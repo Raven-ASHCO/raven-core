@@ -1278,7 +1278,7 @@ pub(super) fn contact_show_lines(
             "not verified"
         }
     )];
-    lines.push(format!("  fp {}", super::contact_fingerprint(&target)));
+    lines.push(format!("  fp {}", super::shown_fingerprint(&target)));
     let Some(peer) = key_of(&target) else {
         return Ok(lines);
     };

@@ -5607,6 +5607,23 @@ fn contact_fingerprint(c: &Contact) -> String {
     }
 }
 
+/// [`contact_fingerprint`] as the terminal shows it: the old code of a
+/// verified contact, [`CODE_HIDDEN`] for one that is not verified
+/// (RAVEN_SECURITY_WORDS_V1 §8 rule 1: no part of a friend's code is shown
+/// before a check matched, or a user could "verify" a card by copying back
+/// what Raven printed).
+fn shown_fingerprint(c: &Contact) -> String {
+    if c.pinned {
+        contact_fingerprint(c)
+    } else {
+        CODE_HIDDEN.into()
+    }
+}
+
+/// Shown instead of the code of a key that is not verified.
+/// The terminal app's words too (`tui::controller::HIDDEN_CODE`).
+const CODE_HIDDEN: &str = "[security code hidden until verified]";
+
 fn normalize_tag(tag: &str) -> String {
     sanitize_terminal_line(tag.trim().trim_start_matches('@')).to_lowercase()
 }
@@ -6561,8 +6578,10 @@ fn save_contact_from(
                 } else {
                     String::new()
                 };
+                // Never the key's own code: it is shown once a check matched.
                 return Err(format!(
-                    "fingerprint mismatch: got {fp}, expected {}{case}",
+                    "fingerprint mismatch: {} is not this key's code{case}; nothing saved \
+                     (ask them to read their code out again)",
                     sanitize_terminal_line(exp)
                 ));
             }
@@ -6628,19 +6647,22 @@ fn save_contact_from(
             }
             eprintln!(
                 "  old fp={}  {}",
-                contact_fingerprint(c),
+                shown_fingerprint(c),
                 sanitize_terminal_line(&c.address)
             );
-            eprintln!("  new fp={fp}  {}", sanitize_terminal_line(&address));
             eprintln!(
-                "{C_DIM}DHT/gossip cannot overwrite a pin. To replace it deliberately: verify the new fingerprint out-of-band, run{C_RESET}"
+                "  new fp={CODE_HIDDEN}  {}",
+                sanitize_terminal_line(&address)
+            );
+            eprintln!(
+                "{C_DIM}DHT/gossip cannot overwrite a pin. To replace it deliberately: compare security words with them in person or by phone, run{C_RESET}"
             );
             eprintln!(
                 "  ash contact remove --address {}",
                 sanitize_terminal_line(&c.address)
             );
             eprintln!(
-                "{C_DIM}then add the new key again with --verify-fp <new fingerprint>.{C_RESET}"
+                "{C_DIM}then add the new key again and check it with them: raven contact verify.{C_RESET}"
             );
             note_key_change_attempt(&c.pub_hex);
             return Err("KEY_CHANGE_REFUSED_WITHOUT_REPIN".into());
@@ -6667,7 +6689,7 @@ fn save_contact_from(
                     i + 1,
                     c.primary_label(),
                     normalize_tag(&c.public_tag),
-                    contact_fingerprint(c),
+                    shown_fingerprint(c),
                     if c.pinned { " [pinned]" } else { "" }
                 );
             }
@@ -6695,7 +6717,7 @@ fn save_contact_from(
         {
             return Err(format!(
                 "petname \"{pet}\" is already used by another contact (fp={}) — choose a distinct petname",
-                contact_fingerprint(other)
+                shown_fingerprint(other)
             ));
         }
     }
@@ -6844,13 +6866,22 @@ fn save_contact_from(
             }
         );
     }
-    println!("{C_DIM}fingerprint{C_RESET} {fp}");
+    // The code once the key is verified only (no copy-back, §8 rule 1).
+    let verified = pin || prior_pinned;
+    println!(
+        "{C_DIM}fingerprint{C_RESET} {}",
+        if verified { fp.as_str() } else { CODE_HIDDEN }
+    );
     println!(
         "{C_DIM}pinned{C_RESET}      {}",
-        if pin || prior_pinned {
-            "yes (Tag+key locked locally)"
+        if verified {
+            "yes (Tag+key locked locally)".to_string()
         } else {
-            "no — not verified yet (compare the fingerprint with them by phone or in person, then add them again with --verify-fp)"
+            format!(
+                "no — not verified yet (compare security words with them by phone or in \
+                 person: raven contact verify {})",
+                if named { label.as_str() } else { "NAME" }
+            )
         }
     );
     let who = if named { label.as_str() } else { "them" };
@@ -7011,7 +7042,7 @@ fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
         } else {
             format!("{0}○ unpinned{1}", c.dim, c.reset)
         };
-        let fp = contact_fingerprint(ct);
+        let fp = shown_fingerprint(ct);
         let mut dial = if ct.lan_dial.is_empty() {
             String::new()
         } else {
@@ -7420,7 +7451,7 @@ fn cmd_contact_resolve(data_dir: &Path, tag: &str) -> Result<(), String> {
         if let Some(t) = c.tag_subtitle() {
             println!("{C_DIM}public_tag{C_RESET}  {t}");
         }
-        println!("{C_DIM}fingerprint{C_RESET} {}", contact_fingerprint(c));
+        println!("{C_DIM}fingerprint{C_RESET} {}", shown_fingerprint(c));
         println!(
             "{C_DIM}pinned{C_RESET}      {}",
             if c.pinned { "yes" } else { "no" }
@@ -7438,7 +7469,7 @@ fn cmd_contact_resolve(data_dir: &Path, tag: &str) -> Result<(), String> {
             i + 1,
             c.primary_label(),
             c.tag_subtitle().unwrap_or_default(),
-            contact_fingerprint(c),
+            shown_fingerprint(c),
             if c.pinned { " [pinned]" } else { "" }
         );
     }
@@ -7531,7 +7562,7 @@ fn cmd_contact_verify(
             "{C_DIM}address{C_RESET}     {}",
             sanitize_terminal_line(&c.address)
         );
-        println!("{C_DIM}fingerprint{C_RESET} {}", contact_fingerprint(c));
+        println!("{C_DIM}fingerprint{C_RESET} {}", shown_fingerprint(c));
         // Words only for a verified contact (section 8 of the spec).
         if let (true, Ok(ed)) = (c.pinned, parse_pub_hex(&c.pub_hex)) {
             println!("{C_DIM}words{C_RESET}       {}", words_text(&ed));
@@ -7860,10 +7891,7 @@ fn cmd_contact_remove(
         "{C_DIM}address{C_RESET}     {}",
         sanitize_terminal_line(&target.address)
     );
-    println!(
-        "{C_DIM}fingerprint{C_RESET} {}",
-        contact_fingerprint(&target)
-    );
+    println!("{C_DIM}fingerprint{C_RESET} {}", shown_fingerprint(&target));
     println!(
         "{C_DIM}pinned{C_RESET}      {}",
         if target.pinned { "yes" } else { "no" }
@@ -12990,7 +13018,7 @@ fn cmd_send_interactive(data_dir: &Path) {
             n = i + 1,
             label = ct.primary_label(),
             d = c.dim,
-            fp = contact_fingerprint(ct),
+            fp = shown_fingerprint(ct),
             r = c.reset,
             pinned = if ct.pinned { " [pinned]" } else { "" }
         );
@@ -13026,7 +13054,7 @@ fn cmd_send_interactive(data_dir: &Path) {
                     i + 1,
                     ct.primary_label(),
                     ct.tag_subtitle().unwrap_or_default(),
-                    contact_fingerprint(ct),
+                    shown_fingerprint(ct),
                     if ct.pinned { " [pinned]" } else { "" }
                 );
             }
@@ -18737,6 +18765,44 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         );
     }
 
+    /// Blind entry (RAVEN_SECURITY_WORDS_V1 §8 rule 1): the terminal shows
+    /// an unverified contact's code nowhere (lists, pickers, a refused
+    /// check), so it cannot be copied back to "verify" a card. Once a check
+    /// matched, it shows.
+    #[test]
+    fn an_unverified_contacts_code_is_never_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = alice_key();
+        let (address, pub_hex) = (encode_address(&ed), hex::encode(ed));
+        add_contact(dir.path(), &address, &pub_hex, "Alice", "", None, "").unwrap();
+        let alice = || load_contacts(dir.path()).unwrap().remove(0);
+        assert_eq!(shown_fingerprint(&alice()), CODE_HIDDEN);
+        let err = add_contact(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "Alice",
+            "",
+            Some("AAAA-BBBB-CCCC"),
+            "",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("fingerprint mismatch: "), "{err}");
+        for part in VERIFY_FP.split('-') {
+            assert!(!err.contains(part), "{part}: {err}");
+        }
+        cmd_contact_verify(
+            dir.path(),
+            Some("Alice"),
+            None,
+            None,
+            None,
+            Some(ALICE_WORDS),
+        )
+        .unwrap();
+        assert_eq!(shown_fingerprint(&alice()), VERIFY_FP);
+    }
+
     #[test]
     fn invite_cannot_rebind_pinned_identity_to_new_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -19012,10 +19078,9 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "",
         )
         .unwrap_err();
-        assert!(
-            err.starts_with("fingerprint mismatch: got If4x-36FU-omFi"),
-            "{err}"
-        );
+        // The key's own code is never in the refusal (blind entry).
+        assert!(err.starts_with("fingerprint mismatch: "), "{err}");
+        assert!(!err.contains("If4x-36FU-omFi"), "{err}");
         assert!(err.contains(FINGERPRINT_CASE_HINT), "{err}");
         let err = add_contact(
             dir.path(),
@@ -28645,7 +28710,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         };
         assert_eq!(onion(d), (binding.to_text(), false));
         // Verified (as `contact verify` pins: a re-save with the code).
-        let code = contact_fingerprint(&load_contacts(d).unwrap()[0]);
+        let code = device_fingerprint_v1(&parse_pub_hex(&pub_hex).unwrap());
         save_contact(
             d,
             &address,

@@ -2114,7 +2114,7 @@ mod tests {
         );
         let why = refused.result.expect_err("a wrong-case code pins nothing");
         assert!(why.contains(bridge::FINGERPRINT_CASE_HINT), "{why}");
-        assert!(why.contains(&format!("got {HIDDEN_CODE}")), "{why}");
+        assert!(why.starts_with("fingerprint mismatch: "), "{why}");
         assert!(!why.contains(&bob.fingerprint), "{why}");
         assert_eq!(saved(&controller, &bob.pub_hex), None);
 

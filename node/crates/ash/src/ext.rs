@@ -1613,14 +1613,16 @@ fn not_verified_line(data_dir: &Path, ctx: &SendCtx) -> String {
         Some(dial) => format!(
             "{who} is not verified, so RAVEN reaches {who} only at an address on your local \
              network, and the saved LAN address {} is not one there. Save the IP address {who} \
-             has on your network: {}. Or compare the fingerprint with them, then add them again \
-             with --verify-fp.",
+             has on your network: {}. Or compare security words with them by phone or in \
+             person: raven contact verify {}.",
             sanitize_terminal_line(&dial),
-            fix_address_cmd(FailedCarrier::Lan, &ctx.sel())
+            fix_address_cmd(FailedCarrier::Lan, &ctx.sel()),
+            ctx.sel()
         ),
         None => format!(
-            "Its only route is the Internet, which needs {who} verified: compare the fingerprint \
-             with them, then add them again with --verify-fp."
+            "Its only route is the Internet, which needs {who} verified: compare security words \
+             with them by phone or in person: raven contact verify {}.",
+            ctx.sel()
         ),
     }
 }
@@ -14937,7 +14939,7 @@ mod local_route_tests {
             "only at an address on your local network",
             "bob-mac.local:7420 is not one there",
             "ash contact set-dial --petname Bob --lan-dial IP:PORT",
-            "--verify-fp",
+            "raven contact verify --petname Bob",
         ] {
             assert!(lan.contains(words), "{words}: {lan}");
         }
