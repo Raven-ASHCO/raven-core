@@ -271,7 +271,9 @@
 //! - **C38 a sibling's success wakes the queue (cutoff F5, the study's C43;
 //!   `RAVEN_LAB_OFFLINE=1 RAVEN_LAB_NOISE_PIN=1` on every profile,
 //!   `RAVEN_LAB_LAN_DEFAULT_PORT` naming a free port):** A, B and C link
-//!   once (A pins B's and C's Noise statics). B and C go away and A queues
+//!   once (A pins B's and C's Noise statics; A meets B over Internet
+//!   direct, since a friend met on the LAN in the last 10 minutes is retried
+//!   within 15 s whatever its backoff, E1). B and C go away and A queues
 //!   a message for each, until A's next try for B is a minute or more away.
 //!   B comes back on its port and stays silent; C comes back and dials A:
 //!   B's message is delivered within 5 s of C's link plus one dial (A logs
@@ -8440,14 +8442,39 @@ fn c38_outbox_wakes_on_sibling_success() {
     let b_listen = format!("127.0.0.1:{}", free_loopback_port());
     let c_listen = format!("127.0.0.1:{}", free_loopback_port());
     let a_svc = a.start_service();
-    let b_svc = b.start_service_on(&b_listen, None);
+    // B also listens for Internet direct: A's one link with B goes there,
+    // not over the LAN. A friend with an authenticated LAN link in the last
+    // 10 minutes is tried again within 15 s whatever its backoff (E1,
+    // `outbox::LAN_SEEN_RETRY`, a field fix of 2026-10-25), so A's next try
+    // for a B it had just met on the LAN never gets a minute away, and the
+    // wake would have nothing to beat.
+    let b_svc = b.start_service_on(&b_listen, Some("127.0.0.1:0"));
     let c_svc = c.start_service_on(&c_listen, None);
-    a.add_contact(&b, "bob", &b_listen);
+    a.pin_contact(&b, "bob", Some(&b_listen));
+    let set = a.raven(
+        &[
+            "contact",
+            "set-addr",
+            "@bob",
+            "--internet",
+            &b_svc.internet_dial,
+        ],
+        None,
+    );
+    assert!(set.ok, "a contact set-addr --internet:\n{}", set.all());
     a.add_contact(&c, "carol", &c_listen);
-    b.add_contact(&a, "alice", &a_svc.lan_dial);
+    // Internet direct takes only verified contacts, on both ends.
+    b.pin_contact(&a, "alice", Some(&a_svc.lan_dial));
     c.add_contact(&a, "alice", &a_svc.lan_dial);
-    // Linked once: A pins B's and C's Noise statics (M0).
-    assert_delivered("c38 a→b", &a.send("bob", "c38 hello bob"));
+    // Linked once: A pins B's and C's Noise statics (M0), B's over Internet
+    // direct, C's over the LAN.
+    assert_delivered(
+        "c38 a→b",
+        &a.raven(
+            &["send", "--contact", "@bob", "--carrier", "internet"],
+            Some("c38 hello bob\n"),
+        ),
+    );
     assert_delivered("c38 a→c", &a.send("carol", "c38 hello carol"));
     let pinned = || {
         let pins = noise_pins_text(&a.dir);
