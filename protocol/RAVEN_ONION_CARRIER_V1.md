@@ -16,8 +16,9 @@ release builds read neither variable. A security notice can hold `feature/onion`
 
 **Audience:** re-implementers of the onion carrier.
 **Reference:** Rust `raven_core::onion` (binding, route name), `raven_core::onion_gate`,
-raven-node `src/onion/` (helper protocol, supervisor, race), `src/bin/raven-tor-helper/`
-(Arti), and the vector `shared-vectors/rvn1/onion/binding_001.json` (§11).
+`raven_core::lan_noise::derive_onion_noise_static` (the link's static, §5.1), raven-node
+`src/onion/` (helper protocol, supervisor, race), `src/bin/raven-tor-helper/` (Arti), and the
+vectors `shared-vectors/rvn1/onion/binding_001.json` and `noise_static_001.json` (§11).
 
 ---
 
@@ -27,8 +28,9 @@ raven-node `src/onion/` (helper protocol, supervisor, race), `src/bin/raven-tor-
 Tor: v3 onion service of the receiver, Tor client of the sender (both outbound only)
   -> one Tor stream to the service's virtual port 7422
   -> Raven link: Noise_XX_25519_ChaChaPoly_BLAKE2s, prologue "raven/onion-link/v1",
-     RIH1 hello, contact gate, RLB1, dispatch frames
-     (byte-identical to Internet direct except the prologue)
+     the onion link's own Noise static (§5.1), RIH1 hello, contact gate, RLB1,
+     dispatch frames (byte-identical to Internet direct except the prologue
+     and the static)
   -> unchanged sealed endpoint objects and ACKs
 ```
 
@@ -94,6 +96,7 @@ is derived live for each plan from a verified binding (§3) and never stored in
   `Noise_XX_25519_ChaChaPoly_BLAKE2s`, the RIH1 hello (caps as Internet direct), the contact gate
   (verified, unblocked contacts only, stranger timing parity), RLB1 both ways, then frames. The
   distinct prologue means no TCP, libp2p, nearby or onion transcript completes against another.
+- Both ends use the onion link's own Noise static (§5.1), never the device static.
 - No RLK1 knock (it is about a TCP source address; an onion stream has none).
 - Route hints (RRH1, caps bit 8), link padding (PAD1) and the update exchange (RUP1) are offered
   as on Internet direct.
@@ -254,18 +257,45 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
 - A rendezvous circuit is kept by Arti for 10 minutes after its last use, then closed.
 - Channel padding `reduced`.
 
+### §5.1 The onion link's Noise static
+
+Anyone who holds a card can open an onion link and read the responder's static from Noise
+message 2, before the contact gate runs; the dialer's static goes to the onion service only. A
+static that LAN or Internet direct listeners also answer with would let that person match a
+listener's IP address to the card's identity. So both ends of an onion link use a static of
+their own:
+
+```
+onion_static = HKDF-SHA256(salt = "rvn1/onion-noise/v1", IKM = identity seed,
+                           info = "static-x25519", L = 32)        (an X25519 private key)
+```
+
+- It is never the device static (`salt = "rvn1/lan-noise/v1"`, same info) that LAN, Internet
+  direct, p2p and nearby links use. It is stable, and names nothing beyond the onion address
+  the card already shows.
+- The RIH1 hello signs the static with the handshake hash (as on Internet direct), so a contact
+  still authenticates it; Tor authenticates the onion service, whose key the identity signs
+  (§3).
+- Noise pins (M0) are neither checked nor recorded on onion links: a pin records the device
+  static.
+- Nodes from before this rule answered onion links with the device static. The carrier has
+  never been on in a release build, so no deployed node does.
+
 ## §11 Vectors
 
 `shared-vectors/rvn1/onion/binding_001.json`: the RFC 8032 test-1 identity ("alice") binds the
 onion key of RFC 8032 test 2's public key at `issued_s = 1792756800`; the signing input, the
-104-byte binding and its card text. Written by Rust under `RAVEN_REGEN_SECURITY_VECTORS=1`
-(`raven_core::onion` tests).
+104-byte binding and its card text. `shared-vectors/rvn1/onion/noise_static_001.json`: alice's
+onion link static (§5.1) next to her device static. Both are written by Rust under
+`RAVEN_REGEN_SECURITY_VECTORS=1` (`raven_core::onion` tests); the Python reference checks the
+static (`protocol/reference/tests/test_onion_link.py`).
 
 ## §12 Privacy and what users are told
 
 - Neither friend learns the other's IP on this path. The first Tor relay (guard) of each side
   sees that side's IP and that it uses Tor, not who it talks to.
-- Anyone who holds a card can tell when its owner's onion service is online.
+- Anyone who holds a card can tell when its owner's onion service is online, and can read the
+  onion link's static (§5.1), which matches no LAN or Internet listener.
 - Logs carry states and counts only: never a friend's onion address, never the node's own, and
   never Arti's own text.
 - The user text is design §3.8.

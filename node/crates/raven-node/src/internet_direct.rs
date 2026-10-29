@@ -41,6 +41,15 @@
 //! so one pin covers LAN, Internet direct and the p2p inner link (where
 //! libp2p already authenticated our PeerId, the stop still keeps our Raven
 //! identity back).
+//!
+//! **The onion link's static** (RAVEN_ONION_CARRIER_V1 §5.1): the onion
+//! link answers with a static of its own ([`LinkStatic::Onion`]), never the
+//! device static the other links use. Anyone holding a card can open an
+//! onion link and read message 2; that key names nothing beyond the onion
+//! address the card shows, and no LAN or Internet listener answers with it.
+//! Noise pins are not read or written on onion links: Tor authenticates the
+//! onion service (whose key the identity signs) and the hello signs the
+//! static.
 
 use std::convert::Infallible;
 use std::net::IpAddr;
@@ -62,8 +71,8 @@ use raven_core::lan_dispatch::{
 };
 use raven_core::lan_noise::{
     build_initiator_with_prologue, build_responder_with_prologue, build_responder_with_static,
-    derive_noise_static, get_remote_static, handshake_hash, handshake_read, handshake_write,
-    into_transport, noise_static_public, static_public,
+    get_remote_static, handshake_hash, handshake_read, handshake_write, into_transport,
+    noise_static_public, static_public, LinkStatic,
 };
 use raven_core::link_knock::DialerStep;
 use raven_core::link_padding::PadState;
@@ -102,6 +111,8 @@ pub(crate) const HOLD: &str = "INTERNET_DIRECT_HOLD: indexed InternetTransport i
 pub(crate) struct RavenLink {
     /// Noise prologue (domain separation between links).
     pub prologue: &'static [u8],
+    /// The Noise static this link answers and dials with.
+    pub noise_static: LinkStatic,
     /// The carrier the contact gate and the outbox use.
     pub carrier: OutboxCarrier,
     /// Log prefix of inbound failures (`<name> inbound …`).
@@ -113,6 +124,7 @@ pub(crate) struct RavenLink {
 /// Internet direct: raw TCP, prologue `raven/internet/v1`.
 pub(crate) const INTERNET_LINK: RavenLink = RavenLink {
     prologue: NOISE_PROLOGUE,
+    noise_static: LinkStatic::Device,
     carrier: OutboxCarrier::Internet,
     name: "internet_direct",
     wire: "INTERNET",
@@ -121,6 +133,7 @@ pub(crate) const INTERNET_LINK: RavenLink = RavenLink {
 /// The p2p carrier: inside a libp2p stream, prologue `raven/p2p-link/v1`.
 pub(crate) const P2P_LINK: RavenLink = RavenLink {
     prologue: P2P_LINK_PROLOGUE,
+    noise_static: LinkStatic::Device,
     carrier: OutboxCarrier::P2p,
     name: "p2p",
     wire: "P2P",
@@ -131,6 +144,7 @@ pub(crate) const P2P_LINK: RavenLink = RavenLink {
 /// `raven/nearby-link/v1`.
 pub(crate) const NEARBY_LINK: RavenLink = RavenLink {
     prologue: NEARBY_LINK_PROLOGUE,
+    noise_static: LinkStatic::Device,
     carrier: OutboxCarrier::Nearby,
     name: "nearby",
     wire: "NEARBY",
@@ -142,12 +156,22 @@ pub(crate) const NEARBY_LINK: RavenLink = RavenLink {
 /// contact exactly as Internet direct does.
 pub(crate) const ONION_LINK: RavenLink = RavenLink {
     prologue: ONION_LINK_PROLOGUE,
+    noise_static: LinkStatic::Onion,
     carrier: OutboxCarrier::Onion,
     name: "onion",
     wire: "ONION",
 };
 
 impl RavenLink {
+    /// Noise pins (M0) on this link: the device static's links only. An
+    /// onion link's static is not the one a pin records.
+    pub(crate) fn noise_pins(&self) -> crate::lan_direct::NoisePins {
+        match self.noise_static {
+            LinkStatic::Device => crate::lan_direct::NoisePins::current(),
+            LinkStatic::Onion => crate::lan_direct::NoisePins { live: false },
+        }
+    }
+
     /// This link's gate: the Internet direct flag, the p2p flag, the
     /// nearby flag or the onion flag.
     pub(crate) fn require_live(&self) -> Result<(), String> {
@@ -364,7 +388,10 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
     raven_core::suite_policy::check_link()?;
     let (mut hs, local_static, remote_static, knocked, m3_payload) = match knock {
         None => {
-            let secret = derive_noise_static(identity).map_err(|e| e.to_string())?;
+            let secret = link
+                .noise_static
+                .derive(identity)
+                .map_err(|e| e.to_string())?;
             let local_static = noise_static_public(&secret);
             let mut hs =
                 build_initiator_with_prologue(&secret, link.prologue).map_err(|e| e.to_string())?;
@@ -466,7 +493,10 @@ async fn responder_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     raven_core::suite_policy::check_link()?;
     let (mut hs, local_static, knocked) = match ear {
         None => {
-            let secret = derive_noise_static(identity).map_err(|e| e.to_string())?;
+            let secret = link
+                .noise_static
+                .derive(identity)
+                .map_err(|e| e.to_string())?;
             let local_static = noise_static_public(&secret);
             let mut hs =
                 build_responder_with_prologue(&secret, link.prologue).map_err(|e| e.to_string())?;
@@ -702,7 +732,7 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         // M0: its link authenticated its static (before the dial-back),
         // unless its knock matched: then it is a static for this link only.
         if !knocked.fresh_dialer() {
-            crate::lan_direct::NoisePins::current()
+            link.noise_pins()
                 .record(&data_dir, &identity, remote_ed, remote_static, None)
                 .await;
         }
@@ -1104,7 +1134,7 @@ where
     CFut: std::future::Future<Output = Result<S, String>>,
 {
     progress.stage = "loading the local identity";
-    let pins = crate::lan_direct::NoisePins::current();
+    let pins = link.noise_pins();
     // RLK1 (P6.35): Internet direct dials knock while it is live.
     let knock_live = link == INTERNET_LINK && crate::link_knock::live();
     let knock_seeds = crate::pair_seed::live();
@@ -1352,7 +1382,9 @@ mod tests {
     use super::*;
     use crate::netutil::{Admission, ReplyWaits};
     use raven_core::envelope::{EnvType, Envelope};
-    use raven_core::lan_noise::transport_encrypt;
+    use raven_core::lan_noise::{
+        derive_noise_static, derive_onion_noise_static, transport_encrypt,
+    };
 
     #[test]
     fn hold_without_lab_when_flag_false() {
@@ -1651,6 +1683,77 @@ mod tests {
         .unwrap();
         assert_eq!(pk, bob().public_key_bytes());
         assert_eq!(responder.await.unwrap(), alice().public_key_bytes());
+    }
+
+    /// RAVEN_ONION_CARRIER_V1 §5.1: anyone can open an onion link and read
+    /// the responder's static from message 2. It must be the onion link's
+    /// own key, never the device static a LAN or Internet listener answers
+    /// with; and an onion dialer never shows the device static either. Both
+    /// ends still authenticate each other (the hellos sign the statics).
+    #[tokio::test]
+    async fn onion_link_never_shows_the_device_static() {
+        let device = |id: &Identity| noise_static_public(&derive_noise_static(id).unwrap());
+        let onion = |id: &Identity| noise_static_public(&derive_onion_noise_static(id).unwrap());
+
+        // A stranger's message 1 and the onion listener's message 2.
+        let (mut dialer, mut listener) = tokio::io::duplex(1 << 17);
+        let responder = tokio::spawn(async move {
+            responder_handshake(ONION_LINK, &mut listener, &bob(), LinkFeatures::NONE, None)
+                .await
+                .map(drop)
+        });
+        let stranger = derive_noise_static(&mallory()).unwrap();
+        let mut hs = build_initiator_with_prologue(&stranger, ONION_LINK.prologue).unwrap();
+        let m1 = handshake_write(&mut hs, &[]).unwrap();
+        write_raw(&mut dialer, &m1).await.unwrap();
+        let m2 = read_raw(&mut dialer).await.unwrap();
+        handshake_read(&mut hs, &m2).unwrap();
+        let shown = get_remote_static(&hs).unwrap();
+        assert_ne!(
+            shown,
+            device(&bob()),
+            "the device static went out over onion"
+        );
+        assert_eq!(shown, onion(&bob()));
+        drop(dialer);
+        assert!(responder.await.unwrap().is_err());
+
+        // Two contacts over onion: authenticated, and neither static is a
+        // device static.
+        let (mut dialer, mut listener) = tokio::io::duplex(1 << 17);
+        let responder = tokio::spawn(async move {
+            let (pk, _, mut t, ours, dialer_static, _) =
+                responder_handshake(ONION_LINK, &mut listener, &bob(), LinkFeatures::NONE, None)
+                    .await
+                    .unwrap();
+            write_inet_frame(&mut listener, &mut t, &ours)
+                .await
+                .unwrap();
+            (pk, dialer_static)
+        });
+        let (pk, _, _, listener_static, _) = initiator_session_on(
+            ONION_LINK,
+            &mut dialer,
+            &alice(),
+            &bob().public_key_bytes(),
+            LinkFeatures::NONE,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pk, bob().public_key_bytes());
+        assert_eq!(listener_static, onion(&bob()));
+        let (dialer_pk, dialer_static) = responder.await.unwrap();
+        assert_eq!(dialer_pk, alice().public_key_bytes());
+        assert_eq!(dialer_static, onion(&alice()));
+        assert_ne!(dialer_static, device(&alice()));
+
+        // The other links keep the device static (noise pins cover them).
+        for link in [INTERNET_LINK, P2P_LINK, NEARBY_LINK] {
+            assert_eq!(link.noise_static, LinkStatic::Device, "{link:?}");
+        }
+        assert!(!ONION_LINK.noise_pins().live);
     }
 
     /// RNL1 §7: a nearby responder takes only the key its pipe was knocked

@@ -899,7 +899,19 @@ listener it also hands the same Noise static key on every network (Noise XX
 message 2; encrypted, so a passive observer does not see it), which links
 the laptop across networks. MAC addresses and computer names (DHCP, mDNS)
 come from the operating system; the user guide gives the habits that help
-([`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) sections 2 and 4).
+([`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) sections 2 and 4). Anyone who
+learned that static as a contact (or a former one) can recognise the
+listener's IP address with it.
+
+**The onion carrier (gated off: `ONION_PRODUCTION_ENABLED = false`).**
+Anyone holding a card can open an onion link and read Noise message 2
+before the contact gate. The onion link therefore answers with a static of
+its own (`RAVEN_ONION_CARRIER_V1.md` §5.1), derived under another HKDF salt
+and used on onion links only, never the device static above: it names
+nothing beyond the onion address the card already shows, and no LAN or
+Internet listener answers with it, so it cannot tie an IP address to the
+card's identity. The RIH1 hello still signs it. What stays: anyone holding
+a card can tell when the onion service is online (§12 of that spec).
 
 **Phase 6b (built, all gated off; none is in this version).** Each measure
 and what it does not hide; the full inventory of identifiers is in
