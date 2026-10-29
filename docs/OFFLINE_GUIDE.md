@@ -300,7 +300,7 @@ What each part does, **when on in your build**:
 | Nearby search <!-- gate: LAN_BEACON_PRODUCTION_ENABLED=false --> | Asks the network for your contacts with a token that changes, with no Raven marker, and learns a friend's address and port, the IPv6 zone too | held |
 | Route memory | After the Internet or p2p failed on this network, starts with the route that worked; LAN stays first on a network where it works | test builds only |
 | Session renewal <!-- gate: SESSION_RENEWAL_PRODUCTION_ENABLED=false --> | Renews your secure connection with a friend while you are together, so messages written after the meeting wait at least 12 h | held |
-| Friends who hold mail <!-- gate: FRIEND_CUSTODY_PRODUCTION_ENABLED=false --> | A friend's laptop on the same link holds sealed messages for a contact who is away, until they come back | held |
+| Friends who hold mail <!-- gate: FRIEND_CUSTODY_PRODUCTION_ENABLED=true --> | A friend's laptop on the same link holds sealed messages for a contact who is away, until they come back | on (October 2026), after a yes on both sides ([`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) section 9) |
 
 Internet and p2p routes, where your build has them, fail at once on a link
 with no uplink, and may take up to 45 s to time out on a hotspot whose
@@ -334,13 +334,15 @@ when your friend's laptop confirmed it.
 
 ## 8. Not supported
 
-- Raven over Bluetooth itself (`raven nearby` is held in this build)
-  <!-- gate: NEARBY_PRODUCTION_ENABLED=false --> and Wi-Fi Direct. A
+- Raven over Bluetooth itself on Windows and Linux (`raven nearby` is in
+  release builds on macOS only, since October 2026)
+  <!-- gate: NEARBY_PRODUCTION_ENABLED=macos --> and Wi-Fi Direct. A
   Bluetooth network (PAN, section 3) is an ordinary IP link, not Raven over
-  Bluetooth. How Raven over Bluetooth will work: [`NEARBY.md`](NEARBY.md).
+  Bluetooth. How Raven over Bluetooth works: [`NEARBY.md`](NEARBY.md).
 - Relaying a message through a third laptop.
-- More than a day apart without meeting: a message cannot wait longer than
-  your secure connection with that friend lasts.
+- More than 7 days apart without meeting: a message stops trying 7 days
+  after you wrote it <!-- gate: LONG_HORIZON_PRODUCTION_ENABLED=true --> (before
+  October 2026: when your secure connection with that friend ended, a day).
 
 ## 9. Verification status
 

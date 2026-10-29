@@ -47,12 +47,23 @@ is not yet verified.
 
 ```bash
 cd node
-cargo build --locked -p raven-node -p ash --release
+cargo build --locked -p raven-node -p ash --release --features raven-node/tor
 bash scripts/install/linux_systemd_user.sh
 export PATH="$HOME/.local/bin:$PATH"
 raven init        # `ash` is only aliased when no system ash shell exists
 raven doctor
 ```
+
+**What a release build carries (October 2026).** Direct messaging on the local network, and the
+features switched on after the three-machine field test ([`FIELD_TEST_2026_10.md`](FIELD_TEST_2026_10.md);
+not independently reviewed): Internet direct, peer-to-peer with hole punching and relays run by
+friends, router port mapping, route hints, finding this computer's public address with STUN
+(Cloudflare and Google only), the Tor onion carrier (below), friends keeping sealed mail for each
+other, messages that keep trying for up to 7 days, groups of up to 16, and the app channel for
+RDAP; Bluetooth nearby on macOS only. `linux_systemd_user.sh` builds with the cargo feature `tor` and puts `raven-tor-helper` next to `raven-node` (`RAVEN_INSTALL_TOR_HELPER=0` leaves it out). Linux has no release Bluetooth backend. Listening for Internet direct and peer-to-peer, router port mapping,
+relaying for friends, keeping mail for friends, using friends as mailboxes and Bluetooth each stay
+off until you turn them on. Paragraphs below that still name a `*_PRODUCTION_ENABLED = false`
+gate describe features that stay held, or say so.
 
 Headless host (no desktop keyring): pass the passphrase file so the unit can
 unlock the vault. The unit gets `Environment=RAVEN_KEYSTORE_PASSPHRASE_FILE=<path>`
@@ -143,7 +154,7 @@ same-Wi-Fi network without uplink, a hotspot, a cable, and the firewall on
 Linux (what `raven lan status` tells you, and what to type while nearby search
 is held in your build).
 
-**Friend mailboxes (held in this build).** When a contact cannot be reached,
+**Friend mailboxes.** When a contact cannot be reached,
 raven-node can leave a sealed copy of your message with a friend you both
 verified, and collect mail that friends hold for you. Each needs its own yes:
 `raven custody use on` (use friends as mailboxes; asked once, and `raven
@@ -153,9 +164,10 @@ pass `--yes`). A friend's Raven can't read your messages, but it learns both
 Raven identities, when and how big each message is, when it is collected and
 the IP addresses it sees; its signed copy stays until it is collected or
 expires (at most 24 hours). [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) §9
-explains it. Both stay off in release builds until the unsigned
-[`WAIVER_FRIEND_CUSTODY_DRAFT.md`](WAIVER_FRIEND_CUSTODY_DRAFT.md) is signed
-and its gates flip (debug builds: `RAVEN_LAB_TEST_A=1`). `raven custody
+explains it. Release builds have friend mailboxes since October 2026, over the local network and
+the internet (switched on after the three-machine field test, before the unsigned
+[`WAIVER_FRIEND_CUSTODY_DRAFT.md`](WAIVER_FRIEND_CUSTODY_DRAFT.md) was signed); each
+still needs its own yes above. `raven custody
 status` and `raven node custody status` show counts only. A waiting message
 in `raven outbox list` may carry one of these codes: `MAILBOX_OFF` (you have
 not turned friend mailboxes on), `NO_SHARED_CUSTODIAN` (the contact collects
@@ -168,10 +180,9 @@ your Internet address (`raven whoami --card --inet <public-ip-or-name>:7422`)
 reach this computer over TCP port **7422** (7421 is mock BLE's, 7423 is
 reserved for libp2p). Only your contacts get an answer: anyone else completes
 the Noise handshake and is disconnected before this node names itself, but a
-scanner still learns that something listens on that port. A build with
-Internet direct off (`INTERNET_DIRECT_PRODUCTION_ENABLED = false`, the state
-until its waiver is signed) keeps the port closed and logs `internet_direct
-failed: INTERNET_DIRECT_HOLD ...`; the debug lab unlock is `RAVEN_LAB_TEST_A=1`.
+scanner still learns that something listens on that port. Release builds have
+Internet direct since October 2026 (`INTERNET_DIRECT_PRODUCTION_ENABLED = true`); the
+listener stays your choice.
 `raven status` shows an `internet` row: `YES` only while the running service
 really has the listener up.
 
@@ -206,9 +217,27 @@ address is never dialled. Your Internet listener treats an unverified contact
 like a stranger, and so does your LAN listener when it connects from outside
 those ranges.
 
-## libp2p: relay and hole punching (not enabled yet)
+## Tor onion carrier
 
-**libp2p is opt-in too, and release builds do not run it yet.** It is phase P3
+Release builds have the Tor onion carrier since October 2026 (switched on after the three-machine
+field test, where a phone hotspot and a home network reached each other over Tor 10 / 10 in
+every direction; not independently reviewed). The installer builds with the cargo feature `tor`
+and puts `raven-tor-helper` (Arti, the Tor client, in its own process) next to `raven-node`;
+raven-node starts it and keeps an onion service, so a friend can reach this computer from any
+network with no port forward and no address typed. Tor relays are the only third party it
+talks to; Tor is only a pipe, and the Raven link inside it is end-to-end as on every other
+path. Your card carries your onion address (signed by your key), never an IP address. Raven
+races the direct paths against Tor and uses whichever connects first; over Tor a message took
+about 8 to 27 seconds in the field test.
+
+`raven status` has a `Tor` row (starting, ready, blocked on this network). The first start can
+take a few minutes. Known open problems: the onion service was unreachable for part of a long
+idle night, and took from about 10 seconds to 9 minutes to become reachable after a start.
+`RAVEN_INSTALL_TOR_HELPER=0` installs no helper (and removes one): `raven status` then says "Tor: not built in this raven". A debug build closes the carrier with `RAVEN_LAB_TOR=0`.
+
+## libp2p: relay and hole punching
+
+**libp2p is opt-in too.** It is phase P3
 of the transports plan
 ([`design/2026-10-transports-internet-mesh-bridge.md`](design/2026-10-transports-internet-mesh-bridge.md)
 §3.5-§3.7). It is meant for two contacts who are both behind a home router
@@ -221,44 +250,43 @@ key of its own) or a dedicated always-on box (the relay kit,
 [`RELAY_KIT.md`](RELAY_KIT.md)). It only passes encrypted bytes along: the
 Raven link inside runs end to end between the two contacts.
 
-The gate is `P2P_PRODUCTION_ENABLED = false` in
-`node/crates/raven-core/src/p2p_gate.rs`, the state until its waiver is signed
-([`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md) is an unsigned
-draft). While it is off, `raven-node` never listens, dials, reserves or
-advertises libp2p, whatever you configure below, and logs one line starting
-`P2P_HOLD:`; the debug lab unlock is `RAVEN_LAB_TEST_A=1`, as for Internet
-direct. Nothing here has been tested between real homes yet: the physical rows
-R7b (two NAT'd homes plus a relay) and R8 (relay only, one side behind CGNAT or
-a phone hotspot) are run by the owner and are still pending.
+The gate is `P2P_PRODUCTION_ENABLED` in
+`node/crates/raven-core/src/p2p_gate.rs`: on in release builds since October 2026
+(switched on after the three-machine field test; the unsigned
+[`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md) was not signed first). A debug build
+closes it with `RAVEN_LAB_TEST_A=0`: `raven-node` then never listens, dials, reserves or
+advertises libp2p and logs one line starting `P2P_HOLD:`. Hole punching has not yet connected
+two real homes: in the field test the phone hotspot's NAT was the kind Raven does not punch,
+and messages between the two networks went over Tor. While p2p listens, raven-node also asks
+two public STUN servers (Cloudflare and Google) which public address they see, every 20
+minutes; it tells that address only to verified friends, inside encrypted links (route
+hints), never in a card. `raven node stun off` stops the query.
 
 Route hints, relaying for your contacts and automatic relay choice (the
 any-network plan's Phase 2) sit behind gates of their own,
-`ROUTE_HINTS_PRODUCTION_ENABLED` and `FRIEND_RELAY_PRODUCTION_ENABLED`, both
-`false` until the Phase 2 amendment of the waiver (its §9) is signed; debug
-builds open them with `RAVEN_LAB_ROUTE_HINTS=1` and `RAVEN_LAB_FRIEND_RELAY=1`
-(with `RAVEN_LAB_TEST_A=1`). While they are off, raven-node sends no route
-hints, never relays for your contacts and never picks a relay by itself, and
-`raven relay offer` and `raven relay auto` say so. Their real-world rows are in
+`ROUTE_HINTS_PRODUCTION_ENABLED` and `FRIEND_RELAY_PRODUCTION_ENABLED`, both on in release
+builds since October 2026; relaying for your contacts is still your own `raven relay offer on`.
+Debug builds close them with `RAVEN_LAB_ROUTE_HINTS=0` and `RAVEN_LAB_FRIEND_RELAY=0`; while
+they are closed, raven-node sends no route hints, never relays for your contacts and never
+picks a relay by itself, and `raven relay offer` and `raven relay auto` say so. Their real-world rows are in
 an unpublished test checklist.
 
 Phase 4 of the any-network plan (networks that let only web traffic out,
 router port mapping with NAT-PMP, PCP and IPv6 pinholes, the NAT mapping
-class, and a network ID that changes) sits behind six more gates, all
-`false`: `WSS_PRODUCTION_ENABLED` and `WSS_PROXY_PRODUCTION_ENABLED`
+class, and a network ID that changes) sits behind six more gates. Three are on in release builds since October 2026:
+`PORT_MAP_PRODUCTION_ENABLED`, `V6_PINHOLE_PRODUCTION_ENABLED` and
+`NAT_CLASS_PRODUCTION_ENABLED` (debug builds close them with `RAVEN_LAB_PORT_MAP=0`,
+`RAVEN_LAB_V6_PINHOLE=0` and `RAVEN_LAB_NAT_CLASS=0`). Three stay `false`:
+`WSS_PRODUCTION_ENABLED` and `WSS_PROXY_PRODUCTION_ENABLED`
 (`node/crates/raven-core/src/wss_gate.rs`; debug `RAVEN_LAB_WSS=1` and
-`RAVEN_LAB_WSS_PROXY=1`), and `PORT_MAP_PRODUCTION_ENABLED`,
-`V6_PINHOLE_PRODUCTION_ENABLED`, `NAT_CLASS_PRODUCTION_ENABLED` and
-`PEER_ROTATION_PRODUCTION_ENABLED` (`node/crates/raven-core/src/portmap_gate.rs`;
-debug `RAVEN_LAB_PORT_MAP=1`, `RAVEN_LAB_V6_PINHOLE=1`, `RAVEN_LAB_NAT_CLASS=1`
-and `RAVEN_LAB_PEER_ROTATION=1`), each with `RAVEN_LAB_TEST_A=1`. They wait
-for unsigned drafts: [`WAIVER_WSS_PROXY_DRAFT.md`](WAIVER_WSS_PROXY_DRAFT.md),
-[`WAIVER_PORT_MAP_DRAFT.md`](WAIVER_PORT_MAP_DRAFT.md) and §10 of the p2p
-relay draft; their real-world rows are in
-an unpublished test checklist. While they are off a
-node behaves as in Phase 2: `raven-node relay --wss` exits with `WSS_HOLD`, no
-proxy is used, the router is asked through UPnP only, every hole punch is
-tried and the network ID stays fixed; the commands below say so when you use
-them. `raven doctor --router` is not gated: it is a read-only question to your
+`RAVEN_LAB_WSS_PROXY=1`), and `PEER_ROTATION_PRODUCTION_ENABLED`
+(`node/crates/raven-core/src/portmap_gate.rs`; debug `RAVEN_LAB_PEER_ROTATION=1`), each with
+`RAVEN_LAB_TEST_A=1`. They wait for unsigned drafts:
+[`WAIVER_WSS_PROXY_DRAFT.md`](WAIVER_WSS_PROXY_DRAFT.md) and §10 of the p2p relay draft (the
+port-mapping draft, [`WAIVER_PORT_MAP_DRAFT.md`](WAIVER_PORT_MAP_DRAFT.md), was not signed
+before its gates were switched on). While they are off, `raven-node relay --wss` exits with
+`WSS_HOLD`, no proxy is used and the network ID stays fixed; the commands below say so when
+you use them. `raven doctor --router` is not gated: it is a read-only question to your
 own router (below).
 
 libp2p uses TCP **and** UDP (QUIC) port **7423**, for the endpoint service and
@@ -697,8 +725,8 @@ WAN address is in 100.64/10 or another private range). RAVEN speaks UPnP-IGD
 over IPv4 only; a router that offers only NAT-PMP or PCP (some Apple and ISP
 routers) needs a manual forward of TCP and UDP 7423.
 
-**NAT-PMP, PCP and IPv6 pinholes (lab-only while `PORT_MAP_PRODUCTION_ENABLED`
-and `V6_PINHOLE_PRODUCTION_ENABLED` are false).** With the PORT_MAP gate open,
+**NAT-PMP, PCP and IPv6 pinholes.** With the PORT_MAP gate open (release builds since
+October 2026),
 the same yes lets raven-node ask the router with PCP first, then NAT-PMP, then
 UPnP (one protocol per network), and the question says so:
 
@@ -849,14 +877,14 @@ a member can tell whether another member is online. Route hints are not
 signed, so they prove nothing to anyone else, but a contact can keep what it
 was told.
 
-## Bluetooth nearby (not enabled yet)
+## Bluetooth nearby (macOS only)
 
 Bluetooth nearby lets your verified contacts' laptops in radio range get
-your messages with no network at all ([`NEARBY.md`](NEARBY.md)). It is held
-in every build (`NEARBY_PRODUCTION_ENABLED = false`) until the unsigned
-[`WAIVER_NEARBY_DRAFT.md`](WAIVER_NEARBY_DRAFT.md) is signed, and no
-installer turns it on (`linux_systemd_user.sh` changes nothing for it):
-`raven nearby enable` does, once it is released. What it will need here:
+your messages with no network at all ([`NEARBY.md`](NEARBY.md)). Release builds
+have it on macOS only (since October 2026). Linux has no release Bluetooth backend:
+`NEARBY_PRODUCTION_ENABLED` is false here, `linux_systemd_user.sh` builds none, and nearby stays a lab
+feature on Linux (a debug build with the feature `nearby-radio`, `RAVEN_LAB_TEST_A=1` and
+`RAVEN_LAB_NEARBY=1`). What it needs here, for that lab build: What it will need here:
 
 - **BlueZ access without root.** The user service reaches BlueZ over the
   system D-Bus as you. Desktop distributions allow the logged-in user;

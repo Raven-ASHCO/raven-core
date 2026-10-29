@@ -863,6 +863,21 @@ physical attack vector. Endpoint integrity (OS sandboxing, code signing,
 jailbreak detection) is the user's and the OS vendor's responsibility, not
 a RAVEN protocol guarantee.
 
+**The app channel on macOS (owner decision Q6, 2026-10-29).** The app
+channel (RDAP over Raven, [`design/2026-10-rdap-app-channel.md`](design/2026-10-rdap-app-channel.md))
+is on in release builds since October 2026, and its IPC checks only the
+user (UID-only) on macOS too, as on Windows and Linux
+(`APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED = true`). On macOS that is weaker
+than the rest of Raven: the node's keys sit behind Keychain access rules
+that would show a dialog to a foreign program, but any process of the same
+macOS user can use the app channel without one. Such a process can read
+the RDAP task and answer content the channel carries (the app inbox) and
+send RDAP tasks to verified contacts as this identity (the identity key
+signs for it). Ordinary Raven messages and chat history are not exposed
+through it, and it reaches only verified contacts. A stronger check of the
+calling process (its code-signing identity, daemon-owned-secrets §4.4) is
+future work. Accepted as a documented residual, not independently reviewed.
+
 ### 3.17 Traffic analyst
 
 **Can do:** Observe connection metadata — who connects to whom, when, how

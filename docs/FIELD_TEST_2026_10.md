@@ -7,8 +7,9 @@ number below was counted from them, and each result says where its number comes 
 
 **Read this first.** These were **debug builds with lab switches on**. Most of what this report
 shows (the Tor onion carrier, public address discovery, hole punching, friends keeping mail,
-groups, Bluetooth nearby, the long message horizon) is **switched off in release builds**
-(see [ROADMAP.md](ROADMAP.md)). Three computers and one person running the test is a small
+groups, Bluetooth nearby, the long message horizon) was **switched off in release builds** at the
+time; after this test those features were switched on in release builds (Bluetooth nearby on
+macOS only), without an independent review (see [ROADMAP.md](ROADMAP.md)). Three computers and one person running the test is a small
 sample. This is evidence that the design can work on real networks, not proof that it works
 everywhere.
 

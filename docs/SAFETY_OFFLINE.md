@@ -480,9 +480,10 @@ raven privacy seal-now
 
 ## 9. Friends who carry or hold messages
 
-<!-- gate: FRIEND_CUSTODY_PRODUCTION_ENABLED=false: this section describes friends who hold mail before its flip; update it when the gate flips. -->
-**Friends who hold mail, when on in your build** (not in this version:
-section 12). A friend's laptop can keep a sealed copy of your message for a
+<!-- gate: FRIEND_CUSTODY_PRODUCTION_ENABLED=true: this section describes friends who hold mail, switched on in release builds in October 2026. -->
+**Friends who hold mail** (in release builds since October 2026, after the
+three-machine field test; not independently reviewed). A friend's laptop can
+keep a sealed copy of your message for a
 contact who is away, until that contact's Raven collects it. It does this
 only for two people who are both its owner's verified contacts.
 
@@ -555,8 +556,9 @@ comes back the same way, once each of you has verified the other's friend
   and `raven contact show` with a contact's name says which way that contact
   can be reached while away.
 
-Friends who pass messages on over the internet (relays): not in this
-version.
+A friend's computer that relays your encrypted link over the internet, when
+its owner turned that on (`raven relay offer on`), passes bytes along and holds
+nothing: in release builds since October 2026.
 
 ## 10. Signs something is wrong
 
@@ -629,24 +631,26 @@ Three meeting steps:
 
 Each row marked "not in this version" is held off in release builds by a
 switch in the code; `scripts/check_offline_guide.sh` fails when a switch
-named here changes, so this table is updated with it.
+named here changes, so this table is updated with it. The rows marked
+"October 2026" were switched on after the three-machine field test, without
+an independent review.
 
 | Feature | This version |
 |---|---|
 | Messages over a local network (router, hotspot, cable) with typed addresses <!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=true --> | Yes |
 | Stop before telling another computer at a friend's old address who you are <!-- gate: LAN_NOISE_PIN_PRODUCTION_ENABLED=false --> | Not in this version (being reviewed) |
 | Keep a message for a friend whose computer name is not found; retry waiting friends at once when one answers; notice a cable network at once; reach a friend added without an address at the address they last connected from <!-- gate: OFFLINE_LAN_PRODUCTION_ENABLED=false --> | Not in this version (being reviewed) |
-| Learn a friend's new address or port automatically <!-- gate: ROUTE_HINTS_PRODUCTION_ENABLED=false --> | Not in this version |
+| Learn a friend's new address or port automatically <!-- gate: ROUTE_HINTS_PRODUCTION_ENABLED=true --> | Yes (October 2026): friends tell each other inside their encrypted links |
 | Turning the local network off, on only for a meeting, or on for verified friends only (section 4) | Yes |
 | A random local-network port instead of 7420 (section 4) <!-- gate: LISTEN_PORT_RANDOM_PRODUCTION_ENABLED=false --> | Not in this version |
 | Hiding message sizes on the network (section 4) <!-- gate: LINK_PADDING_PRODUCTION_ENABLED=false --> | Not in this version |
 | A new key for every connection with a friend; a new key, or no answer, for strangers (section 4) <!-- gate: LINK_KNOCK_PRODUCTION_ENABLED=false --> | Not in this version |
-| Friends who hold messages for you (section 9) <!-- gate: FRIEND_CUSTODY_PRODUCTION_ENABLED=false --> | Not in this version |
+| Friends who hold messages for you (section 9) <!-- gate: FRIEND_CUSTODY_PRODUCTION_ENABLED=true --> | Yes (October 2026), after a yes on both sides |
 | Two friends in a row: one passes a message on to the other (section 9) <!-- gate: CUSTODY_HANDOFF_PRODUCTION_ENABLED=false --> | Not in this version |
-| Messages over the internet or through relays <!-- gate: INTERNET_DIRECT_PRODUCTION_ENABLED=false --> <!-- gate: P2P_PRODUCTION_ENABLED=false --> | Not in this version |
+| Messages over the internet, through relays or over Tor <!-- gate: INTERNET_DIRECT_PRODUCTION_ENABLED=true --> <!-- gate: P2P_PRODUCTION_ENABLED=true --> <!-- gate: ONION_PRODUCTION_ENABLED=true --> | Yes (October 2026; not independently reviewed) |
 | Finding friends on a new network without typing an address (nearby search, section 4) <!-- gate: LAN_BEACON_PRODUCTION_ENABLED=false --> | Not in this version |
-| Raven over Bluetooth (`raven nearby`) <!-- gate: NEARBY_PRODUCTION_ENABLED=false --> | Not in this version |
-| Messages that wait longer than a day | Not in this version |
+| Raven over Bluetooth (`raven nearby`) <!-- gate: NEARBY_PRODUCTION_ENABLED=macos --> | On macOS (October 2026), after `raven nearby enable`; not in this version on Windows and Linux |
+| Messages that wait longer than a day <!-- gate: LONG_HORIZON_PRODUCTION_ENABLED=true --> | Yes (October 2026): a message keeps trying for up to 7 days after you wrote it |
 | Encrypting what Raven keeps about your friends on this computer (section 5) | Yes |
 | Deleting old chats automatically, deleting one chat, forgetting learned addresses (section 6) | Yes |
 | `raven lock`: stop Raven and keep it stopped (section 5) | Yes; it really locks only a profile with a Raven passphrase |

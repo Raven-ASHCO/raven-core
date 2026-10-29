@@ -1,6 +1,17 @@
 # Roadmap: from lab features to release
 
-Release builds of Raven do one thing today: direct messages between two computers on the same local
+**October 2026: switched on in release builds.** After the three-machine field test the owner
+switched on, in release builds, the features that test exercised: Internet direct, the
+peer-to-peer carrier and friend relays, route hints, router port mapping and IPv6 pinholes, the
+NAT class, public address discovery (STUN), hole punching between friends, the Tor onion carrier,
+friend custody over the local network and the internet, the long message horizon, groups,
+Bluetooth nearby on macOS only, and the app channel for RDAP (on macOS with UID-only IPC, the
+owner's decision Q6). Their gates are now `true`. This was done **before** the items in
+their "Still needed" column below (independent review, signed release records, more real-world
+rows): those rows stay here as the list of what is still missing for them. In a debug build a
+`RAVEN_LAB_*` switch set to `0` closes such a feature again.
+
+Release builds had one thing before that: direct messages between two computers on the same local
 network. Everything else is a **lab feature**: compiled in, tested in CI, and held off by a constant
 in the code (`*_PRODUCTION_ENABLED = false`) that a release build cannot change. In a debug build a
 `RAVEN_LAB_*` environment variable opens it, for testing only.

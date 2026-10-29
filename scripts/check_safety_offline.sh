@@ -9,10 +9,11 @@
 #      as `raven contact remove Sam`, or an option missing its value, exits 2
 #      before --help is honoured). Quoted strings and `<placeholders>` count
 #      as one word each; a pipe, redirect, `;` or `&` ends the command;
-#   2. every `<!-- gate: NAME=true|false ... -->` marker (the guide's "not in
-#      this version" rows and its pre-flip paragraphs) matches
-#      `const NAME: bool = ...;` in node/crates/raven-core/src. A flipped gate
-#      fails here until the guide is updated with it.
+#   2. every `<!-- gate: NAME=true|false|macos ... -->` marker (the guide's
+#      "not in this version" rows and its pre-flip paragraphs) matches
+#      `const NAME: bool = ...;` in node/crates/raven-core/src (`macos`: a
+#      const that is `cfg!(target_os = "macos")`, on in macOS builds only).
+#      A flipped gate fails here until the guide is updated with it.
 # The guide must hold at least one command line and one gate marker (an empty
 # match never passes).
 #
@@ -174,17 +175,18 @@ fenced_commands() {
 
 # gate_markers DOC: NAME=VALUE of every gate marker in DOC, one per line.
 gate_markers() {
-  tr -d '\r' <"$1" | grep -oE '<!-- gate: [A-Z0-9_]+=(true|false)' | sed 's/^<!-- gate: //' || true
+  tr -d '\r' <"$1" | grep -oE '<!-- gate: [A-Z0-9_]+=(true|false|macos)' | sed 's/^<!-- gate: //' || true
 }
 
-# gate_value NAME: the value of `const NAME: bool = ...;` (exactly one).
+# gate_value NAME: the value of `const NAME: bool = ...;` (exactly one):
+# true, false, or macos for `cfg!(target_os = "macos")`.
 gate_value() {
   local found
-  found="$(grep -rhoE --include='*.rs' "const $1: bool = (true|false);" "$GATE_SRC" || true)"
+  found="$(grep -rhoE --include='*.rs' "const $1: bool = (true|false|cfg!\(target_os = \"macos\"\));" "$GATE_SRC" || true)"
   if [[ "$(printf '%s\n' "$found" | grep -c .)" -ne 1 ]]; then
     return 1
   fi
-  printf '%s\n' "$found" | sed -E 's/.*= (true|false);/\1/'
+  printf '%s\n' "$found" | sed -E 's/.*= (true|false);/\1/; s/.*= cfg!\(target_os = "macos"\);/macos/'
 }
 
 # check_doc DOC: both checks; prints a summary, returns 1 on a violation.
@@ -247,7 +249,9 @@ self_test() {
     '<!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=true -->'
   write_doc "$dir/good3.md" 'raven contact verify <name>' \
     '<!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=true -->'
-  for kind in good good2 good3; do
+  write_doc "$dir/good4.md" 'raven nearby status' \
+    '<!-- gate: NEARBY_PRODUCTION_ENABLED=macos -->'
+  for kind in good good2 good3 good4; do
     if ! check_doc "$dir/$kind.md" >/dev/null 2>&1; then
       echo "SELF_TEST_FAIL: the '$kind' guide was refused" >&2
       rc=1
@@ -269,7 +273,9 @@ self_test() {
     '<!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=true -->'
   write_doc "$dir/extra.md" 'raven contact verify Sam Bob Extra' \
     '<!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=true -->'
-  for kind in sub flag gate unknown empty arg value extra; do
+  write_doc "$dir/os.md" 'raven nearby status' \
+    '<!-- gate: NEARBY_PRODUCTION_ENABLED=false -->'
+  for kind in sub flag gate unknown empty arg value extra os; do
     if check_doc "$dir/$kind.md" >/dev/null 2>&1; then
       echo "SELF_TEST_FAIL: the '$kind' guide passed" >&2
       rc=1
@@ -279,7 +285,7 @@ self_test() {
   if [[ "$rc" -ne 0 ]]; then
     return 1
   fi
-  echo "check_safety_offline self-test OK (3 good guides pass, 8 bad ones fail)"
+  echo "check_safety_offline self-test OK (4 good guides pass, 9 bad ones fail)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
