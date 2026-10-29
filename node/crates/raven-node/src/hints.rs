@@ -1842,8 +1842,8 @@ struct Told {
     generation: u64,
     at: Instant,
     /// The LAN part the last LAN link carried: LAN_PORT, the DIRECT
-    /// entries, and when.
-    lan: Option<(Option<u16>, Vec<String>, Instant)>,
+    /// entries, when, and under which generation.
+    lan: Option<(Option<u16>, Vec<String>, Instant, u64)>,
     /// The PAIR_SEED entry (Phase 6b, spec §14), as told.
     seed: Option<raven_core::pair_seed::SeedEntry>,
 }
@@ -1898,7 +1898,7 @@ fn note_told(
     now: Instant,
 ) {
     let lan = if carrier == OutboxCarrier::Lan {
-        Some((hints.lan_port, hints.direct.clone(), now))
+        Some((hints.lan_port, hints.direct.clone(), now, hints.generation))
     } else {
         told_to(data_dir, peer).and_then(|t| t.lan)
     };
@@ -1940,9 +1940,11 @@ pub(crate) fn forget_told(data_dir: &Path) {
 /// Should a link over `carrier` carry `hints` to a contact that was last
 /// told `told` (pure)? Yes when it never was, the generation or the pair
 /// seed entry is another, the last telling is [`REFRESH`] old, or (LAN) the
-/// LAN part adds a port or an address to the last one told over LAN, or
-/// that one is [`REFRESH`] old. A LAN part that only lacks something told
-/// before is not news: the receiver keeps the fuller one (spec §5.3).
+/// LAN part adds a port or an address to the last one told over LAN, that
+/// one is [`REFRESH`] old, or it was told under an older generation (a
+/// newer snapshot went over Internet or p2p since, without it: carrier
+/// matrix C20). A LAN part that only lacks something told before is not
+/// news: the receiver keeps the fuller one (spec §5.3).
 fn tell_due(told: Option<&Told>, hints: &RouteHints, carrier: OutboxCarrier, now: Instant) -> bool {
     let Some(t) = told else {
         return true;
@@ -1956,8 +1958,9 @@ fn tell_due(told: Option<&Told>, hints: &RouteHints, carrier: OutboxCarrier, now
     }
     match &t.lan {
         None => true,
-        Some((port, direct, at)) => {
+        Some((port, direct, at, generation)) => {
             stale(*at)
+                || *generation != hints.generation
                 || hints.lan_port.is_some_and(|p| *port != Some(p))
                 || hints.direct.iter().any(|d| !direct.contains(d))
         }
@@ -2034,7 +2037,7 @@ pub(crate) async fn lan_asks(data_dir: &Path, keys: LinkKeys, announce: bool) ->
             &ctx.keys.peer,
             ctx.now_ms,
         );
-        Some(plan.generation != told.generation || seed != told.seed || propose)
+        Some(lan_news(&told, plan.generation, seed.as_ref(), propose))
     })
     .await
     .ok()
@@ -2042,6 +2045,28 @@ pub(crate) async fn lan_asks(data_dir: &Path, keys: LinkKeys, announce: bool) ->
     // Not known (not a verified contact, the generation could not be
     // saved): asked, as before.
     news.unwrap_or(true)
+}
+
+/// Whether a LAN dial to a contact `told` this has news for it ([`lan_asks`]):
+/// the snapshot's `generation` or the pair seed entry moved since it was
+/// told, a seed is proposed, or its LAN part (LAN_PORT and the same-LAN
+/// DIRECT entries, which only a LAN link carries) was last told under an
+/// older generation. A snapshot told over Internet or p2p since then left
+/// the contact's view of this node's LAN part behind; only a LAN link
+/// renews it, and [`tell_due`] tells it then, so the next dial has no news
+/// again (carrier matrix C20: a node back on the network with a new p2p
+/// port told the new generation over its relay, and its next LAN link asked
+/// for nothing, so the contact kept dialling the old LAN address).
+fn lan_news(
+    told: &Told,
+    generation: u64,
+    seed: Option<&raven_core::pair_seed::SeedEntry>,
+    propose: bool,
+) -> bool {
+    generation != told.generation
+        || seed != told.seed.as_ref()
+        || propose
+        || told.lan.as_ref().is_some_and(|l| l.3 != generation)
 }
 
 fn note_sent(peer: &[u8; 32], hints: &RouteHints, label: LinkLabel) {
@@ -4837,7 +4862,7 @@ mod tests {
         let told = Told {
             generation: 7,
             at: t0,
-            lan: Some((Some(7531), vec![a.into()], t0)),
+            lan: Some((Some(7531), vec![a.into()], t0, 7)),
             seed: None,
         };
         let soon = t0 + Duration::from_secs(60);
@@ -4877,6 +4902,24 @@ mod tests {
         for carrier in [OutboxCarrier::Internet, OutboxCarrier::P2p] {
             assert!(!tell_due(Some(&told), &hints(7, None, &[]), carrier, soon));
             assert!(tell_due(Some(&told), &hints(8, None, &[]), carrier, soon));
+        }
+        // C20: generation 7 went over p2p, the LAN part was told under 6.
+        // A LAN link tells it again, the same port and addresses or not.
+        let lan_older = Told {
+            lan: Some((Some(7531), vec![a.into()], t0, 6)),
+            ..told.clone()
+        };
+        assert!(
+            tell_due(Some(&lan_older), &hints(7, Some(7531), &[a]), lan, soon),
+            "a LAN part told under an older generation"
+        );
+        for carrier in [OutboxCarrier::Internet, OutboxCarrier::P2p] {
+            assert!(!tell_due(
+                Some(&lan_older),
+                &hints(7, None, &[]),
+                carrier,
+                soon
+            ));
         }
         // Never told over LAN: the LAN part is news.
         let no_lan = Told {
@@ -4919,7 +4962,7 @@ mod tests {
         let told = |generation: u64, at: Instant| Told {
             generation,
             at,
-            lan: Some((Some(7531), Vec::new(), at)),
+            lan: Some((Some(7531), Vec::new(), at, generation)),
             seed: None,
         };
         keep(&TOLD_TO, dd, &keys.peer, told(generation, now), |t| t.at);
@@ -4943,6 +4986,17 @@ mod tests {
         assert!(lan_asks(dd, keys, true).await, "an announce link asks");
         keep(&TOLD_TO, dd, &keys.peer, told(g - 1, now), |t| t.at);
         assert!(lan_asks(dd, keys, false).await, "a newer generation");
+        // C20: the newest generation went over p2p, the LAN part was told
+        // under the one before: the LAN dial asks, so its LAN part is told.
+        let p2p_since = Told {
+            lan: Some((Some(7531), Vec::new(), now, g - 1)),
+            ..told(g, now)
+        };
+        keep(&TOLD_TO, dd, &keys.peer, p2p_since, |t| t.at);
+        assert!(
+            lan_asks(dd, keys, false).await,
+            "a LAN part told under an older generation"
+        );
         // (A monotonic clock that started less than REFRESH ago has no
         // such time.)
         if let Some(old) = now.checked_sub(REFRESH) {
