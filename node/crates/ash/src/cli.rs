@@ -2102,6 +2102,15 @@ struct Contact {
     /// hint only. Omitted from the file while empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     onion: String,
+    /// `lan_dial` was typed on this computer (`--lan-dial`, `contact
+    /// set-dial`, the prompt) or learned from the contact's own
+    /// authenticated link after a delivery. False for a card's `lan=`
+    /// (nobody signs a card's routes; the security words cover the key
+    /// only): such a route keeps the local-network rule even for a verified
+    /// contact (`raven_core::outbox::ContactRoutes::card_lan`). Omitted
+    /// from the file while false; a book from before reads false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    lan_dial_trusted: bool,
 }
 
 impl Contact {
@@ -4619,6 +4628,9 @@ fn update_contact_lan_dial(data_dir: &Path, pub_hex: &str, dial: &str) -> Result
     for c in contacts.iter_mut() {
         if c.pub_hex.eq_ignore_ascii_case(&want) {
             c.lan_dial = dial.to_string();
+            // Typed on this computer, or one that just reached and
+            // authenticated the contact: never a card's.
+            c.lan_dial_trusted = true;
             found = true;
             break;
         }
@@ -6415,8 +6427,9 @@ fn add_contact(
     verify_fp: Option<&str>,
     lan_dial: &str,
 ) -> Result<(), String> {
-    add_contact_with_routes(
-        data_dir, address, pub_hex, petname, public_tag, verify_fp, lan_dial, "", None,
+    // A LAN address given here was typed on this computer.
+    save_contact_from(
+        data_dir, address, pub_hex, petname, public_tag, verify_fp, lan_dial, "", None, true, true,
     )
 }
 
@@ -6424,6 +6437,8 @@ fn add_contact(
 /// empty one keeps what the contact already had, a non-empty one is validated
 /// before anything else is looked at and replaces it. `verify_fp` is what the
 /// friend read out, their security words or old code ([`security_check`]).
+/// The LAN route is a card's or invite's: it keeps the local-network rule
+/// ([`Contact::lan_dial_trusted`]).
 #[allow(clippy::too_many_arguments)]
 fn add_contact_with_routes(
     data_dir: &Path,
@@ -6451,7 +6466,8 @@ fn add_contact_with_routes(
 }
 
 /// [`add_contact_with_routes`]; `report` false leaves out the "contact
-/// saved" summary (`contact verify` says what it did itself).
+/// saved" summary (`contact verify` says what it did itself). A LAN route
+/// given here is a card's ([`save_contact_from`]).
 #[allow(clippy::too_many_arguments)]
 fn save_contact(
     data_dir: &Path,
@@ -6464,6 +6480,37 @@ fn save_contact(
     internet_dial: &str,
     p2p: Option<&P2pRoute>,
     report: bool,
+) -> Result<(), String> {
+    save_contact_from(
+        data_dir,
+        address,
+        pub_hex,
+        petname,
+        public_tag,
+        verify_fp,
+        lan_dial,
+        internet_dial,
+        p2p,
+        report,
+        false,
+    )
+}
+
+/// [`save_contact`]; `lan_typed`: a non-empty `lan_dial` was typed on this
+/// computer, not taken from a card or invite ([`Contact::lan_dial_trusted`]).
+#[allow(clippy::too_many_arguments)]
+fn save_contact_from(
+    data_dir: &Path,
+    address: &str,
+    pub_hex: &str,
+    petname: &str,
+    public_tag: &str,
+    verify_fp: Option<&str>,
+    lan_dial: &str,
+    internet_dial: &str,
+    p2p: Option<&P2pRoute>,
+    report: bool,
+    lan_typed: bool,
 ) -> Result<(), String> {
     let new_inet = if internet_dial.trim().is_empty() {
         None
@@ -6659,14 +6706,19 @@ fn save_contact(
         .as_ref()
         .map(|c| c.lan_dial.clone())
         .unwrap_or_default();
-    let dial = if !lan_dial.trim().is_empty() {
+    let prior_trusted = prior.as_ref().is_some_and(|c| c.lan_dial_trusted);
+    let (dial, dial_trusted) = if !lan_dial.trim().is_empty() {
         let d = lan_dial.trim();
         if !looks_like_lan_dial(d) {
             return Err("lan_dial must look like host:port (e.g. 192.168.1.20:7420)".into());
         }
-        d.to_string()
+        // A card naming the address saved already keeps how it was saved.
+        (
+            d.to_string(),
+            lan_typed || (prior_trusted && prior_dial == d),
+        )
     } else {
-        prior_dial
+        (prior_dial, prior_trusted)
     };
     let inet = new_inet.unwrap_or_else(|| {
         prior
@@ -6722,6 +6774,7 @@ fn save_contact(
         // verifying a friend added from an onion-only card wiped it, and
         // its sends never planned Tor). A card's binding is stored after.
         onion: prior.as_ref().map(|c| c.onion.clone()).unwrap_or_default(),
+        lan_dial_trusted: dial_trusted,
     };
     // A contact saved with this key already (its new card: a new LAN
     // address, say) is the same contact: the card replaces its saved routes,
@@ -9978,6 +10031,8 @@ fn cmd_contact_set_routes(
         .ok_or("contact not found for the address update")?;
     if let Some(v) = &edit.lan {
         row.lan_dial = v.clone();
+        // Typed on this computer (`contact set-addr --lan`).
+        row.lan_dial_trusted = !v.is_empty();
     }
     if let Some(v) = &edit.internet {
         row.internet_dial = v.clone();
@@ -15974,6 +16029,9 @@ pub fn run() {
                         std::process::exit(1);
                     }
                 };
+                // `--lan-dial` typed here (a card's `lan=` is not: it keeps
+                // the local-network rule, `Contact::lan_dial_trusted`).
+                let lan_typed = !lan_dial.trim().is_empty();
                 let (address, pub_hex, lan_dial, internet_dial) = match &card {
                     // Explicit route flags win over the card's hints.
                     Some(c) => (
@@ -16016,7 +16074,7 @@ pub fn run() {
                     None => {}
                 }
                 let p2p = card.as_ref().and_then(|c| c.p2p.clone());
-                if let Err(e) = add_contact_with_routes(
+                if let Err(e) = save_contact_from(
                     &data_dir,
                     &address,
                     &pub_hex,
@@ -16026,6 +16084,8 @@ pub fn run() {
                     &lan_dial,
                     &internet_dial,
                     p2p.as_ref(),
+                    true,
+                    lan_typed,
                 ) {
                     eprintln!("{}", sanitize_terminal_line(&e));
                     ext::flush_security_sink();
@@ -19423,6 +19483,107 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert_eq!(run_blind_check(Some("K7Q4M"), &[ALICE_WORDS]), Ok(None));
     }
 
+    /// A card's `lan=` is saved as a card's (it keeps the local-network rule
+    /// even once the contact is verified); a LAN address typed here
+    /// (`--lan-dial`, `contact set-dial`) or one a delivery just used is
+    /// marked as this computer's own. Verifying keeps the mark as it was.
+    #[test]
+    fn a_cards_lan_address_is_saved_as_a_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = alice_key();
+        let (address, pub_hex) = (encode_address(&ed), hex::encode(ed));
+        let trusted = || load_contacts(dir.path()).unwrap()[0].lan_dial_trusted;
+        add_contact_with_routes(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "Alice",
+            "",
+            None,
+            "203.0.113.7:7420",
+            "",
+            None,
+        )
+        .unwrap();
+        assert!(!trusted());
+        let raw = std::fs::read_to_string(dir.path().join("contacts.json")).unwrap();
+        assert!(!raw.contains("lan_dial_trusted"), "omitted while false");
+        let routes = raven_core::outbox::contact_routes(dir.path(), &ed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(routes.card_lan, ["203.0.113.7:7420"]);
+        // Verified: still a card's address.
+        cmd_contact_verify(
+            dir.path(),
+            Some("Alice"),
+            None,
+            None,
+            None,
+            Some(ALICE_WORDS),
+        )
+        .unwrap();
+        assert!(load_contacts(dir.path()).unwrap()[0].pinned);
+        assert!(!trusted());
+        let route = raven_core::OutboxRoute {
+            carrier: raven_core::OutboxCarrier::Lan,
+            dial: "203.0.113.7:7420".into(),
+        };
+        let routes = raven_core::outbox::contact_routes(dir.path(), &ed)
+            .unwrap()
+            .unwrap();
+        assert!(routes.pinned && !routes.localize_pinned(&route));
+        // Typed here: this computer's own.
+        cmd_contact_set_dial(dir.path(), None, Some("Alice"), None, "203.0.113.7:7420").unwrap();
+        assert!(trusted());
+        let routes = raven_core::outbox::contact_routes(dir.path(), &ed)
+            .unwrap()
+            .unwrap();
+        assert!(routes.card_lan.is_empty() && routes.localize_pinned(&route));
+        // A card naming the same address keeps the mark; another one does not.
+        add_contact_with_routes(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "",
+            "",
+            None,
+            "203.0.113.7:7420",
+            "",
+            None,
+        )
+        .unwrap();
+        assert!(trusted());
+        add_contact_with_routes(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "",
+            "",
+            None,
+            "198.51.100.4:7420",
+            "",
+            None,
+        )
+        .unwrap();
+        assert!(!trusted());
+        // `--lan-dial` typed with `contact add`.
+        save_contact_from(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "",
+            "",
+            None,
+            "198.51.100.4:7420",
+            "",
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(trusted());
+    }
+
     #[test]
     fn contact_verify_check_pins_and_keeps_name_routes_and_tag() {
         let dir = tempfile::tempdir().unwrap();
@@ -19732,6 +19893,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         };
         let book = vec![row(&a, "Sam (Office)", "sam"), row(&b, "Sam (Home)", "sam")];
         assert_eq!(
@@ -19844,6 +20006,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         }];
         let mid = [0xabu8; 16];
         let forged =
@@ -20307,6 +20470,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         }
     }
 
@@ -22681,6 +22845,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         };
         let book = vec![mk("Alice", &a, false), mk("Bobby", &b, true)];
         let mid = [0xabu8; 16];
@@ -22768,6 +22933,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                     custodians: Vec::new(),
                     hide_ip: false,
                     onion: String::new(),
+                    lan_dial_trusted: false,
                 }
             })
             .collect()
@@ -28217,6 +28383,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                 custodians: Vec::new(),
                 hide_ip: false,
                 onion: String::new(),
+                lan_dial_trusted: false,
             }],
         )
         .unwrap();
@@ -28434,6 +28601,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         }
     }
 

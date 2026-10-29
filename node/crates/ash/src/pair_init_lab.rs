@@ -928,7 +928,7 @@ pub(crate) fn resend_after_reset(
     .filter_map(|r| {
         raven_core::outbox::localize_lan_route(
             &r,
-            contact.pinned,
+            contact.localize_pinned(&r),
             raven_core::outbox::LOCALIZE_RESOLVE_TIMEOUT,
         )
         .ok()

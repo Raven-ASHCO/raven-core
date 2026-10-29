@@ -4966,6 +4966,9 @@ fn local_dial_routes_with(
 ) -> Result<LocalDialRoutes, String> {
     use raven_core::outbox::{localize_lan_route, RouteRefusal, LOCALIZE_RESOLVE_TIMEOUT};
     let pinned = raven_core::contact_is_pinned(data_dir, peer)?;
+    // A card's LAN route keeps the local-network rule for a verified contact
+    // too (`raven_core::outbox::ContactRoutes::lan_local_only`).
+    let book = raven_core::outbox::contact_routes(data_dir, peer)?;
     let mut out = Vec::with_capacity(routes.len());
     let mut unresolved = Vec::new();
     for (i, route) in routes.iter().enumerate() {
@@ -4973,6 +4976,8 @@ fn local_dial_routes_with(
             carrier: route.carrier.outbox(),
             dial: route.dial.trim().to_string(),
         };
+        let pinned_contact = pinned;
+        let pinned = pinned && !book.as_ref().is_some_and(|c| c.lan_local_only(&planned));
         let why = match localize_lan_route(&planned, pinned, LOCALIZE_RESOLVE_TIMEOUT) {
             Ok(local) => {
                 out.push(super::pair_init_lab::DialRoute {
@@ -5012,6 +5017,10 @@ fn local_dial_routes_with(
                 sanitize_terminal_line(&e)
             ),
         };
+        if pinned_contact {
+            // Verified, but the address came from a card.
+            return Err(card_lan_text(&ctx.who(), &reason, peer));
+        }
         return Err(super::pair_init_lab::unverified_remote_lan_text(
             &ctx.who(),
             &reason,
@@ -5020,6 +5029,20 @@ fn local_dial_routes_with(
         ));
     }
     Ok((out, unresolved))
+}
+
+/// A send to a verified contact whose LAN address came from a card and is
+/// not on the local network (`reason`): a card's routes are not signed, so
+/// such an address is dialled only on the local network. NOT SENT, nothing
+/// dialled; the user can set an address they trust.
+fn card_lan_text(who: &str, reason: &str, peer: &[u8; 32]) -> String {
+    format!(
+        "NOT SENT: {reason}, and that LAN address came from {who}'s card: a LAN address from a \
+         card is used only on your local network, because nobody signs a card's addresses. If \
+         {who} gave you this address themselves, save it: raven contact set-dial --address {} \
+         HOST:PORT. Nothing was dialled.",
+        encode_address(peer),
+    )
 }
 
 /// A send to a contact that is not verified while `raven lan verified-only
@@ -14846,6 +14869,38 @@ mod local_route_tests {
 
     fn dials(routes: &[DialRoute]) -> Vec<String> {
         routes.iter().map(|r| r.dial.clone()).collect()
+    }
+
+    /// `raven send` to a verified contact whose saved LAN address came from
+    /// a card and is not local: refused before any dial, in words that do
+    /// not call the contact unverified. Typed here, the same address goes.
+    #[test]
+    fn a_verified_contacts_card_lan_address_is_used_only_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = [0x5du8; 32];
+        let row = |trusted: bool| {
+            std::fs::write(
+                dir.path().join("contacts.json"),
+                format!(
+                    r#"[{{"petname":"Bob","address":"","pub_hex":"{}","pinned":true,"lan_dial":"203.0.113.7:7420","lan_dial_trusted":{trusted}}}]"#,
+                    hex::encode(peer)
+                ),
+            )
+            .unwrap();
+        };
+        let ctx = SendCtx {
+            name: "Bob".into(),
+            ..SendCtx::default()
+        };
+        let routes = [lan("203.0.113.7:7420")];
+        row(false);
+        let err = local_dial_routes_with(dir.path(), &routes, &peer, &ctx, true).unwrap_err();
+        assert!(err.contains("came from Bob's card"), "{err}");
+        assert!(!err.contains("not verified"), "{err}");
+        assert!(err.contains("Nothing was dialled"), "{err}");
+        row(true);
+        let (kept, _) = local_dial_routes_with(dir.path(), &routes, &peer, &ctx, true).unwrap();
+        assert_eq!(dials(&kept), ["203.0.113.7:7420"]);
     }
 
     /// `raven outbox show` on a message held as CONTACT_NOT_VERIFIED: a

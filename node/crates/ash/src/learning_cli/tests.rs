@@ -31,6 +31,7 @@ fn contact(petname: &str, key: &[u8; 32]) -> Contact {
         custodians: Vec::new(),
         hide_ip: false,
         onion: String::new(),
+        lan_dial_trusted: false,
     }
 }
 

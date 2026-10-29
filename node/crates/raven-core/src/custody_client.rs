@@ -1512,7 +1512,10 @@ fn custodian_routes_with(
         .filter(|r| custody_route_allowed(custody, gates, r))
         .filter(|r| !lan_only || r.carrier == OutboxCarrier::Lan)
         .filter_map(|r| {
-            localize_lan_route(&r, custody.wan, LOCALIZE_RESOLVE_TIMEOUT)
+            // A card's LAN route keeps the local-network rule
+            // ([`crate::outbox::ContactRoutes::lan_local_only`]).
+            let wan = custody.wan && !contact.lan_local_only(&r);
+            localize_lan_route(&r, wan, LOCALIZE_RESOLVE_TIMEOUT)
                 .ok()
                 .map(|d| (r, d))
         })

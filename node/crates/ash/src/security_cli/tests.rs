@@ -31,6 +31,7 @@ fn contact(seed: u8, petname: &str, pinned: bool) -> Contact {
         custodians: Vec::new(),
         hide_ip: false,
         onion: String::new(),
+        lan_dial_trusted: false,
     }
 }
 

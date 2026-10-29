@@ -359,6 +359,31 @@ the user's responsibility, matching the pre-pivot model's §3.4. We also note
 number re-verification as a TODO; today the safety-number check is a manual
 compare-in-person-or-by-call flow, not an automated re-scan.
 
+**Who learns the dialer's identity (this version).** On LAN direct (and on
+Internet direct once it is live) the dialer sends its signed identity bind
+first, after Noise message 2; the listener answers with its own only to a
+dialer that names one of its contacts. Noise authenticates nothing about the
+listener before that bind, so whoever answers at the address dialled learns
+the dialer's Raven identity, its IP address and when it sends (never
+content: the bind and everything after it is checked against the contact's
+key, and a wrong key ends the link). Two ways to be that listener:
+
+- *At a contact's real address*: a reused DHCP lease, a planted listener or
+  an ARP spoof on the same network. Not prevented in this version; M0 and
+  the RLK1 knock below are the answer.
+- *By steering the dial*: a card's route fields (`lan=`, `inet=`, `p2p=`,
+  `via=`) are not signed (only `onion=` is), and comparing security words
+  checks the key only, so someone who alters a card in transit can name
+  their own host. A card's LAN route therefore keeps the local-network rule
+  even after the contact is verified: it is dialled only at a loopback,
+  private, link-local or unique-local address, whatever name it gives. Only
+  a LAN address typed on this computer (`--lan-dial`, `contact set-dial`) or
+  learned from the contact's own authenticated link may lie beyond the local
+  network; a LAN address saved before this rule counts as a card's until it
+  is typed again or learned. A card's Internet route (`inet=`) has no such
+  limit and is the remaining card exposure once Internet direct is live;
+  signed card routes are the planned fix.
+
 **Phase 6b (built, gated off; not in this version):**
 
 - *Impostor at a contact's address* (a reused DHCP address, a planted
