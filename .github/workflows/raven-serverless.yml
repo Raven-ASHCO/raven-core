@@ -257,7 +257,9 @@ jobs:
   rust-linux:
     name: Rust + vectors (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 80, not 60: the shipped release build with the Tor helper (Arti) adds
+    # several minutes while its cache is cold.
+    timeout-minutes: 80
     # Headless runner: no Secret Service. Debug CI keeps the lab locked-file
     # backend so cargo test --locked / ash init create ephemeral identities; the
     # Release keystore (passphrase vault) is proven by linux-release-keystore.
@@ -346,12 +348,14 @@ jobs:
           cargo test --locked -p raven-core nearby_
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1 \
             cargo test --locked -p raven-node --features nearby-radio nearby:: -- --test-threads=1
-      # The Tor onion carrier (lab, docs/design/2026-10-tor-fallback.md): the
-      # binding, route and planner tests in raven-core, then raven-node's onion
-      # module and the outbox race under the Tor lab switch, end to end over
-      # the loopback helper (no Tor network: automated tests never touch it).
-      # The Arti helper is built and linted with the `tor` feature; it is only
-      # run by the field test.
+      # The Tor onion carrier (on in release builds since 2026-10,
+      # docs/design/2026-10-tor-fallback.md): the binding, route and planner
+      # tests in raven-core, then raven-node's onion module and the outbox race
+      # under the lab switches, end to end over the loopback helper (no Tor
+      # network: automated tests never touch it). The Arti helper is built and
+      # linted with the `tor` feature, then deleted: the onion gate is on in a
+      # debug build too, so a debug raven-node a later step starts next to it
+      # would start real Tor.
       - name: onion tests (loopback helper, lab switch; Arti helper built)
         shell: bash
         run: |
@@ -361,14 +365,16 @@ jobs:
             cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
+          rm -f target/debug/raven-tor-helper
           # arti#2726: the vendored saturating-time limit search must end
           # (Windows clock counts 100 ns ticks; Tor bootstrap hung at 15 %).
           cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
             --target-dir target/saturating-time --lib -- coarse_clock system_time_limits
           git diff --exit-code -- ../shared-vectors/rvn1/onion
-      # The lab-gated app channel tests (submit, probe, pairing budget): only
-      # the lab unlock for this test run, no gate flipped. Step-level env, so
-      # the same step works under the Windows shell.
+      # The app channel tests (submit, probe, pairing budget, the guard). The
+      # channel is on in release builds since 2026-10; the lab unlock here
+      # registers the lab content type test/1 for this test run only.
+      # Step-level env, so the same step works under the Windows shell.
       - name: app channel submit tests (lab unlock)
         env:
           RAVEN_LAB_TEST_A: "1"
@@ -390,9 +396,11 @@ jobs:
       # services + `raven send` each way + inbox (C1) and a stranger refused
       # before the responder identifies itself (C3, F4); C2 does the same over
       # Internet direct (listeners on 127.0.0.1 and [::1], contacts with only
-      # Internet routes, debug lab unlock while the P1 flag is off). Rust, not
-      # bash, so the same scenario runs on all three runners (named-pipe IPC on
-      # Windows).
+      # Internet routes; Internet direct is on in release builds since 2026-10,
+      # and these profiles keep the lab unlock so their cards still carry
+      # routes, which release cards never do). Every profile closes Tor and
+      # STUN discovery (a debug build's "0"). Rust, not bash, so the same
+      # scenario runs on all three runners (named-pipe IPC on Windows).
       - name: Portable carrier harness (C1 LAN direct + C2 Internet direct both ways + C3 contact gating)
         shell: bash
         # C43's silent router and gate-closed control start a real UPnP
@@ -422,8 +430,9 @@ jobs:
           bash ../scripts/check_offline_guide.sh target/debug/raven --self-test
           bash ../scripts/check_offline_guide.sh target/debug/raven
       # The relay kit's Linux installer for real (docs/RELAY_KIT.md), on the
-      # debug build above with the lab unlock (the P2P gate is closed in every
-      # production build, which the kit refuses with exit 3): the hardened
+      # debug build above with the lab unlock (the kit installs release builds
+      # too since p2p is on in release; a lab build keeps this run short and
+      # lets the lab profiles of C25 use cards with routes): the hardened
       # system unit runs as user raven-relay and binds TCP 443 through
       # CAP_NET_BIND_SERVICE (the installer waits for /tcp/443 in the relay's
       # status), the card names the 443 line and two lab profiles reserve and
@@ -492,7 +501,11 @@ jobs:
       # route_memory, relay_select, reach_diag, session_reset, outbox and
       # raven-node (netwatch lab events and egress, lab ping, the retired
       # relay listen, the hints announcer switch, friend_relay) run (they
-      # return early in a debug build).
+      # return early in a debug build). The gates switched on in October 2026
+      # (onion, Internet direct, friend custody, the app channel) stay on with
+      # every switch set, the generic lab unlock opens nothing in release
+      # (pair_init), and a card carries and takes no unsigned route
+      # (route_hints::tests::card_routes_lab_switch_is_inert_in_release).
       - name: lab switches inert in release (every switch set)
         shell: bash
         env:
@@ -551,9 +564,9 @@ jobs:
           # switch; no gate reads it in release (raven-core
           # `nearby_gate::tests::nearby_only_closes_and_never_opens`).
           RAVEN_LAB_NEARBY_ONLY: "1"
-          # The Tor onion carrier (lab): its switch, the helper path, the
-          # loopback helper and the race's head start are never read in
-          # release (raven-core `onion_gate`).
+          # The Tor onion carrier (on in release builds since 2026-10): its
+          # close switch, the helper path, the loopback helper and the race's
+          # head start are never read in release (raven-core `onion_gate::`).
           RAVEN_LAB_TOR: "1"
           RAVEN_TOR_HELPER: "/tmp/raven-lab-no-tor-helper"
           RAVEN_LAB_TOR_LOOPBACK: "/tmp/raven-lab-tor-loopback"
@@ -571,8 +584,9 @@ jobs:
           RAVEN_LAB_PORTMAP_LIFETIME: "8"
           RAVEN_LAB_NAT_CLASS_FORCE: "varies"
           RAVEN_LAB_PEER_EPOCH_S: "10"
-          # Auto-reach: STUN discovery and serverless punching stay shut and
-          # their harness values are never read (raven-core
+          # Auto-reach: STUN discovery and serverless punching stay at their
+          # consts (on in release builds since 2026-10) and their harness
+          # values are never read (raven-core
           # `portmap_gate::lab_switches_are_inert_in_release`).
           RAVEN_LAB_STUN_DISCOVERY: "1"
           RAVEN_LAB_SERVERLESS_PUNCH: "1"
@@ -659,6 +673,12 @@ jobs:
             update_exchange::tests::the_exchange_is_inert_without_debug_assertions \
             update_downloads::tests::auto_approve_is_inert_without_debug_assertions \
             group::tests::the_lab_switch_is_inert_without_debug_assertions \
+            onion_gate:: internet_gate:: \
+            custody_gate::tests::custody_flags_are_on_and_handoff_stays_off \
+            custody_gate::tests::gates_follow_the_consts_and_the_debug_close_switches \
+            custody_gate::tests::hold_text_names_the_flag_and_the_close_switch \
+            pair_init::tests::lab_gate_and_test_a_gate_are_inert_without_debug_assertions \
+            app_channel::tests::production_flags_are_on \
             release_plan_is_byte_identical_with_the_gate_off
           # Phase 5 (review cross-6): nearby's service, the custody handoff
           # forwarder and the letter steps read their real gates here too,
@@ -740,10 +760,27 @@ jobs:
           done
       - name: release build of ash makes no raven-release (P6.46)
         run: bash scripts/release_tool_feature_audit.sh --release-build
+      # The configuration the Linux installer ships (docs/INSTALL_Linux.md):
+      # ash and raven-node with the Tor helper, compiled only, warning-free.
+      # Nothing here runs a release binary; the helper is deleted at once, so
+      # no later step starts a release raven-node next to it (it would start
+      # real Tor).
+      - name: release build of the shipped configuration (Tor helper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/shipped-build.log"
+          cargo build --locked --release -p ash -p raven-node --features raven-node/tor 2>&1 | tee "$log"
+          rm -f target/release/raven-tor-helper
+          if grep -nE '^(warning|error)' "$log"; then
+            echo "the shipped release build is not warning-free" >&2
+            exit 1
+          fi
       # With no switch set: every test named for a lab switch staying inert
-      # or a production flag staying false, so a new gate's tests run here
-      # in release without a list to keep up to date (Phase 3 "release job").
-      - name: lab switches inert, production flags false (release)
+      # or a production flag holding its const (off, or on for the gates
+      # switched on in October 2026), so a new gate's tests run here in
+      # release without a list to keep up to date (Phase 3 "release job").
+      - name: lab switches inert, production flags as pinned (release)
         run: |
           cargo test --locked --release -p raven-core --lib -- inert production_flag
           cargo test --locked --release -p raven-node --bins -- inert production_flag
@@ -1011,7 +1048,9 @@ jobs:
   rust-macos:
     name: Rust (macOS)
     runs-on: macos-latest
-    timeout-minutes: 60
+    # 80, not 60: the shipped release build with the Tor helper (Arti) adds
+    # several minutes while its cache is cold.
+    timeout-minutes: 80
     defaults:
       run:
         working-directory: node
@@ -1044,9 +1083,10 @@ jobs:
           cargo test --locked -p raven-swarm --features p2p-host,wss --lib
           cargo build --locked -p raven-swarm -p raven-node
           cargo build --locked --release -p raven-core -p raven-node -p ash
-      # The lab-gated app channel tests (submit, probe, pairing budget): only
-      # the lab unlock for this test run, no gate flipped. Step-level env, so
-      # the same step works under the Windows shell.
+      # The app channel tests (submit, probe, pairing budget, the guard). The
+      # channel is on in release builds since 2026-10; the lab unlock here
+      # registers the lab content type test/1 for this test run only.
+      # Step-level env, so the same step works under the Windows shell.
       - name: app channel submit tests (lab unlock)
         env:
           RAVEN_LAB_TEST_A: "1"
@@ -1072,12 +1112,14 @@ jobs:
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1 \
             cargo test --locked -p raven-node --features nearby-radio nearby:: -- --test-threads=1
           cargo test --locked -p raven-node --features nearby-radio --bin raven-nearby-helper --test nearby_helper
-      # The Tor onion carrier (lab, docs/design/2026-10-tor-fallback.md): the
-      # binding, route and planner tests in raven-core, then raven-node's onion
-      # module and the outbox race under the Tor lab switch, end to end over
-      # the loopback helper (no Tor network: automated tests never touch it).
-      # The Arti helper is built and linted with the `tor` feature; it is only
-      # run by the field test.
+      # The Tor onion carrier (on in release builds since 2026-10,
+      # docs/design/2026-10-tor-fallback.md): the binding, route and planner
+      # tests in raven-core, then raven-node's onion module and the outbox race
+      # under the lab switches, end to end over the loopback helper (no Tor
+      # network: automated tests never touch it). The Arti helper is built and
+      # linted with the `tor` feature, then deleted: the onion gate is on in a
+      # debug build too, so a debug raven-node a later step starts next to it
+      # would start real Tor.
       - name: onion tests (loopback helper, lab switch; Arti helper built)
         shell: bash
         run: |
@@ -1087,6 +1129,7 @@ jobs:
             cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
+          rm -f target/debug/raven-tor-helper
           # arti#2726: the vendored saturating-time limit search must end
           # (Windows clock counts 100 ns ticks; Tor bootstrap hung at 15 %).
           cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
@@ -1124,6 +1167,23 @@ jobs:
       # /bin/bash 3.2; no launchd agent, no Bluetooth.
       - name: Nearby helper install dry run (nearby_helper_selftest.sh, /bin/bash 3.2)
         run: /bin/bash scripts/install/nearby_helper_selftest.sh
+      # The configuration the macOS installer ships (docs/INSTALL_macOS.md):
+      # ash and raven-node with the Tor helper and the Bluetooth radio
+      # backend, compiled only, warning-free. Nothing here runs a release
+      # binary; the helpers are deleted at once, so no later step starts a
+      # release raven-node next to them (it would start real Tor).
+      - name: release build of the shipped configuration (Tor helper, Bluetooth)
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/shipped-build.log"
+          cargo build --locked --release -p ash -p raven-node \
+            --features raven-node/tor,raven-node/nearby-radio 2>&1 | tee "$log"
+          rm -f target/release/raven-tor-helper target/release/raven-nearby-helper
+          if grep -nE '^(warning|error)' "$log"; then
+            echo "the shipped release build is not warning-free" >&2
+            exit 1
+          fi
       # CLI DX: menu/CLI smoke only (not Keychain / launchd / Gatekeeper).
       # Must stay on script-default target/debug/ash — locked-file is refused in Release.
       # locked-file avoids Keychain ACL hangs in CI — not a production Keychain claim.
@@ -1155,9 +1215,11 @@ jobs:
       # services + `raven send` each way + inbox (C1) and a stranger refused
       # before the responder identifies itself (C3, F4); C2 does the same over
       # Internet direct (listeners on 127.0.0.1 and [::1], contacts with only
-      # Internet routes, debug lab unlock while the P1 flag is off). Rust, not
-      # bash, so the same scenario runs on all three runners (named-pipe IPC on
-      # Windows).
+      # Internet routes; Internet direct is on in release builds since 2026-10,
+      # and these profiles keep the lab unlock so their cards still carry
+      # routes, which release cards never do). Every profile closes Tor and
+      # STUN discovery (a debug build's "0"). Rust, not bash, so the same
+      # scenario runs on all three runners (named-pipe IPC on Windows).
       - name: Portable carrier harness (C1 LAN direct + C2 Internet direct both ways + C3 contact gating)
         shell: bash
         # C43's silent router and gate-closed control start a real UPnP
@@ -1234,7 +1296,9 @@ jobs:
   rust-windows:
     name: Rust (Windows)
     runs-on: windows-latest
-    timeout-minutes: 60
+    # 80, not 60: the shipped release build with the Tor helper (Arti) adds
+    # several minutes while its cache is cold.
+    timeout-minutes: 80
     defaults:
       run:
         working-directory: node
@@ -1289,9 +1353,10 @@ jobs:
           cargo test --locked -p raven-swarm --features p2p-host,wss --lib
           cargo build --locked -p ash -p raven-node -p raven-swarm
           cargo build --locked --release -p raven-core -p raven-node -p ash
-      # The lab-gated app channel tests (submit, probe, pairing budget): only
-      # the lab unlock for this test run, no gate flipped. Step-level env, so
-      # the same step works under the Windows shell.
+      # The app channel tests (submit, probe, pairing budget, the guard). The
+      # channel is on in release builds since 2026-10; the lab unlock here
+      # registers the lab content type test/1 for this test run only.
+      # Step-level env, so the same step works under the Windows shell.
       - name: app channel submit tests (lab unlock)
         env:
           RAVEN_LAB_TEST_A: "1"
@@ -1312,12 +1377,14 @@ jobs:
           cargo test --locked -p raven-core nearby_
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1 \
             cargo test --locked -p raven-node --features nearby-radio nearby:: -- --test-threads=1
-      # The Tor onion carrier (lab, docs/design/2026-10-tor-fallback.md): the
-      # binding, route and planner tests in raven-core, then raven-node's onion
-      # module and the outbox race under the Tor lab switch, end to end over
-      # the loopback helper (no Tor network: automated tests never touch it).
-      # The Arti helper is built and linted with the `tor` feature; it is only
-      # run by the field test.
+      # The Tor onion carrier (on in release builds since 2026-10,
+      # docs/design/2026-10-tor-fallback.md): the binding, route and planner
+      # tests in raven-core, then raven-node's onion module and the outbox race
+      # under the lab switches, end to end over the loopback helper (no Tor
+      # network: automated tests never touch it). The Arti helper is built and
+      # linted with the `tor` feature, then deleted: the onion gate is on in a
+      # debug build too, so a debug raven-node a later step starts next to it
+      # would start real Tor.
       - name: onion tests (loopback helper, lab switch; Arti helper built)
         shell: bash
         run: |
@@ -1327,11 +1394,27 @@ jobs:
             cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
+          rm -f target/debug/raven-tor-helper.exe
           # arti#2726: the vendored saturating-time limit search must end
           # (Windows clock counts 100 ns ticks; Tor bootstrap hung at 15 %).
           cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
             --target-dir target/saturating-time --lib -- coarse_clock system_time_limits
           git diff --exit-code -- ../shared-vectors/rvn1/onion
+      # The configuration the Windows installer ships
+      # (docs/INSTALL_Windows.md): ash and raven-node with the Tor helper, no
+      # Bluetooth backend, compiled only, warning-free. Nothing here runs a
+      # release binary; the helper is deleted at once.
+      - name: release build of the shipped configuration (Tor helper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/shipped-build.log"
+          cargo build --locked --release -p ash -p raven-node --features raven-node/tor 2>&1 | tee "$log"
+          rm -f target/release/raven-tor-helper.exe
+          if grep -nE '^(warning|error)' "$log"; then
+            echo "the shipped release build is not warning-free" >&2
+            exit 1
+          fi
       # Named reliability gates (Sprint 0 evidence bar). cargo, not bash.
       # reliability_10k on Windows is QUEUE DURABILITY ONLY — not a path proof.
       # Path proof: named bridge_v1 + ash_doctor_send_smoke.ps1 (this job).
@@ -1343,9 +1426,11 @@ jobs:
       # services + `raven send` each way + inbox (C1) and a stranger refused
       # before the responder identifies itself (C3, F4); C2 does the same over
       # Internet direct (listeners on 127.0.0.1 and [::1], contacts with only
-      # Internet routes, debug lab unlock while the P1 flag is off). Rust, not
-      # bash, so the same scenario runs on all three runners (named-pipe IPC on
-      # Windows).
+      # Internet routes; Internet direct is on in release builds since 2026-10,
+      # and these profiles keep the lab unlock so their cards still carry
+      # routes, which release cards never do). Every profile closes Tor and
+      # STUN discovery (a debug build's "0"). Rust, not bash, so the same
+      # scenario runs on all three runners (named-pipe IPC on Windows).
       - name: Portable carrier harness (C1 LAN direct + C2 Internet direct both ways + C3 contact gating)
         shell: bash
         # C43's silent router and gate-closed control start a real UPnP
