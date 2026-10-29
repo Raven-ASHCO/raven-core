@@ -126,11 +126,13 @@ contacts reach this computer over TCP port **7422** (7421 is mock BLE's, 7423
 is reserved for libp2p). A card carries no Internet address: `raven whoami
 --card --inet` is refused, except in a debug build with the lab unlock
 (`RAVEN_LAB_TEST_A=1`). While p2p runs too (below), raven-node tells each
-verified contact this address inside your encrypted link once you are
-connected over Tor or the local network: the public IP that STUN found, with
-this port (route hints; not while you hide your IP from them or turned STUN
-off). Otherwise tell them the address yourself, and they type it (`raven
-contact set-addr --internet HOST:PORT`). Only your contacts get an answer:
+verified contact this address inside your encrypted link whenever the two of
+you are connected (local network, Tor or p2p): the public IP that STUN found,
+with this port (route hints). It does not while you hide your IP from them or
+turned STUN off, nor when STUN sees your router change port numbers on the
+way out (raven-node then does not guess that this same port is forwarded).
+Otherwise tell them the address yourself, and they type it (`raven contact
+set-addr --internet HOST:PORT`). Only your contacts get an answer:
 anyone else completes
 the Noise handshake and is disconnected before this node names itself, but a
 scanner still learns that something listens on that port. Release builds have
