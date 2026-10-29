@@ -18,6 +18,11 @@
 //!
 //! Nothing here ever carries an onion address of a friend in a log or an
 //! event: the onion key travels only inside the connect request.
+//!
+//! Items only a helper uses are marked
+//! `#[cfg_attr(not(debug_assertions), allow(dead_code))]`: a release
+//! raven-node has no loopback helper, and raven-tor-helper allows dead code
+//! in its copy of this file.
 
 use std::future::Future;
 use std::time::Duration;
@@ -178,10 +183,12 @@ pub fn upload_round(message: &str) -> Option<(u32, u32)> {
 }
 
 /// The pause before a second Tor connect ([`connect_with_retry`]).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub const CONNECT_RETRY_PAUSE: Duration = Duration::from_secs(2);
 /// A second Tor connect is made only with at least this much of the
 /// connect budget left after the pause (a rendezvous over a fresh
 /// descriptor takes several seconds).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub const CONNECT_RETRY_MIN_LEFT: Duration = Duration::from_secs(12);
 
 /// A failed connect worth one more try with a fresh descriptor and fresh
@@ -189,6 +196,7 @@ pub const CONNECT_RETRY_MIN_LEFT: Duration = Duration::from_secs(12);
 /// rendezvous failed, or Tor timed out. Field test round 8: right after a
 /// friend's node restarted, the first connects failed on what the client
 /// had cached of the old service (its descriptor, its introduction points).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn worth_another_connect(reply: &ConnectReply) -> bool {
     matches!(
         reply,
@@ -203,6 +211,7 @@ pub fn worth_another_connect(reply: &ConnectReply) -> bool {
 /// descriptor again and builds new circuits) when [`CONNECT_RETRY_MIN_LEFT`]
 /// is left after [`CONNECT_RETRY_PAUSE`]. Each try is bounded by what is
 /// left of `budget`; the error is the last try's.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub async fn connect_with_retry<T, F, Fut>(
     budget: Duration,
     mut connect: F,
@@ -319,6 +328,7 @@ pub enum ConnectReply {
 }
 
 impl ConnectReply {
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     fn code(&self) -> u8 {
         match self {
             Self::Ok => 0,
@@ -330,6 +340,7 @@ impl ConnectReply {
     }
 
     /// The reason text (a fixed phrase; empty for [`Self::Ok`]).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn reason(&self) -> &str {
         match self {
             Self::Ok => "",
@@ -339,6 +350,7 @@ impl ConnectReply {
 
     /// The reply bytes: status, reason length, reason (cut to
     /// [`MAX_REASON`], non-printable bytes as `?`).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn encode(&self) -> Vec<u8> {
         let reason: Vec<u8> = self
             .reason()
@@ -398,6 +410,7 @@ pub fn encode_connect(
 
 /// A connect request's parts, the token checked against `token` first
 /// ([`token_eq`]); `None` on a wrong token.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn decode_connect(
     req: &[u8; CONNECT_REQUEST_LEN],
     token: &[u8; TOKEN_LEN],
@@ -415,6 +428,7 @@ pub fn decode_connect(
 /// the helper gives each rendezvous circuit of its onion service (the same
 /// for every stream on one circuit, never reused in one helper life). It
 /// says nothing about who dialled; raven-node counts its slots per circuit.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn encode_forward(token: &[u8; TOKEN_LEN], circuit: u64) -> [u8; FORWARD_HEADER_LEN] {
     let mut out = [0u8; FORWARD_HEADER_LEN];
     out[..TOKEN_LEN].copy_from_slice(token);
