@@ -1,0 +1,15 @@
+{
+  "description": "Negative RFC1 v1 custody handoff frame (RAVEN_CUSTODY_HANDOFF_V1.md); the reply is what a listener serving the handoff ops sends once its link gate and contact rule passed",
+  "deterministic": true,
+  "expected": {
+    "decode": "UNSUPPORTED",
+    "reply_frame_hex": "5246433101fe010203040506070801",
+    "reply_frame_len": 15
+  },
+  "inputs": {
+    "frame_hex": "524643310187010203040506070800e0a276f22b4634ef7d0cbeffb551327cea4b0023464594e13c58345ce2d34460",
+    "frame_len": 47
+  },
+  "name": "A HANDOFF_RESULT (reply op 0x87) sent as a request: UNSUPPORTED, max_version 1, echoing req_id",
+  "protocol_version": "rvn1"
+}

@@ -1,0 +1,1729 @@
+# Raven serverless node CI — B1-required product / terminal-path gates.
+# Lab / experimental jobs live in raven-serverless-lab.yml so a lab failure
+# cannot fail this workflow conclusion.
+# Thin always-on companion: raven-b1-always-on.yml (`B1 always-on gate`).
+name: Raven Serverless Node
+
+on:
+  # No path filters on the B1 product workflow. Docs-only PRs still get
+  # conclusions for Messaging / Secret / Rust job names after required-check
+  # pin. Lab stays path-filtered in raven-serverless-lab.yml.
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: jobs only read the repository. Third-party actions are
+# pinned to full commit SHAs (the comment names the release); bump them
+# deliberately. RUST_TOOLCHAIN pins rustc/clippy so a new stable release cannot
+# change CI results without a code change — raven-toolchain-canary.yml tracks
+# latest stable separately.
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.98.0"
+
+concurrency:
+  group: raven-serverless-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tree-presence:
+    name: Detect optional product trees
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      libp2p_bridge: ${{ steps.detect.outputs.libp2p_bridge }}
+      ios_app: ${{ steps.detect.outputs.ios_app }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: detect
+        name: Record whether iOS / Libp2pBridge trees exist
+        run: |
+          set -euo pipefail
+          if [[ -f ios-native/RAVEN/Libp2pBridge/go.mod ]]; then
+            echo "libp2p_bridge=true" >> "$GITHUB_OUTPUT"
+            echo "Libp2pBridge present"
+          else
+            echo "libp2p_bridge=false" >> "$GITHUB_OUTPUT"
+            echo "Libp2pBridge absent on this tree — Go libp2p bridge security will skip"
+          fi
+          if [[ -f ios-native/RAVEN/RAVEN.xcodeproj/project.pbxproj ]]; then
+            echo "ios_app=true" >> "$GITHUB_OUTPUT"
+            echo "ios-native/RAVEN present"
+          else
+            echo "ios_app=false" >> "$GITHUB_OUTPUT"
+            echo "ios-native/RAVEN absent on this tree — iOS protocol security tests will skip"
+          fi
+      # A skipped job looks green in the checks list. Say loudly which
+      # security suites did NOT run on this tree.
+      - name: Coverage manifest (skipped security suites)
+        run: |
+          set -euo pipefail
+          echo "## Security suites NOT exercised on this tree" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f ios-native/RAVEN/Libp2pBridge/go.mod ]]; then
+            echo "- go-bridge (Go libp2p bridge security): ios-native/RAVEN/Libp2pBridge absent" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Coverage gap::Go libp2p bridge security tests skipped (tree absent)"
+          fi
+          if [[ ! -f ios-native/RAVEN/RAVEN.xcodeproj/project.pbxproj ]]; then
+            echo "- ios-security (iOS protocol security + Swift rvn1 vector parity): ios-native/RAVEN absent" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Coverage gap::iOS/Swift protocol security and vector parity skipped (tree absent)"
+          fi
+
+  messaging-product-boundary:
+    name: Messaging-only product boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Refuse public-social product regressions
+        run: bash node/scripts/messaging_product_boundary_gate.sh
+
+  secret-scan:
+    name: Secret pattern scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Run secret history scan (CI mode)
+        run: bash scripts/secret_history_scan.sh --ci
+
+  harness-integrity:
+    name: Harness self-tests + protocol freeze
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Protocol freeze hashes (docs/PROTOCOL_FREEZE_HASHES_V1.md)
+        run: bash scripts/freeze_protocol_hashes.sh --check
+      - name: No diverging docs/ duplicates under node/
+        run: bash scripts/check_doc_pointers.sh
+      # Phase 6a P6.17: learning code never writes settings or the contact
+      # book, opens no gate and feeds nothing it learned into RRH1/RLB1/RFC1.
+      - name: Learning source boundary (static)
+        run: |
+          set -euo pipefail
+          bash node/scripts/learning_boundary_check.sh --self-test
+          bash node/scripts/learning_boundary_check.sh
+      # Proves a failing assertion inside a step turns the harness red (the
+      # historical `( ... ) && ok || fail` form silently ignored it).
+      - name: Proof / reliability harness self-tests
+        run: |
+          set -euo pipefail
+          bash scripts/final_serverless_proof.sh --self-test
+          bash scripts/reliability_matrix_20.sh --self-test
+          bash scripts/harness_util_selftest.sh
+      # Phase 6b (P6.46): the release log auditor (structure; the signature
+      # checks run where the Python reference's `cryptography` is installed).
+      - name: Release log auditor self-test (check_log.py)
+        run: python3 -I scripts/release/check_log.py --self-test
+      # The secret scanner must still see a real seed after many allow-listed RFC 8032
+      # test seeds, and the O6 IPC-surface guard must fire on an injected forbidden op
+      # (both used to be silent no-ops). Neither writes anything. The Keychain guard
+      # check keeps every macOS Keychain call behind macos_keychain::guarded.
+      - name: Scanner / guard self-tests (secret scan, O6 IPC guard, Keychain guard)
+        run: |
+          set -euo pipefail
+          bash scripts/secret_history_scan.sh --self-test
+          bash scripts/o6_m1_same_rvn1_bind_check.sh --self-test
+          bash scripts/keychain_guard_check.sh --self-test
+          bash scripts/keychain_guard_check.sh
+      # R1 stop-line (docs/design/2026-10-linux-keystore.md): Secret Service only
+      # through the frozen no-prompt fork, no-prompt APIs only in the approved
+      # wrapper (identity_store.rs), never Unlock / a plain session.
+      - name: Secret Service R1 boundary (static)
+        run: |
+          set -euo pipefail
+          bash node/scripts/secret_service_r1_boundary_check.sh --self-test
+          bash node/scripts/secret_service_r1_boundary_check.sh
+      - name: shellcheck (errexit pitfalls + harness warnings)
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          # SC2251: a bare `! cmd` never trips errexit, so it asserts nothing.
+          shellcheck --include=SC2251 scripts/*.sh scripts/lib/*.sh scripts/release/*.sh \
+            node/scripts/*.sh node/scripts/install/*.sh
+          shellcheck -S warning \
+            scripts/final_serverless_proof.sh scripts/reliability_matrix_20.sh \
+            scripts/lib/proof_assert.sh scripts/freeze_protocol_hashes.sh scripts/check_doc_pointers.sh \
+            scripts/check_install_helpers.sh scripts/check_safety_offline.sh scripts/check_offline_guide.sh \
+            scripts/secret_history_scan.sh scripts/release/*.sh node/scripts/install/*.sh \
+            node/scripts/lan_path_smoke.sh node/scripts/bridge_abc_demo.sh \
+            node/scripts/two_node_demo.sh node/scripts/internet_dial_smoke.sh \
+            node/scripts/libp2p_swarm_smoke.sh node/scripts/mailbox_opaque_smoke.sh \
+            node/scripts/bootstrap_manual_peer_smoke.sh node/scripts/internet_indexed_two_node.sh \
+            node/scripts/lan_direct_two_node.sh node/scripts/netns_nat_dcutr.sh \
+            node/scripts/netns_offline.sh node/scripts/wan_two_network_test.sh \
+            node/scripts/build_nearby_helper_app.sh \
+            node/scripts/learning_boundary_check.sh
+          # Phase 4's scripts (review E-4): r8_only_443.sh replaces and restores
+          # a host firewall under sudo, so its warnings block here too, not only
+          # in the advisory restrictive-net-linux job. -x follows
+          # netns_restrictive.sh's source of netns_nat_dcutr.sh.
+          shellcheck -S warning -x node/scripts/netns_restrictive.sh node/scripts/r8_only_443.sh
+      # Review E-3: every netns harness scrubs the lab switches and proxy
+      # settings the fault matrix scrubs (no build, no process, no network).
+      - name: Harness environment scrub (lan_fault_matrix.py --self-test)
+        run: python3 -I scripts/lan_fault_matrix.py --self-test
+      # Phase 3 P3.7: the bash installers give the service the LAN address
+      # `raven-node lan-default` prints (auto once the build's B12 gate is
+      # open, else 127.0.0.1:7420). Stub raven-node binaries and
+      # RAVEN_INSTALL_RENDER_ONLY=1: nothing is built, written or started.
+      - name: Installer LAN default (lan_default_selftest.sh)
+        run: bash node/scripts/install/lan_default_selftest.sh
+      # The R31 kit (node/scripts/update_mesh_test.sh) never writes over a
+      # program that runs from its bin/: a temp file renamed into place, and
+      # refused while one runs. Stand-in scripts only: nothing is built, and
+      # nothing is started but one sleeping script, stopped at the end.
+      - name: Update mesh kit install guard (update_mesh_test.sh selftest)
+        run: bash node/scripts/update_mesh_test.sh selftest
+      # The relay kit (docs/RELAY_KIT.md; its *.sh files are in both shellcheck
+      # lines above through node/scripts/install/*.sh, and raven-relay.sh's
+      # #!/bin/sh puts shellcheck in POSIX mode): syntax of every kit script, the
+      # quoting helpers it copies from the other installers, ASCII-only
+      # PowerShell (5.1 reads a BOM-less file as ANSI), and the tripwire: no kit
+      # script ever names the flag that serves anyone.
+      - name: Relay kit scripts (syntax, shared helpers, ASCII-only PowerShell, never an open relay)
+        run: |
+          set -euo pipefail
+          for f in node/scripts/install/*relay*.sh; do
+            bash -n "$f"
+          done
+          sh -n node/scripts/install/raven-relay.sh
+          bash scripts/check_install_helpers.sh
+          if LC_ALL=C grep -nP '[^\x00-\x7F]' node/scripts/install/*.ps1; then
+            echo "non-ASCII bytes in a PowerShell installer (Windows PowerShell 5.1 reads it as ANSI)" >&2
+            exit 1
+          fi
+          if grep -nE -- '--open|relay-open' node/scripts/install/*relay*; then
+            echo "a relay kit script names the open-relay flag: the kit never runs an open relay" >&2
+            exit 1
+          fi
+          echo "relay kit scripts OK"
+
+  # The ordinary SQLite amalgamation (~9.5 MB sqlite3.c) is compiled into every default
+  # build and its SHA-256 pins live in the same repo (libsqlite3-sys-raven/build.rs), so
+  # a commit that edits both builds green everywhere else. This ties the files AND the
+  # pins to the checksummed crates.io libsqlite3-sys 0.38.2 archive. It is merge-blocking
+  # only once this check is added to branch protection (the required-check pin is OFF).
+  # curl is retried: a provenance MISMATCH fails the same way every attempt.
+  supply-chain-provenance:
+    name: Vendored SQLite provenance vs crates.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: libsqlite3-sys-raven ordinary SQLite vs checksummed crates.io archive
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if bash node/scripts/verify_sqlcipher_fork_ordinary_sqlite_upstream.sh; then
+              exit 0
+            fi
+            echo "provenance verifier attempt $attempt failed" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+  # The §59 harness cited by README.md. Lab build (unsafe-demo-crypto); exits 1
+  # unless every step is green. Artifacts hold public keys only.
+  final-serverless-proof:
+    name: Final serverless proof (lab harness)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: final-serverless-proof
+      - name: Run scripts/final_serverless_proof.sh
+        run: bash scripts/final_serverless_proof.sh
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: final-serverless-proof
+          path: |
+            node/proof_artifacts/
+            !node/proof_artifacts/LATEST
+          if-no-files-found: warn
+
+  rust-linux:
+    name: Rust + vectors (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Headless runner: no Secret Service. Debug CI keeps the lab locked-file
+    # backend so cargo test --locked / ash init create ephemeral identities; the
+    # Release keystore (passphrase vault) is proven by linux-release-keystore.
+    env:
+      RAVEN_IDENTITY_BACKEND: locked-file
+      RAVEN_ALLOW_EPHEMERAL_DATA_DIR: "1"
+      # Phase 4 (P4.3): the runner has an IPv4 default gateway, so the
+      # gateway lookup test must find it.
+      RAVEN_TEST_EXPECT_GATEWAY: "1"
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: |
+          cargo clippy --locked -p raven-core -p ash -p raven-node -p raven-swarm --all-targets -- -D warnings
+          cargo clippy --locked -p raven-swarm --all-features --all-targets -- -D warnings
+          # Non-default debug / experimental features that ship in debug builds.
+          cargo clippy --locked -p ash -p raven-node --all-targets \
+            --features ash/debug-trace-delivery,raven-node/corebluetooth -- -D warnings
+      - name: fuzz targets type-check (cargo-fuzz crate, stable)
+        run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --lib --bins -- -D warnings
+      - name: RustSec active dependency audit
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2
+          python3 -m unittest scripts/test_audit_active_dependencies.py
+          python3 scripts/audit_active_dependencies.py
+      # The lab SQLCipher provider (bundled-sqlcipher*, full-braid-durable-lab)
+      # must never reach a shipped package's resolved feature graph. The script
+      # also self-tests that it fires on raven-core's lab feature graph, and asserts
+      # that libsqlite3-sys still resolves to the audited path fork (node + node/fuzz
+      # lockfiles): a rusqlite bump that drops the [patch] fails here.
+      - name: SQLCipher lab provider absent from release feature graphs
+        run: bash scripts/sqlcipher_release_feature_audit.sh
+      # Phase 6b (P6.46, OD6b-28): the offline release tool (ash feature
+      # `release-tool`) is in no release feature graph, no release script or
+      # CI release command enables it (the audit self-tests both checks), and
+      # its own lint and tests (test keys only) run here.
+      - name: release tool absent from release builds; its lint and tests
+        run: |
+          set -euo pipefail
+          bash scripts/release_tool_feature_audit.sh
+          cargo clippy --locked -p ash --features release-tool --all-targets -- -D warnings
+          cargo test --locked -p ash --features release-tool --test release_tool
+      - name: test raven-core + ash
+        run: cargo test --locked -p raven-core -p ash -p raven-node
+      # Phase 6b (P6.51): the vectors Rust writes (shared-vectors/rvn1/update:
+      # the release key set, RAD1, RTL1, RRB1/RRBC, RUP1; rvn1/link: PAD1 and
+      # the RLK1 knock; rvn1/pair_seed: the pair-seed KDF; rvn1/lan: the
+      # knocked handshake noise_xx_handshake_003) are written again and must
+      # come out byte for byte the same, with no new file; the Python
+      # reference checks each one ("protocol vectors (python)" below).
+      - name: Rust-written security vectors have no drift
+        run: |
+          set -euo pipefail
+          RAVEN_REGEN_SECURITY_VECTORS=1 cargo test --locked -p raven-core --lib -- \
+            advisory:: tlog:: release_bundle:: release_keys:: update_exchange:: link_padding:: \
+            link_knock:: pair_seed:: lan_vectors::tests::noise_xx_handshake_003_vector
+          git diff --exit-code -- ../shared-vectors/rvn1/update ../shared-vectors/rvn1/link \
+            ../shared-vectors/rvn1/pair_seed ../shared-vectors/rvn1/lan
+          test -z "$(git ls-files --others --exclude-standard -- ../shared-vectors/rvn1/update \
+            ../shared-vectors/rvn1/link ../shared-vectors/rvn1/pair_seed ../shared-vectors/rvn1/lan)"
+      # Phase 5 (P5.28): Bluetooth nearby with no radio. raven-core's nearby
+      # tests (gate, RNL1 link and vectors, carrier plumbing), then
+      # raven-node's nearby module (engine, fake radio, ether hub, pipes)
+      # built with the platform radio feature and run under the nearby lab
+      # switch; no real radio is opened. C50-C53 and C56 run in the carrier
+      # harness below (every --ignored case). On Linux this also runs the
+      # BlueZ backend's pure tests (P5.29); the backend itself runs end to
+      # end on emulated controllers in the advisory nearby-btvirt job.
+      - name: nearby tests (fake radio, lab switch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core nearby_
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1 \
+            cargo test --locked -p raven-node --features nearby-radio nearby:: -- --test-threads=1
+      # The Tor onion carrier (lab, docs/design/2026-10-tor-fallback.md): the
+      # binding, route and planner tests in raven-core, then raven-node's onion
+      # module and the outbox race under the Tor lab switch, end to end over
+      # the loopback helper (no Tor network: automated tests never touch it).
+      # The Arti helper is built and linted with the `tor` feature; it is only
+      # run by the field test.
+      - name: onion tests (loopback helper, lab switch; Arti helper built)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core onion
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
+            cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
+          cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
+          cargo build --locked -p raven-node --features tor --bin raven-tor-helper
+          # arti#2726: the vendored saturating-time limit search must end
+          # (Windows clock counts 100 ns ticks; Tor bootstrap hung at 15 %).
+          cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
+            --target-dir target/saturating-time --lib -- coarse_clock system_time_limits
+          git diff --exit-code -- ../shared-vectors/rvn1/onion
+      # The lab-gated app channel tests (submit, probe, pairing budget): only
+      # the lab unlock for this test run, no gate flipped. Step-level env, so
+      # the same step works under the Windows shell.
+      - name: app channel submit tests (lab unlock)
+        env:
+          RAVEN_LAB_TEST_A: "1"
+        run: 'cargo test --locked -p raven-node app_channel::'
+      # CLI DX: menu/CLI smoke only (not Keychain / launchd / Gatekeeper).
+      # Must stay on script-default target/debug/ash — locked-file is refused in Release.
+      # Script uses RAVEN_IDENTITY_BACKEND=locked-file and ephemeral mktemp dirs.
+      - name: ash menu smoke
+        run: ./scripts/ash_menu_smoke.sh
+      - name: LAN handshake KAT (shared vectors, no live network)
+        run: cargo test --locked -p raven-core --lib lan_
+      # Must stay on script-default target/debug — locked-file is refused in Release.
+      # Script uses RAVEN_IDENTITY_BACKEND=locked-file and
+      # RAVEN_CHAT_HISTORY_BACKEND=locked-file so GNU/Linux SS connect-fail
+      # can persist chat-history (not a production 0600-key fallback).
+      - name: LAN direct two-node smoke
+        run: ./scripts/lan_direct_two_node.sh
+      # Portable carrier harness (transports design §6.4): two real raven-node
+      # services + `raven send` each way + inbox (C1) and a stranger refused
+      # before the responder identifies itself (C3, F4); C2 does the same over
+      # Internet direct (listeners on 127.0.0.1 and [::1], contacts with only
+      # Internet routes, debug lab unlock while the P1 flag is off). Rust, not
+      # bash, so the same scenario runs on all three runners (named-pipe IPC on
+      # Windows).
+      - name: Portable carrier harness (C1 LAN direct + C2 Internet direct both ways + C3 contact gating)
+        shell: bash
+        # C43's silent router and gate-closed control start a real UPnP
+        # search (SSDP), which only a CI runner's network may see.
+        env:
+          RAVEN_HARNESS_UPNP_SEARCH: "1"
+        run: |
+          set -euo pipefail
+          cargo build --locked -p ash -p raven-node
+          cargo test --locked -p raven-node --test carrier_matrix -- --ignored --nocapture
+      # docs/OFFLINE_GUIDE.md (Phase 3 P3.24) and docs/SAFETY_OFFLINE.md
+      # (cutoff pack CP.15; its check folded in here by Phase 3 P3.C7): every
+      # raven/ash line in their fenced blocks exists in this build's --help
+      # with its flags, every gate they mark matches the const in raven-core
+      # (a flipped gate fails here until the guides say so), "nothing to do"
+      # appears only when nearby search is on, and the read-only OS commands
+      # the offline guide names run on this runner. The self-test also runs
+      # check_safety_offline.sh's. Debug build above (the script tries
+      # raven.exe on Windows).
+      - name: Offline and safety guides (docs/OFFLINE_GUIDE.md, docs/SAFETY_OFFLINE.md)
+        # Its own evidence (LAN waiver amendment §5): it runs even when a
+        # harness step before it failed.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ../scripts/check_offline_guide.sh target/debug/raven --self-test
+          bash ../scripts/check_offline_guide.sh target/debug/raven
+      # The relay kit's Linux installer for real (docs/RELAY_KIT.md), on the
+      # debug build above with the lab unlock (the P2P gate is closed in every
+      # production build, which the kit refuses with exit 3): the hardened
+      # system unit runs as user raven-relay and binds TCP 443 through
+      # CAP_NET_BIND_SERVICE (the installer waits for /tcp/443 in the relay's
+      # status), the card names the 443 line and two lab profiles reserve and
+      # are relayed through it (carrier_matrix C25), an update and a rollback
+      # keep the PeerId (the installer asserts it), and uninstall removes the
+      # unit.
+      - name: Relay kit install smoke (systemd unit, CAP_NET_BIND_SERVICE on 443, lab build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env RAVEN_RELAY_PREBUILT="$PWD/target/debug" RAVEN_RELAY_LAB=1 RAVEN_RELAY_HOST=127.0.0.1 \
+            bash scripts/install/linux_relay.sh
+          systemctl is-active --quiet raven-relay
+          [[ "$(systemctl show raven-relay -p User --value)" == raven-relay ]]
+          pid="$(systemctl show raven-relay -p MainPID --value)"
+          sudo grep -q '^CapAmb:.*400$' "/proc/$pid/status"
+          via443="$(sudo raven-relay card | sed -n 's|^via=\(.*/tcp/443/.*\)$|\1|p')"
+          [[ -n "$via443" ]]
+          echo "card names the 443 line: $via443"
+          # carrier_matrix C25: lab profiles reserve on this installed relay,
+          # one over the 443 line alone, and are relayed both ways
+          # (`sudo -n raven-relay allow|card|status`).
+          RAVEN_RELAY_KIT_VIA="$via443" RAVEN_RELAY_KIT_SUDO=1 \
+            cargo test --locked -p raven-node --test carrier_matrix \
+            c25_an_installed_relay_takes_reservations_on_443 -- --ignored --exact --nocapture
+          sudo raven-relay status
+          peer="$(sudo sed -n 's/^  "peer_id": "\(.*\)",$/\1/p' /var/lib/raven-relay/relay_status.json)"
+          # Update path: the same command again (settings from kit.conf).
+          sudo env RAVEN_RELAY_PREBUILT="$PWD/target/debug" bash scripts/install/linux_relay.sh
+          sudo env RAVEN_RELAY_ROLLBACK=1 bash scripts/install/linux_relay.sh
+          [[ "$(sudo sed -n 's/^  "peer_id": "\(.*\)",$/\1/p' /var/lib/raven-relay/relay_status.json)" == "$peer" ]]
+          sudo env RAVEN_RELAY_UNINSTALL=1 bash scripts/install/linux_relay.sh
+          if systemctl cat raven-relay >/dev/null 2>&1; then
+            echo "unit still present after uninstall" >&2
+            exit 1
+          fi
+          if [[ -e /usr/local/bin/raven-relay ]]; then
+            echo "wrapper still present after uninstall" >&2
+            exit 1
+          fi
+          sudo test -f /var/lib/raven-relay/relay_key.ed25519
+          echo "relay kit install smoke OK (key kept after uninstall)"
+      - name: bridge + fuzz smoke
+        run: cargo test --locked -p raven-core --test bridge_v1 --test fuzz_smoke
+      - name: 10,000-message queue reliability gate
+        run: cargo test --locked -p raven-core --test reliability_10k -- --ignored
+      - name: Deterministic 1,000-node adversarial DTN simulation
+        run: |
+          cargo test --locked -p raven-core --test network_sim_1000
+          cargo test --locked --release -p raven-core --test network_sim_1000
+      # Phase 6a (P6.8): the learning core against the static planner on the
+      # scenario families; the thresholds are asserted, the table printed.
+      - name: Learning simulator acceptance gate
+        run: |
+          cargo test --locked -p raven-core --test learning_sim -- --nocapture
+          cargo test --locked --release -p raven-core --test learning_sim -- --nocapture
+      # Debug-only lab switches are inert in a release build. Every switch is
+      # set to a value that opens it in a debug build, so a wiring that read
+      # one in release would fail here (an unset switch would pass either
+      # way): the gates (lan_gate, p2p_gate, route_hints) stay at their
+      # consts (the cutoff pack's two held gates, Phase 3's `auto` LAN listener
+      # and LAN beacon included; `raven-node lan-default` stays 127.0.0.1:7420),
+      # the value switches are never read (the LAN beacon's port, family and
+      # loopback bus too), the lab clock stays the system clock
+      # (its file says 10 days ahead), and the release-only tests of
+      # route_memory, relay_select, reach_diag, session_reset, outbox and
+      # raven-node (netwatch lab events and egress, lab ping, the retired
+      # relay listen, the hints announcer switch, friend_relay) run (they
+      # return early in a debug build).
+      - name: lab switches inert in release (every switch set)
+        shell: bash
+        env:
+          RAVEN_LAB_TEST_A: "1"
+          RAVEN_LAB_ROUTE_HINTS: "1"
+          RAVEN_LAB_HINTS_NO_ANNOUNCE: "1"
+          RAVEN_LAB_FRIEND_RELAY: "1"
+          RAVEN_LAB_FRIEND_RELAY_LISTEN: "127.0.0.1:0"
+          RAVEN_LAB_RELAY_SELECT: "1,1,1"
+          RAVEN_LAB_P2P_PROFILE_RELAY: "1"
+          RAVEN_LAB_P2P_LOCAL_CANDIDATES: "1"
+          RAVEN_LAB_P2P_RELAY_ONLY: "1"
+          RAVEN_LAB_NET_TAG: "lab"
+          RAVEN_LAB_P2P_PING: "2,1"
+          RAVEN_LAB_SESSION_RESET: "1"
+          RAVEN_LAB_CUSTODY_WAN: "1"
+          RAVEN_LAB_CUSTODY_AFTER_MS: "1"
+          RAVEN_LAB_CUSTODY_FETCH_MS: "1"
+          RAVEN_LAB_CUSTODY_PRETEND_OLD: "1"
+          # Phase 5 (P5.13): a custodian without the letter ops.
+          RAVEN_LAB_CUSTODY_BASE_OPS_ONLY: "1"
+          # Phase 5 (P5.17): multi-hop custody's lab unlock; (P5.21) the
+          # forwarder's interval.
+          RAVEN_LAB_CUSTODY_HANDOFF: "1"
+          RAVEN_LAB_CUSTODY_FORWARD_MS: "1"
+          RAVEN_LAB_OFFLINE: "1"
+          RAVEN_LAB_NOISE_PIN: "1"
+          RAVEN_LAB_LAN_DEFAULT_PORT: "17420"
+          RAVEN_LAB_LAN_AUTO: "1"
+          RAVEN_LAB_LAN_SOURCE_DENY_LOOPBACK: "1"
+          RAVEN_LAB_LAN_BEACON: "1"
+          RAVEN_LAB_LAN_BEACON_PORT: "17421"
+          RAVEN_LAB_LAN_BEACON_FAMILY: "v6"
+          RAVEN_LAB_LAN_BEACON_BUS: "/tmp/raven-lab-beacon-bus"
+          # The privacy pack's (PP.1): never read in release; a release build
+          # seals without RAVEN_LAB_AT_REST.
+          RAVEN_LAB_AT_REST: "1"
+          RAVEN_LAB_ERASE_ROOT: "/tmp/raven-lab-erase-root"
+          RAVEN_LAB_AT_REST_KEY_FAULT: "unavailable"
+          RAVEN_LAB_RETENTION_GRACE_MS: "1"
+          RAVEN_LAB_LOGIN_ITEM_ROOT: "/tmp/raven-lab-login-items"
+          RAVEN_LAB_LOGIN_ITEM_TOOLS: "/tmp/raven-lab-login-tools"
+          # Phase 5 (P5.3): the horizon's and the letters' lab unlocks.
+          RAVEN_LAB_HORIZON: "1"
+          RAVEN_LAB_LETTER: "1"
+          # Groups (docs/design/2026-10-groups.md): the lab unlock.
+          RAVEN_LAB_GROUPS: "1"
+          # Phase 5 (P5.25-P5.28): nearby's lab unlock, its ether hub, the
+          # public-address allowance, the shorter foreground and the network
+          # audit: never read in release.
+          RAVEN_LAB_NEARBY: "1"
+          RAVEN_LAB_NEARBY_ETHER: "127.0.0.1:9"
+          RAVEN_LAB_NEARBY_ALLOW_PUBLIC_ADDR: "1"
+          RAVEN_LAB_NEARBY_FOREGROUND_MS: "1"
+          # Offline mesh carry Phase 0: the field test's Bluetooth-only
+          # switch; no gate reads it in release (raven-core
+          # `nearby_gate::tests::nearby_only_closes_and_never_opens`).
+          RAVEN_LAB_NEARBY_ONLY: "1"
+          # The Tor onion carrier (lab): its switch, the helper path, the
+          # loopback helper and the race's head start are never read in
+          # release (raven-core `onion_gate`).
+          RAVEN_LAB_TOR: "1"
+          RAVEN_TOR_HELPER: "/tmp/raven-lab-no-tor-helper"
+          RAVEN_LAB_TOR_LOOPBACK: "/tmp/raven-lab-tor-loopback"
+          RAVEN_LAB_TOR_HEAD_START_MS: "1"
+          RAVEN_LAB_NET_AUDIT: "/tmp/raven-lab-net-audit"
+          # Phase 4 (P4.1): its six gates stay at their consts and its
+          # harness values are never read.
+          RAVEN_LAB_WSS: "1"
+          RAVEN_LAB_WSS_PROXY: "1"
+          RAVEN_LAB_PORT_MAP: "1"
+          RAVEN_LAB_V6_PINHOLE: "1"
+          RAVEN_LAB_NAT_CLASS: "1"
+          RAVEN_LAB_PEER_ROTATION: "1"
+          RAVEN_LAB_PORTMAP_GATEWAY: "127.0.0.1:5351"
+          RAVEN_LAB_PORTMAP_LIFETIME: "8"
+          RAVEN_LAB_NAT_CLASS_FORCE: "varies"
+          RAVEN_LAB_PEER_EPOCH_S: "10"
+          # Auto-reach: STUN discovery and serverless punching stay shut and
+          # their harness values are never read (raven-core
+          # `portmap_gate::lab_switches_are_inert_in_release`).
+          RAVEN_LAB_STUN_DISCOVERY: "1"
+          RAVEN_LAB_SERVERLESS_PUNCH: "1"
+          RAVEN_LAB_STUN_SERVERS: "127.0.0.1:9"
+          RAVEN_LAB_STUN_REFRESH_S: "5"
+          RAVEN_LAB_PUNCH_SLOT_S: "5"
+          # Phase 6a (P6.2): learning connectivity's unlock, its harness
+          # timings and the sealer fault; learning stays shut, untuned and
+          # sealed in release (raven-core
+          # `learning_lab_switches_are_inert_without_debug_assertions`).
+          RAVEN_LAB_LEARNING: "1"
+          RAVEN_LAB_LEARNING_TUNE: "1,1,1"
+          RAVEN_LAB_LEARNING_SEALER: "unavailable"
+          # Phase 6b (P6.21): the sensing gates' switches; no SEC_* event is
+          # noted or answered and no session profile is refused in release
+          # (raven-core `security_lab_switches_are_inert_without_debug_assertions`
+          # and `security_gate::`, raven-node `security::` with its gates
+          # shut).
+          RAVEN_LAB_SECURITY_EVENTS: "1"
+          RAVEN_LAB_SECURITY_RESPONSES: "1"
+          RAVEN_LAB_SUITE_FLOOR: "1"
+          # Phase 6b (P6.26): the penalty box's loopback switch; loopback stays
+          # exempt in release (raven-core
+          # `penalty_loopback_switch_is_inert_without_debug_assertions`).
+          RAVEN_LAB_SEC_PENALTY_LOOPBACK: "1"
+          # Phase 6b (P6.34): PAD1 link padding's lab switch; no link offers
+          # or sends RPD1 in release (raven-node `link::`).
+          RAVEN_LAB_LINK_PADDING: "1"
+          # Phase 6b (P6.35): the RLK1 link knock's lab switch; no dial knocks
+          # and no listener reads a knock in release (raven-node
+          # `link_knock::`).
+          RAVEN_LAB_LINK_KNOCK: "1"
+          # Phase 6b (P6.36): the random LAN port's lab switch; no new
+          # profile picks a port and none is read in release (raven-core
+          # `random_port_lab_switch_is_inert_in_release`).
+          RAVEN_LAB_RANDOM_PORT: "1"
+          # Phase 6b (P6.38): pair seeds' lab switch; no RRH1 carries a seed
+          # and every beacon, knock and Bluetooth key comes from the root in
+          # release (raven-core `pair_seed::`, raven-node `pair_seed::`).
+          RAVEN_LAB_PAIR_SEED: "1"
+          # Phase 6b (P6.40): Lock now v2's lab switch; nothing locks and
+          # Status has no `locked` in release.
+          RAVEN_LAB_LOCAL_PROTECTION: "1"
+          # Phase 6b (P6.44): the advisory gate's switch; the update state
+          # reads and writes nothing in release, and the lab release key
+          # set (written below) is never read there.
+          RAVEN_LAB_ADVISORY: "1"
+          # Phase 6b (P6.47): the release bundle gate's switch; `raven
+          # update` stages, installs and records nothing in release.
+          RAVEN_LAB_RELEASE_BUNDLE: "1"
+          # Phase 6b (P6.48): the mesh update gate's switch; the RUP1
+          # exchange (`update_exchange::live`) stays shut in release.
+          RAVEN_LAB_MESH_UPDATE: "1"
+          # Phase 6b (P6.49): the lab download approval and install word;
+          # nothing is approved or typed by itself in release.
+          RAVEN_LAB_UPDATE_AUTO_APPROVE: "1"
+          # Phase 6b (P6.51): the lab friend whose HAVE claims a newer
+          # notice than it holds; no HAVE claims anything it lacks in release.
+          RAVEN_LAB_UPDATE_CLAIM_NEWER: "1"
+        run: |
+          set -euo pipefail
+          events="$RUNNER_TEMP/netwatch-events"
+          printf 'up 192.0.2.10/24\negress none\n' >"$events"
+          export RAVEN_LAB_NETWATCH_EVENTS="$events"
+          clock="$RUNNER_TEMP/lab-clock"
+          printf '864000000\n' >"$clock"
+          export RAVEN_LAB_CLOCK_FILE="$clock"
+          keys="$RUNNER_TEMP/lab-release-keys"
+          printf '%s\n' 010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce >"$keys"
+          export RAVEN_LAB_RELEASE_KEYS_FILE="$keys"
+          cargo test --locked --release -p raven-core --lib -- \
+            lan_gate:: p2p_gate:: route_hints:: route_memory:: relay_select:: reach_diag:: clock:: horizon:: \
+            wss_gate:: portmap_gate:: gateway:: nearby_gate:: lab_audit:: pair_seed:: security_gate:: \
+            lan_gate::tests::learning_lab_switches_are_inert_without_debug_assertions \
+            lan_gate::tests::security_lab_switches_are_inert_without_debug_assertions \
+            lan_gate::tests::penalty_loopback_switch_is_inert_without_debug_assertions \
+            learning::tests::lab_tune_parse_table \
+            session_reset::tests::session_reset_lab_switch_is_inert_without_debug_assertions \
+            custody_gate::tests::handoff_live_needs_custody_and_its_own_switch \
+            at_rest::tests::key_fault_switch_is_inert_without_debug_assertions \
+            node_policy::tests::random_port_lab_switch_is_inert_in_release \
+            update_state::tests::release_keys_file_is_inert_without_debug_assertions \
+            update_state::tests::the_bundle_gate_is_inert_without_debug_assertions \
+            update_exchange::tests::the_exchange_is_inert_without_debug_assertions \
+            update_downloads::tests::auto_approve_is_inert_without_debug_assertions \
+            group::tests::the_lab_switch_is_inert_without_debug_assertions \
+            release_plan_is_byte_identical_with_the_gate_off
+          # Phase 5 (review cross-6): nearby's service, the custody handoff
+          # forwarder and the letter steps read their real gates here too,
+          # once as built by default and once with the platform radio built
+          # in (nearby-radio, the build that has a real radio backend).
+          node_inert=(
+            netwatch:: p2p:: proxy:: hints:: friend_relay:: link:: link_knock:: pair_seed:: relay_listen_is_retired_unless_the_test_switch
+            lan_default_lab_switch_is_inert_in_release
+            the_lab_foreground_ttl_only_shortens_and_only_in_the_lab
+            lab_bus_port_and_family_overrides_are_inert_without_debug_assertions
+            nearby::tests::a_service_with_the_gate_closed_creates_no_radio
+            custody::tests::forward_hops_are_nobody_with_the_handoff_gate_closed
+            custody::tests::an_encounter_with_the_custody_gate_off_is_a_no_op
+            letters::tests::the_letter_steps_do_nothing_with_the_letter_gate_closed
+            lock_v2_lab_switch_is_inert_in_release
+            update_exchange::tests::with_the_gate_shut_nothing_is_offered_sent_or_taken
+            update_exchange::tests::the_newer_claim_is_inert_without_debug_assertions
+            security::tests::nothing_is_noted_or_reported_while_the_gate_is_shut
+            security::tests::status_is_reported_only_while_the_gate_is_live
+          )
+          cargo test --locked --release -p raven-node --bin raven-node -- "${node_inert[@]}"
+          cargo test --locked --release -p raven-node --features nearby-radio --bin raven-node -- \
+            "${node_inert[@]}"
+      - name: build swarm
+        run: cargo build --locked -p raven-swarm -p raven-node
+      - name: experimental mailbox/NAT tests (still production-disabled)
+        run: |
+          set -euo pipefail
+          expect_failure_with_message() {
+            expected="$1"
+            shift
+            log="$(mktemp)"
+            if "$@" >"$log" 2>&1; then
+              echo "security hold unexpectedly allowed command: $*" >&2
+              rm -f "$log"
+              exit 1
+            fi
+            if ! grep -Fq -- "$expected" "$log"; then
+              echo "command failed without the expected security-hold diagnostic: $*" >&2
+              tail -n 80 "$log" >&2
+              rm -f "$log"
+              exit 1
+            fi
+            rm -f "$log"
+          }
+          cargo test --locked -p raven-swarm --all-features --all-targets
+          cargo build --locked --release -p raven-swarm \
+            --features experimental-offline-mailbox \
+            --bin raven-swarm-mailbox-experimental
+          cargo build --locked --release -p raven-swarm \
+            --features experimental-nat-connectivity \
+            --bin raven-swarm-connectivity-experimental
+          expect_failure_with_message \
+            "security hold: pass --allow-experimental-mailbox explicitly" \
+            target/release/raven-swarm-mailbox-experimental \
+            serve --data-dir target/ci-mailbox-security-hold --timeout-secs 1
+          expect_failure_with_message \
+            "experimental NAT connectivity requires explicit runtime opt-in" \
+            target/release/raven-swarm-connectivity-experimental --run-seconds 1
+      - name: release crypto feature gate
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p raven-core -p raven-node -p ash
+          for package in raven-core raven-node ash; do
+            log="$(mktemp)"
+            if cargo build --locked --release -p "$package" --features unsafe-demo-crypto >"$log" 2>&1; then
+              echo "unsafe-demo-crypto unexpectedly linked into $package release" >&2
+              rm -f "$log"
+              exit 1
+            fi
+            if ! grep -Fq -- \
+              "unsafe-demo-crypto is forbidden in release builds" "$log"; then
+              echo "unsafe-demo-crypto gate for $package failed for an unrelated reason" >&2
+              tail -n 80 "$log" >&2
+              rm -f "$log"
+              exit 1
+            fi
+            rm -f "$log"
+          done
+      - name: release build of ash makes no raven-release (P6.46)
+        run: bash scripts/release_tool_feature_audit.sh --release-build
+      # With no switch set: every test named for a lab switch staying inert
+      # or a production flag staying false, so a new gate's tests run here
+      # in release without a list to keep up to date (Phase 3 "release job").
+      - name: lab switches inert, production flags false (release)
+        run: |
+          cargo test --locked --release -p raven-core --lib -- inert production_flag
+          cargo test --locked --release -p raven-node --bins -- inert production_flag
+      - name: libp2p swarm smoke
+        run: ./scripts/libp2p_swarm_smoke.sh
+      - name: bootstrap manual-peer smoke
+        run: ./scripts/bootstrap_manual_peer_smoke.sh
+      # Software A–B–C mock_ble (TCP stand-in). Debug locked-file only —
+      # not a production Secret Service claim; not Byzantine / flood-proof.
+      # Must stay on script-default target/debug — locked-file is refused in Release.
+      # Script always rebuilds with unsafe-demo-crypto for --body-mode unsafe-interim.
+      - name: bridge A-B-C demo (mock_ble)
+        run: ./scripts/bridge_abc_demo.sh
+      - name: mailbox opaque put/get smoke
+        run: ./scripts/mailbox_opaque_smoke.sh
+      - name: libp2p offline mailbox restart smoke
+        run: ./scripts/swarm_mailbox_smoke.sh
+      - name: legacy Internet path remains fail-closed
+        run: ./scripts/internet_dial_smoke.sh
+      # Positive lab path: RIH1 + indexed PairInit/ACK on 127.0.0.1.
+      # CLAIM: localhost/lab ≠ WAN / multi-NAT Proven. Production flag stays false.
+      - name: InternetTransport localhost indexed two-node (lab; not WAN)
+        run: ./scripts/internet_indexed_two_node.sh
+        env:
+          RAVEN_IDENTITY_BACKEND: locked-file
+          RAVEN_ALLOW_EPHEMERAL_DATA_DIR: "1"
+          RAVEN_LAB_TEST_A: "1"
+      - name: protocol vectors (python)
+        working-directory: protocol/reference
+        run: |
+          python3 -m pip install -q -r requirements.txt
+          python3 -m pytest -q
+          python3 generate_rvn1.py
+          python3 generate_portmap.py
+          python3 generate_wss.py
+          python3 generate_peer_rotation.py
+          git diff --exit-code -- ../../shared-vectors/rvn1
+          test -z "$(git ls-files --others --exclude-standard -- ../../shared-vectors/rvn1)"
+      - name: SBOM (cargo tree --locked + cyclonedx if available)
+        run: |
+          set -euo pipefail
+          mkdir -p target/sbom
+          cargo tree --locked -p raven-core -p ash -p raven-node -p raven-swarm --prefix depth \
+            > target/sbom/raven-cargo-tree.txt
+          if cargo install --list 2>/dev/null | grep -q '^cargo-cyclonedx '; then
+            cargo cyclonedx -p raven-core --format json --output-cdx target/sbom/raven-core.cdx.json || true
+          else
+            cargo install cargo-cyclonedx --locked --version 0.5.7 || true
+            cargo cyclonedx -p raven-core --format json --output-cdx target/sbom/raven-core.cdx.json \
+              || echo "cyclonedx optional — cargo-tree SBOM retained"
+          fi
+          test -s target/sbom/raven-cargo-tree.txt
+          ls -la target/sbom/
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: raven-sbom-linux
+          path: node/target/sbom/
+          if-no-files-found: error
+
+  # RELEASE-build proof of the Linux keystore (R1, docs/design/2026-10-linux-keystore.md):
+  # no lab backend env. Two profiles on the passphrase vault (passphrase files in a
+  # temp dir), two raven-node services on 127.0.0.1, contacts, `raven send` each way,
+  # inbox check, plus the refusal paths (no passphrase on a non-TTY, env passphrase,
+  # loose file mode, wrong passphrase, backend switch, Release locked-file).
+  linux-release-keystore:
+    name: Linux Release keystore smoke (passphrase vault)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: linux-release-keystore
+      - name: Release build (locked)
+        run: cargo build --locked --release -p raven-node -p ash
+      - name: Two-node Release smoke over the passphrase vault
+        run: bash scripts/linux_release_keystore_two_node.sh
+
+  # Same Release smoke inside a headless, unlocked GNOME Keyring (dbus-run-session +
+  # gnome-keyring-daemon --unlock with a throwaway test password). Advisory until it
+  # has run green on the hosted image: a provider quirk must not block the vault proof.
+  linux-release-keystore-secret-service:
+    name: Linux Release keystore smoke (Secret Service, headless gnome-keyring)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: linux-release-keystore
+      - name: Install headless Secret Service provider
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gnome-keyring dbus dbus-x11
+      - name: Release build (locked)
+        run: cargo build --locked --release -p raven-node -p ash
+      - name: Two-node Release smoke over Secret Service
+        run: |
+          set -euo pipefail
+          dbus-run-session -- bash -c '
+            set -euo pipefail
+            printf "%s" "raven-ci-throwaway-keyring" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            eval "$(gnome-keyring-daemon --start --components=secrets)"
+            export GNOME_KEYRING_CONTROL
+            bash scripts/linux_release_keystore_two_node.sh --secret-service
+          '
+
+  # Phase 6b (P6.46, design D §9, OD6b-27): two release builds of this commit
+  # on Linux, from checkouts in different folders, as different users, must
+  # make byte-identical binaries (scripts/release/build_reproducible.sh:
+  # toolchain pinned, a fixed build path with its own cargo home, paths
+  # remapped, SOURCE_DATE_EPOCH from the commit). Advisory (continue-on-error)
+  # until it has been green 10 times in a row; then it becomes required. No
+  # cache: a cached target could hide a difference.
+  reproducible-build:
+    name: reproducible build (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Build A (this checkout, the runner user)
+        run: bash scripts/release/build_reproducible.sh --out "$RUNNER_TEMP/repro-a"
+      - name: Build B (a checkout in another folder, another user)
+        run: |
+          set -euo pipefail
+          sudo cp -a "$(rustc --print sysroot)" /opt/raven-rust
+          sudo chmod -R a+rX /opt/raven-rust
+          sudo useradd --create-home raven-repro
+          sudo mkdir -p /srv/raven-b /srv/repro-b
+          sudo rsync -a --exclude /node/target/ "$GITHUB_WORKSPACE/" /srv/raven-b/
+          sudo chown -R raven-repro: /srv/raven-b /srv/repro-b
+          # The fixed build folder is build A's: B starts from nothing.
+          sudo rm -rf /tmp/raven-reproducible
+          sudo -u raven-repro env -i HOME=/home/raven-repro PATH=/opt/raven-rust/bin:/usr/bin:/bin \
+            bash /srv/raven-b/scripts/release/build_reproducible.sh --out /srv/repro-b/out
+      - name: Compare (byte for byte)
+        run: |
+          set -euo pipefail
+          diff -u "$RUNNER_TEMP/repro-a/BUILDINFO" /srv/repro-b/out/BUILDINFO
+          if ! diff -u "$RUNNER_TEMP/repro-a/SHA256SUMS" /srv/repro-b/out/SHA256SUMS; then
+            echo "::error title=reproducible build::the two builds differ"
+            exit 1
+          fi
+          echo "reproducible: the two builds are byte-identical"
+
+  # Phase 5 (P5.29): the BlueZ backend end to end on two emulated controllers
+  # (btvirt over hci_vhci, under bluetoothd): hci0 publishes and advertises a
+  # token, hci1 scans, connects and subscribes, and a frame crosses each way.
+  # Advisory until it has run green on the hosted image: a runner kernel
+  # without hci_vhci or an image without btvirt is reported as a notice and
+  # skips the rest. The test refuses any controller that is not emulated.
+  nearby-btvirt:
+    name: Nearby BlueZ backend on emulated controllers (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Probe hci_vhci, BlueZ and btvirt
+        id: probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          sudo apt-get update -q || true
+          sudo apt-get install -y -q --no-install-recommends bluez bluez-test-tools \
+            "linux-modules-extra-$(uname -r)" || true
+          btvirt=$(command -v btvirt || ls /usr/lib/bluez/*/btvirt /usr/libexec/bluetooth/btvirt 2>/dev/null | head -n1 || true)
+          if sudo modprobe hci_vhci && [ -c /dev/vhci ] && [ -n "$btvirt" ]; then
+            echo "btvirt=$btvirt" >> "$GITHUB_OUTPUT"
+            echo "ready=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=nearby-btvirt::skipped: this runner has no hci_vhci or no btvirt"
+            echo "ready=0" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        if: steps.probe.outputs.ready == '1'
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.probe.outputs.ready == '1'
+        with:
+          workspaces: node
+          prefix-key: nearby-btvirt
+      - name: Two emulated LE controllers under bluetoothd
+        if: steps.probe.outputs.ready == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl restart bluetooth
+          sudo "${{ steps.probe.outputs.btvirt }}" -L -l2 > "$RUNNER_TEMP/btvirt.log" 2>&1 &
+          for _ in $(seq 1 20); do
+            [ "$(ls /sys/class/bluetooth | grep -c '^hci')" -ge 2 ] && break
+            sleep 1
+          done
+          sudo btmgmt --index 0 power on
+          sudo btmgmt --index 1 power on
+      - name: BlueZ backend end to end (ignored test, lab only)
+        if: steps.probe.outputs.ready == '1'
+        env:
+          RAVEN_IDENTITY_BACKEND: locked-file
+          RAVEN_ALLOW_EPHEMERAL_DATA_DIR: "1"
+          RAVEN_LAB_BLUEZ_BTVIRT: "1"
+        run: >-
+          cargo test --locked -p raven-node --features nearby-radio
+          nearby::bluez::dbus::tests::btvirt -- --ignored --nocapture
+
+  # The Windows build of every test target, type-checked on Linux on every
+  # push (review E-harness-docs-ci-2): a test helper gated to Unix once broke
+  # the compile of ash's Windows tests, and since cargo runs no test when a
+  # requested test target fails to compile, `rust-windows` ran none at all,
+  # raven-core's DPAPI tests included. This job fails in minutes instead.
+  # mingw-w64 is the C cross-compiler the C dependencies' build scripts need.
+  windows-cross-check:
+    name: Windows target type-check (on Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: windows-cross-check
+      - name: Install the mingw-w64 C cross-compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-mingw-w64-x86-64
+      - name: clippy for x86_64-pc-windows-gnu (every target, tests included)
+        run: cargo clippy --locked --target x86_64-pc-windows-gnu -p raven-core -p ash -p raven-node --all-targets -- -D warnings
+      # Phase 5 (P5.30): the WinRT nearby backend, compiled only with
+      # feature nearby-radio.
+      - name: clippy for x86_64-pc-windows-gnu (nearby radio)
+        run: cargo clippy --locked --target x86_64-pc-windows-gnu -p raven-node --all-targets --features nearby-radio -- -D warnings
+
+  rust-macos:
+    name: Rust (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+      # Phase 3 P3.7: the installer LAN-default self-test of the Linux job, here
+      # under /bin/bash 3.2 (the oldest bash the installers support) and with
+      # plutil -lint on the rendered plist. Stubs only: nothing is built,
+      # written or started.
+      - name: Installer LAN default (lan_default_selftest.sh, /bin/bash 3.2)
+        run: /bin/bash scripts/install/lan_default_selftest.sh
+      # The R31 kit's install guard of the Linux job, here where it matters
+      # most: on Apple silicon a program written over in place is killed.
+      - name: Update mesh kit install guard (update_mesh_test.sh selftest, /bin/bash 3.2)
+        run: /bin/bash scripts/update_mesh_test.sh selftest
+      - name: test raven-core + ash + swarm build
+        # Phase 4 (P4.3): the gateway lookup test must find the runner's
+        # IPv4 default gateway.
+        env:
+          RAVEN_TEST_EXPECT_GATEWAY: "1"
+        run: |
+          cargo test --locked -p raven-core -p ash -p raven-node
+          cargo test --locked -p raven-core --lib lan_
+          cargo test --locked -p raven-swarm --features p2p-host,wss --lib
+          cargo build --locked -p raven-swarm -p raven-node
+          cargo build --locked --release -p raven-core -p raven-node -p ash
+      # The lab-gated app channel tests (submit, probe, pairing budget): only
+      # the lab unlock for this test run, no gate flipped. Step-level env, so
+      # the same step works under the Windows shell.
+      - name: app channel submit tests (lab unlock)
+        env:
+          RAVEN_LAB_TEST_A: "1"
+        run: 'cargo test --locked -p raven-node app_channel::'
+      # Phase 5 (P5.28): Bluetooth nearby with no radio. raven-core's nearby
+      # tests (gate, RNL1 link and vectors, carrier plumbing), then
+      # raven-node's nearby module (engine, fake radio, ether hub, pipes)
+      # built with the platform radio feature and run under the nearby lab
+      # switch; no real radio is opened. C50-C53 and C56 run in the carrier
+      # harness below (every --ignored case). The BlueZ backend (P5.29)
+      # runs end to end on emulated controllers in the advisory
+      # nearby-btvirt job. Here the same run also takes the CoreBluetooth
+      # backend's no-radio tests (P5.31: raven-node's side over a scripted
+      # helper), and the helper's own: its state machine, CBUUID bytes from
+      # the RNL1 vectors, and the helper outside RavenNearby.app saying
+      # Unauthorized with no crash (this runner has no Bluetooth permission;
+      # no CoreBluetooth manager is created).
+      - name: nearby tests (fake radio, lab switch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core nearby_
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1 \
+            cargo test --locked -p raven-node --features nearby-radio nearby:: -- --test-threads=1
+          cargo test --locked -p raven-node --features nearby-radio --bin raven-nearby-helper --test nearby_helper
+      # The Tor onion carrier (lab, docs/design/2026-10-tor-fallback.md): the
+      # binding, route and planner tests in raven-core, then raven-node's onion
+      # module and the outbox race under the Tor lab switch, end to end over
+      # the loopback helper (no Tor network: automated tests never touch it).
+      # The Arti helper is built and linted with the `tor` feature; it is only
+      # run by the field test.
+      - name: onion tests (loopback helper, lab switch; Arti helper built)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core onion
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
+            cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
+          cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
+          cargo build --locked -p raven-node --features tor --bin raven-tor-helper
+          # arti#2726: the vendored saturating-time limit search must end
+          # (Windows clock counts 100 ns ticks; Tor bootstrap hung at 15 %).
+          cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
+            --target-dir target/saturating-time --lib -- coarse_clock system_time_limits
+          git diff --exit-code -- ../shared-vectors/rvn1/onion
+      # Phase 5 (review cross-6): a release raven-node with the CoreBluetooth
+      # backend built in and every Phase 5 lab switch set reads none of
+      # them: nearby's service creates no radio object, the custody handoff
+      # forwarder has no next hop and the letter steps do nothing (the
+      # Linux job runs the same tests in its "every switch set" step).
+      - name: Phase 5 switches inert in release (nearby radio built in)
+        shell: bash
+        env:
+          RAVEN_LAB_TEST_A: "1"
+          RAVEN_LAB_NEARBY: "1"
+          RAVEN_LAB_NEARBY_ETHER: "127.0.0.1:9"
+          RAVEN_LAB_NEARBY_ALLOW_PUBLIC_ADDR: "1"
+          RAVEN_LAB_NEARBY_FOREGROUND_MS: "1"
+          RAVEN_LAB_CUSTODY_HANDOFF: "1"
+          RAVEN_LAB_CUSTODY_FORWARD_MS: "1"
+          RAVEN_LAB_HORIZON: "1"
+          RAVEN_LAB_LETTER: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p raven-node --features nearby-radio --bin raven-node -- \
+            the_lab_foreground_ttl_only_shortens_and_only_in_the_lab \
+            nearby::tests::a_service_with_the_gate_closed_creates_no_radio \
+            custody::tests::forward_hops_are_nobody_with_the_handoff_gate_closed \
+            custody::tests::an_encounter_with_the_custody_gate_off_is_a_no_op \
+            letters::tests::the_letter_steps_do_nothing_with_the_letter_gate_closed
+      # Phase 5 (P5.32): the macOS installer's helper-only mode as a dry run
+      # (temporary HOME, bin dir and profile; cargo and launchctl stubbed for
+      # the installer): RavenNearby.app is copied, signed ad hoc and checked,
+      # and raven-node's code signature is the same before and after. Under
+      # /bin/bash 3.2; no launchd agent, no Bluetooth.
+      - name: Nearby helper install dry run (nearby_helper_selftest.sh, /bin/bash 3.2)
+        run: /bin/bash scripts/install/nearby_helper_selftest.sh
+      # CLI DX: menu/CLI smoke only (not Keychain / launchd / Gatekeeper).
+      # Must stay on script-default target/debug/ash — locked-file is refused in Release.
+      # locked-file avoids Keychain ACL hangs in CI — not a production Keychain claim.
+      - name: ash menu smoke
+        run: ./scripts/ash_menu_smoke.sh
+      # Named reliability gates (Sprint 0 evidence bar). reliability_10k is
+      # #[ignore] and is NOT run by the umbrella cargo test --locked above.
+      # reliability_10k on macOS is QUEUE DURABILITY ONLY — not a path proof.
+      # Path proof: named bridge_v1 (this job) and/or ash_menu_smoke (CLI DX #16).
+      - name: 10,000-message queue reliability gate
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core --test reliability_10k -- --ignored
+      - name: bridge_v1 (pure Rust)
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core --test bridge_v1
+      - name: libp2p swarm smoke
+        run: ./scripts/libp2p_swarm_smoke.sh
+      - name: bootstrap manual-peer smoke
+        run: ./scripts/bootstrap_manual_peer_smoke.sh
+      - name: InternetTransport localhost indexed two-node (lab; not WAN)
+        run: ./scripts/internet_indexed_two_node.sh
+        env:
+          RAVEN_IDENTITY_BACKEND: locked-file
+          RAVEN_ALLOW_EPHEMERAL_DATA_DIR: "1"
+          RAVEN_LAB_TEST_A: "1"
+      # Portable carrier harness (transports design §6.4): two real raven-node
+      # services + `raven send` each way + inbox (C1) and a stranger refused
+      # before the responder identifies itself (C3, F4); C2 does the same over
+      # Internet direct (listeners on 127.0.0.1 and [::1], contacts with only
+      # Internet routes, debug lab unlock while the P1 flag is off). Rust, not
+      # bash, so the same scenario runs on all three runners (named-pipe IPC on
+      # Windows).
+      - name: Portable carrier harness (C1 LAN direct + C2 Internet direct both ways + C3 contact gating)
+        shell: bash
+        # C43's silent router and gate-closed control start a real UPnP
+        # search (SSDP), which only a CI runner's network may see.
+        env:
+          RAVEN_HARNESS_UPNP_SEARCH: "1"
+        run: |
+          set -euo pipefail
+          cargo build --locked -p ash -p raven-node
+          cargo test --locked -p raven-node --test carrier_matrix -- --ignored --nocapture
+      # docs/OFFLINE_GUIDE.md (Phase 3 P3.24) and docs/SAFETY_OFFLINE.md
+      # (cutoff pack CP.15; its check folded in here by Phase 3 P3.C7): every
+      # raven/ash line in their fenced blocks exists in this build's --help
+      # with its flags, every gate they mark matches the const in raven-core
+      # (a flipped gate fails here until the guides say so), "nothing to do"
+      # appears only when nearby search is on, and the read-only OS commands
+      # the offline guide names run on this runner. The self-test also runs
+      # check_safety_offline.sh's. Debug build above (the script tries
+      # raven.exe on Windows).
+      - name: Offline and safety guides (docs/OFFLINE_GUIDE.md, docs/SAFETY_OFFLINE.md)
+        # Its own evidence (LAN waiver amendment §5): it runs even when a
+        # harness step before it failed.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ../scripts/check_offline_guide.sh target/debug/raven --self-test
+          bash ../scripts/check_offline_guide.sh target/debug/raven
+      # The relay kit's macOS installer (docs/RELAY_KIT.md) on the debug build
+      # above with the lab unlock, everything under $RUNNER_TEMP: the check runs
+      # and the plist it writes lints and runs `raven-node relay` with the 443
+      # listener and never the open-relay flag. Nothing is loaded here.
+      - name: Relay kit install smoke (launchd plist, lab build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          kit="$RUNNER_TEMP/relay-kit"
+          RAVEN_RELAY_PREBUILT="$PWD/target/debug" RAVEN_RELAY_LAB=1 RAVEN_RELAY_NO_LOAD=1 \
+            RAVEN_RELAY_DIR="$kit/relay" RAVEN_RELAY_PLIST_DIR="$kit/la" RAVEN_RELAY_BIN_DIR="$kit/rbin" \
+            RAVEN_RELAY_WRAPPER_DIR="$kit/wbin" RAVEN_RELAY_HOST=127.0.0.1 bash scripts/install/macos_relay.sh
+          plist="$kit/la/com.raven.relay.plist"
+          plutil -lint "$plist"
+          args="$(plutil -extract ProgramArguments json -o - "$plist")"
+          echo "ProgramArguments: $args"
+          for want in '"relay"' '"--also-tcp"' '"443"' '"--counts-every"'; do
+            if ! grep -qF -- "$want" <<<"$args"; then
+              echo "ProgramArguments lack $want" >&2
+              exit 1
+            fi
+          done
+          if grep -qF -- '--open' <<<"$args"; then
+            echo "the kit's plist names the open-relay flag" >&2
+            exit 1
+          fi
+          test -x "$kit/wbin/raven-relay" && test -f "$kit/rbin/kit.conf"
+      # Advisory: the real launchd bootstrap in this user's gui domain (the
+      # runner may lack one), which also records whether a process that is not
+      # root may listen on TCP 443 here (the installer waits for /tcp/443 in the
+      # relay's status). Always uninstalled.
+      - name: Relay kit launchd bootstrap + TCP 443 as a user (advisory)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          kit="$RUNNER_TEMP/relay-kit-live"
+          export RAVEN_RELAY_PREBUILT="$PWD/target/debug" RAVEN_RELAY_LAB=1 RAVEN_RELAY_DIR="$kit/relay" \
+            RAVEN_RELAY_PLIST_DIR="$kit/la" RAVEN_RELAY_BIN_DIR="$kit/rbin" RAVEN_RELAY_WRAPPER_DIR="$kit/wbin" \
+            RAVEN_RELAY_HOST=127.0.0.1
+          trap 'RAVEN_RELAY_UNINSTALL=1 RAVEN_RELAY_PURGE=1 bash scripts/install/macos_relay.sh || true' EXIT
+          bash scripts/install/macos_relay.sh
+          grep -E '"/ip[46]/[^"]*/tcp/443"' "$kit/relay/relay_status.json"
+          "$kit/wbin/raven-relay" status
+
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+      # The runner's git defaults to core.autocrlf=true. build.rs hashes the ordinary
+      # SQLite amalgamation on every build and the protocol freeze manifest hashes
+      # protocol/ + shared-vectors/ byte for byte, so a CRLF checkout of any of them
+      # breaks the build with an opaque hash panic. .gitattributes pins them to LF /
+      # -text; fail here first with a clear message if that ever regresses.
+      - name: Byte-pinned inputs are LF in this checkout (core.autocrlf guard)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          bad="$(git ls-files --eol -- node/third_party protocol shared-vectors \
+            | awk '$1 == "i/lf" && $2 != "w/lf" && $2 != "w/none"' || true)"
+          if [[ -n "$bad" ]]; then
+            echo "files that are LF in the index but not LF in the working tree (check .gitattributes / core.autocrlf):" >&2
+            echo "$bad" | head -n 20 >&2
+            exit 1
+          fi
+          echo "byte-pinned paths are LF in the working tree"
+      # Phase 4 (P4.3): raven-core's Windows-only code (the default gateway
+      # through GetBestRoute2, the interface reader) is linted only here.
+      - name: clippy (raven-core, Windows)
+        run: cargo clippy --locked -p raven-core --all-targets -- -D warnings
+      # Phase 5 (P5.30): the WinRT nearby backend (src/nearby/winrt/) is
+      # compiled only with feature nearby-radio: linted here on Windows.
+      - name: clippy (raven-node nearby radio, Windows)
+        run: cargo clippy --locked -p raven-node --all-targets --features nearby-radio -- -D warnings
+      # bash, not the default pwsh: pwsh runs every line and the step takes only
+      # the LAST command's exit code, so a failing `cargo test` above a passing
+      # `cargo build` left the job green. --no-fail-fast: every test binary runs
+      # (cargo otherwise stops at the first failing one) and the step still fails.
+      - name: test raven-core + ash
+        shell: bash
+        # Phase 4 (P4.3): the gateway lookup test must find the runner's
+        # IPv4 default gateway.
+        env:
+          RAVEN_TEST_EXPECT_GATEWAY: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked --no-fail-fast -p raven-core -p ash -p raven-node
+          cargo test --locked -p raven-swarm --features p2p-host,wss --lib
+          cargo build --locked -p ash -p raven-node -p raven-swarm
+          cargo build --locked --release -p raven-core -p raven-node -p ash
+      # The lab-gated app channel tests (submit, probe, pairing budget): only
+      # the lab unlock for this test run, no gate flipped. Step-level env, so
+      # the same step works under the Windows shell.
+      - name: app channel submit tests (lab unlock)
+        env:
+          RAVEN_LAB_TEST_A: "1"
+        run: 'cargo test --locked -p raven-node app_channel::'
+      # Phase 5 (P5.28): Bluetooth nearby with no radio. raven-core's nearby
+      # tests (gate, RNL1 link and vectors, carrier plumbing), then
+      # raven-node's nearby module (engine, fake radio, ether hub, pipes)
+      # built with the platform radio feature and run under the nearby lab
+      # switch; no real radio is opened. C50-C53 and C56 run in the carrier
+      # harness below (every --ignored case). The BlueZ backend (P5.29)
+      # runs end to end on emulated controllers in the advisory
+      # nearby-btvirt job. Here the same run also takes the WinRT backend's
+      # no-radio tests (P5.30: WinRT buffers and GUIDs; no adapter opened).
+      - name: nearby tests (fake radio, lab switch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core nearby_
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1 \
+            cargo test --locked -p raven-node --features nearby-radio nearby:: -- --test-threads=1
+      # The Tor onion carrier (lab, docs/design/2026-10-tor-fallback.md): the
+      # binding, route and planner tests in raven-core, then raven-node's onion
+      # module and the outbox race under the Tor lab switch, end to end over
+      # the loopback helper (no Tor network: automated tests never touch it).
+      # The Arti helper is built and linted with the `tor` feature; it is only
+      # run by the field test.
+      - name: onion tests (loopback helper, lab switch; Arti helper built)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p raven-core onion
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
+            cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
+          cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
+          cargo build --locked -p raven-node --features tor --bin raven-tor-helper
+          # arti#2726: the vendored saturating-time limit search must end
+          # (Windows clock counts 100 ns ticks; Tor bootstrap hung at 15 %).
+          cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
+            --target-dir target/saturating-time --lib -- coarse_clock system_time_limits
+          git diff --exit-code -- ../shared-vectors/rvn1/onion
+      # Named reliability gates (Sprint 0 evidence bar). cargo, not bash.
+      # reliability_10k on Windows is QUEUE DURABILITY ONLY — not a path proof.
+      # Path proof: named bridge_v1 + ash_doctor_send_smoke.ps1 (this job).
+      - name: 10,000-message queue reliability gate
+        run: cargo test --locked -p raven-core --test reliability_10k -- --ignored
+      - name: bridge_v1 (pure Rust)
+        run: cargo test --locked -p raven-core --test bridge_v1
+      # Portable carrier harness (transports design §6.4): two real raven-node
+      # services + `raven send` each way + inbox (C1) and a stranger refused
+      # before the responder identifies itself (C3, F4); C2 does the same over
+      # Internet direct (listeners on 127.0.0.1 and [::1], contacts with only
+      # Internet routes, debug lab unlock while the P1 flag is off). Rust, not
+      # bash, so the same scenario runs on all three runners (named-pipe IPC on
+      # Windows).
+      - name: Portable carrier harness (C1 LAN direct + C2 Internet direct both ways + C3 contact gating)
+        shell: bash
+        # C43's silent router and gate-closed control start a real UPnP
+        # search (SSDP), which only a CI runner's network may see.
+        env:
+          RAVEN_HARNESS_UPNP_SEARCH: "1"
+        run: |
+          set -euo pipefail
+          cargo build --locked -p ash -p raven-node
+          cargo test --locked -p raven-node --test carrier_matrix -- --ignored --nocapture
+      # docs/OFFLINE_GUIDE.md (Phase 3 P3.24) and docs/SAFETY_OFFLINE.md
+      # (cutoff pack CP.15; its check folded in here by Phase 3 P3.C7): every
+      # raven/ash line in their fenced blocks exists in this build's --help
+      # with its flags, every gate they mark matches the const in raven-core
+      # (a flipped gate fails here until the guides say so), "nothing to do"
+      # appears only when nearby search is on, and the read-only OS commands
+      # the offline guide names run on this runner. The self-test also runs
+      # check_safety_offline.sh's. Debug build above (the script tries
+      # raven.exe on Windows).
+      - name: Offline and safety guides (docs/OFFLINE_GUIDE.md, docs/SAFETY_OFFLINE.md)
+        # Its own evidence (LAN waiver amendment §5): it runs even when a
+        # harness step before it failed.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ../scripts/check_offline_guide.sh target/debug/raven --self-test
+          bash ../scripts/check_offline_guide.sh target/debug/raven
+      - name: ash doctor→send smoke (Windows terminal path)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = 'scripts/ash_doctor_send_smoke.ps1'
+          if (-not (Test-Path -LiteralPath $script)) {
+            Write-Error "$script missing — refusing silent skip"
+            exit 1
+          }
+          & $script
+          if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: ash / raven-node --help (terminal smoke)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "target\debug\ash.exe")) { throw "missing target/debug/ash.exe" }
+          if (-not (Test-Path "target\debug\raven-node.exe")) { throw "missing target/debug/raven-node.exe" }
+          & ".\target\debug\ash.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "ash --help failed" }
+          & ".\target\debug\raven-node.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "raven-node --help failed" }
+          Write-Host "Windows terminal --help OK"
+      - name: ash menu smoke
+        shell: bash
+        run: ./scripts/ash_menu_smoke.sh
+      - name: PowerShell install script syntax check
+        shell: pwsh
+        run: |
+          Get-Command Get-Content | Out-Null
+          foreach ($p in @("scripts/install/windows_service.ps1", "scripts/install/windows_relay.ps1")) {
+            if (-not (Test-Path $p)) { throw "missing $p" }
+            # Parse-only: ensure script is well-formed PowerShell.
+            # pwsh 7 requires [ref] targets to exist before ParseFile.
+            $tokens = $null
+            $errs = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $p), [ref]$tokens, [ref]$errs)
+            if ($errs) { $errs | ForEach-Object { $_ }; throw "parse errors in $p" }
+            Write-Host "$p OK"
+          }
+      - name: windows_service.ps1 exercise (temp dirs)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = "scripts/install/windows_service.ps1"
+          if (-not (Test-Path $script)) { throw "missing $script" }
+          $root = Join-Path $env:RUNNER_TEMP "raven-windows-service-exercise"
+          $dataDir = Join-Path $root "data"
+          $binDir = Join-Path $root "bin"
+          try {
+            New-Item -ItemType Directory -Force -Path $dataDir, $binDir | Out-Null
+            # Write-Host is the information stream (6): keep its lines to check them.
+            $lines = @(& (Resolve-Path $script) -DataDir $dataDir -BinDir $binDir -SkipScheduledTask 6>&1 | ForEach-Object { "$_" })
+            $lines | ForEach-Object { Write-Host $_ }
+            foreach ($name in @("raven-node.exe", "ash.exe", "raven.exe")) {
+              $path = Join-Path $binDir $name
+              if (-not (Test-Path -LiteralPath $path)) { throw "missing $path" }
+              Write-Host "ok $path"
+            }
+            # Phase 3 P3.7: the LAN default follows `raven-node lan-default`; a
+            # release build holds auto (LAN_AUTO_LISTEN_PRODUCTION_ENABLED, B12),
+            # so the install stays on this PC.
+            if ($lines -notcontains "lan-listen=127.0.0.1:7420") { throw "the release install did not print lan-listen=127.0.0.1:7420 (the B12 gate is closed)" }
+            Write-Host "ok lan-listen=127.0.0.1:7420 (release build, gate closed)"
+          } finally {
+            if (Test-Path -LiteralPath $root) {
+              Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+      # Phase 3 P3.7: RAVEN_INSTALL_RENDER_ONLY=1 builds, copies, stops and registers
+      # nothing and asks the raven-node.exe already in -BinDir for the LAN default. A
+      # release build answers 127.0.0.1:7420 even with the lab switch set (inert in
+      # release); a debug build with RAVEN_LAB_LAN_AUTO=1 answers auto, and the task's
+      # arguments and the two Private-profile firewall rules follow. An invalid
+      # -LanListen throws before anything is asked or built.
+      - name: windows_service.ps1 LAN default (render-only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = "scripts/install/windows_service.ps1"
+          if (-not (Test-Path $script)) { throw "missing $script" }
+          $root = Join-Path $env:RUNNER_TEMP "raven-windows-service-render"
+          $dataDir = Join-Path $root "data"
+          $env:RAVEN_INSTALL_RENDER_ONLY = "1"
+          $env:RAVEN_LAB_LAN_AUTO = "1"
+          try {
+            $lines = @(& (Resolve-Path $script) -DataDir $dataDir -BinDir "target\release" 6>&1 | ForEach-Object { "$_" })
+            $lines | ForEach-Object { Write-Host $_ }
+            if ($lines -notcontains "lan-listen=127.0.0.1:7420") { throw "release build: render-only did not resolve lan-listen=127.0.0.1:7420" }
+            if (-not ($lines | Where-Object { $_ -like "service-args=*--lan-listen 127.0.0.1:7420 *" })) { throw "release build: the task's arguments lack --lan-listen 127.0.0.1:7420" }
+            $lines = @(& (Resolve-Path $script) -DataDir $dataDir -BinDir "target\debug" 6>&1 | ForEach-Object { "$_" })
+            $lines | ForEach-Object { Write-Host $_ }
+            if ($lines -notcontains "lan-listen=auto") { throw "debug build with RAVEN_LAB_LAN_AUTO=1: render-only did not resolve lan-listen=auto" }
+            if (-not ($lines | Where-Object { $_ -like "service-args=*--lan-listen auto *" })) { throw "debug build: the task's arguments lack --lan-listen auto" }
+            if (-not ($lines | Where-Object { $_ -like '*New-NetFirewallRule -DisplayName "Raven LAN search"*-Protocol UDP -LocalPort 7420 -Profile Private' })) { throw "debug build: no Private-profile UDP rule for the LAN search" }
+            $threw = $false
+            try {
+              & (Resolve-Path $script) -DataDir $dataDir -BinDir "target\release" -LanListen "0.0.0.0:7420 --relay" 6>&1 | Out-Null
+            } catch {
+              $threw = $true
+              if ("$_" -notlike "*-LanListen must look like*") { throw "unexpected refusal: $_" }
+              Write-Host "refused as expected: $_"
+            }
+            if (-not $threw) { throw "render-only accepted an invalid -LanListen" }
+            if (Test-Path -LiteralPath $root) { throw "render-only created $root" }
+            Write-Host "render-only LAN default OK (release 127.0.0.1:7420, debug lab auto, invalid -LanListen refused)"
+          } finally {
+            Remove-Item Env:\RAVEN_INSTALL_RENDER_ONLY -ErrorAction SilentlyContinue
+            Remove-Item Env:\RAVEN_LAB_LAN_AUTO -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $root) {
+              Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+      # Upgrade path + task settings of the logon-task installer (never exercised by the
+      # -SkipScheduledTask run above):
+      #  * a running CLI session holds ash.exe open: Windows refuses to overwrite a running
+      #    image but allows renaming it (FileShare.Delete models exactly that), so the
+      #    installer must move it aside (ash.exe.old) instead of aborting on Copy-Item;
+      #  * the task must register with no execution time limit (PT0S): the Task Scheduler
+      #    default of 72h silently stops the always-on daemon after three days. A uniquely
+      #    named task is registered with -NoStart and always unregistered.
+      - name: windows_service.ps1 upgrade path + logon-task settings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = "scripts/install/windows_service.ps1"
+          if (-not (Test-Path $script)) { throw "missing $script" }
+          $root = Join-Path $env:RUNNER_TEMP "raven-windows-service-upgrade"
+          $dataDir = Join-Path $root "data"
+          $binDir = Join-Path $root "bin"
+          $taskName = "RavenNodeBridgeCI-$PID"
+          $hold = $null
+          try {
+            New-Item -ItemType Directory -Force -Path $dataDir, $binDir | Out-Null
+            & (Resolve-Path $script) -DataDir $dataDir -BinDir $binDir -SkipScheduledTask
+            $ash = Join-Path $binDir "ash.exe"
+            $hold = [System.IO.File]::Open($ash, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Delete)
+            & (Resolve-Path $script) -DataDir $dataDir -BinDir $binDir -SkipScheduledTask
+            if (-not (Test-Path -LiteralPath "$ash.old")) { throw "locked ash.exe was not moved aside to ash.exe.old" }
+            if (-not (Test-Path -LiteralPath $ash)) { throw "ash.exe missing after upgrade over a locked copy" }
+            $hold.Dispose()
+            $hold = $null
+            & (Resolve-Path $script) -DataDir $dataDir -BinDir $binDir -TaskName $taskName -NoStart -InternetListen 127.0.0.1:7422
+            $task = Get-ScheduledTask -TaskName $taskName
+            # -InternetListen is opt-in and lands on the task's command line verbatim.
+            $taskArgs = [string]$task.Actions[0].Arguments
+            if ($taskArgs -notmatch '--internet-listen 127\.0\.0\.1:7422') { throw "task arguments lack --internet-listen: $taskArgs" }
+            # P3.7: no -LanListen = `raven-node lan-default` of this release build (gate closed).
+            if ($taskArgs -notmatch '--lan-listen 127\.0\.0\.1:7420 ') { throw "task arguments lack --lan-listen 127.0.0.1:7420: $taskArgs" }
+            $limit = [string]$task.Settings.ExecutionTimeLimit
+            if ($limit -ne "PT0S") { throw "ExecutionTimeLimit is '$limit', expected PT0S (no limit)" }
+            if ($task.Settings.StartWhenAvailable -ne $true) { throw "StartWhenAvailable is not set" }
+            if ([int]$task.Settings.RestartCount -lt 3) { throw "RestartCount is $($task.Settings.RestartCount), expected restart-on-failure" }
+            if ([string]$task.State -eq "Running") { throw "-NoStart started the task" }
+            Write-Host "logon task settings OK (PT0S, StartWhenAvailable, restart-on-failure, -InternetListen)"
+            # Privacy pack PP.15: `raven lock` may leave the task disabled ("keep Raven
+            # stopped"); a re-install is an explicit start and enables it again.
+            Disable-ScheduledTask -TaskName $taskName | Out-Null
+            & (Resolve-Path $script) -DataDir $dataDir -BinDir $binDir -TaskName $taskName -NoStart
+            $task = Get-ScheduledTask -TaskName $taskName
+            if ([string]$task.State -eq "Disabled") { throw "a re-install left the disabled task disabled" }
+            Write-Host "a re-install enables a task Lock disabled"
+          } finally {
+            if ($null -ne $hold) { $hold.Dispose() }
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $root) {
+              Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+      # The relay kit's Windows installer (docs/RELAY_KIT.md) on the debug build
+      # with the lab unlock, under $env:RUNNER_TEMP: first binaries, kit.conf and
+      # raven-relay.cmd only (-SkipScheduledTask); then an update that keeps
+      # .prev copies and registers a uniquely named logon task without starting
+      # it, whose action runs `relay --data-dir` with the 443 listener and never
+      # the open-relay flag, with the same settings as windows_service.ps1. The
+      # task is always unregistered.
+      - name: windows_relay.ps1 exercise + logon-task settings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = "scripts/install/windows_relay.ps1"
+          if (-not (Test-Path $script)) { throw "missing $script" }
+          $root = Join-Path $env:RUNNER_TEMP "raven-windows-relay"
+          $relayDir = Join-Path $root "relay"
+          $binDir = Join-Path $root "bin"
+          $taskName = "RavenRelayCI-$PID"
+          try {
+            $global:LASTEXITCODE = 0
+            & (Resolve-Path $script) -RelayDir $relayDir -BinDir $binDir -Prebuilt target\debug -Lab -SkipScheduledTask
+            if ($LASTEXITCODE -ne 0) { throw "windows_relay.ps1 -SkipScheduledTask exited $LASTEXITCODE" }
+            foreach ($name in @("raven-node.exe", "raven.exe", "raven-relay.cmd", "kit.conf")) {
+              $path = Join-Path $binDir $name
+              if (-not (Test-Path -LiteralPath $path)) { throw "missing $path" }
+              Write-Host "ok $path"
+            }
+            # The second run takes -Lab and the folder from kit.conf.
+            & (Resolve-Path $script) -BinDir $binDir -Prebuilt target\debug -TaskName $taskName -NoStart
+            if ($LASTEXITCODE -ne 0) { throw "windows_relay.ps1 -NoStart exited $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath (Join-Path $binDir "raven-node.exe.prev"))) { throw "the update kept no raven-node.exe.prev" }
+            $task = Get-ScheduledTask -TaskName $taskName
+            $line = "$($task.Actions[0].Execute) $($task.Actions[0].Arguments)"
+            Write-Host "task action: $line"
+            if ($line -notmatch 'relay --data-dir') { throw "task action lacks 'relay --data-dir': $line" }
+            if ($line -notmatch '--also-tcp 443') { throw "task action lacks '--also-tcp 443': $line" }
+            if ($line -notmatch 'RAVEN_LAB_TEST_A=1') { throw "kit.conf did not keep the lab setting: $line" }
+            if ($line -match '--open') { throw "task action names the open-relay flag: $line" }
+            $limit = [string]$task.Settings.ExecutionTimeLimit
+            if ($limit -ne "PT0S") { throw "ExecutionTimeLimit is '$limit', expected PT0S (no limit)" }
+            if ($task.Settings.StartWhenAvailable -ne $true) { throw "StartWhenAvailable is not set" }
+            if ([int]$task.Settings.RestartCount -lt 3) { throw "RestartCount is $($task.Settings.RestartCount), expected restart-on-failure" }
+            if ([string]$task.State -eq "Running") { throw "-NoStart started the task" }
+            Write-Host "relay logon task settings OK (relay args, --also-tcp 443, PT0S, StartWhenAvailable, restart-on-failure)"
+          } finally {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $root) {
+              Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+      - name: bootstrap manual-peer smoke
+        shell: bash
+        run: ./scripts/bootstrap_manual_peer_smoke.sh
+
+  go-bridge:
+    name: Go libp2p bridge security
+    needs: tree-presence
+    if: needs.tree-presence.outputs.libp2p_bridge == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ios-native/RAVEN/Libp2pBridge
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: ios-native/RAVEN/Libp2pBridge/go.mod
+          cache-dependency-path: ios-native/RAVEN/Libp2pBridge/go.sum
+      - name: Unit, adversarial, and race tests
+        run: go test -count=1 -race ./...
+      - name: Vet
+        run: go vet ./...
+
+  ios-security:
+    name: iOS protocol security tests
+    needs: tree-presence
+    if: needs.tree-presence.outputs.ios_app == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ios-native/RAVEN
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Select an available iOS simulator
+        id: simulator
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)["devices"]
+          candidates = [
+              (runtime, d)
+              for runtime, devices in data.items()
+              for d in devices
+              if d.get("isAvailable") and "iPhone" in d.get("name", "")
+          ]
+          if not candidates:
+              raise SystemExit("no available iPhone simulator")
+          # Runtime identifiers end in a dotted version with dashes. Prefer
+          # the newest available runtime instead of relying on JSON order.
+          def version(item):
+              raw = item[0].rsplit("iOS-", 1)[-1]
+              return tuple(int(part) for part in raw.split("-") if part.isdigit())
+          print(max(candidates, key=version)[1]["udid"])
+          ')
+          echo "device_id=$DEVICE_ID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+      - name: Build and run protocol security tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project RAVEN.xcodeproj \
+            -scheme RAVEN \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.device_id }}" \
+            -parallel-testing-enabled NO \
+            -only-testing:RAVENTests/RavenEnvelopeV1VectorsTests \
+            -only-testing:RAVENTests/RavenServerlessLanPathTests \
+            -only-testing:RAVENTests/RavenEnvelopeEndpointIngestTests \
+            -only-testing:RAVENTests/RavenBleRvn1CarrierTests \
+            -only-testing:RAVENTests/RavenEnvelopeChatWireTests \
+            -only-testing:RAVENTests/ATSAMChainRatchetTests \
+            -only-testing:RAVENTests/ATSAMIndexedSessionProfileTests \
+            -only-testing:RAVENTests/ATSAMPairInitV1Tests \
+            -only-testing:RAVENTests/ATSAMEndpointTransactionV1Tests \
+            -only-testing:RAVENTests/ATSAMPairingRootAgreementTests \
+            -only-testing:RAVENTests/RavenEnvelopeBridgeServiceTests \
+            -only-testing:RAVENTests/MeshInteropVectorsTests \
+            -only-testing:RAVENTests/RavenContactRequestV1Tests \
+            -only-testing:RAVENTests/ContactRequestInboxTests \
+            -only-testing:RAVENTests/RavenServerlessLanSettingsTests \
+            -only-testing:RAVENTests/MessagingProductBoundaryTests
+      - name: LAN handshake KAT + Release lab gate (scripted)
+        run: bash ../../node/scripts/ios_lan_kat.sh
+        env:
+          DEVICE_ID: ${{ steps.simulator.outputs.device_id }}
+      - name: Prove XCTest host stayed offline
+        run: |
+          set -euo pipefail
+          RESULT=$(find "$HOME/Library/Developer/Xcode/DerivedData" \
+            -path '*/Logs/Test/*.xcresult' -type d -print0 \
+            | xargs -0 stat -f '%m %N' \
+            | sort -nr \
+            | head -1 \
+            | cut -d' ' -f2-)
+          test -n "$RESULT"
+          xcrun xcresulttool get test-results tests --path "$RESULT" \
+            | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          names = set()
+          failures = []
+          def walk(value):
+              if isinstance(value, dict):
+                  name = value.get("name")
+                  if isinstance(name, str):
+                      names.add(name)
+                  status = value.get("testStatus") or value.get("status")
+                  if isinstance(status, str) and status.lower() in {"failed", "failure"}:
+                      failures.append(name or "unnamed test")
+                  for child in value.values():
+                      walk(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      walk(child)
+          walk(data)
+          required = {
+              "testAppHostRecognizesXCTestAndSuppressesExternalSideEffects()",
+              "testAppStartupNeverReachedAnExternalSideEffectBoundary()",
+              "testRuntimeDetectorDoesNotDisableProductionShapedLaunch()",
+          }
+          missing = required - names
+          if failures or missing:
+              raise SystemExit(f"offline XCTest proof missing={sorted(missing)} failures={failures}")
+          print("offline XCTest proof present")
+          '
+      - name: Release build (unsafe demo crypto must stay unavailable)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project RAVEN.xcodeproj \
+            -scheme RAVEN \
+            -configuration Release \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.device_id }}" \
+            CODE_SIGNING_ALLOWED=NO

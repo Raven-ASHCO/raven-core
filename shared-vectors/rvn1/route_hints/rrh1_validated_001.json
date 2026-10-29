@@ -1,0 +1,961 @@
+{
+  "description": "Each case: a frame, the link it arrived on, what validate keeps and how many entries it drops. The sender is the sender seed (its Raven key and libp2p PeerId), the receiver the receiver seed. Kept DIRECT entries carry /p2p/<sender PeerId>; addresses are canonical text. A case whose frame carries custody entries (§12) also shows the kept custody_offer, custodian_tags_hex and custodian_tag_flags (the CUSTODIAN_TAG flags after validate, one per kept tag)",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "dropped": 4,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f0300162f6970342f31312e302e332e352f7463702f373432330300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d763103001a2f6970342f3139322e3136382e312e33302f7463702f373432330300172f6970342f3132372e302e302e312f7463702f373432330300192f6970342f3230332e302e3131332e392f7463702f373432330300152f6970362f666538303a3a312f7463702f37343233",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "global-only DIRECT"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f03001c2f6970362f36343a666639623a3a6130303a312f7463702f373432330300232f6970362f323030323a6130303a313a3a312f7564702f373432332f717569632d763103001e2f6970362f36343a666639623a3a6230303a3330352f7463702f37343233",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip6/64:ff9b::b00:305/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "NAT64 and 6to4 DIRECT are global only when the IPv4 inside is"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f03001a2f6970342f3139322e3136382e372e33302f7463702f3734323303001a2f6970342f3139322e3136382e382e33302f7463702f373432330300162f6970342f31302e302e302e352f7463702f373432330300162f6970342f31312e302e332e352f7463702f373432330400021d6b",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "local_direct": [
+            "/ip4/192.168.7.30/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "same-LAN /24 on a LAN link"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f0300242f6970362f666430303a373a373a373a3a33302f7564702f373432332f717569632d76310300242f6970362f666430303a373a373a383a3a33302f7564702f373432332f717569632d763103001a2f6970342f3139322e3136382e372e33302f7463702f37343233",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [
+            "/ip6/fd00:7:7:7::30/udp/7423/quic-v1/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "fd00:7:7:7::20",
+          "pinned": true
+        },
+        "name": "same-LAN /64 on a LAN link"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f03001a2f6970342f3139322e3136382e372e33302f7463702f373432330300162f6970342f31312e302e332e352f7463702f373432330400021d6b",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "the same-LAN rule is for LAN links only"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f0300162f6970342f31312e302e332e312f7463702f373432330300162f6970342f31312e302e332e322f7463702f373432330300162f6970342f31312e302e332e332f7463702f373432330300162f6970342f31312e302e332e342f7463702f373432330300162f6970342f31312e302e332e352f7463702f373432330300162f6970342f31312e302e332e362f7463702f37343233",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.1/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/11.0.3.2/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/11.0.3.3/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/11.0.3.4/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "at most 4 global DIRECT"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f03001a2f6970342f3139322e3136382e372e33302f7463702f3734323303001a2f6970342f3139322e3136382e372e33302f7463702f3734323303001a2f6970342f3139322e3136382e372e33312f7463702f3734323303001a2f6970342f3139322e3136382e372e33322f7463702f373432330300162f6970342f31312e302e332e352f7463702f37343233",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [
+            "/ip4/192.168.7.30/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/192.168.7.31/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "at most 2 same-LAN DIRECT, duplicates dropped"
+      },
+      {
+        "dropped": 4,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f03004f2f6970342f31312e302e332e352f7463702f373432332f7032702f313244334b6f6f57414a746e6437524c75566e45577578776d545950525372506431613152546638325a3559575463784a64424c03001d2f646e73342f6d652e6578616d706c652e6f72672f7463702f373432330300222f6970342f31312e302e332e352f7463702f373432332f7032702d636972637569740300162f6970342f31312e302e332e352f7564702f3734323303001e2f6970342f31312e302e332e362f7564702f373432332f717569632d7631",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.6/udp/7423/quic-v1/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "DIRECT with its own /p2p, a DNS name or a circuit"
+      },
+      {
+        "dropped": 3,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f03001c2f6970342f31312e302e332e352f7463702f3434332f746c732f777303002a2f6970342f31312e302e332e352f7463702f3434332f746c732f736e692f782e6578616d706c652f77730300192f6970342f31312e302e332e352f7463702f3434332f7773730300152f6970342f31312e302e332e362f7463702f343433",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/11.0.3.6/tcp/443/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "DIRECT in a WSS form"
+      },
+      {
+        "dropped": 0,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f0300172f6970342f3132372e302e302e312f7463702f373432330300162f6970342f31302e312e322e332f7463702f37343233",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [
+            "/ip4/127.0.0.1/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/10.1.2.3/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": true,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "lab_local keeps loopback and private DIRECT"
+      },
+      {
+        "dropped": 3,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004f2f6970342f31312e302e332e352f7463702f373432332f7032702f313244334b6f6f57414a746e6437524c75566e45577578776d545950525372506431613152546638325a3559575463784a64424c02005b2f6970342f31312e302e322e322f7463702f373432332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655612f7032702d6369726375697402005b2f6970342f31312e302e322e322f7463702f373432332f7032702d636972637569742f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d6339565561",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "RELAY naming the sender, a circuit or junk"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f0200046a756e6b0200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d6339565561",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "RELAY that is not a multiaddr"
+      },
+      {
+        "dropped": 0,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004f2f6970342f31312e302e322e322f7463702f373432332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d6339565561",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.2/tcp/7423/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "4 RELAY of 2 relays kept"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004f2f6970342f31312e302e322e322f7463702f373432332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d633956556102004f2f6970342f31312e302e322e332f7463702f373432332f7032702f313244334b6f6f57414e776762674350735334756a78546d77626d6b4d325866436572526b5647533268693648526e457976324302004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b6672",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.2/tcp/7423/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "3 distinct relays drop the third"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200552f646e73342f72312e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b6672",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "a third address of one relay and a duplicate dropped"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [
+            "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "p2p",
+          "lab_local": false,
+          "link_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "peer_ip": null,
+          "pinned": true
+        },
+        "name": "P2P_ID matching the p2p link; LAN_PORT on a p2p link dropped"
+      },
+      {
+        "dropped": 7,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "p2p",
+          "lab_local": false,
+          "link_peer_id": "12D3KooWSznkWhSWpp96x24K6v6GgUb1a75zz2JvSsy34uDcZfto",
+          "peer_ip": null,
+          "pinned": true
+        },
+        "name": "P2P_ID mismatch with the p2p link drops the p2p part"
+      },
+      {
+        "dropped": 7,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "p2p",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": null,
+          "pinned": true
+        },
+        "name": "a p2p link without its PeerId drops the p2p part"
+      },
+      {
+        "dropped": 7,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWSznkWhSWpp96x24K6v6GgUb1a75zz2JvSsy34uDcZfto",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "P2P_ID mismatch with the book drops the p2p part"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [
+            "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": null,
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "no book PeerId: P2P_ID kept"
+      },
+      {
+        "dropped": 6,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408001220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "P2P_ID of another key type drops the p2p part"
+      },
+      {
+        "dropped": 5,
+        "frame_hex": "525248310100000199c82cc07b0003f48002004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "no P2P_ID: RELAY and DIRECT dropped"
+      },
+      {
+        "dropped": 7,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": false
+        },
+        "name": "an unpinned sender keeps only LAN_PORT on a local LAN link"
+      },
+      {
+        "dropped": 8,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": false
+        },
+        "name": "an unpinned sender from a public address keeps nothing"
+      },
+      {
+        "dropped": 8,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": false
+        },
+        "name": "an unpinned sender on an Internet link keeps nothing"
+      },
+      {
+        "dropped": 8,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "p2p",
+          "lab_local": false,
+          "link_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "peer_ip": null,
+          "pinned": false
+        },
+        "name": "an unpinned sender on a p2p link keeps nothing"
+      },
+      {
+        "dropped": 0,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f0400021d6b",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "a pinned sender's LAN_PORT on a LAN link from any address"
+      },
+      {
+        "dropped": 2,
+        "frame_hex": "525248310100000199c82cc07b0003f48005002000000000000000000000000000000000000000000000000000000000000000000500202012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+        "kept": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "zero and the receiver's own custodian dropped"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480050020c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "the sender's own custodian dropped"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f48005002077777777777777777777777777777777777777777777777777777777777777770500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "a duplicate custodian dropped"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d6339565561200258abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab0300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777",
+        "kept": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [
+            "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+            "/ip4/11.0.3.5/tcp/7423/p2p/12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL"
+          ],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "an unregistered type of len 600 is skipped"
+      },
+      {
+        "dropped": 3,
+        "frame_hex": "525248310100000199c82cc07b0003f4800400021d6b06000103070021c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a2350007002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed803",
+        "kept": {
+          "custodian_tag_flags": [],
+          "custodian_tags_hex": [],
+          "custodians_hex": [],
+          "custody_offer": null,
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": false
+        },
+        "name": "an unpinned sender's custody entries dropped"
+      },
+      {
+        "dropped": 0,
+        "frame_hex": "525248310100000199c82cc07b0003f480060001ff",
+        "kept": {
+          "custodian_tag_flags": [],
+          "custodian_tags_hex": [],
+          "custodians_hex": [],
+          "custody_offer": 3,
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "p2p",
+          "lab_local": false,
+          "link_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "peer_ip": null,
+          "pinned": true
+        },
+        "name": "CUSTODY_OFFER 0xff kept as 0x03"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f480070021000000000000000000000000000000000000000000000000000000000000000000070021c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a23500",
+        "kept": {
+          "custodian_tag_flags": [
+            0
+          ],
+          "custodian_tags_hex": [
+            "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235"
+          ],
+          "custodians_hex": [],
+          "custody_offer": null,
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "an all-zero CUSTODIAN_TAG dropped"
+      },
+      {
+        "dropped": 0,
+        "frame_hex": "525248310100000199c82cc07b0003f48006000101070021c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a2350307002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8ff",
+        "kept": {
+          "custodian_tag_flags": [
+            1,
+            1
+          ],
+          "custodian_tags_hex": [
+            "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235",
+            "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+          ],
+          "custodians_hex": [],
+          "custody_offer": 1,
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "lan",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "192.168.7.20",
+          "pinned": true
+        },
+        "name": "CUSTODIAN_TAG unknown flag bits cleared, HANDOFF_INBOX kept"
+      },
+      {
+        "dropped": 1,
+        "frame_hex": "525248310100000199c82cc07b0003f48007002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed80207002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed800",
+        "kept": {
+          "custodian_tag_flags": [
+            0
+          ],
+          "custodian_tags_hex": [
+            "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+          ],
+          "custodians_hex": [],
+          "custody_offer": null,
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": null,
+          "local_direct": [],
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "link": {
+          "book_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "carrier": "internet",
+          "lab_local": false,
+          "link_peer_id": null,
+          "peer_ip": "11.0.3.9",
+          "pinned": true
+        },
+        "name": "a duplicate CUSTODIAN_TAG merged"
+      }
+    ]
+  },
+  "inputs": {
+    "receiver_device_hex": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+    "receiver_seed_hex": "5252525252525252525252525252525252525252525252525252525252525252",
+    "sender_device_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+    "sender_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+    "sender_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "RRH1 receiver rules (§5.2): what a receiver keeps from each frame",
+  "protocol_version": "rvn1"
+}

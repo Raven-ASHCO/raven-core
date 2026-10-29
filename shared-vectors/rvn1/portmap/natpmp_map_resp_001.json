@@ -1,0 +1,27 @@
+{
+  "description": "version 0, opcode 130, result, epoch, internal port, mapped external port, granted lifetime",
+  "deterministic": true,
+  "expected": {
+    "epoch": 3600,
+    "external_port": 7423,
+    "internal_port": 7423,
+    "kind": "natpmp_map",
+    "lifetime": 7200,
+    "protocol": 6,
+    "result": 0
+  },
+  "inputs": {
+    "answers": "natpmp_map_tcp_req_001.json",
+    "gateway": {
+      "epoch_s": 3600,
+      "external_ipv4": "11.0.2.9",
+      "max_lifetime_s": 7200
+    },
+    "reply_hex": "0082000000000e101cff1cff00001c20",
+    "sent_natpmp_op": 2,
+    "sent_pcp_op": null
+  },
+  "name": "NAT-PMP TCP mapping response",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

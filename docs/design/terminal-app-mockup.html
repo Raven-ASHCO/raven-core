@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raven terminal app — design mockup</title>
+<style>
+:root{--bg:#f5f4ef;--surface:#ffffff;--card:#faf9f5;--text:#1f1e1c;--muted:#6b6a65;--border:rgba(31,30,28,.15);--border-strong:rgba(31,30,28,.3);
+--ok:#3b6d11;--warn:#854f0b;--bad:#a32d2d;--acc:#185fa5;--acc-bg:#e6f1fb;--t1:#eeedfe;--t1t:#3c3489;--t2:#e1f5ee;--t2t:#085041;--t3:#faece7;--t3t:#712b13;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1c1a;--surface:#262624;--card:#2c2c2a;--text:#ecebe6;--muted:#a3a29b;--border:rgba(236,235,230,.15);--border-strong:rgba(236,235,230,.3);
+--ok:#97c459;--warn:#ef9f27;--bad:#f09595;--acc:#85b7eb;--acc-bg:#0c447c;--t1:#3c3489;--t1t:#cecbf6;--t2:#085041;--t2t:#9fe1cb;--t3:#712b13;--t3t:#f5c4b3}}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans)}
+main{max-width:860px;margin:0 auto;padding:24px 16px}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+p.lead{color:var(--muted);margin:0 0 16px;line-height:1.6}
+.tw{background:var(--card);border-radius:12px;padding:12px}
+.tb{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;align-items:center}
+.tb button{font:inherit;font-size:13px;padding:4px 10px;background:transparent;color:var(--text);border:.5px solid var(--border-strong);border-radius:8px;cursor:pointer}
+.tb button.on{border-color:var(--acc);color:var(--acc)}
+.rm{margin-left:auto;font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.term{background:var(--surface);border:.5px solid var(--border);border-radius:8px;font-family:var(--mono);font-size:12.5px;line-height:1.6;padding:10px 12px;min-height:430px;overflow:hidden}
+.dim{color:var(--muted)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.acc{color:var(--acc)}.b{font-weight:600}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.pane{border:.5px solid var(--border-strong);border-radius:4px;padding:6px 8px}
+.card{max-width:640px;margin:14px auto;border:.5px solid var(--border-strong);border-radius:4px;padding:12px 16px}
+.keys{margin-top:10px;color:var(--muted)}
+.cap{font-size:13px;color:var(--muted);margin-top:8px;line-height:1.6}
+.av{display:inline-block;width:18px;text-align:center;border-radius:3px;font-weight:600}
+.sel{background:var(--acc-bg);border-radius:3px}
+.word{display:inline-block;min-width:76px;padding:1px 4px;border-radius:3px}.hl{background:var(--acc-bg);color:var(--acc)}
+.logo{white-space:pre;line-height:1.05;color:var(--muted);font-size:13px}
+.breathe{animation:breathe 3s ease-in-out infinite}.pulse{animation:breathe 1.6s ease-in-out infinite}
+.beat{display:inline-block;animation:beat .5s ease-out}.ring{animation:ring 1s ease-out}.blink{animation:blink .35s steps(2) 3}
+.slide{animation:slide .45s ease-out}.fade{animation:fade .6s ease-out}.gone{animation:gone .8s ease-in forwards}
+.still *{animation:none!important}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.4}}@keyframes beat{0%{transform:scale(1.5)}100%{transform:scale(1)}}
+@keyframes ring{0%{outline:2px solid var(--warn);outline-offset:0}100%{outline:2px solid transparent;outline-offset:6px}}
+@keyframes blink{0%{opacity:1}50%{opacity:.1}}@keyframes slide{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}@keyframes gone{from{opacity:1}to{opacity:0}}
+</style>
+</head>
+<body><main>
+<h1>Raven terminal app — design mockup</h1>
+<p class="lead">How the full-screen app (<code>raven</code> or <code>ash</code> with no arguments) looks and moves. The motion is honest: every animation reflects something Raven really does (a status check, a message travelling, a signed receipt coming back, a retry). The logo is the website's mark drawn with Braille dots; terminals without Braille show <b>R A V E N</b>. Plan: <code>docs/roadmap/plans/tui-followup-plan.json</code>, step UXF.10.</p>
+<div class="tw">
+<div class="tb" id="tabs">
+<button data-s="welcome">Welcome</button><button data-s="home" class="on">Home (live)</button><button data-s="words">Your security words</button><button data-s="check">Check words</button><button data-s="add">Add a friend</button><button data-s="net">Network</button><button data-s="msg">Message details</button><button data-s="quit">Quit</button>
+<label class="rm"><input type="checkbox" id="rm"> Reduced motion</label>
+</div>
+<div class="term" id="term"></div>
+<div class="cap" id="cap"></div>
+</div>
+</main>
+<script>
+const LOGO=["\u2800\u2800\u2800\u2800\u2800\u2800\u2800\u2880\u28c0\u28e4\u28e4\u28f4\u28f6\u28f6\u28e6\u28e4\u28e4\u28c0\u2800\u2800\u2800\u2800\u2800\u2800\u2800\u2800", "\u2800\u2800\u2800\u2800\u2880\u28e4\u28fe\u283f\u281b\u2809\u2801\u2800\u2800\u2800\u2800\u2808\u2809\u281b\u283f\u28f6\u28c4\u2840\u2800\u2800\u2800\u2800", "\u2800\u2800\u2880\u28f4\u287f\u280b\u2800\u2800\u28c0\u28c0\u28c0\u28c0\u28c0\u28c0\u28c0\u28c0\u28c0\u2800\u2800\u2800\u2819\u28bf\u28e6\u2800\u2800\u2800", "\u2800\u2800\u283e\u280f\u28c0\u28e4\u28f6\u28ff\u281f\u281b\u281b\u281b\u283f\u28ff\u285f\u281b\u281b\u283f\u28f7\u28c4\u2800\u2800\u2839\u28f7\u2840\u2800", "\u2820\u28fe\u287f\u283f\u281b\u2809\u28b8\u28ff\u2800\u2800\u2800\u2800\u2800\u2818\u283f\u283f\u28f6\u28c4\u2808\u28bb\u28f7\u2800\u2800\u2839\u28f7\u2840", "\u2800\u2819\u28bb\u28ff\u2807\u2800\u28b8\u28ff\u2800\u2800\u2800\u2800\u2800\u2880\u28c0\u28c0\u28c8\u28ff\u2847\u2800\u28ff\u2847\u2800\u2800\u28bf\u28c7", "\u2800\u28a0\u28ff\u280f\u2800\u2800\u28b8\u28ff\u2800\u2800\u2800\u28e0\u28fe\u28ff\u287f\u281b\u283b\u28ff\u2807\u28a0\u28ff\u2803\u2800\u2800\u28b8\u28ff", "\u2800\u28fc\u285f\u2800\u28a0\u28c4\u28b8\u28ff\u2800\u2800\u28fc\u285f\u2801\u28ff\u2847\u2800\u2800\u2880\u28e4\u28ff\u280b\u2800\u2800\u2800\u28b8\u287f", "\u2800\u28ff\u2847\u28f0\u28ff\u2847\u28b8\u28ff\u2800\u28fc\u285f\u2800\u2800\u28bb\u28ff\u287f\u283f\u28ff\u28cf\u2800\u2800\u2800\u2800\u2880\u28ff\u2807", "\u2800\u28bb\u28f7\u28ff\u28ff\u2847\u28b8\u28ff\u2800\u28ff\u2847\u28a0\u28c4\u2800\u2819\u28bf\u28e6\u28dc\u28ff\u28e6\u2800\u2800\u2880\u28fc\u285f\u2800", "\u2800\u2808\u281b\u280b\u28bf\u28c7\u28b8\u28ff\u2800\u28ff\u2847\u28ff\u287f\u28b7\u28e6\u28e4\u28c8\u28d9\u28ff\u28ff\u2877\u28e0\u28fe\u281f\u2800\u2800", "\u2800\u2800\u2800\u2800\u2808\u28bf\u28fe\u28ff\u2800\u28b9\u28f7\u28ff\u2847\u2800\u2808\u2809\u28bb\u28ff\u28c9\u28e1\u28fe\u28ff\u28c7\u2800\u2800\u2800", "\u2800\u2800\u2800\u2800\u2800\u2800\u2819\u28bf\u28e6\u28c4\u28fb\u28ff\u2847\u28c0\u28e4\u28e4\u28f4\u287f\u28bf\u28ef\u28c1\u28c8\u28fb\u28e7\u2840\u2800", "\u2800\u2800\u2800\u2800\u2800\u2800\u2800\u2800\u2809\u2819\u281b\u281b\u2801\u2809\u2809\u2809\u2801\u2800\u2800\u2809\u281b\u281b\u281b\u281b\u2803\u2800", ""];
+const term=document.getElementById('term'),cap=document.getElementById('cap'),rm=document.getElementById('rm');const $=id=>document.getElementById(id);
+let T=[];const after=(ms,f)=>T.push(setTimeout(f,ms)),every=(ms,f)=>T.push(setInterval(f,ms));const clear=()=>{T.forEach(t=>{clearTimeout(t);clearInterval(t)});T=[]};
+const R=()=>rm.checked;const SP='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏',BL='▁▂▃▄▅▆▇';
+const av=(l,n)=>`<span class="av" style="background:var(--t${n});color:var(--t${n}t)">${l}</span>`;
+const MY=['turtle','frog','bread','wolf','paper','laptop','funnel','mango','honey','wagon'];
+const ALI=['anchor','basket','candle','desert','eagle','garden','helmet','island','jacket','kettle'];
+const ago=ms=>{const s=Math.floor(ms/1000);return s<5?'just now':s<60?s+' s ago':Math.floor(s/60)+' min ago'};
+let loopN=0;
+const V={
+welcome:{cap:'First run. The Raven mark (the website logo drawn with Braille dots) appears line by line, the letters R A V E N follow, and the tagline types itself. Terminals without Braille, and windows smaller than 80x24, show R A V E N only.',run(){
+term.innerHTML=`<div class="card" style="display:flex;gap:18px;align-items:center"><div id="logo" class="logo"></div><div style="flex:1"><div id="word" class="b acc" style="font-size:18px;letter-spacing:6px;height:26px"></div><div id="tag" class="dim" style="height:22px"></div><div style="height:6px"></div><div>Raven sends messages straight from this computer to your friends' computers. There is no server, no account and no phone number.</div><div style="height:6px"></div><div>In this version, you and your friend must be on the same network (the same Wi-Fi or office network).</div><div class="keys">[Enter] Get started&nbsp;&nbsp; [C] Classic menu&nbsp;&nbsp; [Q] Quit</div></div></div>`;
+const tag='Messages straight to your friends. No server.';
+if(R()){$('logo').textContent=LOGO.join('\n');$('word').textContent='R A V E N';$('tag').textContent=tag;return}
+LOGO.forEach((l,i)=>after(70*i,()=>{$('logo').textContent=LOGO.slice(0,i+1).join('\n')}));
+const t0=LOGO.length*70+150;'RAVEN'.split('').forEach((c,i)=>after(t0+i*110,()=>{$('word').textContent='RAVEN'.slice(0,i+1).split('').join(' ')}));
+tag.split('').forEach((c,i)=>after(t0+650+i*32,()=>{$('tag').textContent=tag.slice(0,i+1)+(i<tag.length-1?'▌':'')}));
+after(t0+2400,()=>{$('logo').classList.add('breathe')});
+}},
+home:{cap:'Home, live. The heartbeat is a real status check of the background program; a message travels along the route line and the signed receipt (✓) comes back; Mina\'s dot rings when Raven retries; the activity line counts real sends and receives; the bottom line names the latest event. Idle screens drop to about 2 frames a second.',run(){
+let lastBeat=Date.now(),lastTouch=Date.now(),spark=[0,1,0,0,2,0,1,0,0,0,1,0,0,3,1,0,0,0,1,0,0,0,0,0];const W=26;
+term.innerHTML=`<div class="row"><span><span class="b acc">R A V E N</span> <span class="dim">·</span> <span class="b">Sara</span></span><span><span id="hb" class="ok">♥</span> <span id="hbt" class="dim">node ok · just now</span> <span class="dim">·</span> <span id="clock" class="dim"></span></span></div>
+<div style="display:grid;grid-template-columns:186px minmax(0,1fr);gap:8px;margin-top:6px">
+<div class="pane"><div class="b">Friends</div><div class="sel" style="padding:1px 2px">&gt; ${av('A',1)} <span class="ok breathe">•</span> Ali</div><div style="padding:1px 2px">&nbsp; ${av('M',2)} <span id="md" class="warn">◐</span> Mina</div><div style="padding:1px 2px">&nbsp; ${av('R',3)} <span class="dim">○</span> Rena <span class="warn">!</span></div><div style="height:8px"></div><div class="dim" id="seen" style="font-size:11.5px"></div><div style="height:110px"></div><div class="dim">A&nbsp; Add a friend</div></div>
+<div class="pane"><div><span class="b">Ali</span> <span class="ok">✓ Verified</span> <span class="dim" id="touch">· in touch just now</span></div><div style="margin:6px 0 4px;white-space:pre" id="route"></div><div class="dim" style="font-size:11.5px">LAN direct · 192.168.1.30:7420</div>
+<div id="chat" style="margin-top:8px;min-height:160px"><div class="dim">Ali · 6 min ago</div><div>&nbsp;&nbsp;Are you coming to the meeting?</div><div style="height:4px"></div><div class="dim">You · 5 min ago&nbsp; <span class="acc">✓✓ Delivered</span></div><div>&nbsp;&nbsp;Yes, see you there</div></div>
+<div style="border-top:.5px solid var(--border);padding-top:4px"><span class="b">To Ali:</span> <span id="comp" class="dim">write here  (Enter sends · Ctrl+J new line)</span></div></div></div>
+<div style="margin-top:8px;border-top:.5px solid var(--border);padding-top:6px" class="row"><span id="ticker" class="dim">Listening on your Wi-Fi · 3 friends · 1 message waiting for Mina</span><span class="dim">activity <span id="spark" class="acc"></span></span></div>`;
+const route=(pos,ch,cls)=>{let s='You ●'+'─'.repeat(W)+'● Ali';if(pos==null){$('route').innerHTML=s.replace('●','<span class="acc">●</span>');return}const i=5+pos;$('route').innerHTML=s.slice(0,i)+`<span class="${cls} b">${ch}</span>`+s.slice(i+1)};
+const travel=(dir,ch,cls,ms,done)=>{if(R()){route(null);done&&done();return}for(let k=0;k<W;k++)after(k*ms/W,()=>route(dir>0?k:W-1-k,ch,cls));after(ms,()=>{route(null);done&&done()})};
+const draw=()=>{$('spark').textContent=spark.map(v=>BL[Math.min(6,v)]).join('')};const bump=n=>{spark[spark.length-1]+=n;draw()};
+const tick=(t,cls)=>{const e=$('ticker');e.className=(cls||'dim')+(R()?'':' fade');e.textContent=t};
+const add=h=>{const d=document.createElement('div');d.className=R()?'':'slide';d.innerHTML=h;const c=$('chat');c.appendChild(d);while(c.children.length>9)c.removeChild(c.firstChild)};
+every(1000,()=>{$('clock').textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});$('hbt').textContent='node ok · '+ago(Date.now()-lastBeat);$('touch').textContent='· in touch '+ago(Date.now()-lastTouch)});
+every(2000,()=>{lastBeat=Date.now();const h=$('hb');h.classList.remove('beat');void h.offsetWidth;if(!R())h.classList.add('beat');spark.shift();spark.push(0);draw()});
+route(null);draw();$('seen').textContent='Mina: 1 message waiting (until Tue 14:05)';
+const scene=()=>{
+after(1500,()=>{tick('Incoming from Ali…','acc');travel(-1,'◂','acc',900,()=>{add('<div style="height:4px"></div><div class="dim">Ali · just now</div><div class="b" id="nb">&nbsp;&nbsp;Great. Can you bring the charger?</div>');lastTouch=Date.now();bump(2);tick('New message from Ali · LAN direct','acc');after(1500,()=>{const n=$('nb');if(n){n.className='';n.removeAttribute('id')}})})});
+const msg="Yes, I'll bring it";
+after(4200,()=>{$('comp').className='';msg.split('').forEach((c,i)=>after(i*50,()=>$('comp').textContent=msg.slice(0,i+1)+'▌'))});
+after(4200+msg.length*50+300,()=>{$('comp').className='dim';$('comp').textContent='write here  (Enter sends · Ctrl+J new line)';add('<div style="height:4px"></div><div class="dim">You · just now&nbsp; <span id="tk" class="dim"></span></div><div>&nbsp;&nbsp;'+msg+'</div>');
+let i=0;const sp=setInterval(()=>{const t=$('tk');if(t)t.textContent=SP[i++%10]+' Sending…'},90);T.push(sp);const t0=Date.now();tick('Sending to Ali over LAN direct…');
+travel(1,'▸','acc',800,()=>{clearInterval(sp);const t=$('tk');if(t){t.textContent='✓ Sent, not confirmed yet';t.className='dim'}after(250,()=>travel(-1,'✓','ok',650,()=>{const t2=$('tk');if(t2){t2.textContent='✓✓ Delivered';t2.className='acc blink';t2.removeAttribute('id')}lastTouch=Date.now();bump(2);tick('Delivered to Ali via LAN direct in '+((Date.now()-t0)/1000).toFixed(1)+' s · receipt signed by Ali','ok')}))})});
+after(11500,()=>{const m=$('md');if(!R()){m.classList.remove('ring');void m.offsetWidth;m.classList.add('ring')}tick('Tried Mina again · not reachable yet · keeps trying until Tue 14:05','warn')});
+after(15500,()=>{const m=$('md');m.textContent='•';m.className='ok'+(R()?'':' blink');bump(1);$('seen').textContent='Mina: in touch just now';tick('Mina is back · your waiting message was delivered ✓✓','ok')});
+after(19500,()=>tick('Listening on your Wi-Fi · 3 friends · all quiet'));
+after(23000,()=>{$('md').textContent='◐';$('md').className='warn';$('seen').textContent='Mina: 1 message waiting (until Tue 14:05)';scene()})};
+scene();
+}},
+words:{cap:'Your security words: 10 English words from Raven\'s own list. Word 10 is the check word. The old code is still accepted. The words appear one by one, then a read-aloud highlight walks through them.',run(){
+term.innerHTML=`<div class="card"><div class="b">Your security words</div><div class="dim">Read them to your friend in person or on a call. Your friend types what they hear.</div><div style="height:10px"></div><div id="grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px 4px"></div><div style="height:10px"></div><div id="say" class="dim" style="height:20px"></div><div class="dim">Word 10 is a check word: it catches a misheard or swapped word. Raven never checks this for you and never marks a friend as verified by itself.</div><div style="height:6px"></div><div class="dim">Old code (still accepted): WuXU N1gi 7n</div><div class="keys">[Enter] Next</div></div>`;
+MY.forEach((w,i)=>{const d=document.createElement('div');d.id='w'+i;d.className='word';d.innerHTML=`<span class="dim">${i+1}.</span> <span class="${i===9?'warn':'b'}">${w}</span>`;d.style.visibility=R()?'visible':'hidden';$('grid').appendChild(d)});
+if(R()){$('say').textContent='Say each word slowly, then the next.';return}
+MY.forEach((w,i)=>after(200*i,()=>{const d=$('w'+i);if(d){d.style.visibility='visible';d.classList.add('slide')}}));
+let k=0;after(2300,()=>every(900,()=>{MY.forEach((w,i)=>{const d=$('w'+i);if(d)d.classList.toggle('hl',i===k%10)});$('say').innerHTML='Say: <span class="acc b">'+MY[k%10]+'</span>'+(k%10===9?' <span class="warn">(check word)</span>':'');k++}));
+}},
+check:{cap:'Checking Ali: you type Ali\'s words as Ali reads them; three letters are enough. Ali\'s words are never shown and there is no right/wrong mark per word. Only the check word at the end says whether they match. This scene alternates between a match and a misheard word.',run(){
+const typo=(loopN++%2)===1;
+term.innerHTML=`<div class="b">Check it's really Ali</div><div class="dim">Call Ali or meet in person. Each of you reads your own words to the other.</div><div style="display:grid;grid-template-columns:1fr 1.3fr;gap:8px;margin-top:10px"><div class="pane"><div class="b">Your words: read these to Ali</div><div class="dim" style="margin-top:4px">${MY.slice(0,5).join(' ')}<br>${MY.slice(5).join(' ')}</div></div><div class="pane"><div class="b">Ali's words: type them as Ali reads them</div><div id="typed" style="margin-top:4px;min-height:44px"></div><div id="cur" style="height:20px"></div></div></div><div id="res" style="margin-top:10px;min-height:44px"></div><div class="keys">[Enter] Check&nbsp;&nbsp; [Tab] Later (not verified)&nbsp;&nbsp; [Esc] Cancel</div>`;
+const heard=ALI.slice();if(typo)heard[5]='garlic';const typed=$('typed'),cur=$('cur'),res=$('res');
+const done=()=>{res.innerHTML=typo?'<div class="warn fade b">One word doesn\'t fit. The check word caught it.</div><div class="fade">Ask Ali to read the words again, slowly. (If they still don\'t fit, do not verify: someone may have swapped Ali\'s key.)</div>':'<div class="ok b fade">✓ They match. Nobody swapped Ali\'s key.</div><div class="fade">To save Ali as verified, type K7Q3M: &gt; <span class="pulse">_</span></div>'};
+if(R()){typed.textContent=heard.join(' · ');done();return}
+let t=300;heard.forEach(w=>{for(let j=1;j<=3;j++){after(t,()=>{cur.innerHTML=`<span class="b">${w.slice(0,j)}</span><span class="dim">${j===3?w.slice(3):''}</span><span class="pulse">▌</span>`});t+=110}after(t+120,()=>{typed.insertAdjacentHTML('beforeend',`<span class="fade">${w}</span><span class="dim"> · </span>`);cur.innerHTML='<span class="dim">Raven word ✓</span>'});t+=420});
+after(t+200,()=>{cur.innerHTML='';let i=0;const s=setInterval(()=>{res.innerHTML='<span class="dim">'+SP[i++%10]+' Checking the check word…</span>'},90);T.push(s);after(900,()=>{clearInterval(s);done()})});
+after(t+5200,()=>V.check.run());
+}},
+add:{cap:'Add a friend: the step strip moves along; a pasted card collapses into a short summary, so the friend\'s security words never appear on screen.',run(){
+term.innerHTML=`<div class="b">Add a friend</div><div id="strip" class="dim"></div><div style="height:6px"></div><div class="pane"><div class="b">Share yours</div><div>Send this to your friend (in a message, an email, or show them):</div><div class="dim" style="word-break:break-all">raven-card/1 address=rvn1qx64…k3l7x lan=192.168.1.20:7420 …</div><div>It holds only public information. Your private key never leaves this computer.</div></div><div class="pane" style="margin-top:8px;border-color:var(--acc)"><div class="b">Paste theirs</div><div>Paste your friend's invite or card:</div><div id="paste" class="dim" style="min-height:40px;word-break:break-all"></div></div><div class="keys">[Tab] Switch box&nbsp; [Enter] Continue&nbsp; [Esc] Back</div>`;
+const steps=['1 Share yours','2 Paste theirs','3 Check words'];const strip=k=>{$('strip').innerHTML=steps.map((s,i)=>i===k?`<span class="acc b">${s}</span>`:s).join(' · ')};const sum='<span class="ok fade">Invite for rvn1qq8x…k3l7x, with a network address</span>';
+if(R()){strip(1);$('paste').innerHTML=sum;return}
+strip(0);after(1500,()=>strip(1));after(2300,()=>{$('paste').innerHTML='<span class="fade">raven-card/1 address=rvn1qq8xw3…k3l7x lan=192.168.1.30:7420 fingerprint=••••••••••••</span>'});after(3600,()=>{$('paste').innerHTML=sum});after(5000,()=>strip(2));after(8000,()=>V.add.run());
+}},
+net:{cap:'Network: the background program starts by itself (spinner), then the listening dot breathes. Switched-off features say Preview.',run(){
+const rows=['<div class="b">Ways to reach friends</div>','<div>Local network (Wi-Fi or cable): <span class="ok">On</span></div>','<div>Internet direct: <span class="warn">Preview, not in this release</span></div>','<div>Peer-to-peer and relays: <span class="warn">Preview, not in this release</span></div>','<div>Friends holding mail for you: <span class="warn">Preview, not in this release</span></div>'];
+term.innerHTML=`<div class="b">Network and status</div><div class="pane" style="margin-top:8px"><div class="b">This computer</div><div id="chip"></div><div id="proc" class="dim"></div><div>Waiting messages: 0</div></div><div class="pane" style="margin-top:8px" id="ways"></div><div class="pane" style="margin-top:8px"><div class="b">About this Raven</div><div>This computer's network address: 192.168.1.20</div><div>This build: Release</div></div><div class="keys">[L] Service log&nbsp; [S] Start&nbsp; [X] Stop&nbsp; [R] Check again&nbsp; [Esc] Back</div>`;
+const fin=()=>{$('chip').innerHTML='<span class="ok pulse">●</span> <span class="ok">Listening on port 7420 on your network.</span>';$('proc').textContent='Background program: Running (process 4242), started by this app'};
+if(R()){fin();$('ways').innerHTML=rows.join('');return}
+let i=0;const s=setInterval(()=>{$('chip').innerHTML='<span class="acc">'+SP[i++%10]+'</span> Starting Raven…'},90);T.push(s);after(1600,()=>{clearInterval(s);fin()});rows.forEach((r,k)=>after(1900+k*300,()=>$('ways').insertAdjacentHTML('beforeend',r.replace('<div','<div class="slide"'))));after(9000,()=>V.net.run());
+}},
+msg:{cap:'Message details: honest status, the real reason, one clear action, the deadline in local time.',run(){
+term.innerHTML=`<div style="min-height:380px;display:flex;align-items:center;justify-content:center"><div class="card" style="margin:0"><div class="b">Message to Mina · 20 min ago</div><div class="dim">“Bring the charger”</div><div style="height:8px"></div><div><span class="b">Status:</span> <span class="warn">◷</span> Waiting for Mina until Tue 14:05 (about 22 hours from now).</div><div><span class="b">Why:</span> Mina's Raven isn't reachable (Mina may be away or on another network).</div><div><span class="b">What you can do:</span> nothing. If Mina doesn't come back before then, tell Mina another way. Or press C to stop trying.</div><div style="height:8px"></div><div class="bad">If time runs out: “Time ran out. It never left this computer. Press R to send it again when you're together.”</div><div class="keys">[R] Try now&nbsp; [C] Stop trying&nbsp; [D] Details&nbsp; [Esc] Close</div></div></div>`;
+}},
+quit:{cap:'Quitting explains what keeps running. The background program stays on by default so friends can still reach you.',run(){
+term.innerHTML=`<div style="min-height:380px;display:flex;align-items:center;justify-content:center"><div class="card fade" style="margin:0"><div class="b">Quit Raven?</div><div style="height:6px"></div><div>Raven's background program keeps running while this computer is on and you stay logged in, so friends can still reach you and waiting messages keep trying.</div><div class="keys">[Enter] Quit&nbsp;&nbsp; [S] Quit and stop the background program&nbsp;&nbsp; [Esc] Stay</div></div></div>`;
+}}};
+let cur='home';function show(k){cur=k;clear();document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.s===k));term.classList.toggle('still',R());cap.textContent=V[k].cap;V[k].run()}
+document.querySelectorAll('#tabs button').forEach(b=>b.addEventListener('click',()=>show(b.dataset.s)));rm.addEventListener('change',()=>show(cur));show('home');
+</script>
+</body></html>

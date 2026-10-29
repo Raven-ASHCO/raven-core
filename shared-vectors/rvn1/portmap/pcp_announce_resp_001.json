@@ -1,0 +1,26 @@
+{
+  "description": "version 2, R=1, opcode 0, result SUCCESS, lifetime 0, epoch, reserved",
+  "deterministic": true,
+  "expected": {
+    "epoch": 3600,
+    "kind": "pcp",
+    "lifetime": 0,
+    "map": null,
+    "opcode": 0,
+    "result": 0
+  },
+  "inputs": {
+    "answers": "pcp_announce_req_001.json",
+    "gateway": {
+      "epoch_s": 3600,
+      "external_ipv4": "11.0.2.9",
+      "max_lifetime_s": 7200
+    },
+    "reply_hex": "028000000000000000000e10000000000000000000000000",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 0
+  },
+  "name": "PCP ANNOUNCE response",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

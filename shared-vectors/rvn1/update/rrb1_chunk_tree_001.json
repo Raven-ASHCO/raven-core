@@ -1,0 +1,157 @@
+{
+  "description": "Chunk roots and audit paths (RAVEN_RELEASE_BUNDLE_V1 §5): a payload of payload_len bytes with byte j = j mod 251, cut in 61,440-byte chunks (the last one what is left); leaf = SHA-256(0x00 || chunk), nodes and the split as RFC 6962 §2.1, the audit path of chunk i as RFC 6962 §2.1.1 (from the leaf's sibling up), checked as RFC 9162 §2.1.3.2. small: 4 full chunks and 1,000 bytes; max: 64 MiB, 1,093 chunks, paths of up to 11 hashes",
+  "deterministic": true,
+  "expected": {
+    "max": {
+      "chunk_count": 1093,
+      "paths": [
+        {
+          "index": 0,
+          "path_hex": [
+            "0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d443",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "5620b913181305aaecf6aef182dc768508f8b8576d9b85a170ebd3423d19eb1b",
+            "197b042281c8190c156a06358db438130c133b926d7108553c174e10f250287c",
+            "04f9dd96f9c826c8a044cf0b46ba45de8a9556ff64eeccf9269728878e18b6f9",
+            "81b50e142c4ae78c2a458d91bed1b769d04337fa7fe32e56fd5624425b126d0a",
+            "137a9aae5dd83372c990697439e028a03966d9c7c96e2142dee0d06c39052a77",
+            "049cdaf72920d9923382fafd1b6e8bca3a9f02fe9f55d15c34ea803e43e4520c",
+            "fad63f4a5c9628a8d85b565b53b99513e3e776516703bb2ac9719f26a0ebe101",
+            "e5170ec3afd7de58ff05f7847bae2bc72087fb1c16e4d9c0d62d2ddf2684b186",
+            "6409075e097c50bf9acfb3c5d0bb063daf5da51cd66d7d8ed122826e9e75a841"
+          ]
+        },
+        {
+          "index": 1,
+          "path_hex": [
+            "971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a3",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "5620b913181305aaecf6aef182dc768508f8b8576d9b85a170ebd3423d19eb1b",
+            "197b042281c8190c156a06358db438130c133b926d7108553c174e10f250287c",
+            "04f9dd96f9c826c8a044cf0b46ba45de8a9556ff64eeccf9269728878e18b6f9",
+            "81b50e142c4ae78c2a458d91bed1b769d04337fa7fe32e56fd5624425b126d0a",
+            "137a9aae5dd83372c990697439e028a03966d9c7c96e2142dee0d06c39052a77",
+            "049cdaf72920d9923382fafd1b6e8bca3a9f02fe9f55d15c34ea803e43e4520c",
+            "fad63f4a5c9628a8d85b565b53b99513e3e776516703bb2ac9719f26a0ebe101",
+            "e5170ec3afd7de58ff05f7847bae2bc72087fb1c16e4d9c0d62d2ddf2684b186",
+            "6409075e097c50bf9acfb3c5d0bb063daf5da51cd66d7d8ed122826e9e75a841"
+          ]
+        },
+        {
+          "index": 1023,
+          "path_hex": [
+            "f617b7808ac3631a2d89b5fcaa986c1cd8481fd43fbe713c475d98c46ba2bd61",
+            "136499bd96e5bd57f83704fc226c94798979841111d6efe381582d25c731351a",
+            "5768fbdaf7f22a781a4de60356e3d09b0d4190a9f7b0536067a5216b78146459",
+            "36e2ba81c5128e07edb6411c35ef5872868a37c4fb51801a058aded35de04ba7",
+            "5def8508b00144668f4619d16e18cfc0b728286294c33bdb762078ab03c9747b",
+            "781b35b5466b39b31a3dca8f83272d83ad1c086c3800eff3e4b933867d290083",
+            "938ccb70e7d030406d65cad315b6eb9387f810ade6f5f039491f95aac072b90c",
+            "003bcdb608e50689d5546c4e7496cd7287ff49db668f1a1d2431d89b413878c1",
+            "0d0f4eae8ce4ad72e71aaf3c22a8f565215cfcbd5bc05e4ab12e5c32c8164dae",
+            "df67a92797bbf4e966d8334b95d3f51d70aebe54523aa542157c5b5895fe8164",
+            "6409075e097c50bf9acfb3c5d0bb063daf5da51cd66d7d8ed122826e9e75a841"
+          ]
+        },
+        {
+          "index": 1024,
+          "path_hex": [
+            "57354222187ac4fc711a38f35e8ef55cd5c7ca13e8f997d6eddbb5c1ba745374",
+            "c53509718a2bed70d249a4ed07c8905fe387ba42c51043d2e6e54acfa69c3638",
+            "20e39c6a0ad3fa14df944a1ab78788a076620710af39ea9e1f3e99a16d60d882",
+            "0c115e14b4c3f574b6a6f1c89c7b68285541b61c1b7abed76d2b1325211ddb2a",
+            "6e0c53d6729e23492b5475c8b89b7566a35a3f7bd7610c56b865d24509e8b78c",
+            "5c915ed76c623f1ec526d7c40232e90d687e7964d9f6f1456683ebcf8b8a1b01",
+            "727d6846a2fdf5dc81f8104e22e955cf79072d6d9de8fff4b0c95a027fde8423",
+            "a787582ff57b176c40a6440f39ffbdf1b994e74cc7b9b78f506804d71a5a143f"
+          ]
+        },
+        {
+          "index": 1091,
+          "path_hex": [
+            "d5e2a13542353ac8c9c23b8f922acbdceb9a2b8743d11ac709f001c05e9c1d73",
+            "4de00a78f22f3da7e88a6b1838d1d37de3d0bb112fa50236f5ef2effdd8a93f8",
+            "bb538966abf38e2b46f8b036024dc4f3219e4c1f3f6fda669ae5cf44fa177b76",
+            "b73f13ba0d3a8076947843263144b40623c3ee8037f39141579a63a3c3bbe87c",
+            "a787582ff57b176c40a6440f39ffbdf1b994e74cc7b9b78f506804d71a5a143f"
+          ]
+        },
+        {
+          "index": 1092,
+          "path_hex": [
+            "7ee162bf6e217bf947f045d977c29260bf0876ff92939d996c0d6bbf521d4525",
+            "b73f13ba0d3a8076947843263144b40623c3ee8037f39141579a63a3c3bbe87c",
+            "a787582ff57b176c40a6440f39ffbdf1b994e74cc7b9b78f506804d71a5a143f"
+          ]
+        }
+      ],
+      "root_hex": "6c3fb6a6d36daf26ef4333aa70859ac061aa162b23fb0bd687ceeedd5e77ad57"
+    },
+    "small": {
+      "chunk_count": 5,
+      "leaf_hashes_hex": [
+        "971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a3",
+        "0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d443",
+        "94093c5d70cb7c559a0bc5d4514820486de9cbd577afb00368c0c198eaa5528a",
+        "2e63206455d9bd1ef23f5d700ec39cd9b4bece752a8486fea27ee1782c000201",
+        "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+      ],
+      "paths": [
+        {
+          "index": 0,
+          "path_hex": [
+            "0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d443",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "index": 1,
+          "path_hex": [
+            "971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a3",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "index": 2,
+          "path_hex": [
+            "2e63206455d9bd1ef23f5d700ec39cd9b4bece752a8486fea27ee1782c000201",
+            "ad326df0660e81c29c909f2c26c60743838975f539d7b76f8e0479217cbef834",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "index": 3,
+          "path_hex": [
+            "94093c5d70cb7c559a0bc5d4514820486de9cbd577afb00368c0c198eaa5528a",
+            "ad326df0660e81c29c909f2c26c60743838975f539d7b76f8e0479217cbef834",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "index": 4,
+          "path_hex": [
+            "c4a12be7e2c18ebb573b9f2c727e5786d168906bc6ac11979d229e2f1400674f"
+          ]
+        }
+      ],
+      "root_hex": "a288c9fbc5a455d4b785c7e234d966b3d1633d7ffe4693647746c18120388db9"
+    }
+  },
+  "inputs": {
+    "chunk_size": 61440,
+    "max_path_indexes": [
+      0,
+      1,
+      1023,
+      1024,
+      1091,
+      1092
+    ],
+    "max_payload_len": 67108864,
+    "small_payload_len": 246760
+  },
+  "name": "rrb1_chunk_tree_001",
+  "protocol_version": "rvn1"
+}

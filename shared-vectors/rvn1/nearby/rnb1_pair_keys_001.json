@@ -1,0 +1,59 @@
+{
+  "description": "RAVEN_NEARBY_LINK_V1 §2. K_root is the R2 pairwise root of RAVEN_LAN_BEACON_V1 §2.2 (RAVEN_PRIVATE_RENDEZVOUS_V1 §5.3a item 2): Z = X25519 of one identity's Ed25519 secret scalar with the Montgomery form of the other identity key, K_root = HKDF-SHA256(salt 'rvn1/r2-pair/v1', ikm Z, info 'root' || lo || hi, 32 bytes) with lo and hi the two Ed25519 keys sorted bytewise; the same bytes as lan_beacon/lbcn_pair_keys_001.json for the same pair. K_ble = HKDF-Expand-SHA256(PRK K_root, info 'medium' || 0x01, 32 bytes). K_tok = HKDF-Expand-SHA256(PRK K_ble, info 'RNB1-token', 32 bytes) and K_knock = HKDF-Expand-SHA256(PRK K_ble, info 'RNB1-knock', 32 bytes). Both sides of a pair compute the same keys. These keys only make beacon tokens and knock tags: never a message, session, route, mailbox or ACK key",
+  "deterministic": true,
+  "expected": {
+    "pairs": [
+      {
+        "a": "alice",
+        "b": "bob",
+        "k_ble_hex": "5a02236e302b1ea12f32ffd2b96d4a284e51b320529d1bd5edb79b443638b766",
+        "k_knock_hex": "8e2091111598a15162adc6ca3f36ba9223a4f5f43ad835cc068beaf4ab3af346",
+        "k_root_hex": "4a7b4e88f966358051ad5a45a0374f88f37627182cce69a27860717269c504a1",
+        "k_tok_hex": "01fdedf3715b8bf8e4ed308de0c9b9509addba54acab4ce64c459c3d633e3e34"
+      },
+      {
+        "a": "alice",
+        "b": "carol",
+        "k_ble_hex": "8b6cdcf5cd33aa56612bb98a3eb317187fb6a8c58312642f022528bb381f56c5",
+        "k_knock_hex": "996031fc590fb5a27ebf306392092f82ba51a7e668676f94d397ac3fef20485f",
+        "k_root_hex": "0252f416f852a2c649224b410480fbd06c590d8af6e6b71e224ad1afe27ea430",
+        "k_tok_hex": "25c70c56b8654f473f81ebeda3b91225787c45a773079c72e3f7be319b9c0ce2"
+      }
+    ]
+  },
+  "inputs": {
+    "knock_info_ascii": "RNB1-knock",
+    "medium_ble": 1,
+    "pairs": [
+      [
+        "alice",
+        "bob"
+      ],
+      [
+        "alice",
+        "carol"
+      ]
+    ],
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      },
+      "carol": {
+        "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "source": "inline: RFC 8032 section 7.1 test 3"
+      }
+    },
+    "r2_pair_salt_ascii": "rvn1/r2-pair/v1",
+    "token_info_ascii": "RNB1-token"
+  },
+  "name": "RNB1 pair keys: the R2 pairwise root, its Bluetooth LE medium key, K_tok and K_knock",
+  "protocol_version": "rvn1"
+}

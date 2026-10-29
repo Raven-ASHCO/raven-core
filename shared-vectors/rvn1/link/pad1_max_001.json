@@ -1,0 +1,61 @@
+{
+  "description": "frame = \"RPD1\" | version 0x01 | reserved 0x00 | inner_len u16 BE | inner | 0x00 padding; the frame length is the smallest bucket of 512, 4096, 16384, 65519 that holds 8 + inner_len (RAVEN_LINK_PADDING_V1 §2). The inner frame is 65511 bytes, byte i = i mod 251; its frame is 65519 bytes (the largest bucket, MAX_TRANSPORT_PLAINTEXT) with no padding, given by its first bytes and its SHA-256. edges: the frame length of inner frames at each bucket's edges; refused: inner lengths a sender cannot pad (0, and 65512 or more)",
+  "deterministic": true,
+  "expected": {
+    "edges": [
+      {
+        "frame_len": 512,
+        "inner_len": 1
+      },
+      {
+        "frame_len": 512,
+        "inner_len": 504
+      },
+      {
+        "frame_len": 4096,
+        "inner_len": 505
+      },
+      {
+        "frame_len": 4096,
+        "inner_len": 4088
+      },
+      {
+        "frame_len": 16384,
+        "inner_len": 4089
+      },
+      {
+        "frame_len": 16384,
+        "inner_len": 16376
+      },
+      {
+        "frame_len": 65519,
+        "inner_len": 16377
+      },
+      {
+        "frame_len": 65519,
+        "inner_len": 65511
+      }
+    ],
+    "frame_head_hex": "525044310100ffe7000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "frame_len": 65519,
+    "frame_sha256_hex": "c2fe78b9f5a257aac4a577f0142f9bf96afbcf5d4e9e8f60fb8d83f7a16456f4",
+    "padding_len": 0,
+    "refused": [
+      {
+        "error": "BAD_LENGTH",
+        "inner_len": 0
+      },
+      {
+        "error": "BAD_LENGTH",
+        "inner_len": 65512
+      }
+    ]
+  },
+  "inputs": {
+    "inner_len": 65511,
+    "inner_rule": "byte i = i mod 251",
+    "inner_sha256_hex": "9ac4fa7ccd058b264639e9b331750e9d17bd913700c0b9a273b9c9520919f781"
+  },
+  "name": "PAD1 frame of the longest inner frame (bucket 65519) and the bucket edges",
+  "protocol_version": "rvn1"
+}

@@ -1,0 +1,54 @@
+{
+  "description": "SHA-256(label || ed_pub): the first 9 bytes are 9 indexes; the 10th is the GF(2^8) check. device_fingerprint_v1 of the same key alongside: both MUST be shown for the same key.",
+  "deterministic": true,
+  "expected": {
+    "check_index": 48,
+    "data_indexes": [
+      118,
+      184,
+      230,
+      180,
+      233,
+      161,
+      230,
+      96,
+      119
+    ],
+    "device_fingerprint_v1": "NN72-hvSx-N7W",
+    "digest_hex": "76b8e6b4e9a1e660777d2fa0adc3af44a68ed02b9ee78534a36b1399a344a201",
+    "indexes": [
+      118,
+      184,
+      230,
+      180,
+      233,
+      161,
+      230,
+      96,
+      119,
+      48
+    ],
+    "text": "library rope tile rice toucan pickle tile helmet lily cow",
+    "words": [
+      "library",
+      "rope",
+      "tile",
+      "rice",
+      "toucan",
+      "pickle",
+      "tile",
+      "helmet",
+      "lily",
+      "cow"
+    ]
+  },
+  "inputs": {
+    "ed_public_hex": "e61a185bcef2613a6c7cb79763ce945d3b245d76114dd440bcf5f2dc1aa57057",
+    "label_ascii": "rvn1/security-words/v1",
+    "wordlist_sha256": "86bd5c396943a48f1e53572e4756738916039f83a7afcefb7dce44620ea7c3f9"
+  },
+  "name": "Security words, dave",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

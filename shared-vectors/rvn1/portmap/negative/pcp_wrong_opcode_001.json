@@ -1,0 +1,15 @@
+{
+  "description": "an ANNOUNCE response (opcode 0) to a MAP request",
+  "deterministic": true,
+  "expected": {
+    "error": "opcode"
+  },
+  "inputs": {
+    "reply_hex": "028000000000000000000e10000000000000000000000000117a021fb22cdbf08252fdff060000001cff1cff00000000000000000000ffff0b000209",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "PCP reply with another opcode",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

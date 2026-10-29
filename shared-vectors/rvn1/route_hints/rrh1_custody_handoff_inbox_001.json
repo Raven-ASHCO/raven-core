@@ -1,0 +1,83 @@
+{
+  "description": "RRH1 v1 frame (RAVEN_ROUTE_HINTS_V1 §4): magic RRH1 | version 1 | generation u64 BE | ttl_s u32 BE | entries (type u8 | len u16 BE | value); a sender writes entries in ascending type order. Two CUSTODIAN_TAGs (0x07, tag[32] || flags u8), the tags of rrh1_custodian_tag_001 rows 1 and 2: the first with flags 0x01 (HANDOFF_INBOX: the sender registered its store tags at that custodian, RAVEN_CUSTODY_HANDOFF_V1 §3.6), the second with 0xfe (every bit this revision does not define). decode keeps the flags as sent; kept is what this revision's receiver keeps from a pinned sender on an Internet link (bit 0 only); phase3_kept_flags is what a receiver built before it keeps (every bit cleared, both tags kept, nothing dropped)",
+  "deterministic": true,
+  "expected": {
+    "decoded": {
+      "custodian_tags": [
+        {
+          "flags": 1,
+          "tag_hex": "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235"
+        },
+        {
+          "flags": 254,
+          "tag_hex": "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+        }
+      ],
+      "custodians_hex": [],
+      "custody_offer": null,
+      "direct": [],
+      "generation": 1760000000123,
+      "lan_port": null,
+      "p2p_id_hex": null,
+      "peer_id": null,
+      "relays": [],
+      "ttl_s": 259200
+    },
+    "frame_hex": "525248310100000199c82cc07b0003f480070021c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a2350107002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8fe",
+    "frame_len": 89,
+    "kept": {
+      "custodian_tag_flags": [
+        1,
+        0
+      ],
+      "custodian_tags_hex": [
+        "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235",
+        "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+      ],
+      "custodians_hex": [],
+      "custody_offer": null,
+      "direct": [],
+      "generation": 1760000000123,
+      "lan_port": null,
+      "local_direct": [],
+      "peer_id": null,
+      "relays": [],
+      "ttl_s": 259200
+    },
+    "phase3_kept_flags": [
+      0,
+      0
+    ]
+  },
+  "inputs": {
+    "custodian_devices_hex": [
+      "e2fe2a39b7326642827d6d82d497622cd6c297fe78270eaa436b01f086b6f3cb",
+      "5b6489c9c7fd0dcf50545e7c164886ef40491ec06c7f1b123041797e8117535e"
+    ],
+    "hints": {
+      "custodian_tags": [
+        {
+          "flags": 1,
+          "tag_hex": "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235"
+        },
+        {
+          "flags": 254,
+          "tag_hex": "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+        }
+      ],
+      "custodians_hex": [],
+      "custody_offer": null,
+      "direct": [],
+      "generation": 1760000000123,
+      "lan_port": null,
+      "p2p_id_hex": null,
+      "peer_id": null,
+      "relays": [],
+      "ttl_s": 259200
+    },
+    "receiver_device_hex": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+    "sender_device_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"
+  },
+  "name": "RRH1 CUSTODIAN_TAG flag bit 0 HANDOFF_INBOX (§4, §12; Phase 5)",
+  "protocol_version": "rvn1"
+}

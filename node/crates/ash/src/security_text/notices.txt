@@ -1,0 +1,255 @@
+SEC_LINK_TAG_FAIL (1), alert
+  Someone on this network keeps changing data between you and Sara
+  Raven noticed each time and threw it away. Nothing was read.
+  Use another network or a hotspot you control.
+  [other_network]
+SEC_LINK_TAG_FAIL (1), warning and notice
+  Data between you and Sara was changed on the way
+  Raven noticed it and threw it away. Nothing was read.
+  If it keeps happening, use another network or a hotspot you control.
+  [other_network]
+SEC_HANDSHAKE_FAIL (2)
+  Connections to this computer failed before they started
+  Raven closed them. They learned nothing about you.
+  Nothing. If it keeps happening, stop listening when you don't need it.
+  [stop_listening]
+SEC_PREAUTH_MALFORMED (3)
+  Unknown computers sent data Raven could not read
+  Raven closed those connections. They learned nothing about you.
+  Nothing. If it keeps happening, stop listening when you don't need it.
+  [stop_listening]
+SEC_STRANGER_REFUSED (4)
+  Unknown computers tried to connect
+  Raven refused them. They learned nothing about you.
+  Nothing. If you didn't expect this, stop listening when you don't need it.
+  [stop_listening]
+SEC_BLOCKED_REFUSED (5)
+  Someone you blocked tried to connect
+  Raven refused it.
+  Nothing.
+  [nothing]
+SEC_UNVERIFIED_REMOTE (6)
+  A contact you haven't verified tried to connect from outside this network
+  Raven refused it: from outside this network, only friends you verified connect.
+  Compare security words with them, in person or by phone.
+  [compare_words]
+SEC_PREAUTH_FLOOD (7)
+  Unknown computers on this network tried to connect many times
+  Raven refused all of them. They learned nothing about you.
+  If you didn't expect this, stop listening when you don't need it, or use meeting mode.
+  [stop_listening]
+SEC_P2P_GATE_REFUSED (8)
+  Unknown computers on the internet tried to connect
+  Raven refused them before they learned anything about you.
+  Nothing.
+  [nothing]
+SEC_BEACON_REPLAY (9)
+  Something on this network repeated an old Raven search
+  Raven ignored it.
+  If you didn't expect this, use another network.
+  [other_network]
+SEC_BEACON_FLOOD (10)
+  Something on this network sent many Raven searches
+  Raven answered only within its limits.
+  Nothing.
+  [nothing]
+SEC_KNOCK_REPLAY (11)
+  Something on this network repeated an old Raven greeting
+  Raven refused it.
+  If you didn't expect this, use another network.
+  [other_network]
+SEC_OBJECT_AUTH_FAIL (20)
+  Messages from Sara failed Raven's security check
+  Raven didn't show them.
+  Ask Sara, in person or by phone, whether they reinstalled Raven or restored their computer. Then compare security words. Raven never blocks Sara by itself.
+  [compare_words]
+SEC_OBJECT_SIG_FAIL (21)
+  Messages from Sara carried a signature Raven doesn't accept
+  Raven didn't show them.
+  Ask Sara, in person or by phone, whether they reinstalled Raven or restored their computer. Then compare security words. Raven never blocks Sara by itself.
+  [compare_words]
+SEC_OBJECT_REPLAY (22)
+  Old messages from Sara arrived again
+  Raven didn't show them twice.
+  This can happen when Sara restored their computer from a backup. Ask Sara, then compare security words.
+  [compare_words]
+SEC_INDEX_JUMP (23)
+  Some messages from Sara seem to be missing
+  Raven keeps the conversation going.
+  Nothing: a lost message or two is common. If Sara says messages are missing, compare security words.
+  [nothing]
+SEC_SESSION_UNKNOWN (24)
+  A message from Sara came over a secure connection Raven no longer has
+  Raven didn't show it. A new secure connection is set up the next time you connect.
+  Nothing. This happens after a reinstall or a restore.
+  [nothing]
+SEC_BINDING_MISMATCH (25)
+  Something claiming to be Sara used a key Raven doesn't accept
+  Raven refused it. Nothing was shown or sent.
+  Compare security words with Sara before you continue. If Sara removed an old computer, this is expected.
+  [compare_words]
+SEC_REVOKED_DEVICE_USED (26)
+  Something claiming to be Sara used a key Raven doesn't accept
+  Raven refused it. Nothing was shown or sent.
+  Compare security words with Sara before you continue. If Sara removed an old computer, this is expected.
+  [compare_words]
+SEC_KEY_CHANGE_ATTEMPT (27)
+  An invite had a different key from the Sara you verified
+  Raven kept the old key.
+  If Sara really has a new key (a new computer or a reinstall), compare security words with Sara before you add it. If not, ignore that invite.
+  [compare_words]
+SEC_PREKEY_ROLLBACK (28)
+  Sara's Raven offered an older key for new conversations
+  Raven kept using the newer one.
+  This can happen when Sara restored a backup. Ask Sara; if Sara didn't, compare security words.
+  [compare_words]
+SEC_ADDRESS_IMPOSTOR (29)
+  Something else answered at Sara's old address
+  Raven didn't introduce you.
+  Nothing. Your message waits until Sara connects, or you meet.
+  [nothing]
+SEC_CAPABILITY_DOWNGRADE (30), alert
+  Sara's Raven now offers an older security method than before
+  Raven didn't use it. Your earlier messages are not affected.
+  If Sara didn't install an older version, someone may be pretending to be Sara. Compare security words first.
+  [compare_words]
+SEC_CAPABILITY_DOWNGRADE (30), warning
+  Sara's Raven turned off a privacy feature
+  Messages still go, but people on the network can see more about them again.
+  Ask Sara whether they changed their Raven. If not, compare security words with Sara.
+  [compare_words]
+SEC_CAPABILITY_DOWNGRADE (30), notice
+  Sara's Raven no longer offers a feature it offered before
+  Nothing changed for your messages.
+  Nothing.
+  [nothing]
+SEC_CONTACT_MALFORMED (31)
+  Sara's Raven sent something Raven could not read
+  Raven ignored it.
+  Nothing. This can happen when one of you runs a much older or newer Raven.
+  [nothing]
+SEC_PAIRINIT_FLOOD (32)
+  Sara's Raven asked to start new secure connections many times
+  Raven answered only within its limits.
+  If it keeps happening, ask Sara whether their Raven works normally.
+  [ask_them]
+SEC_RESET_LOOP (33)
+  Raven and Sara's Raven keep starting over
+  Raven pauses starting over for a while.
+  Ask Sara whether their Raven was reinstalled or restored more than once.
+  [ask_them]
+SEC_CLOCK_SKEW (34)
+  Sara's clock and yours differ by more than 5 minutes
+  Raven couldn't set up a secure connection.
+  Check the time and time zone on both computers.
+  [check_clock]
+SEC_PAIR_SEED_ROOT (35)
+  Sara's Raven found yours with your pair's fixed key, not the changing one
+  Raven let it through. Nothing changed for your messages.
+  Nothing. This happens when one of you reinstalled Raven; the next connection agrees on a new changing key.
+  [nothing]
+SEC_CUSTODIAN_BAD_OBJECT (40)
+  Mail that came through Rena's computer failed Raven's checks
+  Raven didn't show it.
+  Tell Rena in person: Rena may not know.
+  [ask_them]
+SEC_CUSTODIAN_UNREQUESTED (41)
+  Rena's computer handed over mail Raven didn't ask for
+  Raven didn't show it.
+  Tell Rena in person: Rena may not know.
+  [ask_them]
+SEC_CUSTODIAN_REPLAY (42)
+  Rena's computer handed over mail Raven already had
+  Raven didn't show it twice.
+  Nothing.
+  [nothing]
+SEC_DEPOSITOR_FLOOD (43)
+  Rena asked your computer to hold a lot of mail
+  Raven held only what fits its limits.
+  Nothing.
+  [nothing]
+SEC_DEPOSITOR_BAD_OBJECT (44)
+  Mail Rena left with your computer failed Raven's checks
+  Raven didn't keep it.
+  Tell Rena in person: Rena's Raven may need an update.
+  [ask_them]
+SEC_RELAY_NO_RECEIPT (45)
+  Messages through a relay often didn't arrive
+  Raven sent them another way.
+  Nothing.
+  [nothing]
+SEC_RELAY_LINK_BROKEN (46)
+  A relay broke a connection to a friend
+  Raven noticed it and tried again.
+  Nothing.
+  [nothing]
+SEC_LETTER_BAD (47)
+  A sealed letter that came through Rena's computer failed Raven's checks
+  Raven didn't show it.
+  Tell Rena in person: Rena may not know.
+  [ask_them]
+SEC_HANDOFF_REFUSED (48)
+  Rena's computer didn't pass mail on
+  Raven kept the mail and tries another way.
+  Nothing.
+  [nothing]
+SEC_KNOCK_FAIL (49)
+  A nearby device failed Raven's greeting
+  Raven ignored it.
+  Nothing.
+  [nothing]
+SEC_LOCAL_ROLLBACK (60)
+  Raven's data on this computer looks older than it should, or was changed outside Raven
+  Raven noted it.
+  If you restored a backup, this is expected. If not, someone may have had this computer. Compare security words with your friends when you meet.
+  [compare_words]
+SEC_UNLOCK_FAILED (61)
+  Someone typed a wrong Raven passphrase on this computer
+  Raven stayed locked.
+  If it wasn't you, keep this computer with you and lock it when you leave it.
+  [nothing]
+SEC_ADVISORY_FORGED (70)
+  A security update passed on by Sara failed Raven's checks
+  Raven didn't use it.
+  Nothing. Get Raven's updates only from a source you trust.
+  [nothing]
+SEC_ADVISORY_ROLLBACK (71)
+  An older security update passed on by Sara arrived
+  Raven kept the newer one.
+  Nothing.
+  [nothing]
+SEC_ADVISORY_EQUIVOCATION (72)
+  Two different security updates with the same number passed on by Sara arrived
+  Raven used neither.
+  Get Raven's updates only from a source you trust, and tell your friends.
+  [nothing]
+SEC_BUNDLE_FORGED (73)
+  A Raven release passed on by Sara failed Raven's checks
+  Raven didn't install it.
+  Nothing. Get Raven only from a source you trust.
+  [nothing]
+SEC_UPDATE_UNLOGGED (74)
+  A security update passed on by Sara was not in Raven's public update record
+  Raven didn't use it.
+  Nothing.
+  [nothing]
+SEC_BUNDLE_DOWNGRADE (75)
+  An older Raven release passed on by Sara was offered
+  Raven kept this version.
+  Nothing.
+  [nothing]
+SEC_LOG_SPLIT_VIEW (76)
+  Raven's public update record looks different from what your friends see
+  Raven stopped taking new updates until it matches again.
+  Get Raven's updates only from a source you trust, and tell your friends.
+  [nothing]
+SEC_ADVISORY_APPLIED (77)
+  Raven applied a security update passed on by Sara
+  Raven changed what it allows, as the update said.
+  Nothing.
+  [nothing]
+SEC_UPDATE_FLOOD (78)
+  Sara's Raven offered many security updates
+  Raven took only what fits its limits.
+  Nothing.
+  [nothing]

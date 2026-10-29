@@ -1,0 +1,26 @@
+{
+  "description": "the response of pcp_map_v4_resp_001 followed by option 128 (optional to process, length 1, padded): skipped, the reply decodes the same",
+  "deterministic": true,
+  "expected": {
+    "epoch": 3600,
+    "kind": "pcp",
+    "lifetime": 7200,
+    "map": {
+      "external_ip": "11.0.2.9",
+      "external_port": 7423,
+      "internal_port": 7423,
+      "nonce_hex": "117a021fb22cdbf08252fdff",
+      "protocol": 6
+    },
+    "opcode": 1,
+    "result": 0
+  },
+  "inputs": {
+    "reply_hex": "0281000000001c2000000e10000000000000000000000000117a021fb22cdbf08252fdff060000001cff1cff00000000000000000000ffff0b000209800000012a000000",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "PCP MAP response with an optional option",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

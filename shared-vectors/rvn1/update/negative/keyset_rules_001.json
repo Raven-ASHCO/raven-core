@@ -1,0 +1,134 @@
+{
+  "description": "Every refusal of RAVEN_SECURITY_ADVISORY_V1 §2.1 (header, algorithm, count, length, threshold, then each key: a canonical encoding of a curve point not of small order, and not listed before), each case breaking one rule",
+  "deterministic": true,
+  "expected": {
+    "errors": [
+      {
+        "error": "BAD_LENGTH",
+        "name": "empty"
+      },
+      {
+        "error": "BAD_LENGTH",
+        "name": "header_2_bytes"
+      },
+      {
+        "error": "UNSUPPORTED_ALG",
+        "name": "alg_0"
+      },
+      {
+        "error": "UNSUPPORTED_ALG",
+        "name": "alg_2"
+      },
+      {
+        "error": "BAD_COUNT",
+        "name": "n_0"
+      },
+      {
+        "error": "BAD_COUNT",
+        "name": "n_9"
+      },
+      {
+        "error": "BAD_LENGTH",
+        "name": "one_byte_short"
+      },
+      {
+        "error": "BAD_LENGTH",
+        "name": "one_byte_over"
+      },
+      {
+        "error": "BAD_THRESHOLD",
+        "name": "threshold_0"
+      },
+      {
+        "error": "BAD_THRESHOLD",
+        "name": "threshold_4_of_3"
+      },
+      {
+        "error": "WEAK_KEY",
+        "name": "identity_point"
+      },
+      {
+        "error": "WEAK_KEY",
+        "name": "small_order_point"
+      },
+      {
+        "error": "WEAK_KEY",
+        "name": "not_on_curve"
+      },
+      {
+        "error": "WEAK_KEY",
+        "name": "non_canonical_y"
+      },
+      {
+        "error": "DUPLICATE_KEY",
+        "name": "duplicate_key"
+      }
+    ]
+  },
+  "inputs": {
+    "cases": [
+      {
+        "key_set_hex": "",
+        "name": "empty"
+      },
+      {
+        "key_set_hex": "0102",
+        "name": "header_2_bytes"
+      },
+      {
+        "key_set_hex": "000203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "alg_0"
+      },
+      {
+        "key_set_hex": "020203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "alg_2"
+      },
+      {
+        "key_set_hex": "010100",
+        "name": "n_0"
+      },
+      {
+        "key_set_hex": "0102098a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf18a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c1398f62c6d1a457c51ba6a4b5f3dbd2f69fca93216218dc8997e416bd17d93cafd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618",
+        "name": "n_9"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080",
+        "name": "one_byte_short"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce00",
+        "name": "one_byte_over"
+      },
+      {
+        "key_set_hex": "010003d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "threshold_0"
+      },
+      {
+        "key_set_hex": "010403d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "threshold_4_of_3"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737010000000000000000000000000000000000000000000000000000000000000017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "identity_point"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "small_order_point"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737020000000000000000000000000000000000000000000000000000000000000017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "not_on_curve"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "name": "non_canonical_y"
+      },
+      {
+        "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "name": "duplicate_key"
+      }
+    ]
+  },
+  "name": "keyset_rules_001",
+  "protocol_version": "rvn1"
+}

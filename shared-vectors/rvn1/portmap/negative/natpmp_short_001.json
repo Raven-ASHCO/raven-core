@@ -1,0 +1,15 @@
+{
+  "description": "15 of the 16 bytes of natpmp_map_resp_001",
+  "deterministic": true,
+  "expected": {
+    "error": "length"
+  },
+  "inputs": {
+    "reply_hex": "0082000000000e101cff1cff00001c",
+    "sent_natpmp_op": 2,
+    "sent_pcp_op": null
+  },
+  "name": "NAT-PMP mapping response cut short",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

@@ -1,0 +1,766 @@
+# Raven serverless lab CI — ML-KEM incremental, Full Braid Slice 2, Task 0A*,
+# C7 netns NAT simulation (libp2p relay + DCUtR).
+# Fail-closed without opt-in. NOT B1 required checks. Split from
+# raven-serverless.yml so a lab failure cannot fail the product workflow.
+name: Raven Serverless Lab
+
+on:
+  push:
+    paths:
+      - "node/**"
+      - "protocol/**"
+      - "shared-vectors/**"
+      - "ios-native/RAVEN/Libp2pBridge/**"
+      - "ios-native/RAVEN/RAVEN/Core/Config/FeatureFlags.swift"
+      - "ios-native/RAVEN/RAVEN/Core/Protocol/**"
+      - "ios-native/RAVEN/RAVEN/Core/Mesh/**"
+      - "ios-native/RAVEN/RAVEN/Core/Transport/**"
+      - "ios-native/RAVEN/RAVEN/Core/Messaging/**"
+      - "ios-native/RAVEN/RAVEN/Core/Security/ATSAM/**"
+      - "ios-native/RAVEN/RAVEN/Core/Security/LAN/**"
+      - "ios-native/RAVEN/RAVEN/Core/Security/MessageContentSealer.swift"
+      - "ios-native/RAVEN/RAVEN.xcodeproj/**"
+      - "ios-native/RAVEN/RAVEN/App/**"
+      - "ios-native/RAVEN/RAVEN/Features/Contacts/**"
+      - "ios-native/RAVEN/RAVEN/Features/QRCode/**"
+      - "ios-native/RAVEN/RAVEN/Features/Settings/RavenServerlessLanSettingsView.swift"
+      - "ios-native/RAVEN/RAVENTests/**"
+      - "ios-native/RAVEN/RAVEN/**/*.swift"
+      - "RAVEN-WatchApp/RAVEN-Watch/**/*.swift"
+      - "node/scripts/ios_lan_kat.sh"
+      - "node/scripts/ios_lan_lab_checklist.md"
+      - "scripts/secret_history_scan.sh"
+      - "docs/MIGRATION_SERVERLESS_V1.md"
+      - ".github/workflows/raven-serverless.yml"
+      - ".github/workflows/raven-serverless-lab.yml"
+  pull_request:
+    paths:
+      - "node/**"
+      - "protocol/**"
+      - "shared-vectors/**"
+      - "ios-native/RAVEN/Libp2pBridge/**"
+      - "ios-native/RAVEN/RAVEN/Core/Config/FeatureFlags.swift"
+      - "ios-native/RAVEN/RAVEN/Core/Protocol/**"
+      - "ios-native/RAVEN/RAVEN/Core/Mesh/**"
+      - "ios-native/RAVEN/RAVEN/Core/Transport/**"
+      - "ios-native/RAVEN/RAVEN/Core/Messaging/**"
+      - "ios-native/RAVEN/RAVEN/Core/Security/ATSAM/**"
+      - "ios-native/RAVEN/RAVEN/Core/Security/LAN/**"
+      - "ios-native/RAVEN/RAVEN/Core/Security/MessageContentSealer.swift"
+      - "ios-native/RAVEN/RAVEN.xcodeproj/**"
+      - "ios-native/RAVEN/RAVEN/App/**"
+      - "ios-native/RAVEN/RAVEN/Features/Contacts/**"
+      - "ios-native/RAVEN/RAVEN/Features/QRCode/**"
+      - "ios-native/RAVEN/RAVEN/Features/Settings/RavenServerlessLanSettingsView.swift"
+      - "ios-native/RAVEN/RAVENTests/**"
+      - "ios-native/RAVEN/RAVEN/**/*.swift"
+      - "RAVEN-WatchApp/RAVEN-Watch/**/*.swift"
+      - "node/scripts/ios_lan_kat.sh"
+      - "node/scripts/ios_lan_lab_checklist.md"
+      - "scripts/secret_history_scan.sh"
+      - "docs/MIGRATION_SERVERLESS_V1.md"
+      - ".github/workflows/raven-serverless.yml"
+      - ".github/workflows/raven-serverless-lab.yml"
+  workflow_dispatch:
+    inputs:
+      nat_sim_repeat:
+        description: "C7 nat-sim-linux: run the required netns cases N times (1-5), for the green-streak record"
+        required: false
+        default: "1"
+        type: choice
+        options: ["1", "2", "3", "4", "5"]
+
+# Least privilege: jobs only read the repository. Third-party actions are
+# pinned to full commit SHAs (the comment names the release); bump them
+# deliberately. RUST_TOOLCHAIN pins rustc/clippy so a new stable release cannot
+# change CI results without a code change — raven-toolchain-canary.yml tracks
+# latest stable separately.
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.98.0"
+
+concurrency:
+  group: raven-serverless-lab-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tree-presence:
+    name: Detect optional product trees
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ios_app: ${{ steps.detect.outputs.ios_app }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: detect
+        name: Record whether ios-native/RAVEN exists
+        run: |
+          set -euo pipefail
+          if [[ -f ios-native/RAVEN/RAVEN.xcodeproj/project.pbxproj ]]; then
+            echo "ios_app=true" >> "$GITHUB_OUTPUT"
+            echo "ios-native/RAVEN present"
+          else
+            echo "ios_app=false" >> "$GITHUB_OUTPUT"
+            echo "ios-native/RAVEN absent — iOS lab jobs will skip; Linux/Windows lab stays fail-closed"
+          fi
+
+  mlkem768-incremental-portable:
+    name: ML-KEM-768 incremental (portable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: node
+    env:
+      CARGO_TARGET_DIR: target/libcrux-portable
+      LIBCRUX_DISABLE_SIMD128: "1"
+      LIBCRUX_DISABLE_SIMD256: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Test portable incremental ML-KEM-768
+        run: cargo test --locked -p raven-core --features mlkem768-incremental-lab --lib mlkem768_incremental
+      - name: Dump portable Encaps1 state
+        env:
+          RAVEN_DUMP_ENCAPS1_STATE: "1"
+          RAVEN_DUMP_ENCAPS1_STATE_PATH: ${{ github.workspace }}/node/target/libcrux-portable/mlkem768-encaps1-state.hex
+        run: |
+          set -euo pipefail
+          rm -f "$RAVEN_DUMP_ENCAPS1_STATE_PATH"
+          cargo test --locked -p raven-core --features mlkem768-incremental-lab \
+            --lib mlkem768_incremental::feature_smoke::dump_mlkem768_incremental_encaps1_state \
+            -- --exact --ignored
+          test -s "$RAVEN_DUMP_ENCAPS1_STATE_PATH"
+      - name: Upload portable Encaps1 state
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mlkem768-encaps1-portable
+          path: node/target/libcrux-portable/mlkem768-encaps1-state.hex
+          if-no-files-found: error
+      - name: Guard against libcrux from_seed expansion
+        run: |
+          set -euo pipefail
+          if grep -Fq -- \
+            "KeyPairCompressedBytes::from_seed" \
+            crates/raven-core/src/mlkem768_incremental.rs; then
+            echo "forbidden KeyPairCompressedBytes::from_seed path found" >&2
+            exit 1
+          fi
+      - name: Check incremental ML-KEM-768 fixture
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 -m pip install -q -r protocol/reference/requirements.txt
+          python3 -m pytest protocol/reference/tests/test_mlkem768_incremental_check.py -q
+      - name: Build incremental ML-KEM-768 FFI (debug)
+        run: cargo build --locked -p raven-mlkem768-incremental-ffi
+      - name: Release incremental ML-KEM-768 feature gate
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          if cargo build --locked --release -p raven-core \
+            --features mlkem768-incremental-lab >"$log" 2>&1; then
+            echo "mlkem768-incremental-lab unexpectedly built in release mode" >&2
+            rm -f "$log"
+            exit 1
+          fi
+          if ! grep -Fq -- \
+            "mlkem768-incremental-lab is forbidden in release builds" "$log"; then
+            echo "mlkem768-incremental-lab release gate failed for an unrelated reason" >&2
+            tail -n 80 "$log" >&2
+            rm -f "$log"
+            exit 1
+          fi
+          rm -f "$log"
+
+  full-braid-lab:
+    name: Full Braid Slice 2 lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: node
+    env:
+      CARGO_TARGET_DIR: target/full-braid-lab
+      LIBCRUX_DISABLE_SIMD128: "1"
+      LIBCRUX_DISABLE_SIMD256: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      # Signal SPQR (full-braid-lab → prost-build) needs protoc on the runner.
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: full-braid-lab
+      - name: Test Full Braid (Rust)
+        run: |
+          cargo test --locked -p raven-core --features full-braid-lab --lib hybrid_ratchet_v2_full_braid
+          cargo test --locked -p raven-fb-ffi --lib
+          cargo test --locked -p raven-core --features full-braid-lab --test adversarial_atsam
+      - name: Clippy Full Braid
+        run: |
+          cargo clippy --locked -p raven-core --features full-braid-lab --all-targets -- -D warnings
+          cargo clippy --locked -p raven-fb-ffi --all-targets -- -D warnings
+      - name: rustfmt Full Braid
+        run: |
+          rustfmt --check crates/raven-core/src/hybrid_ratchet_v2_full_braid/*.rs
+          rustfmt --check crates/raven-fb-ffi/src/lib.rs
+      - name: Python Full Braid reference
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 -m pip install -q -r protocol/reference/requirements.txt
+          python3 -m pytest protocol/reference/tests/test_full_braid.py -q
+      - name: Build Full Braid FFI (debug)
+        run: cargo build --locked -p raven-fb-ffi
+      - name: Release Full Braid feature gate
+        run: |
+          set -euo pipefail
+          core_log="$(mktemp)"
+          if cargo build --locked --release -p raven-core \
+            --features full-braid-lab >"$core_log" 2>&1; then
+            echo "full-braid-lab unexpectedly built in release mode" >&2
+            rm -f "$core_log"
+            exit 1
+          fi
+          if ! grep -Fq -- \
+            "mlkem768-incremental-lab is forbidden in release builds" \
+            "$core_log"; then
+            echo "raven-core full-braid-lab release gate missed exact diagnostic" >&2
+            tail -n 80 "$core_log" >&2
+            rm -f "$core_log"
+            exit 1
+          fi
+          rm -f "$core_log"
+
+          ffi_log="$(mktemp)"
+          if cargo build --locked --release -p raven-fb-ffi --no-default-features >"$ffi_log" 2>&1; then
+            echo "raven-fb-ffi unexpectedly built in release mode" >&2
+            rm -f "$ffi_log"
+            exit 1
+          fi
+          if ! grep -Fq -- \
+            "raven-fb-ffi is lab-only and must not be linked in Release/App Store builds" \
+            "$ffi_log"; then
+            echo "raven-fb-ffi release gate missed exact diagnostic" >&2
+            tail -n 80 "$ffi_log" >&2
+            rm -f "$ffi_log"
+            exit 1
+          fi
+          rm -f "$ffi_log"
+      - name: Production remains off (vectors + no app callsites)
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path(".")
+          for name in (
+              "full_braid_sm_round_001.json",
+              "full_braid_full_exchange_2pq_2dh_001.json",
+          ):
+              vector = root / "shared-vectors/rvn1/atsam" / name
+              data = json.loads(vector.read_text())
+              assert data.get("production_enabled") is False, (name, data.get("production_enabled"))
+              assert data.get("lab_only") is True, (name, data.get("lab_only"))
+          exchange = json.loads(
+              (root / "shared-vectors/rvn1/atsam/full_braid_full_exchange_2pq_2dh_001.json").read_text()
+          )
+          assert len(exchange.get("aead_checkpoints") or []) == 4, "expected 4 AEAD checkpoints"
+          app = root / "ios-native/RAVEN/RAVEN"
+          hits = []
+          for path in app.rglob("*.swift"):
+              text = path.read_text(errors="ignore")
+              if "ATSAMFullBraid" in text or "raven_fb_" in text or "RAVEN_FULL_BRAID_FFI" in text:
+                  hits.append(str(path))
+          if hits:
+              raise SystemExit(f"Full Braid production callsites: {hits}")
+          print("production_off OK")
+          PY
+
+  full-braid-lab-ios:
+    name: Full Braid Slice 2 lab (iOS)
+    needs: tree-presence
+    if: needs.tree-presence.outputs.ios_app == 'true'
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/node/target/full-braid-ios-lab
+      LIBCRUX_DISABLE_SIMD128: "1"
+      LIBCRUX_DISABLE_SIMD256: "1"
+      IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      # raven-fb-ffi → raven-core/full-braid-lab → SPQR prost-build needs protoc.
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: full-braid-lab-ios
+      - name: Ensure ripgrep
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            brew install ripgrep
+          fi
+      - name: Full Braid Swift FFI lab gate
+        run: bash ./node/scripts/ios_full_braid_lab_gate.sh
+
+  # Task 0A.5 — SQLCipher packaging aggregate stop-line (0A.1–0A.4).
+  # Does not authorize Task 0B / production / commit.
+  full-braid-task0a-provenance:
+    name: Full Braid Task 0A provenance (0A.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # Not hermetic: the selftest and regenerate_sqlcipher_4_17.sh clone upstream SQLCipher
+      # from github.com, so a transient GitHub outage fails this step without any change here.
+      - name: SQLCipher regen/verify selftest (clones upstream from github.com)
+        working-directory: ${{ github.workspace }}
+        env:
+          RAVEN_0A5_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash ./node/scripts/full_braid_task0a_ci_gate.sh provenance
+      # The fork's ordinary sqlite3/ amalgamation is compiled into every default
+      # build; it and the build.rs SHA-256 pins must match the checksummed
+      # crates.io libsqlite3-sys 0.38.2 archive byte for byte.
+      - name: libsqlite3-sys-raven ordinary SQLite provenance vs crates.io
+        working-directory: ${{ github.workspace }}
+        run: bash ./node/scripts/verify_sqlcipher_fork_ordinary_sqlite_upstream.sh
+
+  full-braid-task0a-linux:
+    name: Full Braid Task 0A Linux (0A.2/0A.4/0A.5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: node
+    env:
+      CARGO_TARGET_DIR: target/full-braid-task0a
+      RAVEN_EXPECT_SQLCIPHER_4_17_0: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: full-braid-task0a-linux
+      - name: Task 0A Linux CI gate
+        working-directory: ${{ github.workspace }}
+        env:
+          RAVEN_0A5_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash ./node/scripts/full_braid_task0a_ci_gate.sh linux
+
+  full-braid-task0a-macos:
+    name: Full Braid Task 0A macOS + iOS (0A.2–0A.4)
+    needs: tree-presence
+    if: needs.tree-presence.outputs.ios_app == 'true'
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/node/target/full-braid-task0a-macos
+      RAVEN_EXPECT_SQLCIPHER_4_17_0: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: full-braid-task0a-macos
+      - name: Task 0A macOS/iOS CI gate (incl. cross-provider)
+        working-directory: ${{ github.workspace }}
+        env:
+          RAVEN_0A5_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash ./node/scripts/full_braid_task0a_ci_gate.sh macos
+
+  full-braid-task0a-windows:
+    name: Full Braid Task 0A Windows MSVC (0A.2/0A.4)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: node
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: target/full-braid-task0a-windows
+      RAVEN_EXPECT_SQLCIPHER_4_17_0: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: full-braid-task0a-windows
+      # Do not load vcvars here: VS 2026 env breaks rustc host build scripts
+      # (proc-macro2). rustc finds MSVC itself; the gate prepends dumpbin/nmake
+      # and Strawberry Perl for openssl-src.
+      - name: Verify SQLCipher sqlite3.c pin (LF bytes)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, sys
+          path = pathlib.Path("node/third_party/libsqlite3-sys-raven/sqlcipher/sqlite3.c")
+          got = hashlib.sha256(path.read_bytes()).hexdigest()
+          expect = "8adaff6b464052a74e7adaa3cfa2725400f48eca68f47856fa806eaf30bdf2c9"
+          if got != expect:
+              print(f"FAIL: {path} sha256={got} expected={expect}", file=sys.stderr)
+              sys.exit(1)
+          print(f"ok {path} {got}")
+          PY
+      - name: Task 0A Windows CI gate
+        working-directory: ${{ github.workspace }}
+        run: bash ./node/scripts/full_braid_task0a_ci_gate.sh windows
+
+  mlkem768-incremental-avx2:
+    name: ML-KEM-768 incremental (AVX2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: mlkem768-incremental-portable
+    defaults:
+      run:
+        working-directory: node
+    env:
+      CARGO_TARGET_DIR: target/libcrux-avx2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Confirm AVX2 available
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          if ! grep -qw avx2 /proc/cpuinfo; then
+            echo "AVX2 CPU feature required for this job; x86_64 alone is insufficient" >&2
+            exit 1
+          fi
+      - name: Assert Rust runtime AVX2 detection
+        env:
+          RAVEN_REQUIRE_AVX2: "1"
+        run: |
+          cargo test --locked -p raven-core --features mlkem768-incremental-lab \
+            --lib mlkem768_incremental::feature_smoke::require_avx2_when_gated \
+            -- --exact --nocapture
+      - name: Test AVX2 incremental ML-KEM-768
+        run: cargo test --locked -p raven-core --features mlkem768-incremental-lab --lib mlkem768_incremental
+      - name: Dump AVX2 Encaps1 state
+        env:
+          RAVEN_DUMP_ENCAPS1_STATE: "1"
+          RAVEN_DUMP_ENCAPS1_STATE_PATH: ${{ github.workspace }}/node/target/libcrux-avx2/mlkem768-encaps1-state.hex
+        run: |
+          set -euo pipefail
+          rm -f "$RAVEN_DUMP_ENCAPS1_STATE_PATH"
+          cargo test --locked -p raven-core --features mlkem768-incremental-lab \
+            --lib mlkem768_incremental::feature_smoke::dump_mlkem768_incremental_encaps1_state \
+            -- --exact --ignored
+          test -s "$RAVEN_DUMP_ENCAPS1_STATE_PATH"
+      - name: Download portable Encaps1 state
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mlkem768-encaps1-portable
+          path: node/target/libcrux-portable
+      - name: Compare portable and AVX2 Encaps1 states
+        run: |
+          diff -u \
+            target/libcrux-portable/mlkem768-encaps1-state.hex \
+            target/libcrux-avx2/mlkem768-encaps1-state.hex
+
+  mlkem768-incremental-neon:
+    name: ML-KEM-768 incremental (NEON)
+    runs-on: macos-14
+    timeout-minutes: 20
+    needs: mlkem768-incremental-portable
+    defaults:
+      run:
+        working-directory: node
+    env:
+      CARGO_TARGET_DIR: target/libcrux-neon
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Confirm arm64 runner
+        run: test "$(uname -m)" = arm64
+      - name: Test NEON incremental ML-KEM-768
+        run: cargo test --locked -p raven-core --features mlkem768-incremental-lab --lib mlkem768_incremental
+      - name: Dump NEON Encaps1 state
+        env:
+          RAVEN_DUMP_ENCAPS1_STATE: "1"
+          RAVEN_DUMP_ENCAPS1_STATE_PATH: ${{ github.workspace }}/node/target/libcrux-neon/mlkem768-encaps1-state.hex
+        run: |
+          set -euo pipefail
+          rm -f "$RAVEN_DUMP_ENCAPS1_STATE_PATH"
+          cargo test --locked -p raven-core --features mlkem768-incremental-lab \
+            --lib mlkem768_incremental::feature_smoke::dump_mlkem768_incremental_encaps1_state \
+            -- --exact --ignored
+          test -s "$RAVEN_DUMP_ENCAPS1_STATE_PATH"
+      - name: Download portable Encaps1 state
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mlkem768-encaps1-portable
+          path: node/target/libcrux-portable
+      - name: Compare portable and NEON Encaps1 states
+        run: |
+          diff -u \
+            target/libcrux-portable/mlkem768-encaps1-state.hex \
+            target/libcrux-neon/mlkem768-encaps1-state.hex
+
+  # C7 (transports design §6.4): libp2p relay + DCUtR through simulated NATs in
+  # Linux network namespaces (relay R in "pub", two nft-masquerade routers with
+  # named kernel counters of every packet not to or from R, one raven-node
+  # service behind each) on a global-looking simulated Internet (11.0.0.0/16:
+  # hole punching offers and dials global addresses only; the namespaces have
+  # no route out). Every send must carry its path= label. Required cases,
+  # RAVEN_NETNS_REPEAT times (dispatch input nat_sim_repeat, 1 on pushes):
+  # "cone" (R14 first: a stranger in R's circle is refused by B's peer gate
+  # with 0 packets past R on the counters; then A and B hole-punch and the
+  # next message is path=hole_punched with the direct path counted),
+  # "symmetric" (every message relayed; an upgrade means the NAT is not
+  # symmetric, a failure), "cone-private" (a 10.0 "Internet": relayed, 0
+  # packets out of either LAN to anything but R) and "swap" (Phase 0b: netwatch
+  # sees A's uplink move, the p2p host re-homes on the same relay, A's queued
+  # messages arrive once). Advisory, once: "shifted", "v6fw", "reach", "hints"
+  # (route hints: a direct path learned through RRH1, then no packet to the
+  # contact's old address after its uplink swap; the only case with
+  # RAVEN_LAB_ROUTE_HINTS=1, until Phase 1's 10-green rule applies to it) and
+  # "only443" (the relay kit: A behind an egress filter that lets only TCP
+  # 443 out reserves over the relay's 443 fallback and is relayed both ways;
+  # then over a friend relay's TCP 443 with nothing sent to 7427), "friend"
+  # (friend relays: B and C behind cone and symmetric NATs pick relays from
+  # three operators' offers only and are relayed to each other),
+  # "friend-sleep" (an operator stopped with SIGSTOP is replaced once, with
+  # no second replacement after it continues) and "diag" (why a contact
+  # cannot be reached: both_nat with no relay, then relay_asleep while the
+  # relay is stopped with SIGSTOP, then contact_offline). The cutoff pack's
+  # node/scripts/netns_offline.sh (advisory, once, its own step): Raven with
+  # no internet provider: "lan-noprovider" (one bridge, no default route),
+  # "router-dead-uplink" (a router whose uplink drops everything and DNS,
+  # then a p2p-only contact behind it), "hotspot-ap" (an access point with
+  # no uplink, stale saved addresses, client isolation and custody through
+  # the AP), "cable-linklocal" (169.254/16 only; a listener bound once its
+  # address appears) and "three-rooms" (route hints and custody: a custodian
+  # carried between two rooms).
+  # Debug build + RAVEN_LAB_TEST_A=1 while P2P_PRODUCTION_ENABLED=false. A software
+  # substitute: it does not replace physical rows R7b / R8
+  # (docs/NAT_SOFTWARE_SIM.md). The script exits 2 when it cannot run here
+  # (no namespaces, or an nft preflight finds no named counters or no
+  # masquerade random,fully-random): that fails the step, it is never a skip.
+  # Lab, not a product check (it lives here, not in raven-serverless.yml):
+  # independent of every other job. Green streak: continue-on-error stays
+  # until 10 consecutive green iterations of the required cases on the hosted
+  # image (for example two workflow_dispatch runs with nat_sim_repeat=5; the
+  # script prints "green iterations ... N of M") are recorded here by run id,
+  # then it is deleted. Recorded green runs: none yet. Moving the job into
+  # raven-serverless.yml as a required check is the owner's P2P flip commit.
+  # Hosted runners have passwordless sudo.
+  nat-sim-linux:
+    name: NAT simulation (netns, DCUtR cone + symmetric)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: nat-sim-linux
+      # Built as the runner user; the script itself never runs cargo (and refuses
+      # a release build path: the lab unlock only works in debug builds).
+      - name: Debug build (locked)
+        run: cargo build --locked -p ash -p raven-node
+      - name: Install nftables + iproute2 if missing
+        run: |
+          set -euo pipefail
+          if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends nftables iproute2
+          fi
+          # The lan-move run's bridge capture (it notes and skips the check
+          # without tcpdump).
+          if ! command -v tcpdump >/dev/null 2>&1; then
+            { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tcpdump; } \
+              || echo "tcpdump not installed: lan-move runs without its bridge capture"
+          fi
+          # Failure dumps only (the script adds `conntrack -L` when present).
+          if ! command -v conntrack >/dev/null 2>&1; then
+            { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends conntrack; } \
+              || echo "conntrack not installed: failure dumps go without the conntrack table"
+          fi
+          # Phase 4 (owner decision O4-15): the NAT-PMP/PCP server of the
+          # advisory pcp, pcp-cgn and v6pin runs, which start it in a router
+          # namespace themselves; this job only, nothing ships with it. The
+          # package's own service never runs on the runner.
+          if ! command -v miniupnpd >/dev/null 2>&1; then
+            { sudo apt-get update -q \
+              && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends miniupnpd-nftables; } \
+              || echo "miniupnpd not installed: the pcp runs exit 2 (cannot run here)"
+          fi
+          sudo systemctl disable --now miniupnpd 2>/dev/null || true
+          nft --version
+          ip -V
+      # The input reaches the script through env only, never inlined in `run`
+      # (the script also refuses anything but 1-5 with exit 2).
+      - name: netns NAT DCUtR test (cone + R14 stranger, symmetric, cone-private, uplink swap)
+        env:
+          NAT_SIM_REPEAT: ${{ inputs.nat_sim_repeat || '1' }}
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" RAVEN_NETNS_ALLOW_SUDO=1 \
+            RAVEN_NETNS_REPEAT="$NAT_SIM_REPEAT" \
+            RAVEN_NETNS_TMP="$RUNNER_TEMP/netns-nat" \
+            bash scripts/netns_nat_dcutr.sh
+      # Advisory cases, once, also after a required failure: reported in the
+      # log (with every log of a failed case), never part of the streak.
+      # Phase 3's lan-* runs (the LAN listener on every interface and the LAN
+      # beacon, their lab switches in those runs only) are among them.
+      # So is Phase 3's custody run (friend custody through a public
+      # custodian; the WAN custody switch in that run only), and
+      # Phase 4's port-mapping runs (pcp, pcp-cgn, v6pin: miniupnpd above)
+      # and NAT classification runs (classify, punch-skip; the NAT_CLASS lab
+      # switch in those runs only), and Phase 6a's learn-flaky (learning
+      # connectivity's switch in its second half only), each advisory until
+      # 10 green runs in a row.
+      - name: netns advisory runs (shifted, v6fw, reach, hints, only443, friend, friend-sleep, diag, lan-move, lan-ll, lan-isolated, lan-nonlocal, custody, pcp, pcp-cgn, v6pin, classify, punch-skip, learn-flaky)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" RAVEN_NETNS_ALLOW_SUDO=1 \
+            RAVEN_NETNS_CASES="shifted v6fw reach hints only443 friend friend-sleep diag lan-move lan-ll lan-isolated lan-nonlocal custody pcp pcp-cgn v6pin classify punch-skip learn-flaky" \
+            RAVEN_NETNS_TMP="$RUNNER_TEMP/netns-nat-advisory" \
+            bash scripts/netns_nat_dcutr.sh
+      # The cutoff pack's offline cases (netns_offline.sh), once, advisory:
+      # debug build, lab switches per case (RAVEN_LAB_OFFLINE, _NOISE_PIN,
+      # _TEST_A, _ROUTE_HINTS); the two cutoff gates stay false.
+      - name: netns offline advisory runs (lan-noprovider, router-dead-uplink, hotspot-ap, cable-linklocal, three-rooms)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" RAVEN_NETNS_ALLOW_SUDO=1 \
+            RAVEN_NETNS_TMP="$RUNNER_TEMP/netns-offline" \
+            bash scripts/netns_offline.sh
+      # The run dirs are root-owned (0700); only their logs/ subdirs are uploaded
+      # (public keys, cards, counts-only service logs; no key files).
+      - name: Make the run logs readable for upload
+        if: failure()
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"/netns-nat* "$RUNNER_TEMP"/netns-offline || true
+      - name: Upload netns run logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nat-sim-linux-logs
+          path: |
+            ${{ runner.temp }}/netns-nat*/*/logs/
+            ${{ runner.temp }}/netns-offline/*/logs/
+          if-no-files-found: warn
+  # Phase 4 (RWS1, protocol/RAVEN_WSS_TRANSPORT_V1.md): restrictive networks,
+  # node/scripts/netns_restrictive.sh (advisory, once). It sources
+  # netns_nat_dcutr.sh's helpers and cone topology; a relay with `--wss 443`
+  # in its own namespace, and A behind a router that lets out only TCP 443
+  # and DNS ("only443"), only TLS through a transparent gate ("tlsonly", raw
+  # libp2p dropped, WSS wins) or only an HTTPS proxy with no DNS
+  # ("proxyonly": CONNECT with the relay's name, the restricted line); each
+  # case ends 'delivered 10/10 both ways'. The lab gate and proxy are
+  # node/scripts/lib/tiny_connect_proxy.py (python3, standard library).
+  # Debug build with RAVEN_LAB_TEST_A=1 and RAVEN_LAB_WSS=1 per process;
+  # WSS_PRODUCTION_ENABLED stays false. A software substitute for the
+  # owner-run rows R8w / R8p (node/scripts/r8_only_443.sh). Exit 2 (cannot
+  # run here) fails the step, never a skip; the job is advisory.
+  restrictive-net-linux:
+    name: Restrictive networks (netns, WSS on 443, TLS-only gate, proxy only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: restrictive-net-linux
+      # Built as the runner user; the script never runs cargo.
+      - name: Debug build (locked)
+        run: cargo build --locked -p ash -p raven-node
+      - name: Install nftables + iproute2 if missing
+        run: |
+          set -euo pipefail
+          if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends nftables iproute2
+          fi
+          nft --version
+          ip -V
+          python3 --version
+      - name: Lint the scripts (shellcheck -S warning) and the lab proxy's self-test
+        run: |
+          set -euo pipefail
+          shellcheck -S warning -x scripts/netns_restrictive.sh scripts/r8_only_443.sh
+          python3 -I scripts/lib/tiny_connect_proxy.py --self-test
+      - name: netns restrictive runs (only443, tlsonly, proxyonly)
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" RAVEN_NETNS_ALLOW_SUDO=1 \
+            RAVEN_NETNS_TMP="$RUNNER_TEMP/netns-restrictive" \
+            bash scripts/netns_restrictive.sh
+      # The run dirs are root-owned (0700); only their logs/ subdirs are uploaded
+      # (public keys, cards, counts-only service logs, the gate's and the
+      # proxy's one-line-per-connection logs; no key files).
+      - name: Make the run logs readable for upload
+        if: failure()
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP"/netns-restrictive || true
+      - name: Upload netns run logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: restrictive-net-linux-logs
+          path: |
+            ${{ runner.temp }}/netns-restrictive/*/logs/
+          if-no-files-found: warn

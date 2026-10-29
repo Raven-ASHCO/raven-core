@@ -1,0 +1,475 @@
+{
+  "description": "Each accept case: the input, its canonical text (what a via is stored as) and PeerId, whether it is WSS, its TCP port, its raw and WSS siblings (section 2.3) and relay_dial_forms with the WSS gate closed, open with raw first, and open with WSS first. Each reject case: the input and the step that refuses it (raven_protocol/via.py error codes). PeerIds: Ed25519 keys 0x52 x 32 (relay) and 0x43 x 32 (contact)",
+  "deterministic": true,
+  "expected": {
+    "accept": [
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "WSS on TCP 443 (no SNI: an IP literal)",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/tcp/443/wss/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "the deprecated libp2p alias /wss, stored as /tls/ws",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/8443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/8443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/8443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/8443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/8443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/8443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/tcp/8443/tls/sni/Relay.Example.ORG/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/ip4/203.0.113.7/tcp/8443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 8443,
+        "why": "an SNI name after an IP host, lower-cased; any port",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip6/2001:db8::7/tcp/443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip6/2001:db8::7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip6/2001:db8::7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip6/2001:db8::7/tcp/443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip6/2001:db8::7/tcp/443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip6/2001:db8::7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip6/2001:DB8:0::7/tcp/443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/ip6/2001:db8::7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "an SNI name after an IPv6 host; canonical IPv6 text",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/dns4/relay.example.org/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns4/relay.example.org/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/dns4/relay.example.org/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/dns4/Relay.Example.org/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/dns4/relay.example.org/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "a DNS host (which is the SNI name), lower-cased",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/dns/relay.example.org/tcp/7423/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/dns/relay.example.org/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/dns/relay.example.org/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns/relay.example.org/tcp/7423/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/dns/relay.example.org/tcp/7423/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns/relay.example.org/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/dns/relay.example.org/tcp/7423/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/dns/relay.example.org/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 7423,
+        "why": "WSS on another port: its raw sibling is the same port",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/dns6/relay.example.net/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/dns6/relay.example.net/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/dns6/relay.example.net/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns6/relay.example.net/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/dns6/relay.example.net/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns6/relay.example.net/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/dns6/relay.example.net/tcp/443/wss/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/dns6/relay.example.net/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "/wss after a /dns6 host",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "  /ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu  ",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "surrounding spaces are trimmed",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+        "is_wss": true,
+        "peer_id": "12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+        "raw_sibling": "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+        "tcp_port": 443,
+        "why": "a WSS address that names the contact itself (a direct address)",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": false,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": null,
+        "tcp_port": 443,
+        "why": "raw TCP 443: a WSS sibling by convention (section 2.3 (b))",
+        "wss_sibling": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": false,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": null,
+        "tcp_port": 7423,
+        "why": "raw TCP on another port: no sibling",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/ip4/203.0.113.7/udp/443/quic-v1/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/ip4/203.0.113.7/udp/443/quic-v1/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/ip4/203.0.113.7/udp/443/quic-v1/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/ip4/203.0.113.7/udp/443/quic-v1/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/ip4/203.0.113.7/udp/443/quic-v1/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": false,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": null,
+        "tcp_port": null,
+        "why": "QUIC: no sibling, no suffix",
+        "wss_sibling": null
+      },
+      {
+        "canonical": "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "dial_forms": {
+          "gate_closed": [
+            "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "raw_first": [
+            "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ],
+          "wss_first": [
+            "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+            "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+          ]
+        },
+        "input": "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/wss/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "is_wss": true,
+        "peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "raw_sibling": "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "tcp_port": 443,
+        "why": "/wss whose /tls/ws form is exactly 300 characters",
+        "wss_sibling": null
+      }
+    ],
+    "reject": [
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/7423/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "plain /ws (no TLS)"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/tls without /ws"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/x-parity-ws/%2F/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "the old /x-parity-ws form"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/x-parity-wss/%2F/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "the old /x-parity-wss form"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/certhash/uEiDDq4_xNyDorZBH3TlGazyJdOWSwvo4PUo5YHFMrvDE8g/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/certhash"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/https/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/https"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/http-path/%2Fraven/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/http-path"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/http/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/tls/http"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/noise/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/noise"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/dns4/relay.example.org/tcp/443/tls/sni/relay.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/tls/sni after a DNS host (the DNS name already is the SNI name)"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/sni/203.0.113.8/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "an IPv4 literal as SNI name"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/sni/-bad/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "an SNI name that is no plausible DNS name"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/sni/relay.example.org/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/tls/sni/NAME without /ws"
+      },
+      {
+        "error": "quic_suffix",
+        "input": "/ip4/203.0.113.7/udp/443/quic-v1/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "a WSS suffix on QUIC"
+      },
+      {
+        "error": "quic_suffix",
+        "input": "/ip4/203.0.113.7/udp/443/quic-v1/wss/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/wss on QUIC"
+      },
+      {
+        "error": "circuit",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu/p2p-circuit/p2p/12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+        "why": "a circuit through a WSS address"
+      },
+      {
+        "error": "syntax",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/certhash/uEiDDq4_xNyDorZBH3TlGazyJdOWSwvo4PUo5YHFMrvDE8g/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/tls/ws followed by /certhash"
+      },
+      {
+        "error": "syntax",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/tls/ws/ws"
+      },
+      {
+        "error": "syntax",
+        "input": "/ip4/203.0.113.7/tcp/443/wss/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/wss/tls/ws"
+      },
+      {
+        "error": "syntax",
+        "input": "/ip4/203.0.113.7/tcp/443/TLS/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "multiaddr names are case-sensitive"
+      },
+      {
+        "error": "syntax",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws",
+        "why": "no /p2p/<PeerId>"
+      },
+      {
+        "error": "syntax",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu/",
+        "why": "a trailing /"
+      },
+      {
+        "error": "too_long",
+        "input": "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/wss/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "/wss whose /tls/ws form is 303 characters"
+      },
+      {
+        "error": "not_multiaddr",
+        "input": "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "a 303-character address"
+      },
+      {
+        "error": "host",
+        "input": "/dns4/203.0.113.7/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "an IPv4 literal as a DNS name (TLS cannot send it as SNI)"
+      },
+      {
+        "error": "host",
+        "input": "/dns4/relay-.example.org/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "a label ending in -"
+      },
+      {
+        "error": "host",
+        "input": "/dns/relay.123/tcp/443/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "an all-digit last label"
+      },
+      {
+        "error": "host",
+        "input": "/dns/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.org/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "a label over 63 characters"
+      },
+      {
+        "error": "wss_suffix",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/sni/relay-.example.org/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "an SNI name with a label ending in -"
+      },
+      {
+        "error": "no_single_host",
+        "input": "/ip4/0.0.0.0/tcp/443/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "an unspecified host"
+      },
+      {
+        "error": "port",
+        "input": "/ip4/203.0.113.7/tcp/0/tls/ws/p2p/12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu",
+        "why": "port 0"
+      },
+      {
+        "error": "peer_id",
+        "input": "/ip4/203.0.113.7/tcp/443/tls/ws/p2p/not-a-peer",
+        "why": "no PeerId"
+      }
+    ]
+  },
+  "inputs": {
+    "contact_ed25519_public_hex": "4343434343434343434343434343434343434343434343434343434343434343",
+    "contact_peer_id": "12D3KooWELvyLJnPotAfkxGRrcbuGSnwqy989x5RPw1zHTA2xGLJ",
+    "max_multiaddr_chars": 300,
+    "relay_ed25519_public_hex": "5252525252525252525252525252525252525252525252525252525252525252",
+    "relay_peer_id": "12D3KooWFMiQUpmYgMd4rK23Q6VgdaNPWMJ9FuNin41qA9q2AGAu"
+  },
+  "name": "via= grammar: WebSocket over TLS, siblings and dial forms",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_WSS_TRANSPORT_V1.md"
+}

@@ -1,0 +1,305 @@
+{
+  "description": "raven-relay-schedule/1 followed by 1 to 13 <epoch>:<PeerId> entries (canonical decimal epochs, strictly increasing; canonical Ed25519 PeerIds, each once); one line of at most 984 plain characters after trimming. format_relay_schedule(seed 0x51, from, n) gives the first three accept cases. Reject cases name the rule that refused them (raven_protocol/peer_rotation.py error codes)",
+  "deterministic": true,
+  "expected": {
+    "accept": [
+      {
+        "entries": [
+          {
+            "epoch": 23,
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          }
+        ],
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "one entry (raven relay schedule --epochs 1)"
+      },
+      {
+        "entries": [
+          {
+            "epoch": 23,
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          },
+          {
+            "epoch": 24,
+            "peer_id": "12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji"
+          },
+          {
+            "epoch": 25,
+            "peer_id": "12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt"
+          },
+          {
+            "epoch": 26,
+            "peer_id": "12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6"
+          },
+          {
+            "epoch": 27,
+            "peer_id": "12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL"
+          },
+          {
+            "epoch": 28,
+            "peer_id": "12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8"
+          },
+          {
+            "epoch": 29,
+            "peer_id": "12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7"
+          }
+        ],
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7",
+        "why": "the default: the active epoch and 6 ahead"
+      },
+      {
+        "entries": [
+          {
+            "epoch": 23,
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          },
+          {
+            "epoch": 24,
+            "peer_id": "12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji"
+          },
+          {
+            "epoch": 25,
+            "peer_id": "12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt"
+          },
+          {
+            "epoch": 26,
+            "peer_id": "12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6"
+          },
+          {
+            "epoch": 27,
+            "peer_id": "12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL"
+          },
+          {
+            "epoch": 28,
+            "peer_id": "12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8"
+          },
+          {
+            "epoch": 29,
+            "peer_id": "12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7"
+          },
+          {
+            "epoch": 30,
+            "peer_id": "12D3KooWDrV2gR5uGmnYQSzBfMYrbK9vnjNT7UuBMsCfvXuCFZAP"
+          },
+          {
+            "epoch": 31,
+            "peer_id": "12D3KooWGbY9N69G7sfnGpRp3xYoP4A7r6P48xtU9UJxUkLrWRAP"
+          },
+          {
+            "epoch": 32,
+            "peer_id": "12D3KooWQR2DGpwhNCy2ZfgKHBwwUSa3oGKjhUd9Mjbxa9a2nwVJ"
+          },
+          {
+            "epoch": 33,
+            "peer_id": "12D3KooWMoRfkCjKFdBe6kMDctVEr6qXCPUQnEC9HeaAAnn7L5DP"
+          },
+          {
+            "epoch": 34,
+            "peer_id": "12D3KooWKKkU2vNVYsXAdrtV47Atbff3YYDT9B7wn1rVGzcrEB7c"
+          },
+          {
+            "epoch": 35,
+            "peer_id": "12D3KooWPRkmdupK1GwqT4EawrTYcwFJth6nCaPQP4yph4RcaCSx"
+          }
+        ],
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7 30:12D3KooWDrV2gR5uGmnYQSzBfMYrbK9vnjNT7UuBMsCfvXuCFZAP 31:12D3KooWGbY9N69G7sfnGpRp3xYoP4A7r6P48xtU9UJxUkLrWRAP 32:12D3KooWQR2DGpwhNCy2ZfgKHBwwUSa3oGKjhUd9Mjbxa9a2nwVJ 33:12D3KooWMoRfkCjKFdBe6kMDctVEr6qXCPUQnEC9HeaAAnn7L5DP 34:12D3KooWKKkU2vNVYsXAdrtV47Atbff3YYDT9B7wn1rVGzcrEB7c 35:12D3KooWPRkmdupK1GwqT4EawrTYcwFJth6nCaPQP4yph4RcaCSx",
+        "why": "13 entries, the most a text holds"
+      },
+      {
+        "entries": [
+          {
+            "epoch": 23,
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          }
+        ],
+        "input": "  raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm\n",
+        "why": "surrounding white space is trimmed"
+      },
+      {
+        "entries": [
+          {
+            "epoch": 23,
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          },
+          {
+            "epoch": 25,
+            "peer_id": "12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt"
+          }
+        ],
+        "input": "raven-relay-schedule/1  23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm   25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt",
+        "why": "runs of spaces between entries; epochs need not be consecutive"
+      },
+      {
+        "entries": [
+          {
+            "epoch": 0,
+            "peer_id": "12D3KooWQea6ANvGpGTz8C4UMFVZx56yEM22ZcBFVRcyH5XjqMmF"
+          },
+          {
+            "epoch": 18446744073709551615,
+            "peer_id": "12D3KooWCqqYhA2qJTh3vTF1JbK7ZobEmBY378AHUdHvtL1J6gHm"
+          }
+        ],
+        "input": "raven-relay-schedule/1 0:12D3KooWQea6ANvGpGTz8C4UMFVZx56yEM22ZcBFVRcyH5XjqMmF 18446744073709551615:12D3KooWCqqYhA2qJTh3vTF1JbK7ZobEmBY378AHUdHvtL1J6gHm",
+        "why": "epoch 0 and epoch 2^64 - 1"
+      }
+    ],
+    "reject": [
+      {
+        "error": "prefix",
+        "input": "",
+        "why": "empty"
+      },
+      {
+        "error": "empty",
+        "input": "raven-relay-schedule/1",
+        "why": "the prefix alone"
+      },
+      {
+        "error": "version",
+        "input": "raven-relay-schedule/2 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "another version"
+      },
+      {
+        "error": "prefix",
+        "input": "raven-card/3 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "another kind of line"
+      },
+      {
+        "error": "prefix",
+        "input": "Raven-Relay-Schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "the prefix is case-sensitive"
+      },
+      {
+        "error": "entry",
+        "input": "raven-relay-schedule/1 2312D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "an entry without ':'"
+      },
+      {
+        "error": "epoch",
+        "input": "raven-relay-schedule/1 023:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "a leading zero"
+      },
+      {
+        "error": "epoch",
+        "input": "raven-relay-schedule/1 +23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "a sign"
+      },
+      {
+        "error": "epoch",
+        "input": "raven-relay-schedule/1 :12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "no epoch"
+      },
+      {
+        "error": "epoch",
+        "input": "raven-relay-schedule/1 18446744073709551616:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "2^64"
+      },
+      {
+        "error": "epoch",
+        "input": "raven-relay-schedule/1 0x17:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "hexadecimal"
+      },
+      {
+        "error": "peer_id",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxL",
+        "why": "a PeerId one character short"
+      },
+      {
+        "error": "peer_id",
+        "input": "raven-relay-schedule/1 23:12d3koowho4xusj1emhbco929mzpvqbivbvhfz7xugjcyxypnxlm",
+        "why": "a PeerId in lower case"
+      },
+      {
+        "error": "peer_id",
+        "input": "raven-relay-schedule/1 23:QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+        "why": "a PeerId that is no Ed25519 key"
+      },
+      {
+        "error": "peer_id",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji",
+        "why": "two PeerIds in one entry"
+      },
+      {
+        "error": "order",
+        "input": "raven-relay-schedule/1 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "epochs decreasing"
+      },
+      {
+        "error": "order",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 23:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji",
+        "why": "an epoch twice"
+      },
+      {
+        "error": "duplicate",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "a PeerId twice"
+      },
+      {
+        "error": "too_many",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7 30:12D3KooWDrV2gR5uGmnYQSzBfMYrbK9vnjNT7UuBMsCfvXuCFZAP 31:12D3KooWGbY9N69G7sfnGpRp3xYoP4A7r6P48xtU9UJxUkLrWRAP 32:12D3KooWQR2DGpwhNCy2ZfgKHBwwUSa3oGKjhUd9Mjbxa9a2nwVJ 33:12D3KooWMoRfkCjKFdBe6kMDctVEr6qXCPUQnEC9HeaAAnn7L5DP 34:12D3KooWKKkU2vNVYsXAdrtV47Atbff3YYDT9B7wn1rVGzcrEB7c 35:12D3KooWPRkmdupK1GwqT4EawrTYcwFJth6nCaPQP4yph4RcaCSx 36:12D3KooWRfNFL49KEw84wWrJKBrfoAm9S1Wjme4TPRrPgDWaTRCG",
+        "why": "14 entries"
+      },
+      {
+        "error": "not_one_line",
+        "input": "raven-relay-schedule/1\t23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "a tab"
+      },
+      {
+        "error": "not_one_line",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm\nraven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm",
+        "why": "two lines"
+      },
+      {
+        "error": "not_one_line",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm \u00e9",
+        "why": "a character outside ASCII"
+      },
+      {
+        "error": "not_one_line",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7 30:12D3KooWDrV2gR5uGmnYQSzBfMYrbK9vnjNT7UuBMsCfvXuCFZAP 31:12D3KooWGbY9N69G7sfnGpRp3xYoP4A7r6P48xtU9UJxUkLrWRAP 32:12D3KooWQR2DGpwhNCy2ZfgKHBwwUSa3oGKjhUd9Mjbxa9a2nwVJ 33:12D3KooWMoRfkCjKFdBe6kMDctVEr6qXCPUQnEC9HeaAAnn7L5DP 34:12D3KooWKKkU2vNVYsXAdrtV47Atbff3YYDT9B7wn1rVGzcrEB7c 35:12D3KooWPRkmdupK1GwqT4EawrTYcwFJth6nCaPQP4yph4RcaCSx                                                                                                                                                                                                                                           x",
+        "why": "longer than 984 characters"
+      },
+      {
+        "error": "entry",
+        "input": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWGNVqdLkhYq5TwfmewaPTzhwqAjTAMrg2AB1g2rW1NG1W junk",
+        "why": "a trailing word"
+      }
+    ]
+  },
+  "inputs": {
+    "format": [
+      {
+        "from": 23,
+        "n": 1,
+        "text": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+      },
+      {
+        "from": 23,
+        "n": 7,
+        "text": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7"
+      },
+      {
+        "from": 23,
+        "n": 13,
+        "text": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7 30:12D3KooWDrV2gR5uGmnYQSzBfMYrbK9vnjNT7UuBMsCfvXuCFZAP 31:12D3KooWGbY9N69G7sfnGpRp3xYoP4A7r6P48xtU9UJxUkLrWRAP 32:12D3KooWQR2DGpwhNCy2ZfgKHBwwUSa3oGKjhUd9Mjbxa9a2nwVJ 33:12D3KooWMoRfkCjKFdBe6kMDctVEr6qXCPUQnEC9HeaAAnn7L5DP 34:12D3KooWKKkU2vNVYsXAdrtV47Atbff3YYDT9B7wn1rVGzcrEB7c 35:12D3KooWPRkmdupK1GwqT4EawrTYcwFJth6nCaPQP4yph4RcaCSx"
+      },
+      {
+        "from": 23,
+        "n": 0,
+        "text": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+      },
+      {
+        "from": 23,
+        "n": 99,
+        "text": "raven-relay-schedule/1 23:12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm 24:12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji 25:12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt 26:12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6 27:12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL 28:12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8 29:12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7 30:12D3KooWDrV2gR5uGmnYQSzBfMYrbK9vnjNT7UuBMsCfvXuCFZAP 31:12D3KooWGbY9N69G7sfnGpRp3xYoP4A7r6P48xtU9UJxUkLrWRAP 32:12D3KooWQR2DGpwhNCy2ZfgKHBwwUSa3oGKjhUd9Mjbxa9a2nwVJ 33:12D3KooWMoRfkCjKFdBe6kMDctVEr6qXCPUQnEC9HeaAAnn7L5DP 34:12D3KooWKKkU2vNVYsXAdrtV47Atbff3YYDT9B7wn1rVGzcrEB7c 35:12D3KooWPRkmdupK1GwqT4EawrTYcwFJth6nCaPQP4yph4RcaCSx"
+      }
+    ],
+    "max_entries": 13,
+    "max_len": 984,
+    "raven_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "PeerId rotation: relay schedule text",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_P2P_PEER_ROTATION_V1.md"
+}

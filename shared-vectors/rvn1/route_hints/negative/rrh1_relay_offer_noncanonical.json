@@ -1,0 +1,16 @@
+{
+  "description": "A version-1 RELAY_OFFER record that breaks one rule of RAVEN_ROUTE_HINTS_V1 §11.2: decode_offer refuses it as malformed. In an RRH1 frame (frame_hex: the sender seed's P2P_ID, then this record as entry type 0x20) the record is dropped with an RRH1_MALFORMED debug log and the frame is kept",
+  "deterministic": true,
+  "expected": {
+    "frame_kept": true,
+    "offers_kept": 0,
+    "reason": "an address is not its canonical text (DNS names are lowercase)",
+    "record": "malformed"
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f2000440100a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a998736701202f646e73342f52656c61792e6578616d706c652e6f72672f7463702f37343237",
+    "record_hex": "0100a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a998736701202f646e73342f52656c61792e6578616d706c652e6f72672f7463702f37343237"
+  },
+  "name": "RELAY_OFFER address not in canonical form",
+  "protocol_version": "rvn1"
+}

@@ -1,0 +1,80 @@
+{
+  "description": "RAVEN_NEARBY_LINK_V1 §2. epoch = floor(unix_ms / 900000). T(epoch, advertiser) = HMAC-SHA256(K_tok, 'RNB1' || 0x01 version || 0x01 medium || epoch as u64 big-endian || the advertiser's Ed25519 key)[0..16], then T[6] = (T[6] & 0x0f) | 0x40 and T[8] = (T[8] & 0x3f) | 0x80 (RFC 9562 version 4). The advertiser hosts the service and advertises T as its one 128-bit service UUID; its contact scans for it. C = SHA-256('RNB1-char' || T)[0..16] with the same bits is the characteristic UUID. uuid_string: lowercase 8-4-4-4-12 over the 16 bytes in order; ota_le_hex: the bytes reversed, as an advertisement (AD type 0x06/0x07) carries them; windows_guid_u128_hex: the u128 a Windows GUID is built from (GUID::from_u128 of u128::from_be_bytes(T)). A scanner at epoch e accepts e-1, e and e+1. K_tok is rnb1_pair_keys_001.json's alice-bob k_tok_hex",
+  "deterministic": true,
+  "expected": {
+    "epoch": 1888888,
+    "scanner_accepts": [
+      1888887,
+      1888888,
+      1888889
+    ],
+    "tokens": [
+      {
+        "advertiser": "alice",
+        "char_uuid_hex": "482a83cad4204a929f9b6573385a6b05",
+        "char_uuid_string": "482a83ca-d420-4a92-9f9b-6573385a6b05",
+        "epoch": 1888888,
+        "hmac_input_hex": "524e4231010100000000001cd278d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "ota_le_hex": "998d5ebbeaf983abbb4a029ec68a2a06",
+        "token_hex": "062a8ac69e024abbab83f9eabb5e8d99",
+        "uuid_string": "062a8ac6-9e02-4abb-ab83-f9eabb5e8d99",
+        "windows_guid_u128_hex": "062a8ac69e024abbab83f9eabb5e8d99"
+      },
+      {
+        "advertiser": "bob",
+        "char_uuid_hex": "4ef4a7b5419a4bce9e836fa3e7e4940e",
+        "char_uuid_string": "4ef4a7b5-419a-4bce-9e83-6fa3e7e4940e",
+        "epoch": 1888888,
+        "hmac_input_hex": "524e4231010100000000001cd2783d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "ota_le_hex": "d255eb337defbb82ab4a143b899f38f2",
+        "token_hex": "f2389f893b144aab82bbef7d33eb55d2",
+        "uuid_string": "f2389f89-3b14-4aab-82bb-ef7d33eb55d2",
+        "windows_guid_u128_hex": "f2389f893b144aab82bbef7d33eb55d2"
+      },
+      {
+        "advertiser": "alice",
+        "char_uuid_hex": "6f333066d5e04081960108d937155194",
+        "char_uuid_string": "6f333066-d5e0-4081-9601-08d937155194",
+        "epoch": 1888889,
+        "hmac_input_hex": "524e4231010100000000001cd279d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "ota_le_hex": "6a0d31e963de728cbf49bdad4f777592",
+        "token_hex": "9275774fadbd49bf8c72de63e9310d6a",
+        "uuid_string": "9275774f-adbd-49bf-8c72-de63e9310d6a",
+        "windows_guid_u128_hex": "9275774fadbd49bf8c72de63e9310d6a"
+      },
+      {
+        "advertiser": "bob",
+        "char_uuid_hex": "45e6c622471a44f19ec001706abca5db",
+        "char_uuid_string": "45e6c622-471a-44f1-9ec0-01706abca5db",
+        "epoch": 1888889,
+        "hmac_input_hex": "524e4231010100000000001cd2793d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "ota_le_hex": "e8d3c66c06aa76bc18453c9a5a8340c3",
+        "token_hex": "c340835a9a3c4518bc76aa066cc6d3e8",
+        "uuid_string": "c340835a-9a3c-4518-bc76-aa066cc6d3e8",
+        "windows_guid_u128_hex": "c340835a9a3c4518bc76aa066cc6d3e8"
+      }
+    ]
+  },
+  "inputs": {
+    "epoch_ms": 900000,
+    "pair": [
+      "alice",
+      "bob"
+    ],
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      }
+    },
+    "unix_ms": 1700000000000
+  },
+  "name": "RNB1 tokens and characteristic UUIDs of the pair alice-bob at two epochs",
+  "protocol_version": "rvn1"
+}

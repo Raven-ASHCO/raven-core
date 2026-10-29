@@ -1,0 +1,135 @@
+[package]
+name = "raven-swarm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAVEN rust-libp2p TCP/QUIC swarm + Kad discovery (no FastAPI)"
+
+[[bin]]
+name = "raven-swarm"
+path = "src/main.rs"
+
+[[bin]]
+name = "raven-swarm-mailbox-experimental"
+path = "src/bin/raven-swarm-mailbox-experimental.rs"
+required-features = ["experimental-offline-mailbox"]
+
+[[bin]]
+name = "raven-swarm-connectivity-experimental"
+path = "src/bin/raven-swarm-connectivity-experimental.rs"
+required-features = ["experimental-nat-connectivity"]
+
+[features]
+default = []
+# Security hold: this makes the real mailbox transport available to explicit
+# integration tests and operators, but it is absent from production/default
+# builds until the authenticated session actor is enabled end to end.
+experimental-offline-mailbox = ["libp2p/request-response"]
+# Security hold: this NAT traversal experiment is available only in a separate
+# operator-facing binary, which requires an additional runtime opt-in. The
+# `raven-swarm` binary does not compile or advertise these protocols. (The P3
+# carrier below compiles the same protocols into raven-node, held at runtime.)
+experimental-nat-connectivity = [
+    "dep:rand",
+    "libp2p/autonat",
+    "libp2p/dcutr",
+    "libp2p/relay",
+]
+# Transports P3 (libp2p relay + hole punching): the endpoint host and the relay
+# server (`raven_swarm::host`). Off in this crate's default build, so the
+# `raven-swarm` smoke binary still compiles none of these protocols. Only
+# raven-node enables it, and raven-node never instantiates it unless its
+# runtime gate is open (`raven_core::p2p_live_enabled`:
+# P2P_PRODUCTION_ENABLED=false, or the debug lab unlock), the same way the
+# compiled-in Internet direct carrier is held by
+# INTERNET_DIRECT_PRODUCTION_ENABLED. With the gate closed nothing listens,
+# dials, reserves or advertises.
+p2p-host = [
+    "dep:rand",
+    "dep:libp2p-stream",
+    "dep:socket2",
+    "libp2p/autonat",
+    "libp2p/dcutr",
+    "libp2p/relay",
+    "libp2p/upnp",
+    "dep:zeroize",
+]
+# No `libp2p/dns`. raven-node resolves `/dns*/` route names with the system
+# resolver itself before it hands an address to libp2p: the system resolver
+# follows the OS settings (VPN, split DNS), behind an HTTP proxy the proxy
+# resolves the relay name (RWS1 §7), and a second resolver stack (hickory,
+# which libp2p/dns would build) is attack surface Raven can avoid.
+# Restrictive networks (Phase 4, protocol/RAVEN_WSS_TRANSPORT_V1.md, RWS1):
+# WebSocket over TLS and HTTP CONNECT for relay connections (`raven_swarm::wss`).
+# Only crates already built through libp2p-quic, libp2p-tls and libp2p-upnp: no
+# new package, and no WebSocket crate (owner decision O4-1: Raven's own
+# binary-only RFC 6455 subset). Off in this crate's default build; raven-node
+# enables it, and raven_core::wss_live_enabled holds it at runtime
+# (WSS_PRODUCTION_ENABLED=false, or the debug lab unlock).
+wss = [
+    "p2p-host",
+    "dep:futures-rustls",
+    "dep:rustls",
+    "dep:rcgen",
+    "dep:time",
+    "dep:httparse",
+    "dep:ring",
+    "dep:base64",
+    "dep:zeroize",
+]
+
+[dependencies]
+raven-core = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+futures = "0.3"
+rand = { workspace = true, optional = true }
+# `/raven/link/1.0.0` streams (P3). 0.4.0-alpha is the release for
+# libp2p-swarm 0.48 / libp2p 0.57 (the facade has no `stream` feature).
+libp2p-stream = { version = "=0.5.0-alpha", optional = true }
+# AutoNAT v2 (libp2p 0.57) takes a rand 0.10 RNG; the rest of Raven stays on
+# rand 0.8. OS-seeded StdRng, as libp2p's own Default does.
+rand_autonat = { package = "rand", version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
+# The listen-port probe binds IPv6 IPv6-only, as libp2p-tcp / libp2p-quic do
+# (`host::probe_listen_addr`, P3). Already built through them (0.6): a lock
+# edge, no new crate.
+socket2 = { version = "0.6", optional = true }
+libp2p = { version = "0.57", features = [
+    "tokio",
+    "tcp",
+    "quic",
+    "noise",
+    "yamux",
+    "kad",
+    "identify",
+    "ping",
+    "macros",
+] }
+# WSS (feature `wss`, RWS1). Each is already built through libp2p-quic,
+# libp2p-tls or libp2p-upnp (igd-next, hyper), with these features active: lock
+# edges only. TLS 1.3 on the aws-lc-rs provider (`wss::tls`): rustls without
+# `ring` or `tls12`, futures-rustls without its defaults (tls12, logging).
+futures-rustls = { version = "0.26", default-features = false, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"], optional = true }
+# The relay's ephemeral certificate (ECDSA P-256; rcgen signs with ring).
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"], optional = true }
+time = { version = "0.3", default-features = false, features = ["std"], optional = true }
+# The HTTP/1.1 heads of the WebSocket upgrade and of the CONNECT reply.
+httparse = { version = "1", optional = true }
+# SHA-1 for Sec-WebSocket-Accept only (digest::SHA1_FOR_LEGACY_USE_ONLY).
+ring = { version = "0.17", optional = true }
+base64 = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The FakeGateway (`raven_core::portmap_fake`) for the port-mapping tests
+# (`portmap::tests`): a feature of a workspace crate, no new package.
+raven-core = { workspace = true, features = ["test-helpers"] }
+tempfile = { workspace = true }
+# Paused time for the WSS demux-wait test (`wss::transport_tests`); a tokio
+# feature only, as raven-node's tests use it.
+tokio = { workspace = true, features = ["test-util"] }
+# Reads shared-vectors/rvn1 in tests (`wss::ws`); already a workspace crate.
+serde_json = { workspace = true }

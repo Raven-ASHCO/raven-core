@@ -1,0 +1,227 @@
+[package]
+name = "raven-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAVEN local node — queue, TCP peer, envelope DM"
+
+[[bin]]
+name = "raven-node"
+path = "src/main.rs"
+
+# The macOS nearby radio (P5.31): CoreBluetooth in its own process, shipped as
+# RavenNearby.app (macos/RavenNearby.app, node/scripts/build_nearby_helper_app.sh).
+# raven-node talks to it over stdin/stdout (src/nearby/apple.rs). It holds no
+# keys. On other systems it only says it is unsupported.
+[[bin]]
+name = "raven-nearby-helper"
+path = "src/bin/raven-nearby-helper/main.rs"
+required-features = ["nearby-radio"]
+
+# The Tor onion carrier's helper (lab; docs/design/2026-10-tor-fallback.md):
+# Arti in its own process, so a Tor failure (a panic, Arti's exit(1) on an
+# obsolete version, a bootstrap hang) never takes raven-node down.
+# raven-node talks to it over stdin/stdout and token-checked loopback TCP
+# (src/onion/). Built only with the `tor` feature.
+[[bin]]
+name = "raven-tor-helper"
+path = "src/bin/raven-tor-helper/main.rs"
+required-features = ["tor"]
+
+[[test]]
+name = "nearby_helper"
+path = "tests/nearby_helper.rs"
+required-features = ["nearby-radio"]
+
+[features]
+default = []
+# The Bluetooth LE nearby carrier's platform radios (RNL1; src/nearby/): BlueZ
+# over zbus on linux-gnu (P5.29), WinRT on Windows (P5.30) and CoreBluetooth
+# on macOS through the raven-nearby-helper process (P5.31). Compiled in only
+# with this feature, and held at runtime by raven_core::nearby_live_enabled
+# (NEARBY_PRODUCTION_ENABLED=false). The Linux and Windows dependencies below
+# are already in Cargo.lock (owner decision O5-11); the macOS ones are the
+# owner-approved objc2 set (O5-10).
+nearby-radio = [
+    "dep:zbus",
+    "dep:zvariant",
+    "dep:windows",
+    "dep:objc2",
+    "dep:objc2-encode",
+    "dep:objc2-foundation",
+    "dep:objc2-core-bluetooth",
+]
+# Kept as an alias of `nearby-radio`: CI's debug-feature clippy names it. The
+# old CoreBluetooth experiment it once built is retired (P5.27).
+corebluetooth = ["nearby-radio"]
+# The Tor onion carrier's helper process (raven-tor-helper; owner approval
+# 2026-10-28: Arti, `arti-client` and the crates it needs, exact versions).
+# raven-node itself never links Arti: without this feature the onion carrier
+# still builds and is tested against its loopback helper; with it the real
+# helper binary is built too. Held at runtime by
+# raven_core::onion_live_enabled (ONION_PRODUCTION_ENABLED=false).
+tor = [
+    "dep:arti-client",
+    "dep:tor-hsservice",
+    "dep:tor-cell",
+    "dep:tor-config",
+    "dep:tor-hscrypto",
+    "dep:tor-proto",
+    "dep:tor-rtcompat",
+    "dep:safelog",
+    "dep:tracing",
+]
+# Explicit lab opt-in for the publicly-derivable pre-ATSAM demo cipher.
+unsafe-demo-crypto = ["raven-core/unsafe-demo-crypto"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+# MigratePolicy::Allow: tests seal temp profiles without the lab switch;
+# carrier_matrix C43/C44's router is raven_core::portmap_fake (Phase 4).
+raven-core = { workspace = true, features = ["test-helpers"] }
+
+[dependencies]
+raven-core = { workspace = true }
+# The P3 libp2p carrier and relay role (`p2p-host`): compiled in, held at
+# runtime by raven_core::p2p_live_enabled (P2P_PRODUCTION_ENABLED=false).
+# Relays over WebSocket/TLS (`wss`, Phase 4 RWS1): compiled in, held at runtime
+# by raven_core::wss_live_enabled (WSS_PRODUCTION_ENABLED=false).
+raven-swarm = { path = "../raven-swarm", features = ["p2p-host", "wss"] }
+futures = "0.3"
+# Network-change detection (src/netwatch.rs). Already built for raven-node via
+# libp2p-tcp / libp2p-quic with the same `tokio` feature: no new crate or feature.
+if-watch = { version = "3.2.2", features = ["tokio"] }
+# The `auto` LAN listener's sockets (src/lan_direct.rs): IPV6_V6ONLY, and
+# SO_REUSEADDR on Unix only. Already built for raven-node through tokio: no
+# new crate, and Cargo.lock gains only this edge.
+socket2 = { version = "0.6", features = ["all"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+# `process` and `io-std`: the Tor helper is a child process with its control
+# lines on stdin/stdout (src/onion/). Features of the locked tokio only: no
+# new crate.
+tokio = { workspace = true, features = ["process", "io-std"] }
+clap = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+
+# Arti (the Rust Tor implementation) for raven-tor-helper only (feature
+# `tor`). Exact versions: Arti's crates release together monthly with
+# breaking changes. rustls (no OpenSSL on Linux), no PoW (LGPL), no
+# experimental APIs, no bridges or pluggable transports. `vanguards` (owner
+# decision 2026-10-29, as Arti's own program): vanguard relays for the onion
+# service's and the client's onion circuits, Arti's default mode (lite).
+arti-client = { version = "=0.47.0", optional = true, default-features = false, features = [
+    "tokio",
+    "rustls",
+    "compression",
+    "onion-service-client",
+    "onion-service-service",
+    "vanguards",
+] }
+tor-hsservice = { version = "=0.47.0", optional = true, default-features = false }
+tor-cell = { version = "=0.47.0", optional = true, default-features = false }
+tor-hscrypto = { version = "=0.47.0", optional = true, default-features = false }
+tor-config = { version = "=0.47.0", optional = true, default-features = false }
+tor-proto = { version = "=0.47.0", optional = true, default-features = false }
+# Arti's redaction helper: the `.onion` text of a key for Arti's connect call.
+safelog = { version = "=0.10.0", optional = true, default-features = false }
+tor-rtcompat = { version = "=0.47.0", optional = true, default-features = false, features = [
+    "tokio",
+    "rustls",
+] }
+# Arti's logging facade (already in Cargo.lock through Arti: no new crate):
+# the helper counts the onion service's descriptor upload rounds from one
+# Arti debug event (counts only; nothing else of Arti's logs is read).
+tracing = { version = "=0.1.44", optional = true, default-features = false, features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# BlueZ over D-Bus for the nearby radio (feature `nearby-radio`, glibc builds
+# only: musl static builds have no nearby backend). zbus 1.9.3 and zvariant
+# 2.10.0 are already in Cargo.lock through raven-core's secret-service fork
+# (default features: no xml): no new crate.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+zbus = { version = "=1.9.3", optional = true }
+zvariant = { version = "=2.10.0", optional = true }
+
+# The system's HTTPS proxy for relay dials over WSS (src/proxy.rs,
+# SCDynamicStoreCopyProxies). 0.7.0 is already built for raven-node through
+# if-watch: no new crate, and Cargo.lock gains only this edge.
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
+# CoreBluetooth for the nearby radio helper (feature `nearby-radio`,
+# src/bin/raven-nearby-helper/; owner decision O5-10). Only raven-nearby-helper
+# uses them: raven-node itself never links CoreBluetooth. objc2-encode is
+# objc2's own dependency, listed only to pin the approved version; bitflags 2
+# is already locked. No dispatch2: the helper's private serial queue is a few
+# lines of libdispatch FFI.
+objc2 = { version = "=0.6.4", optional = true, default-features = false, features = ["std"] }
+objc2-encode = { version = "=4.1.0", optional = true, default-features = false }
+objc2-foundation = { version = "=0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSUUID",
+    "NSValue",
+] }
+objc2-core-bluetooth = { version = "=0.3.2", optional = true, default-features = false, features = [
+    "std",
+    "bitflags",
+    "CBATTRequest",
+    "CBAdvertisementData",
+    "CBAttribute",
+    "CBCentral",
+    "CBCentralManager",
+    "CBCentralManagerConstants",
+    "CBCharacteristic",
+    "CBError",
+    "CBManager",
+    "CBPeer",
+    "CBPeripheral",
+    "CBPeripheralManager",
+    "CBService",
+    "CBUUID",
+] }
+
+# IPv6 zones (`netutil::interface_index`): if_nametoindex and if_indextoname
+# (IpHelper). The same windows-sys features raven-core's `netifs` uses: no new
+# crate, and Cargo.lock does not change. WinHttp: the user's proxy settings
+# (src/proxy.rs, WinHttpGetIEProxyConfigForCurrentUser), a feature of the same
+# windows-sys; its strings are freed with GlobalFree (Win32_Foundation).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinHttp",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+# WinRT Bluetooth LE for the nearby radio (feature `nearby-radio`,
+# src/nearby/winrt/). windows 0.62.2 is already in Cargo.lock through
+# if-watch, and these features add no crate: windows-collections,
+# windows-future and windows-numerics are already its locked dependencies.
+# Devices_Radios: the adapter's power state (BluetoothAdapter.GetRadioAsync).
+windows = { version = "=0.62.2", optional = true, features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Radios",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+] }

@@ -1,0 +1,253 @@
+{
+  "description": "entry = type u8 (1 manifest, 2 advisory, 3 key set) | digest[32] | logged_at_ms u64; leaf = SHA-256(0x00 || entry), node = SHA-256(0x01 || left || right), split at the largest power of two below the size (RFC 6962 §2.1); STH = \"RTL1\" | 0x01 | kind 0x01 | reserved u16 | tree_size u64 | root_hash[32] | timestamp_ms u64 | key_set_digest[32] | signature block over \"rvn1/tlog/sth/v1\\0\" || bytes[0..88]; snapshot = \"RTL1\" | 0x01 | kind 0x02 | reserved u16 | entry_count u32 | entries | sth_len u16 | STH (RAVEN_TRANSPARENCY_LOG_V1 §2-§5). The test log: entry 0 is the test key set (type 3, digest of keyset_001); entry i >= 1 is an advisory (odd i, type 2) or a manifest (even i, type 1) with the synthetic digest SHA-256(\"rvn1/tlog/test-artifact\\0\" || \"advisory\" or \"manifest\" || i as u32 BE); entry i is logged at 1792713600000 + i days (ms). A tree head over n entries is signed at 1792713600000 + n days. The roots of the first 1..=17 entries of the test log, and the RFC 6962 reference roots (certificate-transparency merkle_tree_test: 0..=8 leaves of the raw byte strings rfc6962_leaves_hex) that the same hashing gives",
+  "deterministic": true,
+  "expected": {
+    "entries_hex": [
+      "03d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac00",
+      "02600607430f1f7d7e6b55822a991719c87e2dc68ad5c9ff8517dcaf607818578b000001a16b350800",
+      "0186b07086bbdf47a0d7e356ee8b08aef7792a3ab15b78772e3d5828645a1654fc000001a1705b6400",
+      "0221d01292ef7ed2fa1b845c48d2ace0bb908221169acd2dbd357a78cf996a8f9b000001a17581c000",
+      "01e81123907bddaa372e3b4a9c8c4f9c30b513ef84e9d377cc015a7ee9a0cd9d40000001a17aa81c00",
+      "02323e37f4dda8aa57f54a3b17992a886a18cc82b4387c478a5788bbf4739d4cdc000001a17fce7800",
+      "0121f50c8c68c67f83d749fe0ea6c09c0e6840f52e40104ae5e50e3f20fead1dbd000001a184f4d400",
+      "024739213564c8a8306cbf800dc7a5fe5f8d889ad429b7c0c611eb70788013e2eb000001a18a1b3000",
+      "019692b72eeb22cb78ce00504c863440d7d9aa56b30ad33efc33f2dd345de9e3d2000001a18f418c00",
+      "02386cb56fbc29e71632f5613b12f39b9afcdfb39fac74a6d661817aa44e6860f9000001a19467e800",
+      "01a72385d80733dce241ed8ab0d590aef31bd2999dc5030ae8f994893f8eca09cf000001a1998e4400",
+      "02ca9976dc42e2246aa0d98965aa04cf7c761a3a45a31a581411c560eb5a7b306a000001a19eb4a000",
+      "016c4fb502fb3439f96f3c86f488b31e47f4a9fb4b23da4f9100afa9ff95289fba000001a1a3dafc00",
+      "022cf54c0fb9116eaa57d245bb7ae4379622096629ad1ef5c0b1510cbd4f96f13d000001a1a9015800",
+      "018a6f170a0583ec6e3d7b22560bdf5138804f2550170e74692f0ab4e5d0e4fd84000001a1ae27b400",
+      "02a08ac9719486d65689a65e6de033372916b3e4e7857cac096219a9e8c57a65cd000001a1b34e1000",
+      "01e8e86e4f670de7abc844c192ffe5f01b9f4aea88c6866256a52300c848972cba000001a1b8746c00"
+    ],
+    "leaf_hashes_hex": [
+      "3afe490ec16f5ee04ae6405fff48b4366b35b75487709918a064b0ed651682b6",
+      "a701b4e34e9489647b93b9daa0c358b92db25dc7d5e2002147ebb5f9afb68f07",
+      "9195aa760f03ba7ffeab5fece48c3df8a3794becc1066b4698caafb864e049b5",
+      "c250ea321886f277d632bda32002aae28613a69227f94150d35b1da5b5b4366e",
+      "a113c34e97ae6be56a21243c5341f247e4079f1b2235a72eb21d78272d48296d",
+      "0c36b20647c5d31862799e48d9cdc8500e075cf170703912c89e54def9f25f19",
+      "869d83acc806354b45733898beedc8826fc4d1c18bbedd566c1b4cf3b7ad127c",
+      "f6863d6b8c16d6c16499a9d597bc570eb02d3af9eb1590dbb5d60d23f4e7599f",
+      "94f9839a4e6c9da55e523bbb349cf351fb02cade89f3d7c1484dd3648f930fb1",
+      "427c2a07f085c9e5c76502e074d645376581d902eeb05b95374afbd6aa3c2d81",
+      "a280b83cfe90e71b983273e808b7498c017e25135bd859c647747fc148b82581",
+      "b2cb416bc3be431400905b0835ed8bb6b2dbde7c39ab7c998af54004f38f318e",
+      "ccb51f1398ec4cfc0a36339f1f5d52f1d64b3b35e865a0e0fab873b5bf98409b",
+      "4b37bfd9caeb3feb69bea27a6cc466ab667a63c91fca9b1e5a56c1212bf91aa8",
+      "ae755e35068260c8d8c40c67adfa1286cddca4f0d88353be8b65462c2458cf68",
+      "67f5a203c4cef814967793f564321c216bd1faea71dd6c1d75b87c33dfa8fefe",
+      "bce1fa194178980a6cec1d1ee646048e08b82d0729ae3f019e97084171590449"
+    ],
+    "rfc6962_roots": [
+      {
+        "leaves": 0,
+        "root_hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "leaves": 1,
+        "root_hex": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      },
+      {
+        "leaves": 2,
+        "root_hex": "fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125"
+      },
+      {
+        "leaves": 3,
+        "root_hex": "aeb6bcfe274b70a14fb067a5e5578264db0fa9b51af5e0ba159158f329e06e77"
+      },
+      {
+        "leaves": 4,
+        "root_hex": "d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7"
+      },
+      {
+        "leaves": 5,
+        "root_hex": "4e3bbb1f7b478dcfe71fb631631519a3bca12c9aefca1612bfce4c13a86264d4"
+      },
+      {
+        "leaves": 6,
+        "root_hex": "76e67dadbcdf1e10e1b74ddc608abd2f98dfb16fbce75277b5232a127f2087ef"
+      },
+      {
+        "leaves": 7,
+        "root_hex": "ddb89be403809e325750d3d263cd78929c2942b7942a34b77e122c9594a74c8c"
+      },
+      {
+        "leaves": 8,
+        "root_hex": "5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328"
+      }
+    ],
+    "roots": [
+      {
+        "root_hex": "3afe490ec16f5ee04ae6405fff48b4366b35b75487709918a064b0ed651682b6",
+        "tree_size": 1
+      },
+      {
+        "root_hex": "4a0b9dd3e5f7110f1432bcef983db6773e795e4229c8369cb96c851c461961be",
+        "tree_size": 2
+      },
+      {
+        "root_hex": "cdc376786b08d9199b3b34b95daa1b49d74751f8a48bf2b8caba95a40e126ed4",
+        "tree_size": 3
+      },
+      {
+        "root_hex": "92c609f4576270ad09543f0186507bd3ce4d8fead4a984c39fd5f2fb413f43f3",
+        "tree_size": 4
+      },
+      {
+        "root_hex": "2c198d165f8052d9976a0a012698fc00a713fc3fb0529f0e17eacfbc558c54a7",
+        "tree_size": 5
+      },
+      {
+        "root_hex": "6ecbeacd1170a97cc1549e4f61c07940e389d43b459fe6aa0935e8ae214863ee",
+        "tree_size": 6
+      },
+      {
+        "root_hex": "e2aca4545adc0d855a9d7d1fefafd72b0698b462805c85c59f8eb12cda228dc7",
+        "tree_size": 7
+      },
+      {
+        "root_hex": "195d52069aec56c40c97887ab0669b0f4118d7c586870549d5ae5955a209f1a4",
+        "tree_size": 8
+      },
+      {
+        "root_hex": "377d42fb0bd0d6df0884692e8ad748b7393057e071b69bd6b7bb1bf66cd99617",
+        "tree_size": 9
+      },
+      {
+        "root_hex": "cb9a5b21acffe539d221c28e5ada6542833320111d41b022c34c91474d938d2d",
+        "tree_size": 10
+      },
+      {
+        "root_hex": "54f84c42c519725272b1b53cfdf6e9616ad3bd4a28743844cb537f2a9f0ee0c6",
+        "tree_size": 11
+      },
+      {
+        "root_hex": "a5094b8d5b998971f56f803ae3c899572efc5cb4d5ce2ef2db24e0988ef0e36b",
+        "tree_size": 12
+      },
+      {
+        "root_hex": "9148d1816b1158ebbe3242a534fc022513f07b6a6fa03bf43b57801bceab43ff",
+        "tree_size": 13
+      },
+      {
+        "root_hex": "93bfedc22a373f13243dbb47864c8200614df8d91b4cc5f9cfb674fbf40ce058",
+        "tree_size": 14
+      },
+      {
+        "root_hex": "a564d22ec974c1900f49d79fdc6c46d3fef104d6287d4e9f8b390fd973fd6f11",
+        "tree_size": 15
+      },
+      {
+        "root_hex": "500452b27ee8eff4a26df773c10896862fcbb9dbb077cdf21ee678245765b130",
+        "tree_size": 16
+      },
+      {
+        "root_hex": "0e80cdff192c9a83895c5890ec68fa7bc6736707e0c103731b6640b258b8755a",
+        "tree_size": 17
+      }
+    ]
+  },
+  "inputs": {
+    "entries": [
+      {
+        "digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+        "logged_at_ms": 1792713600000,
+        "type": 3
+      },
+      {
+        "digest_hex": "600607430f1f7d7e6b55822a991719c87e2dc68ad5c9ff8517dcaf607818578b",
+        "logged_at_ms": 1792800000000,
+        "type": 2
+      },
+      {
+        "digest_hex": "86b07086bbdf47a0d7e356ee8b08aef7792a3ab15b78772e3d5828645a1654fc",
+        "logged_at_ms": 1792886400000,
+        "type": 1
+      },
+      {
+        "digest_hex": "21d01292ef7ed2fa1b845c48d2ace0bb908221169acd2dbd357a78cf996a8f9b",
+        "logged_at_ms": 1792972800000,
+        "type": 2
+      },
+      {
+        "digest_hex": "e81123907bddaa372e3b4a9c8c4f9c30b513ef84e9d377cc015a7ee9a0cd9d40",
+        "logged_at_ms": 1793059200000,
+        "type": 1
+      },
+      {
+        "digest_hex": "323e37f4dda8aa57f54a3b17992a886a18cc82b4387c478a5788bbf4739d4cdc",
+        "logged_at_ms": 1793145600000,
+        "type": 2
+      },
+      {
+        "digest_hex": "21f50c8c68c67f83d749fe0ea6c09c0e6840f52e40104ae5e50e3f20fead1dbd",
+        "logged_at_ms": 1793232000000,
+        "type": 1
+      },
+      {
+        "digest_hex": "4739213564c8a8306cbf800dc7a5fe5f8d889ad429b7c0c611eb70788013e2eb",
+        "logged_at_ms": 1793318400000,
+        "type": 2
+      },
+      {
+        "digest_hex": "9692b72eeb22cb78ce00504c863440d7d9aa56b30ad33efc33f2dd345de9e3d2",
+        "logged_at_ms": 1793404800000,
+        "type": 1
+      },
+      {
+        "digest_hex": "386cb56fbc29e71632f5613b12f39b9afcdfb39fac74a6d661817aa44e6860f9",
+        "logged_at_ms": 1793491200000,
+        "type": 2
+      },
+      {
+        "digest_hex": "a72385d80733dce241ed8ab0d590aef31bd2999dc5030ae8f994893f8eca09cf",
+        "logged_at_ms": 1793577600000,
+        "type": 1
+      },
+      {
+        "digest_hex": "ca9976dc42e2246aa0d98965aa04cf7c761a3a45a31a581411c560eb5a7b306a",
+        "logged_at_ms": 1793664000000,
+        "type": 2
+      },
+      {
+        "digest_hex": "6c4fb502fb3439f96f3c86f488b31e47f4a9fb4b23da4f9100afa9ff95289fba",
+        "logged_at_ms": 1793750400000,
+        "type": 1
+      },
+      {
+        "digest_hex": "2cf54c0fb9116eaa57d245bb7ae4379622096629ad1ef5c0b1510cbd4f96f13d",
+        "logged_at_ms": 1793836800000,
+        "type": 2
+      },
+      {
+        "digest_hex": "8a6f170a0583ec6e3d7b22560bdf5138804f2550170e74692f0ab4e5d0e4fd84",
+        "logged_at_ms": 1793923200000,
+        "type": 1
+      },
+      {
+        "digest_hex": "a08ac9719486d65689a65e6de033372916b3e4e7857cac096219a9e8c57a65cd",
+        "logged_at_ms": 1794009600000,
+        "type": 2
+      },
+      {
+        "digest_hex": "e8e86e4f670de7abc844c192ffe5f01b9f4aea88c6866256a52300c848972cba",
+        "logged_at_ms": 1794096000000,
+        "type": 1
+      }
+    ],
+    "rfc6962_leaves_hex": [
+      "",
+      "00",
+      "10",
+      "2021",
+      "3031",
+      "40414243",
+      "5051525354555657",
+      "606162636465666768696a6b6c6d6e6f"
+    ]
+  },
+  "name": "rtl1_mth_001",
+  "protocol_version": "rvn1"
+}

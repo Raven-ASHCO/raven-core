@@ -1,0 +1,208 @@
+{
+  "description": "CHUNK = \"RUP1\" | 0x01 | op 0x85 | req_id | index u32 (< 1,093) | len u32 (1..=61,440) | chunk | path_len u8 (0..=11) | path[32] x path_len, the chunk's RFC 6962 audit path from the leaf's sibling up, checked as RFC 9162 §2.1.3.2 against the manifest's chunk root before the chunk is written (RAVEN_UPDATE_EXCHANGE_V1 §3.3, RAVEN_RELEASE_BUNDLE_V1 §5). The payloads of rrb1_chunk_tree_001.json (byte j = j mod 251): small, 246,760 bytes in 5 chunks, answers GET_CHUNKS first 0 count 5 with 5 CHUNK frames and CHUNKS_END OK 5 (req_id 52550005); max, 64 MiB in 1,093 chunks: chunk 0 has an 11-hash path and the longest CHUNK frame (61,811 bytes), which pads into PAD1's 65,519-byte bucket. Each frame is given as head_hex | the chunk (fill_len bytes, byte j = (fill_start + j) mod 251) | tail_hex, with its length and SHA-256; the last small chunk also whole",
+  "deterministic": true,
+  "expected": {
+    "max": {
+      "chunk_count": 1093,
+      "chunks": [
+        {
+          "frame": {
+            "fill_len": 61440,
+            "fill_start": 0,
+            "head_hex": "52555031018552550005000000000000f000",
+            "len": 61811,
+            "sha256_hex": "95c17dccc1bde6eab9008d5ca451d3b037fd8413ca9b62ce1f9ec045ee74332d",
+            "tail_hex": "0b0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d44391938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e7615620b913181305aaecf6aef182dc768508f8b8576d9b85a170ebd3423d19eb1b197b042281c8190c156a06358db438130c133b926d7108553c174e10f250287c04f9dd96f9c826c8a044cf0b46ba45de8a9556ff64eeccf9269728878e18b6f981b50e142c4ae78c2a458d91bed1b769d04337fa7fe32e56fd5624425b126d0a137a9aae5dd83372c990697439e028a03966d9c7c96e2142dee0d06c39052a77049cdaf72920d9923382fafd1b6e8bca3a9f02fe9f55d15c34ea803e43e4520cfad63f4a5c9628a8d85b565b53b99513e3e776516703bb2ac9719f26a0ebe101e5170ec3afd7de58ff05f7847bae2bc72087fb1c16e4d9c0d62d2ddf2684b1866409075e097c50bf9acfb3c5d0bb063daf5da51cd66d7d8ed122826e9e75a841",
+            "xor_at": null
+          },
+          "index": 0,
+          "leaf_hex": "971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a3",
+          "len": 61440,
+          "pad1_len": 65519,
+          "path_hex": [
+            "0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d443",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "5620b913181305aaecf6aef182dc768508f8b8576d9b85a170ebd3423d19eb1b",
+            "197b042281c8190c156a06358db438130c133b926d7108553c174e10f250287c",
+            "04f9dd96f9c826c8a044cf0b46ba45de8a9556ff64eeccf9269728878e18b6f9",
+            "81b50e142c4ae78c2a458d91bed1b769d04337fa7fe32e56fd5624425b126d0a",
+            "137a9aae5dd83372c990697439e028a03966d9c7c96e2142dee0d06c39052a77",
+            "049cdaf72920d9923382fafd1b6e8bca3a9f02fe9f55d15c34ea803e43e4520c",
+            "fad63f4a5c9628a8d85b565b53b99513e3e776516703bb2ac9719f26a0ebe101",
+            "e5170ec3afd7de58ff05f7847bae2bc72087fb1c16e4d9c0d62d2ddf2684b186",
+            "6409075e097c50bf9acfb3c5d0bb063daf5da51cd66d7d8ed122826e9e75a841"
+          ]
+        },
+        {
+          "frame": {
+            "fill_len": 16384,
+            "fill_start": 67092480,
+            "head_hex": "525550310185525500050000044400004000",
+            "len": 16499,
+            "sha256_hex": "8bebcb769ac93b8ca4f5ec4b35569dcb67734852ec3c95e6a7d76b199496f277",
+            "tail_hex": "037ee162bf6e217bf947f045d977c29260bf0876ff92939d996c0d6bbf521d4525b73f13ba0d3a8076947843263144b40623c3ee8037f39141579a63a3c3bbe87ca787582ff57b176c40a6440f39ffbdf1b994e74cc7b9b78f506804d71a5a143f",
+            "xor_at": null
+          },
+          "index": 1092,
+          "leaf_hex": "bb538966abf38e2b46f8b036024dc4f3219e4c1f3f6fda669ae5cf44fa177b76",
+          "len": 16384,
+          "pad1_len": 65519,
+          "path_hex": [
+            "7ee162bf6e217bf947f045d977c29260bf0876ff92939d996c0d6bbf521d4525",
+            "b73f13ba0d3a8076947843263144b40623c3ee8037f39141579a63a3c3bbe87c",
+            "a787582ff57b176c40a6440f39ffbdf1b994e74cc7b9b78f506804d71a5a143f"
+          ]
+        }
+      ],
+      "max_chunk_frame_len": 61811,
+      "pad1_max_inner": 65511,
+      "root_hex": "6c3fb6a6d36daf26ef4333aa70859ac061aa162b23fb0bd687ceeedd5e77ad57"
+    },
+    "small": {
+      "chunk_count": 5,
+      "chunks": [
+        {
+          "frame": {
+            "fill_len": 61440,
+            "fill_start": 0,
+            "head_hex": "52555031018552550005000000000000f000",
+            "len": 61555,
+            "sha256_hex": "657169541695c67192453b9c29c40a93eb771ecc1508ad3cebc3b6d35968f0dc",
+            "tail_hex": "030c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d44391938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383",
+            "xor_at": null
+          },
+          "index": 0,
+          "leaf_hex": "971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a3",
+          "len": 61440,
+          "pad1_len": 65519,
+          "path_hex": [
+            "0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d443",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "frame": {
+            "fill_len": 61440,
+            "fill_start": 61440,
+            "head_hex": "52555031018552550005000000010000f000",
+            "len": 61555,
+            "sha256_hex": "165bbf00ccc3d13048704c8a07008b40c2946fbdda74ebaddcd9fb1b60a0e49a",
+            "tail_hex": "03971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a391938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383",
+            "xor_at": null
+          },
+          "index": 1,
+          "leaf_hex": "0c26aefc8cf6ef54d1223843ad002a8125cbeaf69c9660ab7a5a14c5ffb5d443",
+          "len": 61440,
+          "pad1_len": 65519,
+          "path_hex": [
+            "971fbaa1bd6ca3e42d83bff179e55d5f4dfc673b4b7f684054c71522c35c13a3",
+            "91938df3e654699f1f90ab11cfa7f887afc44c851e54ab7d4211dd7589c6e761",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "frame": {
+            "fill_len": 61440,
+            "fill_start": 122880,
+            "head_hex": "52555031018552550005000000020000f000",
+            "len": 61555,
+            "sha256_hex": "1c08a7fce836f5bc2f9c5ac509b8cee3868c78db8378708a9890100b4c40e26e",
+            "tail_hex": "032e63206455d9bd1ef23f5d700ec39cd9b4bece752a8486fea27ee1782c000201ad326df0660e81c29c909f2c26c60743838975f539d7b76f8e0479217cbef834443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383",
+            "xor_at": null
+          },
+          "index": 2,
+          "leaf_hex": "94093c5d70cb7c559a0bc5d4514820486de9cbd577afb00368c0c198eaa5528a",
+          "len": 61440,
+          "pad1_len": 65519,
+          "path_hex": [
+            "2e63206455d9bd1ef23f5d700ec39cd9b4bece752a8486fea27ee1782c000201",
+            "ad326df0660e81c29c909f2c26c60743838975f539d7b76f8e0479217cbef834",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "frame": {
+            "fill_len": 61440,
+            "fill_start": 184320,
+            "head_hex": "52555031018552550005000000030000f000",
+            "len": 61555,
+            "sha256_hex": "147b0c1acf1fe6c814cdda361b5f4685363dc351b666128c12debcc8f4949374",
+            "tail_hex": "0394093c5d70cb7c559a0bc5d4514820486de9cbd577afb00368c0c198eaa5528aad326df0660e81c29c909f2c26c60743838975f539d7b76f8e0479217cbef834443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383",
+            "xor_at": null
+          },
+          "index": 3,
+          "leaf_hex": "2e63206455d9bd1ef23f5d700ec39cd9b4bece752a8486fea27ee1782c000201",
+          "len": 61440,
+          "pad1_len": 65519,
+          "path_hex": [
+            "94093c5d70cb7c559a0bc5d4514820486de9cbd577afb00368c0c198eaa5528a",
+            "ad326df0660e81c29c909f2c26c60743838975f539d7b76f8e0479217cbef834",
+            "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383"
+          ]
+        },
+        {
+          "frame": {
+            "fill_len": 1000,
+            "fill_start": 245760,
+            "head_hex": "5255503101855255000500000004000003e8",
+            "len": 1051,
+            "sha256_hex": "e72f05725977a4e1e8c067c61675d610d503d5a81cea8957b4c38dd9d82badd9",
+            "tail_hex": "01c4a12be7e2c18ebb573b9f2c727e5786d168906bc6ac11979d229e2f1400674f",
+            "xor_at": null
+          },
+          "index": 4,
+          "leaf_hex": "443fd4eea3165c8179f69ecc2083a1dd37a8df56ef3d10d89bdf7e5adf4d7383",
+          "len": 1000,
+          "pad1_len": 4096,
+          "path_hex": [
+            "c4a12be7e2c18ebb573b9f2c727e5786d168906bc6ac11979d229e2f1400674f"
+          ]
+        }
+      ],
+      "end": {
+        "expects_reply": false,
+        "fields": {
+          "code": 0,
+          "sent": 5
+        },
+        "frame_hex": "525550310186525500050005",
+        "frame_len": 12,
+        "listener": "DROP",
+        "name": "chunks_end",
+        "op": 134,
+        "op_name": "CHUNKS_END",
+        "req_id_hex": "52550005",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      "last_frame_hex": "5255503101855255000500000004000003e81f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a01c4a12be7e2c18ebb573b9f2c727e5786d168906bc6ac11979d229e2f1400674f",
+      "request": {
+        "expects_reply": true,
+        "fields": {
+          "count": 5,
+          "first": 0,
+          "manifest_digest_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        },
+        "frame_hex": "525550310105525500055a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000000005",
+        "frame_len": 47,
+        "listener": "REQUEST",
+        "name": "get_chunks",
+        "op": 5,
+        "op_name": "GET_CHUNKS",
+        "req_id_hex": "52550005",
+        "role": "REQUEST",
+        "terminal_reply": false
+      },
+      "root_hex": "a288c9fbc5a455d4b785c7e234d966b3d1633d7ffe4693647746c18120388db9"
+    }
+  },
+  "inputs": {
+    "chunk_size": 61440,
+    "max_payload_len": 67108864,
+    "req_id_hex": "52550005",
+    "small_payload_len": 246760
+  },
+  "name": "rup1_chunk_path_001",
+  "protocol_version": "rvn1"
+}

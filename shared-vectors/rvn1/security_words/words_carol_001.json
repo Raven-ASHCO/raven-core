@@ -1,0 +1,54 @@
+{
+  "description": "SHA-256(label || ed_pub): the first 9 bytes are 9 indexes; the 10th is the GF(2^8) check. device_fingerprint_v1 of the same key alongside: both MUST be shown for the same key.",
+  "deterministic": true,
+  "expected": {
+    "check_index": 227,
+    "data_indexes": [
+      207,
+      126,
+      22,
+      85,
+      9,
+      11,
+      78,
+      115,
+      27
+    ],
+    "device_fingerprint_v1": "2sBz-4BI7-3qWd",
+    "digest_hex": "cf7e1655090b4e731b40e8bff0f36937e78c2e7f01650f80c80b99683a0d8de6",
+    "indexes": [
+      207,
+      126,
+      22,
+      85,
+      9,
+      11,
+      78,
+      115,
+      27,
+      227
+    ],
+    "text": "sock marble book giraffe banana basket fork lemon brush thunder",
+    "words": [
+      "sock",
+      "marble",
+      "book",
+      "giraffe",
+      "banana",
+      "basket",
+      "fork",
+      "lemon",
+      "brush",
+      "thunder"
+    ]
+  },
+  "inputs": {
+    "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+    "label_ascii": "rvn1/security-words/v1",
+    "wordlist_sha256": "86bd5c396943a48f1e53572e4756738916039f83a7afcefb7dce44620ea7c3f9"
+  },
+  "name": "Security words, carol",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

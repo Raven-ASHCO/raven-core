@@ -1,0 +1,253 @@
+{
+  "description": "tokens, tolerances and error statuses; compared with alice's key",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "case": "canonical",
+        "expected": {
+          "compare_with_alice": "match",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              241,
+              80,
+              25,
+              253,
+              153,
+              114,
+              81,
+              125,
+              98,
+              248
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "turtle frog bread wolf paper laptop funnel mango honey wagon"
+      },
+      {
+        "case": "upper case, hyphens, position numbers",
+        "expected": {
+          "compare_with_alice": "match",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              241,
+              80,
+              25,
+              253,
+              153,
+              114,
+              81,
+              125,
+              98,
+              248
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "1. Turtle- 2. Frog- 3. Bread- 4. Wolf- 5. Paper- 6. Laptop- 7. Funnel- 8. Mango- 9. Honey- 10. Wagon-"
+      },
+      {
+        "case": "first 3 letters",
+        "expected": {
+          "compare_with_alice": "match",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              241,
+              80,
+              25,
+              253,
+              153,
+              114,
+              81,
+              125,
+              98,
+              248
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "tur fro bre wol pap lap fun man hon wag"
+      },
+      {
+        "case": "plurals",
+        "expected": {
+          "compare_with_alice": "match",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              241,
+              80,
+              25,
+              253,
+              153,
+              114,
+              81,
+              125,
+              98,
+              248
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "turtles frogs breads wolfs papers laptops funnels mangoes honeys wagons"
+      },
+      {
+        "case": "full-width letters",
+        "expected": {
+          "compare_with_alice": "match",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              241,
+              80,
+              25,
+              253,
+              153,
+              114,
+              81,
+              125,
+              98,
+              248
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "\uff54\uff55\uff52\uff54\uff4c\uff45 \uff46\uff52\uff4f\uff47 \uff42\uff52\uff45\uff41\uff44 \uff57\uff4f\uff4c\uff46 \uff50\uff41\uff50\uff45\uff52 \uff4c\uff41\uff50\uff54\uff4f\uff50 \uff46\uff55\uff4e\uff4e\uff45\uff4c \uff4d\uff41\uff4e\uff47\uff4f \uff48\uff4f\uff4e\uff45\uff59 \uff57\uff41\uff47\uff4f\uff4e"
+      },
+      {
+        "case": "Persian digits as position numbers (silently ignored)",
+        "expected": {
+          "compare_with_alice": "match",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              241,
+              80,
+              25,
+              253,
+              153,
+              114,
+              81,
+              125,
+              98,
+              248
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "\u06f1 turtle \u06f2 frog \u06f3 bread \u06f4 wolf \u06f5 paper \u06f6 laptop \u06f7 funnel \u06f8 mango \u06f9 honey \u06f1\u06f0 wagon"
+      },
+      {
+        "case": "a token in another alphabet (word 2 typed with a Persian keyboard layout)",
+        "expected": {
+          "compare_with_alice": "non_latin",
+          "looks_like_words": true,
+          "parse": {
+            "position": 2,
+            "status": "non_latin"
+          }
+        },
+        "input": "turtle \u0628\u0642\u062e\u0644 bread wolf paper laptop funnel mango honey wagon"
+      },
+      {
+        "case": "two adjacent words swapped",
+        "expected": {
+          "compare_with_alice": "bad_check",
+          "looks_like_words": true,
+          "parse": {
+            "status": "bad_check"
+          }
+        },
+        "input": "frog turtle bread wolf paper laptop funnel mango honey wagon"
+      },
+      {
+        "case": "one word left out",
+        "expected": {
+          "compare_with_alice": "wrong_count",
+          "looks_like_words": true,
+          "parse": {
+            "count": 9,
+            "status": "wrong_count"
+          }
+        },
+        "input": "turtle frog bread paper laptop funnel mango honey wagon"
+      },
+      {
+        "case": "one word replaced by another list word",
+        "expected": {
+          "compare_with_alice": "bad_check",
+          "looks_like_words": true,
+          "parse": {
+            "status": "bad_check"
+          }
+        },
+        "input": "turtle frog bread wolf parrot laptop funnel mango honey wagon"
+      },
+      {
+        "case": "unknown word",
+        "expected": {
+          "compare_with_alice": "unknown",
+          "looks_like_words": true,
+          "parse": {
+            "position": 3,
+            "status": "unknown"
+          }
+        },
+        "input": "turtle frog xyzzy wolf paper laptop funnel mango honey wagon"
+      },
+      {
+        "case": "prefix too short",
+        "expected": {
+          "compare_with_alice": "ambiguous",
+          "looks_like_words": true,
+          "parse": {
+            "position": 1,
+            "status": "ambiguous"
+          }
+        },
+        "input": "tu frog bread wolf paper laptop funnel mango honey wagon"
+      },
+      {
+        "case": "bob's words against alice's key",
+        "expected": {
+          "compare_with_alice": "mismatch",
+          "looks_like_words": true,
+          "parse": {
+            "indexes": [
+              208,
+              191,
+              226,
+              189,
+              84,
+              16,
+              39,
+              78,
+              49,
+              136
+            ],
+            "status": "ok"
+          }
+        },
+        "input": "sofa scarf thread sausage gecko belt chair fork crab muffin"
+      },
+      {
+        "case": "old code (not words)",
+        "expected": {
+          "looks_like_words": false
+        },
+        "input": "If4x-36FU-omFi"
+      }
+    ]
+  },
+  "inputs": {
+    "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+  },
+  "name": "Security words entry parsing",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

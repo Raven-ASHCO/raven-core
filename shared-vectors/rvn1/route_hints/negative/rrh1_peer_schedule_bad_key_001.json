@@ -1,0 +1,14 @@
+{
+  "description": "An RRH1 frame (the sender seed's P2P_ID, then a PEER_SCHEDULE entry, type 0x23) that breaks RAVEN_ROUTE_HINTS_V1 §13.2: the fifth key is the Ed25519 identity point (01 00 … 00): it decodes but is of small order. The entry is dropped alone with an RRH1_MALFORMED debug log, and the frame and its P2P_ID are kept",
+  "deterministic": true,
+  "expected": {
+    "frame_kept": true,
+    "peer_schedule": null,
+    "reason": "a key of small order"
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f23014e030024ea000000000000000017080000000000000016959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9000000000000001776887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee0000000000000018bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b0000000000000019b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd000000000000001a0100000000000000000000000000000000000000000000000000000000000000000000000000001b33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5000000000000001cc70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff000000000000001df537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c"
+  },
+  "name": "PEER_SCHEDULE with a small-order key",
+  "protocol_version": "rvn1"
+}

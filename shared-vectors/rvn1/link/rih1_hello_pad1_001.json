@@ -1,0 +1,21 @@
+{
+  "description": "hello = RIH1 | caps u32 BE | ed25519_pub32 | sig64; sig = Ed25519(signer, \"rvn1/internet-hello/v1\" | role u8 | caps u32 BE | handshake_hash32 | signer_noise_static32 | ed25519_pub32) (RAVEN_TRANSPORT_INTERFACE_V1 §3). Caps = CAP_INTERNET | CAP_LINK_RRH1 | CAP_LINK_PAD1. The noise static is X25519(HKDF-SHA256(salt = \"rvn1/lan-noise/v1\", ikm = seed, info = \"static-x25519\")). Same signer and binding as route_hints/rih1_hello_rrh1_001.json",
+  "deterministic": true,
+  "expected": {
+    "hello_hex": "5249483100000302c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a5f068854e94aa27532ad0b9d63c38662b55d867ec3c20e3632967df4b8506a41c07ec959c32f0763081569553c6e020562048e7c9cfe1f40626d918cab56120a",
+    "hello_len": 104,
+    "signature_hex": "5f068854e94aa27532ad0b9d63c38662b55d867ec3c20e3632967df4b8506a41c07ec959c32f0763081569553c6e020562048e7c9cfe1f40626d918cab56120a",
+    "signing_bytes_hex": "72766e312f696e7465726e65742d68656c6c6f2f763101000003024848484848484848484848484848484848484848484848484848484848484848b5f72291111b2908b735a91e8f3c77988fa0dac8670721a8227adab29af3f14cc050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"
+  },
+  "inputs": {
+    "caps": 770,
+    "ed25519_pub_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+    "handshake_hash_hex": "4848484848484848484848484848484848484848484848484848484848484848",
+    "noise_static_pub_hex": "b5f72291111b2908b735a91e8f3c77988fa0dac8670721a8227adab29af3f14c",
+    "role": "initiator",
+    "role_u8": 1,
+    "signer_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "RIH1 hello with link feature bits 8 (RRH1) and 9 (PAD1)",
+  "protocol_version": "rvn1"
+}

@@ -1,0 +1,17 @@
+{
+  "description": "RFC1 v1 custody frame(s); header magic RFC1 | version | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "524643310181010203040506070800e0a276f22b4634ef7d0cbeffb551327cea4b0023464594e13c58345ce2d344605246433101830102030405060708000100000000000000000000000000000000000000000000000000000000000000000052464331018401020304050607080001",
+    "frame_len": 112
+  },
+  "inputs": {
+    "frame_lengths": [
+      47,
+      49,
+      16
+    ]
+  },
+  "name": "DEPOSIT_RESULT STORED, then FETCH_END and RELEASE_RESULT, concatenated",
+  "protocol_version": "rvn1"
+}

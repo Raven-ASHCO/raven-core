@@ -1,0 +1,23 @@
+{
+  "description": "payload = \"RLX1\" | version 0x01 | entries (type u8 | len u8 | value), at most 64 bytes; LINK_CAPS (type 0x01, len 4) is u32 BE in the RIH1 caps namespace, bit 8 = RRH1, bit 9 = PAD1. A listener built before PAD1 reads the same caps and ignores bit 9 (only bits it knows count), so it never pads",
+  "deterministic": true,
+  "expected": {
+    "encodings": [
+      {
+        "caps": 768,
+        "pad1": true,
+        "payload_hex": "524c583101010400000300",
+        "rrh1": true
+      },
+      {
+        "caps": 512,
+        "pad1": true,
+        "payload_hex": "524c583101010400000200",
+        "rrh1": false
+      }
+    ]
+  },
+  "inputs": {},
+  "name": "RLX1 LINK_CAPS with PAD1 (RAVEN_ROUTE_HINTS_V1 §3.2, RAVEN_LINK_PADDING_V1 §3)",
+  "protocol_version": "rvn1"
+}

@@ -1,0 +1,17 @@
+{
+  "description": "version 0, opcode 2, reserved, internal port, suggested external port, lifetime 7200 s",
+  "deterministic": true,
+  "expected": {
+    "request_hex": "000200001cff1cff00001c20"
+  },
+  "inputs": {
+    "client_ip": "192.168.1.20",
+    "internal_port": 7423,
+    "lifetime": 7200,
+    "op": 2,
+    "suggested_port": 7423
+  },
+  "name": "NAT-PMP TCP mapping request",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

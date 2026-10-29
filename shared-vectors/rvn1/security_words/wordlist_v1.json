@@ -1,0 +1,23 @@
+{
+  "description": "SHA-256 of protocol/reference/raven_protocol/security_words_v1.txt (the whole file) and spot rows",
+  "deterministic": true,
+  "expected": {
+    "rows": 256,
+    "sha256": "86bd5c396943a48f1e53572e4756738916039f83a7afcefb7dce44620ea7c3f9",
+    "spot": {
+      "0": "airport",
+      "1": "almond",
+      "127": "meadow",
+      "128": "medal",
+      "254": "worm",
+      "255": "zebra"
+    }
+  },
+  "inputs": {
+    "path": "protocol/reference/raven_protocol/security_words_v1.txt"
+  },
+  "name": "Security words v1 list",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

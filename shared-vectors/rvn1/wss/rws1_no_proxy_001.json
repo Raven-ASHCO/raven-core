@@ -1,0 +1,692 @@
+{
+  "description": "Each list case: the list as one string and, for each check, a host (a DNS name or an IP address, IPv6 with or without brackets), the dial's port, and whether the dial goes direct. Loopback and link-local addresses and localhost names always bypass. Section 8; raven_protocol/net_proxy.py",
+  "deterministic": true,
+  "expected": {
+    "lists": [
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "127.0.0.1",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "127.9.9.9",
+            "port": 7423
+          },
+          {
+            "bypass": true,
+            "host": "::1",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "[::1]",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "169.254.10.20",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "fe80::1",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "[FE80::1]",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "localhost",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "LOCALHOST.",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "relay.localhost",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "::ffff:127.0.0.1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "relay.example.org",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "fd00::1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "fec0::1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "notlocalhost",
+            "port": 443
+          }
+        ],
+        "list": "",
+        "why": "an empty list: loopback, link-local and localhost names only"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "relay.example.org",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "203.0.113.7",
+            "port": 7423
+          },
+          {
+            "bypass": true,
+            "host": "[2001:db8::7]",
+            "port": 443
+          }
+        ],
+        "list": "*",
+        "why": "every host"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "www.example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "a.b.example.com",
+            "port": 7423
+          },
+          {
+            "bypass": true,
+            "host": "EXAMPLE.COM",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "www.example.com.",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "notexample.com",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "example.com.evil.net",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "example.co",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "com",
+            "port": 443
+          }
+        ],
+        "list": "example.com",
+        "why": "a domain: it and every name under it, on a label boundary"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "www.example.com",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "notexample.com",
+            "port": 443
+          }
+        ],
+        "list": ".example.com",
+        "why": "a leading dot is optional: the same as example.com"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "www.example.com",
+            "port": 443
+          }
+        ],
+        "list": "example.com.",
+        "why": "a trailing dot is ignored"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "www.example.org",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "example.org",
+            "port": 443
+          }
+        ],
+        "list": "EXAMPLE.org",
+        "why": "entries ignore case"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "www.example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "a.b.example.com",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "example.com",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "notexample.com",
+            "port": 443
+          }
+        ],
+        "list": "*.example.com",
+        "why": "a glob: names under it, not the domain itself"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "relay-1.example.net",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "relay-.example.net",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "relay.example.net",
+            "port": 443
+          }
+        ],
+        "list": "relay-*.example.net",
+        "why": "a glob inside a name"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "10.9.8.7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "110.9.8.7",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "10.example",
+            "port": 443
+          }
+        ],
+        "list": "10.*",
+        "why": "a glob over an IP address's text"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "printer.local",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "local",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "printer.local.",
+            "port": 443
+          }
+        ],
+        "list": "*.local",
+        "why": "the macOS default"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "192.0.2.7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.8",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "[::ffff:192.0.2.7]",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.7.example",
+            "port": 443
+          }
+        ],
+        "list": "192.0.2.7",
+        "why": "an IPv4 address"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "2001:db8::7",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "[2001:DB8:0::7]",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "2001:db8::8",
+            "port": 443
+          }
+        ],
+        "list": "2001:db8::7",
+        "why": "an IPv6 address"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "2001:db8::7",
+            "port": 7423
+          }
+        ],
+        "list": "[2001:db8::7]",
+        "why": "an IPv6 address in brackets"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "10.1.2.3",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "11.0.0.1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "ten.example",
+            "port": 443
+          }
+        ],
+        "list": "10.0.0.0/8",
+        "why": "a CIDR"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "172.20.1.1",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "172.31.255.255",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "172.32.0.1",
+            "port": 443
+          }
+        ],
+        "list": "172.16/12",
+        "why": "the macOS short form"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "169.254.1.2",
+            "port": 443
+          }
+        ],
+        "list": "169.254/16",
+        "why": "the macOS default (link-local, which bypasses anyway)"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "192.168.7.7",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "10.200.0.1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.169.0.1",
+            "port": 443
+          }
+        ],
+        "list": "192.168/16, 10/8",
+        "why": "short forms with one and two parts"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "192.0.2.129",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.1",
+            "port": 443
+          }
+        ],
+        "list": "192.0.2.130/25",
+        "why": "host bits past the prefix are cleared"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "203.0.113.7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "2001:db8::7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "relay.example.org",
+            "port": 443
+          }
+        ],
+        "list": "0.0.0.0/0",
+        "why": "a zero-length IPv4 prefix: every IPv4 address"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "2001:db8:1::1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "2001:db9::1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.7",
+            "port": 443
+          }
+        ],
+        "list": "2001:db8::/32",
+        "why": "an IPv6 CIDR"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "example.com",
+            "port": 8443
+          },
+          {
+            "bypass": false,
+            "host": "example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "www.example.com",
+            "port": 8443
+          }
+        ],
+        "list": "example.com:8443",
+        "why": "a port: only dials to that port"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "192.0.2.7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.7",
+            "port": 7423
+          }
+        ],
+        "list": "192.0.2.7:443",
+        "why": "an IPv4 address with a port"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "2001:db8::7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "2001:db8::7",
+            "port": 80
+          }
+        ],
+        "list": "[2001:db8::7]:443",
+        "why": "an IPv6 address with a port"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "10.9.9.9",
+            "port": 7423
+          },
+          {
+            "bypass": false,
+            "host": "10.9.9.9",
+            "port": 443
+          }
+        ],
+        "list": "10.0.0.0/8:7423",
+        "why": "a CIDR with a port"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "relay.corp.example",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "relay.corp.example",
+            "port": 80
+          }
+        ],
+        "list": "*.corp.example:443",
+        "why": "a glob with a port"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "intranet",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "INTRANET",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "intranet.example",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "192.0.2.7",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "2001:db8::7",
+            "port": 443
+          }
+        ],
+        "list": "<local>",
+        "why": "Windows: names without a dot"
+      },
+      {
+        "checks": [
+          {
+            "bypass": true,
+            "host": "www.example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "example.net",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "10.1.1.1",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "intranet",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "fd00::1",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "printer.local",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "example.org",
+            "port": 443
+          }
+        ],
+        "list": "example.com, .example.net;10.*  <local>\tfd00::/8\n*.local",
+        "why": "separators: comma, semicolon, space, tab and newline"
+      },
+      {
+        "checks": [
+          {
+            "bypass": false,
+            "host": "example.com",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "ok.example",
+            "port": 443
+          },
+          {
+            "bypass": true,
+            "host": "a.ok.example",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "256.1.1.1",
+            "port": 443
+          },
+          {
+            "bypass": false,
+            "host": "10.0.0.1",
+            "port": 443
+          }
+        ],
+        "list": "example.com:abc [::1 :443 10.0.0.0/33 -bad- 1.2.3.4/x 256.1.1.1 fe80::%en0/64 ok.example",
+        "why": "entries that fit no form are ignored"
+      }
+    ]
+  },
+  "inputs": {
+    "separators": "comma, semicolon, space, tab, CR, LF"
+  },
+  "name": "Bypass lists (NO_PROXY, macOS ExceptionsList, Windows ProxyOverride)",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_WSS_TRANSPORT_V1.md"
+}

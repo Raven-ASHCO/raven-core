@@ -1,0 +1,15 @@
+{
+  "description": "pcp_map_v4_resp_001 followed by option 0x70 (mandatory to process, length 4): invalid",
+  "deterministic": true,
+  "expected": {
+    "error": "mandatory_option"
+  },
+  "inputs": {
+    "reply_hex": "0281000000001c2000000e10000000000000000000000000117a021fb22cdbf08252fdff060000001cff1cff00000000000000000000ffff0b0002097000000401020304",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "PCP reply with an unknown mandatory option",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

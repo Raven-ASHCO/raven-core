@@ -1,0 +1,46 @@
+{
+  "description": "RELAY_OFFER v1 record (RAVEN_ROUTE_HINTS_V1 §11.1): version 0x01 | flags u8 (bit0 CONFIRMED, bit1 AUTONAT, bit2 PORT_443) | relay_pub [32] | n_addrs u8 (1..=4) | n x (len u8 (8..=120) | canonical ASCII host+transport multiaddr). It rides RRH1 as entry type 0x20 (type u8 | len u16 BE | record). The relay key is the Ed25519 public key of the relay seed (the relay's own key, never a profile key); its PeerId is the libp2p Ed25519 PeerId of relay_pub, dialled at <addr>/p2p/<PeerId>. The frame is an RRH1 snapshot from the sender seed with two records, the most a frame carries: its P2P_ID, the record of rrh1_relay_offer_001.json, then this one",
+  "deterministic": true,
+  "expected": {
+    "decoded": {
+      "addrs": [
+        "/dns4/relay.example.org/tcp/7427",
+        "/dns4/relay.example.org/udp/7427/quic-v1",
+        "/dns4/relay.example.org/tcp/443"
+      ],
+      "autonat": true,
+      "confirmed": false,
+      "dial": [
+        "/dns4/relay.example.org/tcp/7427/p2p/12D3KooWCmBiXQRKqTPiQFZ7YKCxvewPEqWaUyGgemowB5mpeUBC",
+        "/dns4/relay.example.org/udp/7427/quic-v1/p2p/12D3KooWCmBiXQRKqTPiQFZ7YKCxvewPEqWaUyGgemowB5mpeUBC",
+        "/dns4/relay.example.org/tcp/443/p2p/12D3KooWCmBiXQRKqTPiQFZ7YKCxvewPEqWaUyGgemowB5mpeUBC"
+      ],
+      "flags": 6,
+      "port_443": true,
+      "relay_peer_id": "12D3KooWCmBiXQRKqTPiQFZ7YKCxvewPEqWaUyGgemowB5mpeUBC",
+      "relay_pub_hex": "2bc2800b3316e009209ffd757dab19ccf0ae84bc7ae90654e1e81712d270f653",
+      "version": 1
+    },
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f2000590103a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a998736702162f6970342f31312e302e322e372f7463702f373432371e2f6970342f31312e302e322e372f7564702f373432372f717569632d763120008d01062bc2800b3316e009209ffd757dab19ccf0ae84bc7ae90654e1e81712d270f65303202f646e73342f72656c61792e6578616d706c652e6f72672f7463702f37343237282f646e73342f72656c61792e6578616d706c652e6f72672f7564702f373432372f717569632d76311f2f646e73342f72656c61792e6578616d706c652e6f72672f7463702f343433",
+    "frame_len": 294,
+    "record_hex": "01062bc2800b3316e009209ffd757dab19ccf0ae84bc7ae90654e1e81712d270f65303202f646e73342f72656c61792e6578616d706c652e6f72672f7463702f37343237282f646e73342f72656c61792e6578616d706c652e6f72672f7564702f373432372f717569632d76311f2f646e73342f72656c61792e6578616d706c652e6f72672f7463702f343433",
+    "record_len": 141
+  },
+  "inputs": {
+    "addrs": [
+      "/dns4/relay.example.org/tcp/7427",
+      "/dns4/relay.example.org/udp/7427/quic-v1",
+      "/dns4/relay.example.org/tcp/443"
+    ],
+    "flags": 6,
+    "generation": 1760000000123,
+    "relay_peer_id": "12D3KooWCmBiXQRKqTPiQFZ7YKCxvewPEqWaUyGgemowB5mpeUBC",
+    "relay_pub_hex": "2bc2800b3316e009209ffd757dab19ccf0ae84bc7ae90654e1e81712d270f653",
+    "relay_seed_hex": "6464646464646464646464646464646464646464646464646464646464646464",
+    "sender_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+    "sender_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+    "ttl_s": 259200
+  },
+  "name": "RELAY_OFFER: a DNS-named relay with TCP 443, flags AUTONAT | PORT_443",
+  "protocol_version": "rvn1"
+}

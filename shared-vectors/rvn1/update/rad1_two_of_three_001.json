@@ -1,0 +1,73 @@
+{
+  "description": "RAD1 = \"RAD1\" | 0x01 | flags 0x00 | entry_count u16 | serial u64 | issued_at_ms u64 | key_set_digest[32] | prev_digest[32] | entries | sig_count u8 | (key_index u8 | Ed25519 signature[64]) * sig_count; entry = kind u8 | severity u8 | target_len u8 | target | arg_len u16 | arg | text_id u16; signing input \"rvn1/advisory/v1\\0\" || bytes before the signature block; advisory_digest = SHA-256(\"rvn1/advisory/digest/v1\\0\" || all bytes) (RAVEN_SECURITY_ADVISORY_V1 §3, §6). Advisory #1 (prev_digest all zero) signed by keys 0 and 2 of the test key set (keyset_001): a DEPRECATED PairInit V1 suite and a notice",
+  "deterministic": true,
+  "expected": {
+    "advisory": {
+      "advisory_digest_hex": "f61c73e89b537177995a10258214b913b426fea91a9108caad6d6afc39fd4308",
+      "advisory_hex": "52414431010000020000000000000001000001a1660eac00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000000000000000000000000000000000000000000000000000000000000000001010c70616972696e69742f312f31000000010400066e6f74696365004154657374206e6f7469636520313a2050616972496e6974205631206973206265696e6720726574697265642e204e6f7468696e67206368616e676573207965742e0000020014375ce7770a3e6d830404502caa4c6c5017daab780bbf6dc1a339c715f166e8e2dc237d37844ee2d2a99c35c334765d01c78bbb70157e6642f750d2e9b5020e02aa3667f8b2c13cf2e737b65da608060975356ae60abf8d5f9da0ed08ddb6a04a0c8093b368e36b873d2bf8a8ccc458e4e957fe9bfbabf0b191a259d700523e01",
+      "entries": [
+        {
+          "kind": "SUITE_STATUS",
+          "severity": "DEPRECATED",
+          "target": "pairinit/1/1",
+          "understood": true
+        },
+        {
+          "kind": "NOTICE",
+          "notice_text": "Test notice 1: PairInit V1 is being retired. Nothing changes yet.",
+          "severity": "INFO",
+          "target": "notice",
+          "understood": true
+        }
+      ],
+      "signed_len": 185,
+      "signing_input_hex": "72766e312f61647669736f72792f76310052414431010000020000000000000001000001a1660eac00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000000000000000000000000000000000000000000000000000000000000000001010c70616972696e69742f312f31000000010400066e6f74696365004154657374206e6f7469636520313a2050616972496e6974205631206973206265696e6720726574697265642e204e6f7468696e67206368616e676573207965742e0000"
+    },
+    "verify": "OK"
+  },
+  "inputs": {
+    "advisory": {
+      "entries": [
+        {
+          "arg_hex": "",
+          "kind": 1,
+          "severity": 1,
+          "target": "pairinit/1/1",
+          "text_id": 1
+        },
+        {
+          "arg_hex": "54657374206e6f7469636520313a2050616972496e6974205631206973206265696e6720726574697265642e204e6f7468696e67206368616e676573207965742e",
+          "kind": 4,
+          "severity": 0,
+          "target": "notice",
+          "text_id": 0
+        }
+      ],
+      "issued_at_ms": 1792713600000,
+      "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+      "prev_digest_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "serial": 1,
+      "signers": [
+        0,
+        2
+      ]
+    },
+    "key_set": {
+      "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+      "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+      "public_keys_hex": [
+        "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+        "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce"
+      ],
+      "seeds_hex": [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333"
+      ],
+      "threshold": 2
+    }
+  },
+  "name": "rad1_two_of_three_001",
+  "protocol_version": "rvn1"
+}

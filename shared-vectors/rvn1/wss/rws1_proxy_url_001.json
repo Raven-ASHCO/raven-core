@@ -1,0 +1,630 @@
+{
+  "description": "Each setting case: the input, whether node policy refuses it as carrying credentials (any @), and either the setting (auto, off or url: host, port, the Basic value or null, the redacted display) or the refusal (error: the rule's code; kind: https, socks, pac or invalid, what a status line says). Each Windows case: the entry a WSS dial uses, or null. Section 7 and 8; raven_protocol/net_proxy.py",
+  "deterministic": true,
+  "expected": {
+    "settings": [
+      {
+        "credentials": false,
+        "display": "auto",
+        "input": "",
+        "setting": "auto",
+        "why": "empty: auto"
+      },
+      {
+        "credentials": false,
+        "display": "auto",
+        "input": "  AUTO ",
+        "setting": "auto",
+        "why": "auto, any case, surrounding white space trimmed"
+      },
+      {
+        "credentials": false,
+        "display": "off",
+        "input": "off",
+        "setting": "off",
+        "why": "off"
+      },
+      {
+        "credentials": false,
+        "display": "off",
+        "input": "Off",
+        "setting": "off",
+        "why": "off, any case"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example:3128",
+        "host": "proxy.example",
+        "input": "http://proxy.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "an http:// proxy"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example:3128",
+        "host": "proxy.example",
+        "input": "proxy.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "a bare host:port is http"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example:80",
+        "host": "proxy.example",
+        "input": "http://proxy.example",
+        "port": 80,
+        "setting": "url",
+        "why": "no port: 80"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example:80",
+        "host": "proxy.example",
+        "input": "proxy.example",
+        "port": 80,
+        "setting": "url",
+        "why": "a bare host: http, port 80"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example:8080",
+        "host": "proxy.example",
+        "input": "HTTP://Proxy.Example:8080/",
+        "port": 8080,
+        "setting": "url",
+        "why": "scheme any case, host lower-cased, one trailing / allowed"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example:3128",
+        "host": "proxy.example",
+        "input": "\thttp://proxy.example:3128\r\n",
+        "port": 3128,
+        "setting": "url",
+        "why": "tab, CR and LF around it are trimmed"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy_1.corp.example:3128",
+        "host": "proxy_1.corp.example",
+        "input": "http://proxy_1.corp.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "an underscore in a label"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://proxy.example.:3128",
+        "host": "proxy.example.",
+        "input": "http://proxy.example.:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "a trailing dot (a fully qualified name) is kept"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://127.0.0.1:3128",
+        "host": "127.0.0.1",
+        "input": "http://127.0.0.1:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "a proxy on this computer (cntlm, px)"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://192.0.2.7:65535",
+        "host": "192.0.2.7",
+        "input": "http://192.0.2.7:65535",
+        "port": 65535,
+        "setting": "url",
+        "why": "an IPv4 address; the highest port"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://[2001:db8::1]:3128",
+        "host": "2001:db8::1",
+        "input": "http://[2001:db8::1]:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "an IPv6 address in brackets"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://[2001:db8::1]:8080",
+        "host": "2001:db8::1",
+        "input": "[2001:DB8:0::1]:8080",
+        "port": 8080,
+        "setting": "url",
+        "why": "a bare [IPv6]:port; canonical IPv6 text"
+      },
+      {
+        "basic": null,
+        "credentials": false,
+        "display": "http://192.0.2.7:3128",
+        "host": "192.0.2.7",
+        "input": "http://[::ffff:192.0.2.7]:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "an IPv4-mapped IPv6 address is its IPv4 address"
+      },
+      {
+        "basic": "dXNlcjpwYXNz",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:3128",
+        "host": "proxy.example",
+        "input": "http://user:pass@proxy.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "Basic credentials: base64 of user:pass"
+      },
+      {
+        "basic": "dXNlcjpwQHNzOndvcmQ=",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:3128",
+        "host": "proxy.example",
+        "input": "http://us%65r:p%40ss%3Aword@proxy.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "user name and password percent-decoded"
+      },
+      {
+        "basic": "dXNlcjpwQHNz",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:3128",
+        "host": "proxy.example",
+        "input": "http://user:p@ss@proxy.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "the last @ ends the user part"
+      },
+      {
+        "basic": "dXNlcjo=",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:80",
+        "host": "proxy.example",
+        "input": "http://user@proxy.example",
+        "port": 80,
+        "setting": "url",
+        "why": "a user name alone: an empty password"
+      },
+      {
+        "basic": "OnBhc3M=",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:80",
+        "host": "proxy.example",
+        "input": "http://:pass@proxy.example",
+        "port": 80,
+        "setting": "url",
+        "why": "an empty user name"
+      },
+      {
+        "basic": "dXNlcjrDqXTDqQ==",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:80",
+        "host": "proxy.example",
+        "input": "http://user:%C3%A9t%C3%A9@proxy.example",
+        "port": 80,
+        "setting": "url",
+        "why": "a UTF-8 password, as bytes"
+      },
+      {
+        "basic": "dXNlcjpwYXNz",
+        "credentials": true,
+        "display": "http://<redacted>@proxy.example:3128",
+        "host": "proxy.example",
+        "input": "user:pass@proxy.example:3128",
+        "port": 3128,
+        "setting": "url",
+        "why": "credentials in a bare host:port"
+      },
+      {
+        "credentials": false,
+        "error": "https",
+        "input": "https://proxy.example:443",
+        "kind": "https",
+        "why": "an HTTPS proxy"
+      },
+      {
+        "credentials": true,
+        "error": "https",
+        "input": "HTTPS://user:pass@proxy.example",
+        "kind": "https",
+        "why": "an HTTPS proxy with credentials"
+      },
+      {
+        "credentials": false,
+        "error": "socks",
+        "input": "socks5://127.0.0.1:1080",
+        "kind": "socks",
+        "why": "SOCKS5"
+      },
+      {
+        "credentials": false,
+        "error": "socks",
+        "input": "socks5h://proxy.example:1080",
+        "kind": "socks",
+        "why": "SOCKS5 with remote names"
+      },
+      {
+        "credentials": false,
+        "error": "socks",
+        "input": "socks://proxy.example",
+        "kind": "socks",
+        "why": "SOCKS"
+      },
+      {
+        "credentials": false,
+        "error": "socks",
+        "input": "socks4a://proxy.example:1080",
+        "kind": "socks",
+        "why": "SOCKS4a"
+      },
+      {
+        "credentials": false,
+        "error": "pac",
+        "input": "pac",
+        "kind": "pac",
+        "why": "the word pac"
+      },
+      {
+        "credentials": false,
+        "error": "pac",
+        "input": "WPAD",
+        "kind": "pac",
+        "why": "the word wpad"
+      },
+      {
+        "credentials": false,
+        "error": "pac",
+        "input": "http://wpad.example/proxy.pac",
+        "kind": "pac",
+        "why": "a PAC URL"
+      },
+      {
+        "credentials": false,
+        "error": "pac",
+        "input": "http://wpad.example/proxy.PAC?v=2",
+        "kind": "pac",
+        "why": "a PAC URL with a query"
+      },
+      {
+        "credentials": false,
+        "error": "pac",
+        "input": "file:///etc/proxy.pac",
+        "kind": "pac",
+        "why": "a PAC file"
+      },
+      {
+        "credentials": false,
+        "error": "pac",
+        "input": "http://wpad/wpad.dat",
+        "kind": "pac",
+        "why": "the WPAD file"
+      },
+      {
+        "credentials": false,
+        "error": "scheme",
+        "input": "ftp://proxy.example:21",
+        "kind": "invalid",
+        "why": "another scheme"
+      },
+      {
+        "credentials": false,
+        "error": "scheme",
+        "input": "://proxy.example",
+        "kind": "invalid",
+        "why": "an empty scheme"
+      },
+      {
+        "credentials": false,
+        "error": "path",
+        "input": "http//proxy.example",
+        "kind": "invalid",
+        "why": "no :// - a host part with a path"
+      },
+      {
+        "credentials": false,
+        "error": "path",
+        "input": "http://proxy.example:3128/path",
+        "kind": "invalid",
+        "why": "a path"
+      },
+      {
+        "credentials": false,
+        "error": "path",
+        "input": "http://proxy.example:3128?x=1",
+        "kind": "invalid",
+        "why": "a query"
+      },
+      {
+        "credentials": false,
+        "error": "path",
+        "input": "http://proxy.example:3128#top",
+        "kind": "invalid",
+        "why": "a fragment"
+      },
+      {
+        "credentials": false,
+        "error": "port",
+        "input": "http://proxy.example:0",
+        "kind": "invalid",
+        "why": "port 0"
+      },
+      {
+        "credentials": false,
+        "error": "port",
+        "input": "http://proxy.example:65536",
+        "kind": "invalid",
+        "why": "port above 65535"
+      },
+      {
+        "credentials": false,
+        "error": "port",
+        "input": "http://proxy.example:",
+        "kind": "invalid",
+        "why": "an empty port"
+      },
+      {
+        "credentials": false,
+        "error": "port",
+        "input": "http://proxy.example:08080",
+        "kind": "invalid",
+        "why": "a leading zero"
+      },
+      {
+        "credentials": false,
+        "error": "port",
+        "input": "http://proxy.example:+80",
+        "kind": "invalid",
+        "why": "a sign"
+      },
+      {
+        "credentials": false,
+        "error": "port",
+        "input": "http://proxy.example:31:28",
+        "kind": "invalid",
+        "why": "two ports"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://",
+        "kind": "invalid",
+        "why": "no host"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://:3128",
+        "kind": "invalid",
+        "why": "an empty host"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://0.0.0.0:3128",
+        "kind": "invalid",
+        "why": "the unspecified IPv4 address"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://[::]:3128",
+        "kind": "invalid",
+        "why": "the unspecified IPv6 address"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://224.0.0.1:3128",
+        "kind": "invalid",
+        "why": "a multicast address"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://255.255.255.255:3128",
+        "kind": "invalid",
+        "why": "the broadcast address"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://2001:db8::1:3128",
+        "kind": "invalid",
+        "why": "an IPv6 address without brackets"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://[2001:db8::1",
+        "kind": "invalid",
+        "why": "an unclosed bracket"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://[2001:db8::1]x",
+        "kind": "invalid",
+        "why": "text after the bracket"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://[fe80::1%25en0]:3128",
+        "kind": "invalid",
+        "why": "an IPv6 zone"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://[192.0.2.7]:3128",
+        "kind": "invalid",
+        "why": "an IPv4 address in brackets"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://-proxy.example",
+        "kind": "invalid",
+        "why": "a label starting with -"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://proxy..example",
+        "kind": "invalid",
+        "why": "an empty label"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://256.1.1.1:3128",
+        "kind": "invalid",
+        "why": "a last label of digits: no IPv4 address"
+      },
+      {
+        "credentials": false,
+        "error": "host",
+        "input": "http://10.1:3128",
+        "kind": "invalid",
+        "why": "a short IPv4 form"
+      },
+      {
+        "credentials": true,
+        "error": "userinfo",
+        "input": "http://@proxy.example",
+        "kind": "invalid",
+        "why": "an empty user part"
+      },
+      {
+        "credentials": true,
+        "error": "userinfo",
+        "input": "http://us%zzer:pass@proxy.example",
+        "kind": "invalid",
+        "why": "a bad percent escape"
+      },
+      {
+        "credentials": true,
+        "error": "userinfo",
+        "input": "http://user:pass%4@proxy.example",
+        "kind": "invalid",
+        "why": "a cut percent escape"
+      },
+      {
+        "credentials": true,
+        "error": "userinfo",
+        "input": "http://us%3Aer:pass@proxy.example",
+        "kind": "invalid",
+        "why": "a colon in the user name"
+      },
+      {
+        "credentials": true,
+        "error": "userinfo",
+        "input": "http://user:pa%0Ass@proxy.example",
+        "kind": "invalid",
+        "why": "a control character in the password"
+      },
+      {
+        "credentials": false,
+        "error": "syntax",
+        "input": "http://proxy example:3128",
+        "kind": "invalid",
+        "why": "a space inside"
+      },
+      {
+        "credentials": false,
+        "error": "syntax",
+        "input": "http://pr\u00f6xy.example:3128",
+        "kind": "invalid",
+        "why": "a non-ASCII character"
+      },
+      {
+        "credentials": false,
+        "error": "too_long",
+        "input": "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+        "kind": "invalid",
+        "why": "longer than 1024 bytes"
+      }
+    ],
+    "windows": [
+      {
+        "entry": "b.example:2",
+        "input": "http=a.example:1;https=b.example:2",
+        "why": "the https= entry"
+      },
+      {
+        "entry": "b.example:2",
+        "input": "b.example:2",
+        "why": "one entry for every scheme"
+      },
+      {
+        "entry": "b.example:2",
+        "input": "http=a.example:1;b.example:2;c.example:3",
+        "why": "the first bare entry serves https"
+      },
+      {
+        "entry": "c.example:3",
+        "input": "b.example:2;HTTPS=c.example:3",
+        "why": "an https= entry wins over a bare one, any case"
+      },
+      {
+        "entry": "b.example:2",
+        "input": " http=a.example:1  https=b.example:2 ",
+        "why": "white space separates entries too"
+      },
+      {
+        "entry": "http://b.example:2",
+        "input": "https=http://b.example:2",
+        "why": "an entry may carry http://"
+      },
+      {
+        "entry": "c.example:3",
+        "input": "https=;socks=s.example:1080;c.example:3",
+        "why": "an empty https= entry and socks= are skipped"
+      },
+      {
+        "entry": null,
+        "input": "socks=s.example:1080",
+        "why": "socks= alone: none"
+      },
+      {
+        "entry": null,
+        "input": "http=a.example:1",
+        "why": "http= alone: none"
+      },
+      {
+        "entry": null,
+        "input": "",
+        "why": "empty: none"
+      },
+      {
+        "entry": null,
+        "input": ";;",
+        "why": "only separators: none"
+      }
+    ]
+  },
+  "inputs": {
+    "default_port": 80,
+    "max_text_bytes": 1024,
+    "trimmed": "space, tab, CR, LF"
+  },
+  "name": "Proxy settings, proxy URLs and Windows proxy strings",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_WSS_TRANSPORT_V1.md"
+}

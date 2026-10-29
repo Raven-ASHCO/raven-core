@@ -1,0 +1,60 @@
+{
+  "description": "RAVEN_LAN_BEACON_V1 §3, §5 and §7 (the v1 amendment of Phase 6b, made before the beacon's production flip). A sender puts 0..=15 fresh random bytes after an answer's 48 (the number drawn uniformly); a receiver takes any datagram of 48..=63 bytes as an answer, reads its first 48 bytes as lbcn_answer_001.json describes and ignores the rest. Here the answer of lbcn_answer_001.json (answer_hex) gets tails of 1, 8 and 15 counting bytes from 0xe0 (random in a real answer); alice opens each with her keys for bob to bob's port as she opens the answer alone, and with another query's nonce to nothing. A 64-byte datagram is dropped: lbcn_negative_001.json",
+  "deterministic": true,
+  "expected": {
+    "max_len": 63,
+    "padded": [
+      {
+        "alice_opens": 7420,
+        "alice_opens_with_another_q_nonce": null,
+        "datagram_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08e0",
+        "len": 49,
+        "tail_len": 1
+      },
+      {
+        "alice_opens": 7420,
+        "alice_opens_with_another_q_nonce": null,
+        "datagram_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08e0e1e2e3e4e5e6e7",
+        "len": 56,
+        "tail_len": 8
+      },
+      {
+        "alice_opens": 7420,
+        "alice_opens_with_another_q_nonce": null,
+        "datagram_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08e0e1e2e3e4e5e6e7e8e9eaebecedee",
+        "len": 63,
+        "tail_len": 15
+      }
+    ]
+  },
+  "inputs": {
+    "answer_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08",
+    "answer_vector": "lbcn_answer_001.json",
+    "dst": "192.168.1.20",
+    "opener": "alice",
+    "other_q_nonce_hex": "000102030405060708090a0b0c0d0e0e",
+    "peer": "bob",
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      }
+    },
+    "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+    "src": "192.168.1.30",
+    "tail_first_byte": 224,
+    "tail_lens": [
+      1,
+      8,
+      15
+    ]
+  },
+  "name": "LAN beacon answer with a random tail: read as its first 48 bytes",
+  "protocol_version": "rvn1"
+}

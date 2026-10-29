@@ -1,0 +1,122 @@
+{
+  "description": "RAVEN_LAN_BEACON_V1 §2. a = SHA-512(seed)[0..32] (X25519 clamps it); u = (1 + y) / (1 - y) mod 2^255 - 19 is the Montgomery u-coordinate of an Ed25519 key; Z = X25519(a_A, u_B) = X25519(a_B, u_A). K_root = HKDF-SHA256(salt 'rvn1/r2-pair/v1', ikm Z, info 'root' || lo || hi, 32 bytes) with lo and hi the two Ed25519 keys sorted bytewise: the R2 pairwise root, one per pair for every medium. K_lan = HKDF-Expand-SHA256(PRK K_root, info 'medium' || 0x02, 32 bytes). With X and Y Ed25519 keys, K_q(X->Y) = HMAC-SHA256(K_lan, 'query' || X || Y) and K_r(Y->X) = HMAC-SHA256(K_lan, 'reply' || Y || X); the epoch key K_q,e = HMAC-SHA256(K_q, 'epoch' || e as u64 big-endian), e = floor(epoch_seconds / 600). Labels are ASCII with no terminator. These keys only make beacon tags: never a message, session, route, mailbox or ACK key",
+  "deterministic": true,
+  "expected": {
+    "epoch": 2833333,
+    "pairs": [
+      {
+        "a": "alice",
+        "b": "bob",
+        "hi": "alice",
+        "k_lan_hex": "d6ba21b25249be8a1cf5ed664baa67ef918744f8aca37c17fd5c7a5fcf9c822b",
+        "k_query_a_to_b_hex": "148c3951184e5077f2c18a7bf33c5197ba0acbe49b8cb690bb8aa020c76c6913",
+        "k_query_b_to_a_hex": "f18ebfb41575a6b0e37db6cee7f174b617eeb5ec45dff102af7c7b23c2db6c18",
+        "k_query_epoch_a_to_b_hex": "b853eaf75c4d71c4b47f231322b58596fb029e9b286b14db7a2e057bf8b813f4",
+        "k_query_epoch_b_to_a_hex": "e3e52d4787e31f9373cc654961fd82ee559798b02a9f66556754636b8367d3b4",
+        "k_reply_a_to_b_hex": "8fdbea77ad8c06c7e2fb5950d3122a4a763c99658706f52daa20fe273a512083",
+        "k_reply_b_to_a_hex": "b9ac5041d7466135f40ac6847690f3353c8e47f149977be1e96a259269912a22",
+        "k_root_hex": "4a7b4e88f966358051ad5a45a0374f88f37627182cce69a27860717269c504a1",
+        "lo": "bob",
+        "root_info_hex": "726f6f743d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660cd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "z_by_a_hex": "5166f24a6918368e2af831a4affadd97af0ac326bdf143596c045967cc00230e",
+        "z_by_b_hex": "5166f24a6918368e2af831a4affadd97af0ac326bdf143596c045967cc00230e"
+      },
+      {
+        "a": "alice",
+        "b": "carol",
+        "hi": "carol",
+        "k_lan_hex": "18864388e05cda1ca5b4f8ed97f7250498b5fe95d38f48d8bdfc1e47fd2ae337",
+        "k_query_a_to_b_hex": "ddcd4979de87abfeed31b21e64f56a41c5ccea8787740df0fd640c18e6afde63",
+        "k_query_b_to_a_hex": "4d3c705456dfbaa0138432f5ed21b5d653c2cd88a05a75dc9c332d678a22d1f4",
+        "k_query_epoch_a_to_b_hex": "e4dfe613566b2c13224ab99c19781f21be18c6c8927765c8ef18bceb9a812da9",
+        "k_query_epoch_b_to_a_hex": "6dac9488bfd824506394e4ebe3e86e1f25011ae9113936113da181ca00938b21",
+        "k_reply_a_to_b_hex": "61d5d7c18396b4a5aee433bb624b542740227c991d7bebd77e81004c1f051c0a",
+        "k_reply_b_to_a_hex": "31a57d6ad55efe8b99e3fd24d90b6608c6d3416569e8baf62c057ef37712c9f7",
+        "k_root_hex": "0252f416f852a2c649224b410480fbd06c590d8af6e6b71e224ad1afe27ea430",
+        "lo": "alice",
+        "root_info_hex": "726f6f74d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511afc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "z_by_a_hex": "c64b70c735c7a8f6581bf5fc287a701ad85753647b410e388692cb50b14a4e64",
+        "z_by_b_hex": "c64b70c735c7a8f6581bf5fc287a701ad85753647b410e388692cb50b14a4e64"
+      },
+      {
+        "a": "alice",
+        "b": "dave",
+        "hi": "alice",
+        "k_lan_hex": "e8da78189cad6fc90fee631be38416c65245dfe7dc927c78908cf52481d5000a",
+        "k_query_a_to_b_hex": "f8dc392df4fcab4bacc642e0505c925aa31ea89ffb529f8185a969116e461729",
+        "k_query_b_to_a_hex": "09d5a4a493934afed489f2b782c169e24282f3af6aeb86cc77aa119cfad3da66",
+        "k_query_epoch_a_to_b_hex": "b26e9e338acab9829a7606a601e4cb86730f563071b461cc8519c11c6556c50b",
+        "k_query_epoch_b_to_a_hex": "6a764db24396e2f732180ae8fc4f291a92c30745b709de4b6d8ea3252d5fba02",
+        "k_reply_a_to_b_hex": "fcb0e3c5320ab7e23f4a3ac408abf17d94936b77202ca3122563e1c8c6aa2864",
+        "k_reply_b_to_a_hex": "1dbc84698115beec8d3c1452b8309874efd29570a0b3ca3a6cd8e08da1e7d7ba",
+        "k_root_hex": "4a59e25329e340147ce0b8f920247206e9e66e01e4a12547cb82dc6eb6bef852",
+        "lo": "dave",
+        "root_info_hex": "726f6f74d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "z_by_a_hex": "4ba663a741d1c7fcc34ac766539fd33766eb45f73d6f050b58cc28ca32ce3959",
+        "z_by_b_hex": "4ba663a741d1c7fcc34ac766539fd33766eb45f73d6f050b58cc28ca32ce3959"
+      }
+    ],
+    "people": {
+      "alice": {
+        "montgomery_u_hex": "d85e07ec22b0ad881537c2f44d662d1a143cf830c57aca4305d85c7a90f6b62e",
+        "x25519_scalar_hex": "357c83864f2833cb427a2ef1c00a013cfdff2768d980c0a3a520f006904de90f"
+      },
+      "bob": {
+        "montgomery_u_hex": "25c704c594b88afc00a76b69d1ed2b984d7e22550f3ed0802d04fbcd07d38d47",
+        "x25519_scalar_hex": "6ebd9ed75882d52815a97585caf4790a7f6c6b3b7f821c5e259a24b02e502e11"
+      },
+      "carol": {
+        "montgomery_u_hex": "cbb22fc9f790bd3eba9b84680c157ca4950a9894362601701f89c3c4d9fda23a",
+        "x25519_scalar_hex": "909a8b755ed902849023a55b15c23d11ba4d7f4ec5c2f51b1325a181991ea99c"
+      },
+      "dave": {
+        "montgomery_u_hex": "7ce31baa9a04b5cfb83ab7ccdd7b669b911a082d29883d6aad3256294a0a5e0c",
+        "x25519_scalar_hex": "8f6abea4ae9d201f633f3ec3174a08c4747784257230b8fdd0b2858aac7267f8"
+      }
+    }
+  },
+  "inputs": {
+    "epoch_len_s": 600,
+    "epoch_seconds": 1700000000,
+    "medium_lan": 2,
+    "pairs": [
+      [
+        "alice",
+        "bob"
+      ],
+      [
+        "alice",
+        "carol"
+      ],
+      [
+        "alice",
+        "dave"
+      ]
+    ],
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      },
+      "carol": {
+        "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "source": "inline: RFC 8032 section 7.1 test 3"
+      },
+      "dave": {
+        "ed_public_hex": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+        "seed_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "source": "inline: 32 bytes of 0x44 (not the dave of shared-vectors/v1/identities.json)"
+      }
+    },
+    "r2_pair_salt_ascii": "rvn1/r2-pair/v1"
+  },
+  "name": "LAN beacon keys: R2 pairwise root, LAN medium key, directional and epoch keys",
+  "protocol_version": "rvn1"
+}

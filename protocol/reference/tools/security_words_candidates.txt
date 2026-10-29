@@ -1,0 +1,29 @@
+# English-only candidates in commonness tiers (A1 first). The builder keeps the first word that fits.
+# tier 1
+house car book door tree water apple bread milk egg cheese rice chair table bed window clock phone shoe hat
+shirt ball boat train bus bicycle cat dog fish bird cow pig sheep duck chicken rabbit lion tiger monkey
+elephant snake frog banana orange lemon grape cake cup plate spoon fork box bag pen pencil paper camera radio
+piano guitar drum garden river mountain island beach ocean cloud snow star moon sky farm city school doctor
+teacher baby music song smile
+# tier 2
+jacket sweater scarf glove sock boot belt pocket umbrella wallet ring necklace candle lamp mirror pillow
+blanket towel soap comb brush basket bucket ladder hammer rope tape glue needle thread kettle teapot oven
+fridge sofa desk carpet curtain bench tent castle bridge fence tower gate kitchen ticket stamp envelope
+notebook calendar map coin gold silver diamond medal anchor magnet robot rocket kite balloon puzzle toy
+wagon tractor taxi ship truck sled canoe cabin zebra giraffe camel fox wolf eagle owl parrot penguin dolphin
+shark turtle spider ant crab octopus kangaroo koala panda squirrel hamster pigeon sparrow swan goose lamb
+puppy kitten pony donkey moose hippo rhino gorilla llama lobster cherry peach melon mango plum kiwi lime
+coconut butter honey jam sugar salt pepper tomato potato carrot onion garlic corn bean cucumber lettuce
+cabbage pumpkin mushroom spinach broccoli celery olive peanut walnut almond coffee juice popcorn pancake
+muffin noodle sausage pickle toast jelly cream pizza pasta soup salad sandwich burger
+# tier 3
+violin flute trumpet harp banjo bell whistle doll couch drawer rug stool tray jar mug napkin apron mitten
+slipper skirt vest helmet compass globe marble crystal pearl ruby emerald laptop sticker crayon chalk paint
+ribbon tile brick barrel funnel sink tub bathtub battery lantern bracelet watch purse zipper saw shovel rake
+chain thunder rainbow lake valley cave forest jungle desert volcano waterfall pond stream swamp meadow field
+park street village market museum library airport tunnel leaf grass seed root branch tulip daisy lily
+cactus bamboo oak pine maple palm stone rock sand shell feather nest planet comet galaxy walrus otter beaver
+hedgehog lizard falcon flamingo peacock pelican robin toucan salmon trout tuna shrimp squid worm wasp beetle
+yak bison jaguar leopard cheetah raccoon skunk badger weasel ferret gecko cobra puffin heron ostrich bagel
+bacon pretzel vanilla ginger mint raisin avocado apricot cocoa turnip radish waffle baker barber chef farmer
+nurse pilot sailor painter tailor dentist plumber circle pyramid statue fossil dream

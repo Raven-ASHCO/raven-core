@@ -1,0 +1,24 @@
+{
+  "description": "The published test release key set (RAVEN_SECURITY_ADVISORY_V1 §2.1): Ed25519 keys from the seeds 0x11 x 32, 0x22 x 32, 0x33 x 32 (key indexes 0, 1, 2), threshold 2. KeySet = alg 0x01 | threshold u8 | n u8 | pubkey[32] * n; key_set_digest = SHA-256(\"rvn1/release-keys/v1\\0\" || KeySet). Anyone can sign with these keys: a production key set never contains one",
+  "deterministic": true,
+  "expected": {
+    "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+    "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+    "public_keys_hex": [
+      "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+      "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+      "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce"
+    ]
+  },
+  "inputs": {
+    "alg": 1,
+    "seeds_hex": [
+      "1111111111111111111111111111111111111111111111111111111111111111",
+      "2222222222222222222222222222222222222222222222222222222222222222",
+      "3333333333333333333333333333333333333333333333333333333333333333"
+    ],
+    "threshold": 2
+  },
+  "name": "keyset_001",
+  "protocol_version": "rvn1"
+}

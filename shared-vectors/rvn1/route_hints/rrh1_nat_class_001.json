@@ -1,0 +1,71 @@
+{
+  "description": "RRH1 v1 frame (RAVEN_ROUTE_HINTS_V1 §4) carrying the Phase 4 entry NAT_CLASS (§13.1: type 0x22, len 5: v4_tcp u8 | v4_quic u8 | v6_tcp u8 | v6_quic u8 | flags u8; codes 0 unknown, 1 no_nat, 2 stable_kept, 3 stable_shifted, 4 varies; flags bit 0 global IPv6, bit 1 IPv6 pinhole confirmed). The frame is rrh1_full_001.json's with this entry appended (ascending type order): a receiver built before §13 skips it and keeps the same hints",
+  "deterministic": true,
+  "expected": {
+    "decoded": {
+      "custodians_hex": [
+        "7777777777777777777777777777777777777777777777777777777777777777"
+      ],
+      "direct": [
+        "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1",
+        "/ip4/11.0.3.5/tcp/7423"
+      ],
+      "generation": 1760000000123,
+      "lan_port": 7531,
+      "nat_class": {
+        "v4_quic": "stable_shifted",
+        "v4_tcp": "varies",
+        "v6_global": true,
+        "v6_open": false,
+        "v6_quic": "unknown",
+        "v6_tcp": "stable_kept",
+        "value_hex": "0403020001"
+      },
+      "p2p_id_hex": "002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f",
+      "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+      "relays": [
+        "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+      ],
+      "ttl_s": 259200
+    },
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b05002077777777777777777777777777777777777777777777777777777777777777772200050403020001",
+    "frame_len": 424,
+    "phase2_frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "inputs": {
+    "hints": {
+      "custodians_hex": [
+        "7777777777777777777777777777777777777777777777777777777777777777"
+      ],
+      "direct": [
+        "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1",
+        "/ip4/11.0.3.5/tcp/7423"
+      ],
+      "generation": 1760000000123,
+      "lan_port": 7531,
+      "nat_class": {
+        "v4_quic": "stable_shifted",
+        "v4_tcp": "varies",
+        "v6_global": true,
+        "v6_open": false,
+        "v6_quic": "unknown",
+        "v6_tcp": "stable_kept",
+        "value_hex": "0403020001"
+      },
+      "p2p_id_hex": "002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f",
+      "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+      "relays": [
+        "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+      ],
+      "ttl_s": 259200
+    },
+    "sender_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+    "sender_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "RRH1 with a NAT_CLASS entry (Phase 4)",
+  "protocol_version": "rvn1"
+}

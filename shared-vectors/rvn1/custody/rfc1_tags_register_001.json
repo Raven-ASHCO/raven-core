@@ -1,0 +1,14 @@
+{
+  "description": "RFC1 v1 custody handoff frame(s) (RAVEN_CUSTODY_HANDOFF_V1.md); header magic RFC1 | version 1 | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "5246433101080102030405060708010211111111111111111111111111111111000001a31d82ac0012121212121212121212121212121212000001a322a90800",
+    "frame_len": 64
+  },
+  "inputs": {
+    "action": "REGISTER",
+    "count": 2
+  },
+  "name": "TAGS REGISTER of two store tags, sorted, each with its expiry",
+  "protocol_version": "rvn1"
+}

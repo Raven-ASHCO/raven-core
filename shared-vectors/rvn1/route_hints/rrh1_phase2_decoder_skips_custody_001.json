@@ -1,0 +1,99 @@
+{
+  "description": "A receiver built before §12 treats 0x06 CUSTODY_OFFER and 0x07 CUSTODIAN_TAG as unregistered types and skips them at any length: it decodes each frame to phase2_decoded, the hints of a Phase 3 receiver (phase3_decoded) without the custody entries",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b050020777777777777777777777777777777777777777777777777777777777777777706000103070021c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a2350007002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed803",
+        "name": "the full frame with CUSTODY_OFFER and two CUSTODIAN_TAGs",
+        "phase2_decoded": {
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "direct": [
+            "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1",
+            "/ip4/11.0.3.5/tcp/7423"
+          ],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "p2p_id_hex": "002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f",
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        },
+        "phase3_decoded": {
+          "custodian_tags": [
+            {
+              "flags": 0,
+              "tag_hex": "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235"
+            },
+            {
+              "flags": 3,
+              "tag_hex": "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+            }
+          ],
+          "custodians_hex": [
+            "7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "custody_offer": 3,
+          "direct": [
+            "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1",
+            "/ip4/11.0.3.5/tcp/7423"
+          ],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "p2p_id_hex": "002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f",
+          "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+          "relays": [
+            "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+            "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+          ],
+          "ttl_s": 259200
+        }
+      },
+      {
+        "frame_hex": "525248310100000199c82cc07b0003f48007002150d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed803070021c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a23500060001030400021d6b",
+        "name": "the custody frame, entries in descending type order",
+        "phase2_decoded": {
+          "custodians_hex": [],
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "p2p_id_hex": null,
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        },
+        "phase3_decoded": {
+          "custodian_tags": [
+            {
+              "flags": 3,
+              "tag_hex": "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+            },
+            {
+              "flags": 0,
+              "tag_hex": "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235"
+            }
+          ],
+          "custodians_hex": [],
+          "custody_offer": 3,
+          "direct": [],
+          "generation": 1760000000123,
+          "lan_port": 7531,
+          "p2p_id_hex": null,
+          "peer_id": null,
+          "relays": [],
+          "ttl_s": 259200
+        }
+      }
+    ]
+  },
+  "inputs": {},
+  "name": "RRH1 custody entries and a Phase 2 receiver (§5.1, §12)",
+  "protocol_version": "rvn1"
+}

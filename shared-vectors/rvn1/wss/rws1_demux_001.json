@@ -1,0 +1,84 @@
+{
+  "description": "Each case: the first bytes a client sent to a relay's WSS listener (only the first byte counts; empty: nothing came within the wait, or the connection ended) and what the listener does: tls (TLS, then the WebSocket upgrade), raw (libp2p as on a raw TCP listener) or refused (closed with no reply). Section 6; raven_protocol/connect.py",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "first_hex": "16030100f8010000f40303",
+        "outcome": "tls",
+        "why": "a TLS ClientHello record: TLS, then the WebSocket upgrade"
+      },
+      {
+        "first_hex": "16",
+        "outcome": "tls",
+        "why": "0x16 alone decides"
+      },
+      {
+        "first_hex": "132f6d756c746973747265616d2f312e302e300a",
+        "outcome": "raw",
+        "why": "0x13 /multistream/1.0.0 LF: raw libp2p"
+      },
+      {
+        "first_hex": "13",
+        "outcome": "raw",
+        "why": "0x13 alone decides"
+      },
+      {
+        "first_hex": "474554202f20485454502f312e310d0a",
+        "outcome": "refused",
+        "why": "plain HTTP (GET / HTTP/1.1)"
+      },
+      {
+        "first_hex": "434f4e4e454354",
+        "outcome": "refused",
+        "why": "an HTTP CONNECT"
+      },
+      {
+        "first_hex": "15030300020228",
+        "outcome": "refused",
+        "why": "a TLS alert record"
+      },
+      {
+        "first_hex": "17030300",
+        "outcome": "refused",
+        "why": "a TLS application data record"
+      },
+      {
+        "first_hex": "8001",
+        "outcome": "refused",
+        "why": "an SSLv2-style hello"
+      },
+      {
+        "first_hex": "05010000",
+        "outcome": "refused",
+        "why": "a SOCKS5 greeting"
+      },
+      {
+        "first_hex": "12",
+        "outcome": "refused",
+        "why": "0x12 (the varint 18)"
+      },
+      {
+        "first_hex": "00",
+        "outcome": "refused",
+        "why": "0x00"
+      },
+      {
+        "first_hex": "ff",
+        "outcome": "refused",
+        "why": "0xff"
+      },
+      {
+        "first_hex": "",
+        "outcome": "refused",
+        "why": "nothing within the wait, or the connection ended"
+      }
+    ]
+  },
+  "inputs": {
+    "wait_seconds": 10
+  },
+  "name": "Two-protocol listener: the first byte",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_WSS_TRANSPORT_V1.md"
+}

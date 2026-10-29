@@ -1,0 +1,197 @@
+{
+  "description": "phase = be64(SHA-256(\"raven/libp2p-epoch-phase/v1\" || raven seed)[0..8]) mod L; epoch(t) = (t + phase) div L; the next boundary after t is (epoch(t) + 1) * L - phase. L is 2419200 s (28 days, the default), 600 s (a lab length) and 1 s; each case lists t = 0, a fixed now, the second before the next boundary, the boundary itself and one epoch later",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "epoch_len_s": 2419200,
+        "phase_s": 183555,
+        "raven_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+        "times": [
+          {
+            "epoch": 0,
+            "next_boundary_unix": 2235645,
+            "unix_s": 0
+          },
+          {
+            "epoch": 741,
+            "next_boundary_unix": 1794862845,
+            "unix_s": 1792627200
+          },
+          {
+            "epoch": 741,
+            "next_boundary_unix": 1794862845,
+            "unix_s": 1794862844
+          },
+          {
+            "epoch": 742,
+            "next_boundary_unix": 1797282045,
+            "unix_s": 1794862845
+          },
+          {
+            "epoch": 743,
+            "next_boundary_unix": 1799701245,
+            "unix_s": 1797282045
+          }
+        ]
+      },
+      {
+        "epoch_len_s": 600,
+        "phase_s": 555,
+        "raven_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+        "times": [
+          {
+            "epoch": 0,
+            "next_boundary_unix": 45,
+            "unix_s": 0
+          },
+          {
+            "epoch": 2987712,
+            "next_boundary_unix": 1792627245,
+            "unix_s": 1792627200
+          },
+          {
+            "epoch": 2987712,
+            "next_boundary_unix": 1792627245,
+            "unix_s": 1792627244
+          },
+          {
+            "epoch": 2987713,
+            "next_boundary_unix": 1792627845,
+            "unix_s": 1792627245
+          },
+          {
+            "epoch": 2987714,
+            "next_boundary_unix": 1792628445,
+            "unix_s": 1792627845
+          }
+        ]
+      },
+      {
+        "epoch_len_s": 1,
+        "phase_s": 0,
+        "raven_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+        "times": [
+          {
+            "epoch": 0,
+            "next_boundary_unix": 1,
+            "unix_s": 0
+          },
+          {
+            "epoch": 1792627200,
+            "next_boundary_unix": 1792627201,
+            "unix_s": 1792627200
+          },
+          {
+            "epoch": 1792627201,
+            "next_boundary_unix": 1792627202,
+            "unix_s": 1792627201
+          },
+          {
+            "epoch": 1792627202,
+            "next_boundary_unix": 1792627203,
+            "unix_s": 1792627202
+          }
+        ]
+      },
+      {
+        "epoch_len_s": 2419200,
+        "phase_s": 2067023,
+        "raven_seed_hex": "5252525252525252525252525252525252525252525252525252525252525252",
+        "times": [
+          {
+            "epoch": 0,
+            "next_boundary_unix": 352177,
+            "unix_s": 0
+          },
+          {
+            "epoch": 741,
+            "next_boundary_unix": 1792979377,
+            "unix_s": 1792627200
+          },
+          {
+            "epoch": 741,
+            "next_boundary_unix": 1792979377,
+            "unix_s": 1792979376
+          },
+          {
+            "epoch": 742,
+            "next_boundary_unix": 1795398577,
+            "unix_s": 1792979377
+          },
+          {
+            "epoch": 743,
+            "next_boundary_unix": 1797817777,
+            "unix_s": 1795398577
+          }
+        ]
+      },
+      {
+        "epoch_len_s": 600,
+        "phase_s": 23,
+        "raven_seed_hex": "5252525252525252525252525252525252525252525252525252525252525252",
+        "times": [
+          {
+            "epoch": 0,
+            "next_boundary_unix": 577,
+            "unix_s": 0
+          },
+          {
+            "epoch": 2987712,
+            "next_boundary_unix": 1792627777,
+            "unix_s": 1792627200
+          },
+          {
+            "epoch": 2987712,
+            "next_boundary_unix": 1792627777,
+            "unix_s": 1792627776
+          },
+          {
+            "epoch": 2987713,
+            "next_boundary_unix": 1792628377,
+            "unix_s": 1792627777
+          },
+          {
+            "epoch": 2987714,
+            "next_boundary_unix": 1792628977,
+            "unix_s": 1792628377
+          }
+        ]
+      },
+      {
+        "epoch_len_s": 1,
+        "phase_s": 0,
+        "raven_seed_hex": "5252525252525252525252525252525252525252525252525252525252525252",
+        "times": [
+          {
+            "epoch": 0,
+            "next_boundary_unix": 1,
+            "unix_s": 0
+          },
+          {
+            "epoch": 1792627200,
+            "next_boundary_unix": 1792627201,
+            "unix_s": 1792627200
+          },
+          {
+            "epoch": 1792627201,
+            "next_boundary_unix": 1792627202,
+            "unix_s": 1792627201
+          },
+          {
+            "epoch": 1792627202,
+            "next_boundary_unix": 1792627203,
+            "unix_s": 1792627202
+          }
+        ]
+      }
+    ]
+  },
+  "inputs": {
+    "default_epoch_s": 2419200,
+    "now_unix": 1792627200
+  },
+  "name": "PeerId rotation: epoch phase and boundaries",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_P2P_PEER_ROTATION_V1.md"
+}

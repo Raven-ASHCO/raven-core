@@ -1,0 +1,15 @@
+{
+  "description": "pcp_map_v4_resp_001 plus one byte (61 bytes)",
+  "deterministic": true,
+  "expected": {
+    "error": "length"
+  },
+  "inputs": {
+    "reply_hex": "0281000000001c2000000e10000000000000000000000000117a021fb22cdbf08252fdff060000001cff1cff00000000000000000000ffff0b00020900",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "PCP reply whose length is not a multiple of 4",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

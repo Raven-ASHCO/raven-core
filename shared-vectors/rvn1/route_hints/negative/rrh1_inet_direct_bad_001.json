@@ -1,0 +1,25 @@
+{
+  "description": "An RRH1 frame (the sender seed's P2P_ID, then five INET_DIRECT entries, type 0x24): a port with a leading zero (not canonical), port 0, two good ones (the second with every flag bit set) and a third good one past the limit of 2. Each bad or extra entry is dropped alone with an RRH1_MALFORMED debug log; the frame, its P2P_ID and the two good entries (unknown flag bits cleared) are kept",
+  "deterministic": true,
+  "expected": {
+    "dropped": 3,
+    "frame_kept": true,
+    "inet": [
+      {
+        "addr": "11.0.3.7:7422",
+        "confirmed": false,
+        "value_hex": "0031312e302e332e373a37343232"
+      },
+      {
+        "addr": "11.0.3.8:7422",
+        "confirmed": true,
+        "value_hex": "0131312e302e332e383a37343232"
+      }
+    ]
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f24000f0131312e302e332e373a303734323224000b0031312e302e332e373a3024000e0031312e302e332e373a3734323224000eff31312e302e332e383a3734323224000e0031312e302e332e393a37343232"
+  },
+  "name": "INET_DIRECT entries that break §13.3",
+  "protocol_version": "rvn1"
+}

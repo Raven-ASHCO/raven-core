@@ -1,0 +1,31 @@
+{
+  "description": "K_link = HKDF-Expand-SHA256(PRK K_root, info 'medium' || 0x03, 32 bytes), K_root the R2 pairwise root of the two Ed25519 identity keys (RAVEN_PRIVATE_RENDEZVOUS_V1 §5.3a, shared-vectors/rvn1/lan_beacon/lbcn_pair_keys_001.json). kq_X->Y = HMAC-SHA256(K_link, 'knock-q' || X || Y), kr_X->Y = HMAC-SHA256(K_link, 'knock-r' || X || Y). Message 1 payload = nonce16 || tag16 || pad(0..31), tag16 = HMAC-SHA256(kq_A->B, 'rlk1/m1' || day u32 BE || nonce16 || e_A)[0..16], day = floor(unix_ms / 86400000); message 2 payload = proof16 || pad(0..31), proof16 = HMAC-SHA256(kr_B->A, 'rlk1/m2' || nonce16 || e_A || s_B)[0..16]; A dials, B listens (RAVEN_LINK_KNOCK_V1 §3). A listener that matched no contact (or saw a replay) sends 16 random bytes and 0..31 more: the same lengths as a proof's, so the payload never says whether the knock matched; the dialer finds no proof",
+  "deterministic": true,
+  "expected": {
+    "len": 19,
+    "proof_ok": false
+  },
+  "inputs": {
+    "dialer": "alice",
+    "e_a_hex": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
+    "listener": "bob",
+    "m2_payload_hex": "0ad11a0efb8ed92f042d7cc7c7352ad31d968d",
+    "matched_m2_payload_len": 19,
+    "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "RFC 8032 section 7.1 (the people of shared-vectors/rvn1/lan_beacon)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "RFC 8032 section 7.1 (the people of shared-vectors/rvn1/lan_beacon)"
+      }
+    },
+    "s_b_hex": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14"
+  },
+  "name": "RLK1 negative: the message 2 payload of a listener that matched no knock",
+  "protocol_version": "rvn1"
+}

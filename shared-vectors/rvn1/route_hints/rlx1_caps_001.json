@@ -1,0 +1,105 @@
+{
+  "description": "payload = \"RLX1\" | version 0x01 | entries (type u8 | len u8 | value), at most 64 bytes; LINK_CAPS (type 0x01, len 4) is u32 BE in the RIH1 caps namespace, bit 8 = RRH1. Caps 0 is the empty payload. In the cases, caps is the LINK_CAPS the responder reads: 0 when there is none, or when the payload is malformed and the responder ignores it whole",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "caps": 0,
+        "name": "empty",
+        "payload_hex": ""
+      },
+      {
+        "caps": 256,
+        "name": "LINK_CAPS",
+        "payload_hex": "524c583101010400000100"
+      },
+      {
+        "caps": 0,
+        "name": "header only",
+        "payload_hex": "524c583101"
+      },
+      {
+        "caps": 256,
+        "name": "unknown entries are skipped",
+        "payload_hex": "524c5831010104000001007f03010203"
+      },
+      {
+        "caps": 256,
+        "name": "an unknown entry first",
+        "payload_hex": "524c5831010200010400000100"
+      },
+      {
+        "caps": 256,
+        "name": "64 bytes",
+        "payload_hex": "524c5831010104000001007f33000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "caps": 0,
+        "name": "65 bytes",
+        "payload_hex": "524c5831010104000001007f3400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "caps": 0,
+        "name": "4 bytes",
+        "payload_hex": "524c5831"
+      },
+      {
+        "caps": 0,
+        "name": "wrong magic",
+        "payload_hex": "524c583201010400000100"
+      },
+      {
+        "caps": 0,
+        "name": "version 2",
+        "payload_hex": "524c583102010400000100"
+      },
+      {
+        "caps": 0,
+        "name": "truncated entry",
+        "payload_hex": "524c5831010104000001"
+      },
+      {
+        "caps": 0,
+        "name": "a type byte alone",
+        "payload_hex": "524c5831010104000001007f"
+      },
+      {
+        "caps": 0,
+        "name": "duplicate LINK_CAPS",
+        "payload_hex": "524c583101010400000100010400000100"
+      },
+      {
+        "caps": 0,
+        "name": "duplicate unknown type",
+        "payload_hex": "524c5831010104000001007f007f00"
+      },
+      {
+        "caps": 0,
+        "name": "LINK_CAPS len 3",
+        "payload_hex": "524c5831010103000100"
+      },
+      {
+        "caps": 0,
+        "name": "LINK_CAPS len 5",
+        "payload_hex": "524c58310101050000010000"
+      }
+    ],
+    "encodings": [
+      {
+        "caps": 256,
+        "payload_hex": "524c583101010400000100"
+      },
+      {
+        "caps": 1,
+        "payload_hex": "524c583101010400000001"
+      },
+      {
+        "caps": 0,
+        "payload_hex": ""
+      }
+    ]
+  },
+  "inputs": {},
+  "name": "RLX1 LAN Noise XX message-3 payload (§3.2)",
+  "protocol_version": "rvn1"
+}

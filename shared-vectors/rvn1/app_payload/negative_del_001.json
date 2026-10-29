@@ -1,0 +1,12 @@
+{
+  "description": "RVNAPP/1 app frame inside the ATSAM plaintext of an indexed-session Message",
+  "deterministic": true,
+  "expected": {
+    "class": "reserved_invalid"
+  },
+  "inputs": {
+    "plaintext_hex": "52564e4150502f31206132612d726571756573742f312061626162616261626162616261626162616261626162616261626162616261620a7f"
+  },
+  "name": "negative_del_001",
+  "protocol_version": "rvn1"
+}

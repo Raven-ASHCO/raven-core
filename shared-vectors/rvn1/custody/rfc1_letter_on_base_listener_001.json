@@ -1,0 +1,13 @@
+{
+  "description": "RFC1 letter custody frame(s) (RAVEN_FRIEND_CUSTODY_V1.md §10); header magic RFC1 | version 1 | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "5246433101fe010203040506070801",
+    "frame_len": 15
+  },
+  "inputs": {
+    "request_frame_hex": "524643310105010203040506070801777777777777777777777777777777777777777777777777777777777777777702"
+  },
+  "name": "A listener without the letter ops (built before them, letter gate closed, or RAVEN_LAB_CUSTODY_BASE_OPS_ONLY=1) answers FETCH_LETTERS with UNSUPPORTED, max_version 1, echoing req_id",
+  "protocol_version": "rvn1"
+}

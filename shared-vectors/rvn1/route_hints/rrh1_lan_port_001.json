@@ -1,0 +1,32 @@
+{
+  "description": "RRH1 v1 frame (RAVEN_ROUTE_HINTS_V1 §4): magic RRH1 | version 1 | generation u64 BE | ttl_s u32 BE | entries (type u8 | len u16 BE | value); a sender writes entries in ascending type order. What an unverified contact admitted on the LAN gets, on a LAN link only (§6)",
+  "deterministic": true,
+  "expected": {
+    "decoded": {
+      "custodians_hex": [],
+      "direct": [],
+      "generation": 1760000000123,
+      "lan_port": 7531,
+      "p2p_id_hex": null,
+      "peer_id": null,
+      "relays": [],
+      "ttl_s": 259200
+    },
+    "frame_hex": "525248310100000199c82cc07b0003f4800400021d6b",
+    "frame_len": 22
+  },
+  "inputs": {
+    "hints": {
+      "custodians_hex": [],
+      "direct": [],
+      "generation": 1760000000123,
+      "lan_port": 7531,
+      "p2p_id_hex": null,
+      "peer_id": null,
+      "relays": [],
+      "ttl_s": 259200
+    }
+  },
+  "name": "RRH1 LAN scope: LAN_PORT only",
+  "protocol_version": "rvn1"
+}

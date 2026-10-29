@@ -1,0 +1,21 @@
+{
+  "description": "client IPv6 as is, suggested external :: and the internal port",
+  "deterministic": true,
+  "expected": {
+    "request_hex": "0201000000000e1020010db80000000000000000000000202f94aa07e3fcaaaa24bea9a7110000001cff1cff00000000000000000000000000000000"
+  },
+  "inputs": {
+    "client_ip": "2001:db8::20",
+    "gateway_ip": "fe80::1",
+    "internal_port": 7423,
+    "lifetime": 3600,
+    "nonce_hex": "2f94aa07e3fcaaaa24bea9a7",
+    "protocol": 17,
+    "seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+    "suggested_ip": "::",
+    "suggested_port": 7423
+  },
+  "name": "PCP MAP request, IPv6 UDP (pinhole)",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

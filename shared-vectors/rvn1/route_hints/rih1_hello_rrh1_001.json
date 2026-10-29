@@ -1,0 +1,21 @@
+{
+  "description": "hello = RIH1 | caps u32 BE | ed25519_pub32 | sig64; sig = Ed25519(signer, \"rvn1/internet-hello/v1\" | role u8 | caps u32 BE | handshake_hash32 | signer_noise_static32 | ed25519_pub32) (RAVEN_TRANSPORT_INTERFACE_V1 §3). Caps = CAP_INTERNET | CAP_LINK_RRH1 (RAVEN_ROUTE_HINTS_V1 §3.1)",
+  "deterministic": true,
+  "expected": {
+    "hello_hex": "5249483100000102c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445ab28c2ed1eb22c0420f00004e4d2da776d8efa41754b462ae084855cda8beae7de770acbe4455ebb03d7773df1023d5f08b27b2dd728dfc0f6a12637cc7e28704",
+    "hello_len": 104,
+    "signature_hex": "b28c2ed1eb22c0420f00004e4d2da776d8efa41754b462ae084855cda8beae7de770acbe4455ebb03d7773df1023d5f08b27b2dd728dfc0f6a12637cc7e28704",
+    "signing_bytes_hex": "72766e312f696e7465726e65742d68656c6c6f2f763101000001024848484848484848484848484848484848484848484848484848484848484848b5f72291111b2908b735a91e8f3c77988fa0dac8670721a8227adab29af3f14cc050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"
+  },
+  "inputs": {
+    "caps": 258,
+    "ed25519_pub_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+    "handshake_hash_hex": "4848484848484848484848484848484848484848484848484848484848484848",
+    "noise_static_pub_hex": "b5f72291111b2908b735a91e8f3c77988fa0dac8670721a8227adab29af3f14c",
+    "role": "initiator",
+    "role_u8": 1,
+    "signer_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "RIH1 hello with link feature bit 8 (RRH1)",
+  "protocol_version": "rvn1"
+}

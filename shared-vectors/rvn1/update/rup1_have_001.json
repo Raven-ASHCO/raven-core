@@ -1,0 +1,147 @@
+{
+  "description": "HAVE = \"RUP1\" | 0x01 | op 0x01 | req_id 00000000 | adv_serial u64 | adv_digest[32] | log_size u32 | log_root[32] | n u8 (0..=4) | offers (build_serial u64 >= 1 | target_len u8 (1..=64) | target | manifest_digest[32] | payload_len u64 (1..=67,108,864)); adv_serial 0 exactly when adv_digest is zero, log_size (0..=1,400) 0 exactly when log_root is zero, each manifest digest once (RAVEN_UPDATE_EXCHANGE_V1 §3.1). nothing: a node that holds nothing; test_release: the advisory (serial and advisory_digest), log (tree_size and root_hash) and bundle (build_serial, target, manifest_digest, payload_len) of rrbc_small_001.json; four_offers: four targets; longest: four 64-byte targets (539 bytes, the longest HAVE)",
+  "deterministic": true,
+  "expected": {
+    "haves": [
+      {
+        "expects_reply": false,
+        "fields": {
+          "adv_digest_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "adv_serial": 0,
+          "log_root_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "log_size": 0,
+          "offers": []
+        },
+        "frame_hex": "525550310101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "frame_len": 87,
+        "listener": "HAVE",
+        "name": "nothing",
+        "op": 1,
+        "op_name": "HAVE",
+        "req_id_hex": "00000000",
+        "role": "ONE_WAY",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "adv_digest_hex": "ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90",
+          "adv_serial": 1,
+          "log_root_hex": "bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84",
+          "log_size": 3,
+          "offers": [
+            {
+              "build_serial": 5,
+              "manifest_digest_hex": "ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f",
+              "payload_len": 2170,
+              "target": "aarch64-apple-darwin"
+            }
+          ]
+        },
+        "frame_hex": "525550310101000000000000000000000001ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a9000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a8401000000000000000514616172636836342d6170706c652d64617277696eea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000000000000087a",
+        "frame_len": 156,
+        "listener": "HAVE",
+        "name": "test_release",
+        "op": 1,
+        "op_name": "HAVE",
+        "req_id_hex": "00000000",
+        "role": "ONE_WAY",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "adv_digest_hex": "adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad",
+          "adv_serial": 7,
+          "log_root_hex": "1010101010101010101010101010101010101010101010101010101010101010",
+          "log_size": 40,
+          "offers": [
+            {
+              "build_serial": 9,
+              "manifest_digest_hex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "payload_len": 34000000,
+              "target": "aarch64-apple-darwin"
+            },
+            {
+              "build_serial": 9,
+              "manifest_digest_hex": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+              "payload_len": 35000000,
+              "target": "x86_64-apple-darwin"
+            },
+            {
+              "build_serial": 9,
+              "manifest_digest_hex": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+              "payload_len": 31000000,
+              "target": "x86_64-unknown-linux-gnu"
+            },
+            {
+              "build_serial": 8,
+              "manifest_digest_hex": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+              "payload_len": 67108864,
+              "target": "x86_64-pc-windows-msvc"
+            }
+          ]
+        },
+        "frame_hex": "525550310101000000000000000000000007adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000028101010101010101010101010101010101010101010101010101010101010101004000000000000000914616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000206cc800000000000000009137838365f36342d6170706c652d64617277696ea2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a20000000002160ec00000000000000009187838365f36342d756e6b6e6f776e2d6c696e75782d676e75a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a30000000001d905c00000000000000008167838365f36342d70632d77696e646f77732d6d737663a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a40000000004000000",
+        "frame_len": 368,
+        "listener": "HAVE",
+        "name": "four_offers",
+        "op": 1,
+        "op_name": "HAVE",
+        "req_id_hex": "00000000",
+        "role": "ONE_WAY",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "adv_digest_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "adv_serial": 18446744073709551615,
+          "log_root_hex": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "log_size": 1400,
+          "offers": [
+            {
+              "build_serial": 18446744073709551615,
+              "manifest_digest_hex": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+              "payload_len": 67108864,
+              "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "build_serial": 18446744073709551615,
+              "manifest_digest_hex": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+              "payload_len": 67108864,
+              "target": "ccccccccccccccccccccccccccccccc-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "build_serial": 18446744073709551615,
+              "manifest_digest_hex": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+              "payload_len": 67108864,
+              "target": "ddddddddddddddddddddddddddddddd-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "build_serial": 18446744073709551615,
+              "manifest_digest_hex": "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+              "payload_len": 67108864,
+              "target": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          ]
+        },
+        "frame_hex": "52555031010100000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000578eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee04ffffffffffffffff40616161616161616161616161616161616161616161616161616161616161612d6262626262626262626262626262626262626262626262626262626262626262b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00000000004000000ffffffffffffffff40636363636363636363636363636363636363636363636363636363636363632d6262626262626262626262626262626262626262626262626262626262626262b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b10000000004000000ffffffffffffffff40646464646464646464646464646464646464646464646464646464646464642d6262626262626262626262626262626262626262626262626262626262626262b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b20000000004000000ffffffffffffffff40656565656565656565656565656565656565656565656565656565656565652d6262626262626262626262626262626262626262626262626262626262626262b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b30000000004000000",
+        "frame_len": 539,
+        "listener": "HAVE",
+        "name": "longest",
+        "op": 1,
+        "op_name": "HAVE",
+        "req_id_hex": "00000000",
+        "role": "ONE_WAY",
+        "terminal_reply": false
+      }
+    ],
+    "max_have_len": 539
+  },
+  "inputs": {
+    "source": "rrbc_small_001.json"
+  },
+  "name": "rup1_have_001",
+  "protocol_version": "rvn1"
+}

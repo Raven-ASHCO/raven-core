@@ -1,0 +1,69 @@
+{
+  "description": "acc=0; acc=xtime(acc)^d for each data index; check=xtime(acc)",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "check_index": 0,
+        "data_indexes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "check_index": 169,
+        "data_indexes": [
+          255,
+          255,
+          255,
+          255,
+          255,
+          255,
+          255,
+          255,
+          255
+        ]
+      },
+      {
+        "check_index": 44,
+        "data_indexes": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      {
+        "check_index": 248,
+        "data_indexes": [
+          241,
+          80,
+          25,
+          253,
+          153,
+          114,
+          81,
+          125,
+          98
+        ]
+      }
+    ]
+  },
+  "inputs": {},
+  "name": "GF(2^8) check index",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

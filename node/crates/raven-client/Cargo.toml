@@ -1,0 +1,26 @@
+[package]
+name = "raven-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raven desktop engine: the CLI's logic behind one JSON call (raven_call) for the macOS, Windows and Linux apps"
+publish = false
+
+[lib]
+name = "raven_client"
+path = "src/lib.rs"
+# rlib: the Linux app (Rust) and the tests; staticlib: the macOS app (module
+# map over include/raven_client.h); cdylib: the Windows app (DllImport).
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+raven-core = { workspace = true }
+# The CLI's own code (contacts, cards, sending, outbox, node start), through
+# ash's library target and its engine bridge (crates/ash/src/engine_bridge.rs).
+ash = { path = "../ash", features = ["engine"] }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

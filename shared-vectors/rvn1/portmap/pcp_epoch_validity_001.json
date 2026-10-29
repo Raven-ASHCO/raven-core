@@ -1,0 +1,132 @@
+{
+  "description": "lost when curr + 1 < prev, or c + 2 < s - s/16, or s + 2 < c - c/16 (c: client seconds elapsed, s: curr - prev or 0; integer division); the first answer is always valid",
+  "deterministic": true,
+  "expected": {
+    "lost": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "inputs": {
+    "cases": [
+      {
+        "case": "first answer",
+        "curr": {
+          "client_s": 0,
+          "server": 3600
+        },
+        "prev": null
+      },
+      {
+        "case": "steady clocks",
+        "curr": {
+          "client_s": 60,
+          "server": 3660
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 3600
+        }
+      },
+      {
+        "case": "server one second behind (allowed)",
+        "curr": {
+          "client_s": 0,
+          "server": 3599
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 3600
+        }
+      },
+      {
+        "case": "server two seconds behind",
+        "curr": {
+          "client_s": 0,
+          "server": 3598
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 3600
+        }
+      },
+      {
+        "case": "router restarted",
+        "curr": {
+          "client_s": 60,
+          "server": 5
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 3600
+        }
+      },
+      {
+        "case": "server fast, at the 1/16 bound (valid)",
+        "curr": {
+          "client_s": 100,
+          "server": 208
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 100
+        }
+      },
+      {
+        "case": "server fast beyond the 1/16 bound",
+        "curr": {
+          "client_s": 100,
+          "server": 209
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 100
+        }
+      },
+      {
+        "case": "client fast, at the 1/16 bound (valid)",
+        "curr": {
+          "client_s": 108,
+          "server": 200
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 100
+        }
+      },
+      {
+        "case": "client fast beyond the 1/16 bound",
+        "curr": {
+          "client_s": 109,
+          "server": 200
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 100
+        }
+      },
+      {
+        "case": "a day later",
+        "curr": {
+          "client_s": 86400,
+          "server": 90000
+        },
+        "prev": {
+          "client_s": 0,
+          "server": 3600
+        }
+      }
+    ]
+  },
+  "name": "Server epoch validity (RFC 6887 section 8.5, also NAT-PMP)",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

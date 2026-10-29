@@ -1,0 +1,21 @@
+{
+  "description": "lifetime 0 with the mapping's nonce, protocol and internal port; suggested external port 0",
+  "deterministic": true,
+  "expected": {
+    "request_hex": "020100000000000000000000000000000000ffffc0a80114117a021fb22cdbf08252fdff060000001cff000000000000000000000000ffff00000000"
+  },
+  "inputs": {
+    "client_ip": "192.168.1.20",
+    "gateway_ip": "192.168.1.1",
+    "internal_port": 7423,
+    "lifetime": 0,
+    "nonce_hex": "117a021fb22cdbf08252fdff",
+    "protocol": 6,
+    "seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+    "suggested_ip": "::ffff:0.0.0.0",
+    "suggested_port": 0
+  },
+  "name": "PCP MAP delete, IPv4 TCP",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

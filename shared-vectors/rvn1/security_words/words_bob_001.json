@@ -1,0 +1,54 @@
+{
+  "description": "SHA-256(label || ed_pub): the first 9 bytes are 9 indexes; the 10th is the GF(2^8) check. device_fingerprint_v1 of the same key alongside: both MUST be shown for the same key.",
+  "deterministic": true,
+  "expected": {
+    "check_index": 136,
+    "data_indexes": [
+      208,
+      191,
+      226,
+      189,
+      84,
+      16,
+      39,
+      78,
+      49
+    ],
+    "device_fingerprint_v1": "OfcT-0KZE-JT8E",
+    "digest_hex": "d0bfe2bd5410274e3105d84759d4727e43cb1faf159ed919ac85a5c01c1d2aa4",
+    "indexes": [
+      208,
+      191,
+      226,
+      189,
+      84,
+      16,
+      39,
+      78,
+      49,
+      136
+    ],
+    "text": "sofa scarf thread sausage gecko belt chair fork crab muffin",
+    "words": [
+      "sofa",
+      "scarf",
+      "thread",
+      "sausage",
+      "gecko",
+      "belt",
+      "chair",
+      "fork",
+      "crab",
+      "muffin"
+    ]
+  },
+  "inputs": {
+    "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "label_ascii": "rvn1/security-words/v1",
+    "wordlist_sha256": "86bd5c396943a48f1e53572e4756738916039f83a7afcefb7dce44620ea7c3f9"
+  },
+  "name": "Security words, bob",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

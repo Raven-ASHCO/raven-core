@@ -1,0 +1,155 @@
+{
+  "description": "RRH1 v1 frame (RAVEN_ROUTE_HINTS_V1 §4) carrying the Phase 4 entry PEER_SCHEDULE (§13.2: type 0x23, len 14 + 40 n: flags u8 | epoch_len_s u32 | active_epoch u64 | n u8 | n x (epoch u64 | Ed25519 public key 32 B); flags bit 0 capable, bit 1 rotating, bit 2 postponed) of a sender whose rotation is on in epoch 23: the previous epoch and 6 ahead, 8 entries, the keys of RAVEN_P2P_PEER_ROTATION_V1 §2 for the sender seed. The frame is rrh1_full_001.json's with this entry appended (ascending type order): a receiver built before §13 skips it",
+  "deterministic": true,
+  "expected": {
+    "decoded": {
+      "custodians_hex": [
+        "7777777777777777777777777777777777777777777777777777777777777777"
+      ],
+      "direct": [
+        "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1",
+        "/ip4/11.0.3.5/tcp/7423"
+      ],
+      "generation": 1760000000123,
+      "lan_port": 7531,
+      "p2p_id_hex": "002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f",
+      "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+      "peer_schedule": {
+        "active_epoch": 23,
+        "capable": true,
+        "entries": [
+          {
+            "epoch": 22,
+            "key_hex": "959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9",
+            "peer_id": "12D3KooWKtD9yJSAb1ddWQT7g7XBYs3gxNyowSsbtHjBW6LoHfjE"
+          },
+          {
+            "epoch": 23,
+            "key_hex": "76887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee",
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          },
+          {
+            "epoch": 24,
+            "key_hex": "bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b",
+            "peer_id": "12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji"
+          },
+          {
+            "epoch": 25,
+            "key_hex": "b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd",
+            "peer_id": "12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt"
+          },
+          {
+            "epoch": 26,
+            "key_hex": "de2ec4cb066c1e5106fa858a2ead54aebea4b7749a1dc610639906d88f366e91",
+            "peer_id": "12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6"
+          },
+          {
+            "epoch": 27,
+            "key_hex": "33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5",
+            "peer_id": "12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL"
+          },
+          {
+            "epoch": 28,
+            "key_hex": "c70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff",
+            "peer_id": "12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8"
+          },
+          {
+            "epoch": 29,
+            "key_hex": "f537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c",
+            "peer_id": "12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7"
+          }
+        ],
+        "epoch_len_s": 2419200,
+        "flags": 3,
+        "postponed": false,
+        "rotating": true,
+        "value_hex": "030024ea000000000000000017080000000000000016959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9000000000000001776887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee0000000000000018bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b0000000000000019b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd000000000000001ade2ec4cb066c1e5106fa858a2ead54aebea4b7749a1dc610639906d88f366e91000000000000001b33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5000000000000001cc70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff000000000000001df537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c"
+      },
+      "relays": [
+        "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+      ],
+      "ttl_s": 259200
+    },
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b050020777777777777777777777777777777777777777777777777777777777777777723014e030024ea000000000000000017080000000000000016959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9000000000000001776887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee0000000000000018bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b0000000000000019b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd000000000000001ade2ec4cb066c1e5106fa858a2ead54aebea4b7749a1dc610639906d88f366e91000000000000001b33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5000000000000001cc70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff000000000000001df537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c",
+    "frame_len": 753,
+    "phase2_frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f02004f2f6970342f31312e302e322e312f7463702f373432332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b667202004e2f6970342f31312e302e322e312f7463702f3434332f7032702f313244334b6f6f574b3870687765484d4a6f6d52373751614832325a31564d525544597253757a564e4b74474a713755384b66720200582f646e73342f72656c61792e6578616d706c652e6f72672f7463702f3434332f7032702f313244334b6f6f574a627769527569434735745155333561476244596e50385974484676797876645439475646486d63395655610300242f6970362f326330663a666666303a613a3a352f7564702f373432332f717569632d76310300162f6970342f31312e302e332e352f7463702f373432330400021d6b0500207777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "inputs": {
+    "hints": {
+      "custodians_hex": [
+        "7777777777777777777777777777777777777777777777777777777777777777"
+      ],
+      "direct": [
+        "/ip6/2c0f:fff0:a::5/udp/7423/quic-v1",
+        "/ip4/11.0.3.5/tcp/7423"
+      ],
+      "generation": 1760000000123,
+      "lan_port": 7531,
+      "p2p_id_hex": "002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f",
+      "peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+      "peer_schedule": {
+        "active_epoch": 23,
+        "capable": true,
+        "entries": [
+          {
+            "epoch": 22,
+            "key_hex": "959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9",
+            "peer_id": "12D3KooWKtD9yJSAb1ddWQT7g7XBYs3gxNyowSsbtHjBW6LoHfjE"
+          },
+          {
+            "epoch": 23,
+            "key_hex": "76887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee",
+            "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+          },
+          {
+            "epoch": 24,
+            "key_hex": "bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b",
+            "peer_id": "12D3KooWNTwNCNiU84Kc9iegFBT86R5L8cgCBA2gAUJTxUz6i5Ji"
+          },
+          {
+            "epoch": 25,
+            "key_hex": "b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd",
+            "peer_id": "12D3KooWMsV32rnccDrzp5PWuXFLEBBiyWZGhXhS95M1991un3rt"
+          },
+          {
+            "epoch": 26,
+            "key_hex": "de2ec4cb066c1e5106fa858a2ead54aebea4b7749a1dc610639906d88f366e91",
+            "peer_id": "12D3KooWQmg3HWurnarajPhvkP84FBiKbJhUSiPVW9B2SCxYqpq6"
+          },
+          {
+            "epoch": 27,
+            "key_hex": "33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5",
+            "peer_id": "12D3KooWDJQMzhjkuAWSZfzGwYViyJ3cvBAcDj53BEc6HU2vzBNL"
+          },
+          {
+            "epoch": 28,
+            "key_hex": "c70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff",
+            "peer_id": "12D3KooWPDPV2gtanhATHCGHmJv9TN51C78H84f73cFZJLucPFH8"
+          },
+          {
+            "epoch": 29,
+            "key_hex": "f537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c",
+            "peer_id": "12D3KooWSKbUhHnPLmb4gptSXynpb5yjoYSbvWJK5YRYqzNskMt7"
+          }
+        ],
+        "epoch_len_s": 2419200,
+        "flags": 3,
+        "postponed": false,
+        "rotating": true,
+        "value_hex": "030024ea000000000000000017080000000000000016959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9000000000000001776887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee0000000000000018bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b0000000000000019b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd000000000000001ade2ec4cb066c1e5106fa858a2ead54aebea4b7749a1dc610639906d88f366e91000000000000001b33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5000000000000001cc70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff000000000000001df537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c"
+      },
+      "relays": [
+        "/ip4/11.0.2.1/tcp/7423/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/ip4/11.0.2.1/tcp/443/p2p/12D3KooWK8phweHMJomR77QaH22Z1VMRUDYrSuzVNKtGJq7U8Kfr",
+        "/dns4/relay.example.org/tcp/443/p2p/12D3KooWJbwiRuiCG5tQU35aGbDYnP8YtHFvyxvdT9GVFHmc9VUa"
+      ],
+      "ttl_s": 259200
+    },
+    "sender_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+    "sender_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "RRH1 with a PEER_SCHEDULE entry (Phase 4)",
+  "protocol_version": "rvn1"
+}

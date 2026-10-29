@@ -1,0 +1,13 @@
+{
+  "description": "RFC1 letter custody frame(s) (RAVEN_FRIEND_CUSTODY_V1.md §10); header magic RFC1 | version 1 | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "5246433101060102030405060708017c6d54519240e03d13313a1dafe110ca0eb7f29cf046cb05b6f8eb4b0225add6",
+    "frame_len": 47
+  },
+  "inputs": {
+    "letter_digest_hex": "7c6d54519240e03d13313a1dafe110ca0eb7f29cf046cb05b6f8eb4b0225add6"
+  },
+  "name": "WITHDRAW_LETTERS of that letter's digest",
+  "protocol_version": "rvn1"
+}

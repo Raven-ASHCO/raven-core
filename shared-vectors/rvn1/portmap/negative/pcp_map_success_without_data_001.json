@@ -1,0 +1,15 @@
+{
+  "description": "a 24-byte header-only SUCCESS reply to MAP (only an error may omit the MAP data)",
+  "deterministic": true,
+  "expected": {
+    "error": "length"
+  },
+  "inputs": {
+    "reply_hex": "0281000000001c2000000e10000000000000000000000000",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "PCP MAP SUCCESS without MAP data",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

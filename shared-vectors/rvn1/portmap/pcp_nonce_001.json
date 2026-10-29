@@ -1,0 +1,74 @@
+{
+  "description": "key = SHA-256(domain || seed); nonce = SHA-256(key || gateway IP (16 bytes, IPv4-mapped) || internal IP (16 bytes) || protocol || be16 port)[0..12]; another router or another profile's seed gives other nonces",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "gateway_ip": "192.168.1.1",
+        "internal_ip": "192.168.1.20",
+        "nonce_hex": "117a021fb22cdbf08252fdff",
+        "other_profile_nonce_hex": "52b94b376fad8417d0b78319",
+        "port": 7423,
+        "protocol": 6
+      },
+      {
+        "gateway_ip": "192.168.1.1",
+        "internal_ip": "192.168.1.20",
+        "nonce_hex": "6404426ac95ab8be534ffe88",
+        "other_profile_nonce_hex": "6f59dce630883a10b45b2adc",
+        "port": 7423,
+        "protocol": 17
+      },
+      {
+        "gateway_ip": "192.168.1.1",
+        "internal_ip": "192.168.1.20",
+        "nonce_hex": "d6c376789cf153d3c57f1101",
+        "other_profile_nonce_hex": "3348ab05e2ac024b22070913",
+        "port": 7424,
+        "protocol": 6
+      },
+      {
+        "gateway_ip": "192.168.1.1",
+        "internal_ip": "192.168.1.21",
+        "nonce_hex": "5fcd48615cf776e33e5c8aa2",
+        "other_profile_nonce_hex": "b03e555c7939be6b6292abb1",
+        "port": 7423,
+        "protocol": 6
+      },
+      {
+        "gateway_ip": "10.0.0.1",
+        "internal_ip": "192.168.1.20",
+        "nonce_hex": "8edf5efa132daace330e2a84",
+        "other_profile_nonce_hex": "68bff49786d9a94a991d7335",
+        "port": 7423,
+        "protocol": 6
+      },
+      {
+        "gateway_ip": "fe80::1",
+        "internal_ip": "2001:db8::20",
+        "nonce_hex": "2f94aa07e3fcaaaa24bea9a7",
+        "other_profile_nonce_hex": "75d1175ea98a39d5eaa5ddb5",
+        "port": 7423,
+        "protocol": 17
+      },
+      {
+        "gateway_ip": "fe80::2",
+        "internal_ip": "2001:db8::20",
+        "nonce_hex": "de86b0f037804c7d09ded64d",
+        "other_profile_nonce_hex": "16c584098ba197f4e086da73",
+        "port": 7423,
+        "protocol": 17
+      }
+    ],
+    "key_hex": "27cc38e5bb670752145ce14545bfc91bf9554bea3969dc22b87a09b658446b62",
+    "other_key_hex": "3d2f0dbfa81a6964be429502f8be1954fb3ff27ed93e19ca8b025017851a128e"
+  },
+  "inputs": {
+    "domain_ascii": "raven/pcp-nonce-key/v1",
+    "other_seed_hex": "5252525252525252525252525252525252525252525252525252525252525252",
+    "seed_hex": "5151515151515151515151515151515151515151515151515151515151515151"
+  },
+  "name": "PCP MAP nonce",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

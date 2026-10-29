@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raven desktop app — concept</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+<style>
+:root{--surface-0:#F5F4EF;--surface-1:#FAF9F5;--surface-2:#FFFFFF;--text-primary:#1F1E1C;--text-secondary:#6B6A65;--border:rgba(31,30,28,.15);--border-strong:rgba(31,30,28,.3);--border-accent:#185FA5;
+--text-accent:#185FA5;--text-success:#3B6D11;--text-warning:#854F0B;--text-danger:#A32D2D;--bg-accent:#E6F1FB;--fill-accent:#2F6FDC;--on-accent:#FFFFFF;
+--bg-tint-violet:#EEEDFE;--text-tint-violet:#3C3489;--bg-tint-aqua:#E1F5EE;--text-tint-aqua:#085041;--bg-tint-orange:#FAECE7;--text-tint-orange:#712B13}
+@media (prefers-color-scheme:dark){:root{--surface-0:#1C1C1A;--surface-1:#2C2C2A;--surface-2:#262624;--text-primary:#ECEBE6;--text-secondary:#A3A29B;--border:rgba(236,235,230,.15);--border-strong:rgba(236,235,230,.3);--border-accent:#85B7EB;
+--text-accent:#85B7EB;--text-success:#97C459;--text-warning:#EF9F27;--text-danger:#F09595;--bg-accent:#0C447C;--fill-accent:#378ADD;
+--bg-tint-violet:#3C3489;--text-tint-violet:#CECBF6;--bg-tint-aqua:#085041;--text-tint-aqua:#9FE1CB;--bg-tint-orange:#712B13;--text-tint-orange:#F5C4B3}}
+body{margin:0;background:var(--surface-0);color:var(--text-primary);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}p.lead{color:var(--text-secondary);margin:0 0 16px;line-height:1.6}
+button{font:inherit;color:var(--text-primary);background:transparent;border:.5px solid var(--border-strong);border-radius:8px;cursor:pointer}
+.wrap{background:var(--surface-1);border-radius:12px;padding:12px}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;align-items:center}
+.tabs button{font-size:13px;padding:4px 10px}.tabs button.on{border-color:var(--border-accent);color:var(--text-accent)}
+.rmx{margin-left:auto;font-size:12px;color:var(--text-secondary);display:flex;gap:6px;align-items:center}
+.stage{min-height:440px;display:flex;align-items:center;justify-content:center;position:relative}
+.win{background:var(--surface-2);border:.5px solid var(--border-strong);border-radius:12px;width:100%;max-width:640px;overflow:hidden;position:relative}
+.bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:.5px solid var(--border);font-size:13px}
+.tl{display:flex;gap:6px}.tl span{width:11px;height:11px;border-radius:50%;display:inline-block}.r{background:#ff5f57}.y{background:#febc2e}.g{background:#28c840}
+.ttl{flex:1;text-align:center;font-weight:500;color:var(--text-secondary)}
+.logo{width:72px;height:72px}.icon{width:76px;height:76px;border-radius:18px;border:.5px solid var(--border-strong);background:var(--surface-1);display:flex;align-items:center;justify-content:center}
+.btn{display:inline-block;padding:6px 14px;border-radius:8px;border:.5px solid var(--border-strong);font-size:13px}.btnp{background:var(--fill-accent);color:var(--on-accent);border-color:transparent}
+.side{width:178px;border-right:.5px solid var(--border);padding:8px;font-size:13px}
+.fr{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:8px}.fr.sel{background:var(--bg-accent)}
+.av{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:500;font-size:12px;position:relative}
+.dot{position:absolute;right:-1px;bottom:-1px;width:9px;height:9px;border-radius:50%;border:1.5px solid var(--surface-2)}.on{background:#3b9c4a}.wait{background:#d99a2b}.off{background:#9b9a94}
+.badge{margin-left:auto;font-size:11px;background:var(--bg-accent);color:var(--text-accent);border-radius:10px;padding:0 6px}
+.chat{flex:1;display:flex;flex-direction:column;min-width:0}.msgs{flex:1;padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-size:13px;min-height:230px}
+.in{align-self:flex-start;background:var(--surface-1);border:.5px solid var(--border);border-radius:12px 12px 12px 4px;padding:6px 10px;max-width:70%}
+.out{align-self:flex-end;background:var(--bg-accent);color:var(--text-accent);border-radius:12px 12px 4px 12px;padding:6px 10px;max-width:70%}
+.meta{font-size:11px;color:var(--text-secondary)}.metar{align-self:flex-end;font-size:11px;color:var(--text-secondary)}
+.comp{display:flex;gap:8px;align-items:center;padding:8px 12px;border-top:.5px solid var(--border)}
+.field{flex:1;border:.5px solid var(--border-strong);border-radius:8px;padding:5px 10px;font-size:13px;color:var(--text-secondary);min-height:18px}
+.pill{font-size:11px;border:.5px solid var(--border-strong);border-radius:10px;padding:1px 8px;color:var(--text-secondary)}
+.track{height:14px;margin:0 12px;position:relative;border-bottom:.5px dashed var(--border-strong)}.pk{position:absolute;top:2px;font-size:11px;font-weight:500}
+.chip{display:inline-block;padding:3px 9px;margin:3px;border-radius:12px;border:.5px solid var(--border-strong);font-size:13px}.chip.hl{background:var(--bg-accent);color:var(--text-accent);border-color:transparent}
+.sheet{position:absolute;left:50%;top:44px;transform:translateX(-50%);width:86%;background:var(--surface-2);border:.5px solid var(--border-strong);border-radius:12px;padding:14px 16px;font-size:13px}
+.dim{color:var(--text-secondary)}.ok{color:var(--text-success)}.warn{color:var(--text-warning)}.b{font-weight:600}
+.menubar{width:100%;max-width:640px;display:flex;align-items:center;gap:14px;padding:4px 10px;border:.5px solid var(--border);border-radius:8px;font-size:12px;background:var(--surface-2)}
+.menu{position:absolute;top:44px;right:10px;width:300px;background:var(--surface-2);border:.5px solid var(--border-strong);border-radius:10px;padding:6px;font-size:13px}
+.mi{padding:5px 8px;border-radius:6px;display:flex;gap:8px;align-items:center}.mi:hover{background:var(--bg-accent)}.sep{height:.5px;background:var(--border);margin:4px 2px}
+.tog{width:30px;height:17px;border-radius:9px;background:#3b9c4a;position:relative;display:inline-block}.tog:after{content:'';position:absolute;right:2px;top:2px;width:13px;height:13px;border-radius:50%;background:#fff}
+.breathe{animation:breathe 3s ease-in-out infinite}.beat{display:inline-block;animation:beat .5s ease-out}.pop{animation:pop .35s ease-out}.fade{animation:fade .5s ease-out}.drift{animation:drift 2.6s ease-in-out infinite}
+.still *{animation:none!important}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.45}}@keyframes beat{0%{transform:scale(1.5)}100%{transform:scale(1)}}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.97)}to{opacity:1;transform:none}}@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes drift{0%{transform:translateX(0);opacity:0}15%{opacity:.85}80%{opacity:.85}100%{transform:translateX(250px);opacity:0}}
+</style>
+</head>
+<body><main>
+<h1>Raven desktop app — concept</h1>
+<p class="lead">One design for the native macOS (SwiftUI), Windows (WinUI 3) and Linux (GTK 4) apps. Shown in macOS chrome; Windows and Linux use their own window chrome, tray and controls with the same screens and texts (<code>../strings.en.json</code>). Every animation reflects a real event (see <code>../DESIGN.md</code>, Honest motion).</p>
+<div class="wrap">
+<div class="tabs" id="tabs"><button data-s="dmg">Install (DMG)</button><button data-s="welcome">Welcome</button><button data-s="main" class="on">Main window</button><button data-s="verify">Check words</button><button data-s="menu">Menu bar</button><button data-s="settings">Settings</button><label class="rmx"><input type="checkbox" id="rm"> Reduced motion</label></div>
+<div class="stage" id="stage"></div>
+<div class="dim" id="cap" style="font-size:13px;margin-top:10px;line-height:1.6"></div>
+</div>
+</main>
+<script>
+const LOGO='../assets/raven-mark-1024.png';
+const stage=document.getElementById('stage'),cap=document.getElementById('cap'),rm=document.getElementById('rm');const $=id=>document.getElementById(id);
+let T=[];const after=(ms,f)=>T.push(setTimeout(f,ms)),every=(ms,f)=>T.push(setInterval(f,ms));const clear=()=>{T.forEach(t=>{clearTimeout(t);clearInterval(t)});T=[]};const R=()=>rm.checked;
+const bar=t=>`<div class="bar"><div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div><div class="ttl">${t}</div><div style="width:45px"></div></div>`;
+const avc=(l,n,st)=>`<div class="av" style="background:var(--bg-tint-${n});color:var(--text-tint-${n})">${l}<span class="dot ${st}"></span></div>`;
+const MY=['turtle','frog','bread','wolf','paper','laptop','funnel','mango','honey','wagon'],ALI=['anchor','basket','candle','desert','eagle','garden','helmet','island','jacket','kettle'];
+let loopN=0;
+const V={
+dmg:{cap:'Install: open Raven.dmg and drag the app into Applications. The DMG is signed and notarised, so macOS opens it without warnings. Windows uses an installer, Linux an AppImage, deb or Flatpak.',run(){
+stage.innerHTML=`<div class="win" style="max-width:520px">${bar('Raven')}<div style="padding:34px 30px 26px;display:flex;align-items:center;justify-content:space-between"><div style="text-align:center"><div class="icon"><img class="logo" src="${LOGO}" alt="Raven logo"></div><div style="font-size:13px;margin-top:6px">Raven</div></div><div style="flex:1;position:relative;height:76px;margin:0 16px"><div style="position:absolute;top:37px;left:0;right:0;border-top:1.5px dashed var(--border-strong)"></div><div style="position:absolute;right:-4px;top:28px;color:var(--text-secondary)"><i class="ti ti-chevron-right" style="font-size:18px"></i></div><img src="${LOGO}" style="position:absolute;left:0;top:18px;width:40px;height:40px;opacity:0" class="${R()?'':'drift'}" alt=""></div><div style="text-align:center"><div class="icon"><i class="ti ti-folder" style="font-size:40px;color:var(--text-accent)" aria-hidden="true"></i></div><div style="font-size:13px;margin-top:6px">Applications</div></div></div><div class="dim" style="text-align:center;font-size:13px;padding-bottom:18px">Drag Raven to Applications</div></div>`;
+}},
+welcome:{cap:'First launch: the Raven mark fades in, then three short steps, with the same honest wording as the terminal app.',run(){
+stage.innerHTML=`<div class="win" style="max-width:520px">${bar('')}<div style="padding:26px 34px;text-align:center"><img class="logo ${R()?'':'pop'}" style="width:96px;height:96px" src="${LOGO}" alt="Raven logo"><div id="ww" style="font-size:22px;font-weight:600;letter-spacing:8px;margin-top:8px;height:30px"></div><div id="wt" class="dim" style="font-size:13px;height:20px"></div><div style="text-align:left;margin:16px auto 0;max-width:380px;font-size:13px;line-height:1.7"><div><span class="b">1</span>&nbsp; Choose the name Raven shows only on this computer</div><div><span class="b">2</span>&nbsp; Allow Raven on your local network (macOS will ask: choose Allow)</div><div><span class="b">3</span>&nbsp; See your security words</div></div><div style="margin-top:18px"><span class="btn btnp">Get started</span></div><div class="dim" style="font-size:12px;margin-top:10px">No server, no account, no phone number.</div></div></div>`;
+const tag='Messages straight to your friends. No server.';
+if(R()){$('ww').textContent='RAVEN';$('wt').textContent=tag;return}
+'RAVEN'.split('').forEach((c,i)=>after(350+i*110,()=>{$('ww').textContent='RAVEN'.slice(0,i+1)}));tag.split('').forEach((c,i)=>after(950+i*30,()=>{$('wt').textContent=tag.slice(0,i+1)}));
+}},
+main:{cap:'Main window, live: bubbles slide in, the route line under the toolbar shows a message going out and the signed receipt coming back, the heartbeat is a real status check, and Mina\'s waiting message gets through when she returns.',run(){
+stage.innerHTML=`<div class="win">${bar('Raven')}<div style="display:flex"><div class="side"><div class="field" style="margin-bottom:8px"><i class="ti ti-search" aria-hidden="true"></i> Search</div>
+<div class="fr sel">${avc('A','violet','on breathe')}<div><div class="b">Ali</div><div class="meta" id="ta">In touch just now</div></div></div>
+<div class="fr">${avc('M','aqua','wait" id="md')}<div><div class="b">Mina</div><div class="meta" id="mm">1 waiting · until Tue 14:05</div></div></div>
+<div class="fr">${avc('R','orange','off')}<div><div class="b">Rena</div><div class="meta">Not verified</div></div><span class="badge" id="rb" style="display:none">1</span></div>
+<div style="height:70px"></div><div class="dim" style="font-size:12px"><i class="ti ti-plus" aria-hidden="true"></i> Add a friend</div></div>
+<div class="chat"><div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:.5px solid var(--border);font-size:13px"><span class="b">Ali</span><span class="ok" style="font-size:12px">✓ Verified</span><span style="flex:1"></span><span class="pill">LAN direct</span><span id="hb" class="ok">♥</span><span class="meta" id="hbt">node ok</span></div>
+<div class="track" id="track"></div>
+<div class="msgs" id="msgs"><div class="in">Are you coming to the meeting?</div><div class="out">Yes, see you there</div><div class="metar">✓✓ Delivered</div></div>
+<div id="toast" style="height:18px;padding:0 12px;font-size:12px"></div>
+<div class="comp"><div class="field" id="comp">Message Ali</div><span class="btn btnp"><i class="ti ti-send" aria-hidden="true"></i></span></div></div></div></div>`;
+let lastBeat=Date.now();every(1000,()=>{const s=Math.floor((Date.now()-lastBeat)/1000);$('hbt').textContent='node ok · '+(s<3?'now':s+' s')});
+every(2000,()=>{lastBeat=Date.now();const h=$('hb');h.classList.remove('beat');void h.offsetWidth;if(!R())h.classList.add('beat')});
+const W=24;const tr=(dir,ch,cls,ms,done)=>{if(R()){$('track').innerHTML='';done&&done();return}for(let k=0;k<=W;k++)after(k*ms/W,()=>{const x=dir>0?k:W-k;$('track').innerHTML=`<span class="pk ${cls}" style="left:${x/W*96}%">${ch}</span>`});after(ms+60,()=>{$('track').innerHTML='';done&&done()})};
+const add=(cls,txt)=>{const d=document.createElement('div');d.className=cls+(R()?'':' pop');d.textContent=txt;const m=$('msgs');m.appendChild(d);while(m.children.length>8)m.removeChild(m.firstChild);return d};
+after(1200,()=>tr(-1,'◂','',800,()=>{add('in','Great. Can you bring the charger?');$('ta').textContent='In touch just now'}));
+after(2600,()=>{$('rb').style.display='inline';if(!R())$('rb').classList.add('pop')});
+const msg="Yes, I'll bring it";after(3600,()=>msg.split('').forEach((c,i)=>after(i*45,()=>{$('comp').style.color='var(--text-primary)';$('comp').textContent=msg.slice(0,i+1)})));
+after(3600+msg.length*45+300,()=>{$('comp').style.color='';$('comp').textContent='Message Ali';add('out',msg);const st=add('metar','Sending…');
+tr(1,'▸','',800,()=>{st.textContent='✓ Sent, not confirmed yet';after(200,()=>tr(-1,'✓','ok',650,()=>{st.textContent='✓✓ Delivered';st.style.color='var(--text-accent)'}))})});
+after(10500,()=>{const d=$('md');d.className='dot on'+(R()?'':' pop');$('mm').textContent='In touch just now';$('toast').innerHTML='<span class="ok fade">✓✓ Your waiting message to Mina was delivered</span>'});
+after(16000,()=>V.main.run());
+}},
+verify:{cap:'Check words, as a sheet: your 10 English words with a read-aloud highlight; you type the friend\'s words as they read them; the field completes a word after 3 letters. The friend\'s words are never shown and there is no right/wrong per word: only the check word at the end decides. Alternates between a match and a misheard word.',run(){
+const typo=(loopN++%2)===1;
+stage.innerHTML=`<div class="win">${bar('Raven')}<div style="height:330px;opacity:.35;padding:12px" class="dim">Ali · chat</div><div class="sheet ${R()?'':'pop'}"><div class="b" style="font-size:15px">Check it's really Ali</div><div class="dim" style="font-size:12px">Call Ali or meet in person. Each of you reads your own words to the other.</div>
+<div style="margin-top:10px" class="dim">Your words: read these to Ali</div><div id="mine"></div>
+<div style="margin-top:8px" class="dim">Ali's words: type them as Ali reads them <span id="cnt">0/10</span></div><div id="got" style="min-height:34px"></div><div class="field" id="fld" style="margin-top:4px">&nbsp;</div>
+<div id="res" style="margin-top:10px;min-height:38px"></div><div style="text-align:right"><span class="btn">Later (not verified)</span> <span class="btn btnp">Check</span></div></div></div>`;
+$('mine').innerHTML=MY.map((w,i)=>`<span class="chip" id="m${i}">${w}${i===9?' <span class="warn" style="font-size:11px">check</span>':''}</span>`).join('');
+let k=0;if(!R())every(800,()=>{MY.forEach((w,i)=>{const e=$('m'+i);if(e)e.classList.toggle('hl',i===k%10)});k++});
+const heard=ALI.slice();if(typo)heard[5]='garlic';
+const done=()=>{$('res').innerHTML=typo?'<div class="warn b fade">One word doesn\'t fit. The check word caught it.</div><div class="fade dim">Ask Ali to read the words again, slowly. If they still don\'t fit, do not verify.</div>':'<div class="ok b fade">✓ They match. Nobody swapped Ali\'s key.</div><div class="fade dim">Ali will be saved as verified.</div>'};
+if(R()){$('got').innerHTML=heard.map(w=>`<span class="chip">${w}</span>`).join('');$('cnt').textContent='10/10';done();return}
+let t=300;heard.forEach((w,i)=>{for(let j=1;j<=3;j++){after(t,()=>{$('fld').innerHTML=`<span style="color:var(--text-primary)">${w.slice(0,j)}</span><span class="dim">${j===3?w.slice(3):''}</span>`});t+=100}
+after(t+100,()=>{$('got').insertAdjacentHTML('beforeend',`<span class="chip pop">${w}</span>`);$('fld').innerHTML='&nbsp;';$('cnt').textContent=(i+1)+'/10'});t+=380});
+after(t+500,done);after(t+5000,()=>V.verify.run());
+}},
+menu:{cap:'Menu bar (macOS) / tray (Windows, Linux): the mark breathes while Raven listens; the menu says what is happening and what quitting means.',run(){
+stage.innerHTML=`<div style="width:100%;max-width:640px;position:relative;min-height:400px"><div class="menubar"><span>Finder</span><span class="dim">File</span><span class="dim">Edit</span><span style="flex:1"></span><img src="${LOGO}" class="${R()?'':'breathe'}" style="width:18px;height:18px" alt="Raven"><span class="dim">Wi-Fi</span><span class="dim" id="clk"></span></div>
+<div class="menu ${R()?'':'pop'}"><div class="mi"><img src="${LOGO}" style="width:22px;height:22px" alt=""><div><div class="b">Raven is listening on Wi-Fi</div><div class="meta"><span id="hb2" class="ok">♥</span> background program ok</div></div></div><div class="sep"></div>
+<div class="mi"><span class="ok">●</span> Ali · in touch just now</div><div class="mi"><span class="warn">●</span> Mina · 1 message waiting until Tue 14:05</div><div class="mi"><span class="dim">●</span> Rena · 1 new message</div><div class="sep"></div>
+<div class="mi"><i class="ti ti-app-window" aria-hidden="true"></i> Open Raven</div><div class="mi"><i class="ti ti-user-plus" aria-hidden="true"></i> Add a friend…</div><div class="mi"><i class="ti ti-lock" aria-hidden="true"></i> Lock now</div><div class="sep"></div>
+<div class="mi">Quit window (keeps receiving)</div><div class="mi dim">Quit and stop the background program</div></div></div>`;
+const c=()=>{const e=$('clk');if(e)e.textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})};c();every(1000,c);
+every(2000,()=>{const h=$('hb2');if(!h||R())return;h.classList.remove('beat');void h.offsetWidth;h.classList.add('beat')});
+}},
+settings:{cap:'Settings: the privacy choices (encrypt everything, delete old chats, forget addresses, lock), and honest Preview labels for features switched off in this release.',run(){
+stage.innerHTML=`<div class="win" style="max-width:560px">${bar('Settings')}<div style="display:flex;justify-content:center;gap:22px;padding:10px;border-bottom:.5px solid var(--border);font-size:12px"><span class="dim"><i class="ti ti-settings" aria-hidden="true"></i> General</span><span class="b" style="color:var(--text-accent)"><i class="ti ti-lock" aria-hidden="true"></i> Privacy</span><span class="dim"><i class="ti ti-wifi" aria-hidden="true"></i> Network</span></div>
+<div style="padding:14px 22px;font-size:13px;line-height:2.1">
+<div style="display:flex;justify-content:space-between"><span>Encrypt everything stored on this computer</span><span class="tog"></span></div>
+<div style="display:flex;justify-content:space-between"><span>Keep chats for</span><span class="pill" style="font-size:12px">30 days ▾</span></div>
+<div style="display:flex;justify-content:space-between"><span>Forget friends' addresses after 30 days without contact</span><span class="tog"></span></div>
+<div style="display:flex;justify-content:space-between"><span>Lock Raven when the computer sleeps</span><span class="tog"></span></div>
+<div style="display:flex;justify-content:space-between"><span>Reduced motion</span><span class="tog" style="background:var(--border-strong)"></span></div>
+<div style="height:6px"></div><div class="dim" style="font-size:12px">Network: Local network <span class="ok">On</span> · Internet direct <span class="warn">Preview</span> · Relays <span class="warn">Preview</span> · Friends holding mail <span class="warn">Preview</span></div>
+<div style="margin-top:8px"><span class="btn" style="color:var(--text-danger)">Erase Raven from this computer…</span></div></div></div>`;
+}}};
+let cur='main';function show(k){cur=k;clear();document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.s===k));stage.classList.toggle('still',R());cap.textContent=V[k].cap;V[k].run()}
+document.querySelectorAll('#tabs button').forEach(b=>b.addEventListener('click',()=>show(b.dataset.s)));rm.addEventListener('change',()=>show(cur));show('main');
+</script>
+</body></html>

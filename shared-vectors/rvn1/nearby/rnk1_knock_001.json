@@ -1,0 +1,65 @@
+{
+  "description": "RAVEN_NEARBY_LINK_V1 §5. T is bob's token at e0 (rnb1_tokens_001.json), alice is the central. HELLO = 0x01 || 0x01 version || flags_c || nonce_c || tag_h, tag_h = HMAC-SHA256(K_knock, 'RNK1/hello' || T || flags_c || nonce_c)[0..16]. CHALLENGE = 0x02 || 0x01 || flags_p || nonce_p || tag_p, tag_p = HMAC-SHA256(K_knock, 'RNK1/resp' || T || flags_c || nonce_c || flags_p || nonce_p)[0..16]. PROOF = 0x03 || tag_c, tag_c = HMAC-SHA256(K_knock, 'RNK1/proof' || T || flags_c || nonce_c || flags_p || nonce_p)[0..16]. K_knock is the alice-bob k_knock_hex of rnb1_pair_keys_001.json. The nonces are fixed here; a real knock draws them fresh. silent: HELLOs on the same service, after the one above, that the peripheral does not answer (version other than 1, a tag that does not verify, or a nonce_c it answered before)",
+  "deterministic": true,
+  "expected": {
+    "challenge_hex": "020100202122232425262728292a2b2c2d2e2f58f32b88289d16a895be056e7804cb56",
+    "hello_hex": "010100101112131415161718191a1b1c1d1e1ffa541ff9cfa47e5d80677ee2145fb46c",
+    "proof_hex": "030ac68516e7cdb35d36ae4b453d0951ba",
+    "silent": [
+      {
+        "answered": false,
+        "hello_hex": "010100101112131415161718191a1b1c1d1e1ffa541ff9cfa47e5d80677ee2145fb46c",
+        "what": "a replay of the HELLO above"
+      },
+      {
+        "answered": false,
+        "hello_hex": "010101101112131415161718191a1b1c1d1e1ffa541ff9cfa47e5d80677ee2145fb46c",
+        "what": "flags_c bit 0 flipped (the MAC covers every flag bit)"
+      },
+      {
+        "answered": false,
+        "hello_hex": "010200101112131415161718191a1b1c1d1e1ffa541ff9cfa47e5d80677ee2145fb46c",
+        "what": "version 0x02"
+      },
+      {
+        "answered": false,
+        "hello_hex": "010100101112131415161718191a1b1c1d1e1ffa541ff9cfa47e5d80677ee2145fb46d",
+        "what": "tag_h with its last bit flipped"
+      },
+      {
+        "answered": false,
+        "hello_hex": "010100101112131415161718191a1b1c1d1e1f0948da724ec21e8b63a61b0e2baaa40c",
+        "what": "carol's HELLO (no key of this pair)"
+      }
+    ],
+    "token_hex": "f2389f893b144aab82bbef7d33eb55d2"
+  },
+  "inputs": {
+    "central": "alice",
+    "epoch": 1888888,
+    "flags_c": 0,
+    "flags_p": 0,
+    "nonce_c_hex": "101112131415161718191a1b1c1d1e1f",
+    "nonce_p_hex": "202122232425262728292a2b2c2d2e2f",
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      },
+      "carol": {
+        "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "source": "inline: RFC 8032 section 7.1 test 3"
+      }
+    },
+    "peripheral": "bob"
+  },
+  "name": "RNK1 knock: HELLO, CHALLENGE and PROOF on bob's service, and HELLOs that get silence",
+  "protocol_version": "rvn1"
+}

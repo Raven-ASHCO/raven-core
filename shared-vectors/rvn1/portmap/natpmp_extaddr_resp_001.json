@@ -1,0 +1,24 @@
+{
+  "description": "version 0, opcode 128, result, seconds since start of epoch, IPv4",
+  "deterministic": true,
+  "expected": {
+    "epoch": 3600,
+    "external_ip": "11.0.2.9",
+    "kind": "natpmp_external_addr",
+    "result": 0
+  },
+  "inputs": {
+    "answers": "natpmp_extaddr_req_001.json",
+    "gateway": {
+      "epoch_s": 3600,
+      "external_ipv4": "11.0.2.9",
+      "max_lifetime_s": 7200
+    },
+    "reply_hex": "0080000000000e100b000209",
+    "sent_natpmp_op": 0,
+    "sent_pcp_op": null
+  },
+  "name": "NAT-PMP external address response",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

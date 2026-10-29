@@ -1,0 +1,458 @@
+{
+  "description": "header = \"RUP1\" | version 0x01 | op u8 | req_id[4]; 0x01 HAVE (one-way, req_id zero) adv_serial u64 | adv_digest[32] | log_size u32 | log_root[32] | n u8 (0..=4) | offers (build_serial u64 | target_len u8 | target | manifest_digest[32] | payload_len u64); 0x02 GET_ADVISORY, 0x03 GET_LOG (empty); 0x04 GET_MANIFEST manifest_digest[32]; 0x05 GET_CHUNKS manifest_digest[32] | first u32 | count u8 (1..=8); 0x06 GET_ROTATION key_set_digest[32] (answered ADVISORY); 0x82 ADVISORY rad1_len u16 | RAD1 | RTL1 snapshot; 0x83 LOG snapshot; 0x84 MANIFEST manifest_len u16 | RRB1 | snapshot; 0x85 CHUNK (non-terminal) index u32 | len u32 | bytes | path_len u8 (0..=11) | path[32] x path_len; 0x86 CHUNKS_END code u8 (0 OK) | sent u8 (0..=8); 0xFF ERROR code u8 (1 UNSUPPORTED, 2 NOT_FOUND, 3 BUSY, 4 RATE_LIMITED, 5 POLICY_DENIED, 6 MALFORMED, others kept as unknown); every frame at most 65,511 bytes (RAVEN_UPDATE_EXCHANGE_V1 §3). One frame of every op carrying the test release of rrbc_small_001.json (its advisory, log snapshot, manifest and one-chunk payload), CHUNKS_END with and without a code, ERROR with each code and an unknown one; for each its role, what raven-node's dial classifier says (expects_reply: a request; terminal_reply: ends a request) and what a listener does (REQUEST, HAVE, ERROR <code>, DROP: it never answers a reply or a HAVE). answers: the replies that can answer each request. link_caps: caps bit 10 = RUP1 in the RIH1 hello and in RLX1 LINK_CAPS",
+  "deterministic": true,
+  "expected": {
+    "answers": [
+      {
+        "answered_by": [
+          "advisory",
+          "error_unsupported",
+          "error_not_found",
+          "error_busy",
+          "error_rate_limited",
+          "error_policy_denied",
+          "error_malformed",
+          "error_unknown"
+        ],
+        "request": "get_advisory"
+      },
+      {
+        "answered_by": [
+          "log",
+          "error_unsupported",
+          "error_not_found",
+          "error_busy",
+          "error_rate_limited",
+          "error_policy_denied",
+          "error_malformed",
+          "error_unknown"
+        ],
+        "request": "get_log"
+      },
+      {
+        "answered_by": [
+          "manifest",
+          "error_unsupported",
+          "error_not_found",
+          "error_busy",
+          "error_rate_limited",
+          "error_policy_denied",
+          "error_malformed",
+          "error_unknown"
+        ],
+        "request": "get_manifest"
+      },
+      {
+        "answered_by": [
+          "chunk",
+          "chunks_end_ok",
+          "chunks_end_busy",
+          "error_unsupported",
+          "error_not_found",
+          "error_busy",
+          "error_rate_limited",
+          "error_policy_denied",
+          "error_malformed",
+          "error_unknown"
+        ],
+        "request": "get_chunks"
+      },
+      {
+        "answered_by": [
+          "advisory",
+          "error_unsupported",
+          "error_not_found",
+          "error_busy",
+          "error_rate_limited",
+          "error_policy_denied",
+          "error_malformed",
+          "error_unknown"
+        ],
+        "request": "get_rotation"
+      }
+    ],
+    "classify": [
+      {
+        "expects_reply": false,
+        "frame_hex": "52555031",
+        "listener": "DROP",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "frame_hex": "525550310102000000",
+        "listener": "DROP",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "frame_hex": "52555031020352550001",
+        "listener": "ERROR UNSUPPORTED",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "frame_hex": "5255503102ff5255000101",
+        "listener": "ERROR UNSUPPORTED",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "frame_hex": "52555031010752550001",
+        "listener": "ERROR UNSUPPORTED",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "frame_hex": "52555031018752550001",
+        "listener": "DROP",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "frame_hex": "5246433101020000000000000000",
+        "listener": "DROP",
+        "terminal_reply": false
+      }
+    ],
+    "frames": [
+      {
+        "expects_reply": false,
+        "fields": {
+          "adv_digest_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "adv_serial": 0,
+          "log_root_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "log_size": 0,
+          "offers": []
+        },
+        "frame_hex": "525550310101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "frame_len": 87,
+        "listener": "HAVE",
+        "name": "have_nothing",
+        "op": 1,
+        "op_name": "HAVE",
+        "req_id_hex": "00000000",
+        "role": "ONE_WAY",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "adv_digest_hex": "ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90",
+          "adv_serial": 1,
+          "log_root_hex": "bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84",
+          "log_size": 3,
+          "offers": [
+            {
+              "build_serial": 5,
+              "manifest_digest_hex": "ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f",
+              "payload_len": 2170,
+              "target": "aarch64-apple-darwin"
+            }
+          ]
+        },
+        "frame_hex": "525550310101000000000000000000000001ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a9000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a8401000000000000000514616172636836342d6170706c652d64617277696eea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000000000000087a",
+        "frame_len": 156,
+        "listener": "HAVE",
+        "name": "have_test_release",
+        "op": 1,
+        "op_name": "HAVE",
+        "req_id_hex": "00000000",
+        "role": "ONE_WAY",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": true,
+        "fields": {},
+        "frame_hex": "52555031010252550001",
+        "frame_len": 10,
+        "listener": "REQUEST",
+        "name": "get_advisory",
+        "op": 2,
+        "op_name": "GET_ADVISORY",
+        "req_id_hex": "52550001",
+        "role": "REQUEST",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "rad1_hex": "52414431010000020000000000000001000001a1660eac00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c3320000000000000000000000000000000000000000000000000000000000000000020105726176656e0008000000000000000300000400066e6f746963650041526176656e20312e352e30206669786573206120746573742070726f626c656d2e20557064617465207768656e206120667269656e64206f66666572732069742e00000200978588ae5c7b3247636f6c522424ef52eced7cd254a094d376ecfd4540ad72f929e00d0fe3c59e4e54e4eb34b7431669148f65fdd9cae32e3e7a9ae1b625a40f02498d70532df1f714fb1fc98e3d998f8d9fec1c96fc69203eeb98518117d4b699ce65eaf6b53b96502ac252433fc9bdfac7e5c9c556584a4be0b03fcc17628501",
+          "snapshot_hex": "52544c31010200000000000303d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90000001a16b35080001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000001a1705b640000db52544c31010100000000000000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84000001a17581c000d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202000dd859f255675d4954d49e58ea81f25e296ce543785fc2ca66435d8b0f55679bc0bdf23b3c54ae6cf3380857e20a49c4cb1603a4ed8df4c57b88a45038cb5709016de9940374dba2c44e74bb585e39efcbca1fde9f1f3821cdfcfea5482d9f3761a246e4fe660f6ac8276cbe657fc7f4fc536dbdf02132b1344ebf0baacc134006"
+        },
+        "frame_hex": "52555031018252550001013d52414431010000020000000000000001000001a1660eac00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c3320000000000000000000000000000000000000000000000000000000000000000020105726176656e0008000000000000000300000400066e6f746963650041526176656e20312e352e30206669786573206120746573742070726f626c656d2e20557064617465207768656e206120667269656e64206f66666572732069742e00000200978588ae5c7b3247636f6c522424ef52eced7cd254a094d376ecfd4540ad72f929e00d0fe3c59e4e54e4eb34b7431669148f65fdd9cae32e3e7a9ae1b625a40f02498d70532df1f714fb1fc98e3d998f8d9fec1c96fc69203eeb98518117d4b699ce65eaf6b53b96502ac252433fc9bdfac7e5c9c556584a4be0b03fcc1762850152544c31010200000000000303d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90000001a16b35080001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000001a1705b640000db52544c31010100000000000000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84000001a17581c000d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202000dd859f255675d4954d49e58ea81f25e296ce543785fc2ca66435d8b0f55679bc0bdf23b3c54ae6cf3380857e20a49c4cb1603a4ed8df4c57b88a45038cb5709016de9940374dba2c44e74bb585e39efcbca1fde9f1f3821cdfcfea5482d9f3761a246e4fe660f6ac8276cbe657fc7f4fc536dbdf02132b1344ebf0baacc134006",
+        "frame_len": 685,
+        "listener": "DROP",
+        "name": "advisory",
+        "op": 130,
+        "op_name": "ADVISORY",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": true,
+        "fields": {},
+        "frame_hex": "52555031010352550001",
+        "frame_len": 10,
+        "listener": "REQUEST",
+        "name": "get_log",
+        "op": 3,
+        "op_name": "GET_LOG",
+        "req_id_hex": "52550001",
+        "role": "REQUEST",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "snapshot_hex": "52544c31010200000000000303d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90000001a16b35080001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000001a1705b640000db52544c31010100000000000000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84000001a17581c000d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202000dd859f255675d4954d49e58ea81f25e296ce543785fc2ca66435d8b0f55679bc0bdf23b3c54ae6cf3380857e20a49c4cb1603a4ed8df4c57b88a45038cb5709016de9940374dba2c44e74bb585e39efcbca1fde9f1f3821cdfcfea5482d9f3761a246e4fe660f6ac8276cbe657fc7f4fc536dbdf02132b1344ebf0baacc134006"
+        },
+        "frame_hex": "5255503101835255000152544c31010200000000000303d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90000001a16b35080001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000001a1705b640000db52544c31010100000000000000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84000001a17581c000d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202000dd859f255675d4954d49e58ea81f25e296ce543785fc2ca66435d8b0f55679bc0bdf23b3c54ae6cf3380857e20a49c4cb1603a4ed8df4c57b88a45038cb5709016de9940374dba2c44e74bb585e39efcbca1fde9f1f3821cdfcfea5482d9f3761a246e4fe660f6ac8276cbe657fc7f4fc536dbdf02132b1344ebf0baacc134006",
+        "frame_len": 366,
+        "listener": "DROP",
+        "name": "log",
+        "op": 131,
+        "op_name": "LOG",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": true,
+        "fields": {
+          "manifest_digest_hex": "ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f"
+        },
+        "frame_hex": "52555031010452550001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f",
+        "frame_len": 42,
+        "listener": "REQUEST",
+        "name": "get_manifest",
+        "op": 4,
+        "op_name": "GET_MANIFEST",
+        "req_id_hex": "52550001",
+        "role": "REQUEST",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "manifest_hex": "52524231010103000000000000000005000001a1660eac00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33205312e352e3014616172636836342d6170706c652d64617277696ee56f9e51d09cca400a9d6e4be0cdd75d5f40a23a06312e39382e3000000000000000010000f000000000000000087a1fbe8be8fab7df4582a788d42abdbcf550c506d8bcdf22e50e1beebaaef6f3994e476d628311e0c060f295a50187b4220069b121b41cbcd9fc1deb46848bada90962696e2f726176656e01000000000000000000000000000004b0f332fedf1b316c98db014d020928263d8587d074d68c7f412e0db2505a5696002ce7e8bb023120e27ebf8ce2eb7f9c98e72f04588bbb168dde9a9c30e65ee5f30e62696e2f726176656e2d6e6f64650100000000000004b00000000000000384ee22c33b24ded97b7bac9d6e465641661bbfd8f5902a4275c1a02e7bb66fa1f06d149598cd9e23a960d7da3a94dbb6c51fcc0db98edb812af1fd5b30b1f7cab90f646f63732f524541444d452e74787400000000000000083400000000000000466a79e851d56b10ccf7e3d9513783fded7b6d8a3a55619756d6d056b97e800b8d6a79e851d56b10ccf7e3d9513783fded7b6d8a3a55619756d6d056b97e800b8d0037526176656e20312e352e3020287465737420766563746f7273206f6e6c79293a206669786573206120746573742070726f626c656d2e0a0200ccf19f72cc84153317f32ca86d2e79cba210bbb09f96d4942894a297e5655a3cfddbb2659acf40d513efb51b2273b6fec9841e0a38b369c6b019b9caab79210e01d1ce71b4ee7f57150456f62d2f52ccf8d70e622a8dcdc53c045698159ad2d255868904ace11941bc92a5d08fe62322e8f778aa1d66accb691f7b26afa54b0f01",
+          "snapshot_hex": "52544c31010200000000000303d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90000001a16b35080001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000001a1705b640000db52544c31010100000000000000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84000001a17581c000d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202000dd859f255675d4954d49e58ea81f25e296ce543785fc2ca66435d8b0f55679bc0bdf23b3c54ae6cf3380857e20a49c4cb1603a4ed8df4c57b88a45038cb5709016de9940374dba2c44e74bb585e39efcbca1fde9f1f3821cdfcfea5482d9f3761a246e4fe660f6ac8276cbe657fc7f4fc536dbdf02132b1344ebf0baacc134006"
+        },
+        "frame_hex": "52555031018452550001029a52524231010103000000000000000005000001a1660eac00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33205312e352e3014616172636836342d6170706c652d64617277696ee56f9e51d09cca400a9d6e4be0cdd75d5f40a23a06312e39382e3000000000000000010000f000000000000000087a1fbe8be8fab7df4582a788d42abdbcf550c506d8bcdf22e50e1beebaaef6f3994e476d628311e0c060f295a50187b4220069b121b41cbcd9fc1deb46848bada90962696e2f726176656e01000000000000000000000000000004b0f332fedf1b316c98db014d020928263d8587d074d68c7f412e0db2505a5696002ce7e8bb023120e27ebf8ce2eb7f9c98e72f04588bbb168dde9a9c30e65ee5f30e62696e2f726176656e2d6e6f64650100000000000004b00000000000000384ee22c33b24ded97b7bac9d6e465641661bbfd8f5902a4275c1a02e7bb66fa1f06d149598cd9e23a960d7da3a94dbb6c51fcc0db98edb812af1fd5b30b1f7cab90f646f63732f524541444d452e74787400000000000000083400000000000000466a79e851d56b10ccf7e3d9513783fded7b6d8a3a55619756d6d056b97e800b8d6a79e851d56b10ccf7e3d9513783fded7b6d8a3a55619756d6d056b97e800b8d0037526176656e20312e352e3020287465737420766563746f7273206f6e6c79293a206669786573206120746573742070726f626c656d2e0a0200ccf19f72cc84153317f32ca86d2e79cba210bbb09f96d4942894a297e5655a3cfddbb2659acf40d513efb51b2273b6fec9841e0a38b369c6b019b9caab79210e01d1ce71b4ee7f57150456f62d2f52ccf8d70e622a8dcdc53c045698159ad2d255868904ace11941bc92a5d08fe62322e8f778aa1d66accb691f7b26afa54b0f0152544c31010200000000000303d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002ae1f3fcd35880eeba74d197be61d0ec8dd10acd3636a607b8a6d66fd8c6b5a90000001a16b35080001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f000001a1705b640000db52544c31010100000000000000000003bfb870b37ee4b5149b827f93d5d60248a1c65bc1c22b330ba3ecf566ca5d9a84000001a17581c000d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202000dd859f255675d4954d49e58ea81f25e296ce543785fc2ca66435d8b0f55679bc0bdf23b3c54ae6cf3380857e20a49c4cb1603a4ed8df4c57b88a45038cb5709016de9940374dba2c44e74bb585e39efcbca1fde9f1f3821cdfcfea5482d9f3761a246e4fe660f6ac8276cbe657fc7f4fc536dbdf02132b1344ebf0baacc134006",
+        "frame_len": 1034,
+        "listener": "DROP",
+        "name": "manifest",
+        "op": 132,
+        "op_name": "MANIFEST",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": true,
+        "fields": {
+          "count": 1,
+          "first": 0,
+          "manifest_digest_hex": "ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f"
+        },
+        "frame_hex": "52555031010552550001ea58c35c8bf21bf35bd7dfbf86a01e6ab0d69011cc9fc0c51374ab27e9d4628f0000000001",
+        "frame_len": 47,
+        "listener": "REQUEST",
+        "name": "get_chunks",
+        "op": 5,
+        "op_name": "GET_CHUNKS",
+        "req_id_hex": "52550001",
+        "role": "REQUEST",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "bytes_hex": "032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f4180726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f526176656e20312e352e3020746573742072656c656173652e0a5468657365206279746573206578697374206f6e6c7920696e20746865207465737420766563746f72732e0a",
+          "index": 0,
+          "path_hex": []
+        },
+        "frame_hex": "52555031018552550001000000000000087a032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f4180726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f2e4d6c8baac9e80c2b4a6988a7c6e50928476685a4c3e20625446382a1c0df032241607f9ebddc001f3e5d7c9bbad9f81c3b5a7998b7d6f51938577695b4d3f21635547392b1d0ef133251708faecdec102f4e6d8cabcae90d2c4b6a89a8c7e60a29486786a5c4e30726456483a2c1e004234261809fbedd01203f5e7d9cbbdaf91d3c5b7a99b8d7f61a39587796b5d4f31736557493b2d1f01433527190afceed11304f6e8daccbea0e2d4c6b8aa9c8e70b2a496887a6c5e40827466584a3c2e10524436281a0bfde0221405f7e9dbcdbfa1e3d5c7b9ab9d8f71b3a597897b6d5f41837567594b3d2f11534537291b0cfee1231506f8eadcceb0f526176656e20312e352e3020746573742072656c656173652e0a5468657365206279746573206578697374206f6e6c7920696e20746865207465737420766563746f72732e0a00",
+        "frame_len": 2189,
+        "listener": "DROP",
+        "name": "chunk",
+        "op": 133,
+        "op_name": "CHUNK",
+        "req_id_hex": "52550001",
+        "role": "REPLY",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 0,
+          "sent": 1
+        },
+        "frame_hex": "525550310186525500010001",
+        "frame_len": 12,
+        "listener": "DROP",
+        "name": "chunks_end_ok",
+        "op": 134,
+        "op_name": "CHUNKS_END",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 3,
+          "sent": 0
+        },
+        "frame_hex": "525550310186525500010300",
+        "frame_len": 12,
+        "listener": "DROP",
+        "name": "chunks_end_busy",
+        "op": 134,
+        "op_name": "CHUNKS_END",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": true,
+        "fields": {
+          "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332"
+        },
+        "frame_hex": "52555031010652550001d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+        "frame_len": 42,
+        "listener": "REQUEST",
+        "name": "get_rotation",
+        "op": 6,
+        "op_name": "GET_ROTATION",
+        "req_id_hex": "52550001",
+        "role": "REQUEST",
+        "terminal_reply": false
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 1,
+          "code_name": "UNSUPPORTED"
+        },
+        "frame_hex": "5255503101ff5255000101",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_unsupported",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 2,
+          "code_name": "NOT_FOUND"
+        },
+        "frame_hex": "5255503101ff5255000102",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_not_found",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 3,
+          "code_name": "BUSY"
+        },
+        "frame_hex": "5255503101ff5255000103",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_busy",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 4,
+          "code_name": "RATE_LIMITED"
+        },
+        "frame_hex": "5255503101ff5255000104",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_rate_limited",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 5,
+          "code_name": "POLICY_DENIED"
+        },
+        "frame_hex": "5255503101ff5255000105",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_policy_denied",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 6,
+          "code_name": "MALFORMED"
+        },
+        "frame_hex": "5255503101ff5255000106",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_malformed",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      },
+      {
+        "expects_reply": false,
+        "fields": {
+          "code": 42,
+          "code_name": "UNKNOWN"
+        },
+        "frame_hex": "5255503101ff525500012a",
+        "frame_len": 11,
+        "listener": "DROP",
+        "name": "error_unknown",
+        "op": 255,
+        "op_name": "ERROR",
+        "req_id_hex": "52550001",
+        "role": "TERMINAL_REPLY",
+        "terminal_reply": true
+      }
+    ],
+    "link_caps": {
+      "cap_link_rup1": 1024,
+      "hello_caps_rrh1_pad1_rup1": 1794,
+      "hello_caps_rup1": 1026,
+      "rlx1_payload_rrh1_pad1_rup1_hex": "524c583101010400000700"
+    }
+  },
+  "inputs": {
+    "source": "rrbc_small_001.json"
+  },
+  "name": "rup1_frames_001",
+  "protocol_version": "rvn1"
+}

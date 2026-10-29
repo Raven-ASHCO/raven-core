@@ -1,0 +1,15 @@
+{
+  "description": "version 0, opcode 0 (the RFC 6886 section 3.5 figure), result 1, epoch; sent alongside the NAT-PMP address request",
+  "deterministic": true,
+  "expected": {
+    "kind": "natpmp_only"
+  },
+  "inputs": {
+    "reply_hex": "0000000100000e10",
+    "sent_natpmp_op": 0,
+    "sent_pcp_op": 0
+  },
+  "name": "NAT-PMP-only router answers the PCP ANNOUNCE probe",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

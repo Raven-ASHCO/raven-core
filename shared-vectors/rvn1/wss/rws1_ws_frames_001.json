@@ -1,0 +1,822 @@
+{
+  "description": "Client frames carry the masking key 37fa213d, server frames none. Each data case: a binary frame's head both ways, the whole frame's length and SHA-256, and, up to 126 payload bytes, the payload and the whole frames (otherwise byte i of the payload is i mod 251). Each control case: a close, ping or pong frame both ways. Heads: what parse_head reads; incomplete: heads it needs more bytes for; reject: heads it refuses, with the close code. Each sequence: frames read in a row (data frames joined into messages, pings and pongs skipped, a close ends the reading; a frame gives its payload, or a length whose payload is the i mod 251 pattern), the messages (length, SHA-256 and, up to 64 bytes, the bytes) and the outcome: end (the input ran out), close (code: its status code) or fail (code: the close code sent). Section 5; raven_protocol/websocket.py",
+  "deterministic": true,
+  "expected": {
+    "control": [
+      {
+        "client_frame_hex": "888237fa213d3412",
+        "close_code": 1000,
+        "op": 8,
+        "payload_hex": "03e8",
+        "server_frame_hex": "880203e8",
+        "why": "close 1000: normal closure"
+      },
+      {
+        "client_frame_hex": "888237fa213d3410",
+        "close_code": 1002,
+        "op": 8,
+        "payload_hex": "03ea",
+        "server_frame_hex": "880203ea",
+        "why": "close 1002: a frame the subset refuses"
+      },
+      {
+        "client_frame_hex": "888237fa213d3411",
+        "close_code": 1003,
+        "op": 8,
+        "payload_hex": "03eb",
+        "server_frame_hex": "880203eb",
+        "why": "close 1003: a text message"
+      },
+      {
+        "client_frame_hex": "888237fa213d340b",
+        "close_code": 1009,
+        "op": 8,
+        "payload_hex": "03f1",
+        "server_frame_hex": "880203f1",
+        "why": "close 1009: a message over 262144 bytes"
+      },
+      {
+        "client_frame_hex": "888037fa213d",
+        "close_code": null,
+        "op": 8,
+        "payload_hex": "",
+        "server_frame_hex": "8800",
+        "why": "a close without a status code"
+      },
+      {
+        "client_frame_hex": "898537fa213d7f9f4d5158",
+        "op": 9,
+        "payload_hex": "48656c6c6f",
+        "server_frame_hex": "890548656c6c6f",
+        "why": "ping 'Hello' (RFC 6455 section 5.7)"
+      },
+      {
+        "client_frame_hex": "8a8537fa213d7f9f4d5158",
+        "op": 10,
+        "payload_hex": "48656c6c6f",
+        "server_frame_hex": "8a0548656c6c6f",
+        "why": "pong 'Hello' (RFC 6455 section 5.7)"
+      },
+      {
+        "client_frame_hex": "898037fa213d",
+        "op": 9,
+        "payload_hex": "",
+        "server_frame_hex": "8900",
+        "why": "an empty ping"
+      },
+      {
+        "client_frame_hex": "8a8037fa213d",
+        "op": 10,
+        "payload_hex": "",
+        "server_frame_hex": "8a00",
+        "why": "an empty pong"
+      },
+      {
+        "client_frame_hex": "89fd37fa213d37fb233e33ff273a3ff32b363bf72f3227eb332e23ef372a2fe33b262be73f2217db031e13df071a1fd30b161bd70f1207cb130e03cf170a0fc31b060bc71f0277bb637e73bf677a7fb36b767bb76f7267ab736e63af776a6fa37b666ba77f62579b435e539f475a5f934b565b974f52478b534e438f574a4f835b464b",
+        "op": 9,
+        "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c",
+        "server_frame_hex": "897d000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c",
+        "why": "the longest control payload"
+      }
+    ],
+    "data": [
+      {
+        "client_frame_hex": "828037fa213d",
+        "client_frame_len": 6,
+        "client_frame_sha256": "bfe33ca5cd8fd83d8932a73e0ffefc72f391dfcec9569cf5e4cb21144e68ac90",
+        "client_head_hex": "828037fa213d",
+        "payload_hex": "",
+        "payload_len": 0,
+        "server_frame_hex": "8200",
+        "server_frame_len": 2,
+        "server_frame_sha256": "1c53d1a46b3330cc470eecfb6a3d9b8d61cebe92f81c6551c5c6afe5a35071d5",
+        "server_head_hex": "8200",
+        "why": "an empty binary frame"
+      },
+      {
+        "client_frame_hex": "828537fa213d7f9f4d5158",
+        "client_frame_len": 11,
+        "client_frame_sha256": "d22157b94af77295be764a009e831f35e63cc37cfb53bbc8542c9e3c45001b43",
+        "client_head_hex": "828537fa213d",
+        "payload_hex": "48656c6c6f",
+        "payload_len": 5,
+        "server_frame_hex": "820548656c6c6f",
+        "server_frame_len": 7,
+        "server_frame_sha256": "fbb6248922399bc2cc18136e249e053e96e780280b52856d44dda3023f7b988e",
+        "server_head_hex": "8205",
+        "why": "'Hello' as a binary frame (RFC 6455 section 5.7 shows it as text, 0x81)"
+      },
+      {
+        "client_frame_hex": "82fd37fa213d37fb233e33ff273a3ff32b363bf72f3227eb332e23ef372a2fe33b262be73f2217db031e13df071a1fd30b161bd70f1207cb130e03cf170a0fc31b060bc71f0277bb637e73bf677a7fb36b767bb76f7267ab736e63af776a6fa37b666ba77f62579b435e539f475a5f934b565b974f52478b534e438f574a4f835b464b",
+        "client_frame_len": 131,
+        "client_frame_sha256": "60d495586fc920d63d6ea43a4a561d9458a9b49a58d8170e257e90eef694a90f",
+        "client_head_hex": "82fd37fa213d",
+        "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c",
+        "payload_len": 125,
+        "server_frame_hex": "827d000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c",
+        "server_frame_len": 127,
+        "server_frame_sha256": "31de6ba82a2508bb7552db745e9847f37c8deb6093d7b09cb6d3b0fe571ec008",
+        "server_head_hex": "827d",
+        "why": "the longest 7-bit length"
+      },
+      {
+        "client_frame_hex": "82fe007e37fa213d37fb233e33ff273a3ff32b363bf72f3227eb332e23ef372a2fe33b262be73f2217db031e13df071a1fd30b161bd70f1207cb130e03cf170a0fc31b060bc71f0277bb637e73bf677a7fb36b767bb76f7267ab736e63af776a6fa37b666ba77f62579b435e539f475a5f934b565b974f52478b534e438f574a4f835b464b87",
+        "client_frame_len": 134,
+        "client_frame_sha256": "31bb1f5eb1496e40e89e65709d59cdfa323f4b06a25f029c89ef41a9d88b2e5a",
+        "client_head_hex": "82fe007e37fa213d",
+        "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d",
+        "payload_len": 126,
+        "server_frame_hex": "827e007e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d",
+        "server_frame_len": 130,
+        "server_frame_sha256": "e17318bc1a8b0ef70af365998ada415cb863b5a589e235ccc026e7b6205bad2a",
+        "server_head_hex": "827e007e",
+        "why": "the shortest 16-bit length"
+      },
+      {
+        "client_frame_len": 65543,
+        "client_frame_sha256": "4f1ee187d81e00eaaf52537a612930cc3c8f276384cb35515f59fcdaa0925587",
+        "client_head_hex": "82feffff37fa213d",
+        "payload_len": 65535,
+        "server_frame_len": 65539,
+        "server_frame_sha256": "8ae4c67caed0bc0620f6e30af998a84a53182b0a3700b2e11a8a7b61f9f120a3",
+        "server_head_hex": "827effff",
+        "why": "the longest 16-bit length"
+      },
+      {
+        "client_frame_len": 65550,
+        "client_frame_sha256": "a2082520c621a5c98cb6af2153d1d3ba0f717b8c8a056a7d5b4ab499e3f70850",
+        "client_head_hex": "82ff000000000001000037fa213d",
+        "payload_len": 65536,
+        "server_frame_len": 65546,
+        "server_frame_sha256": "1469b731d6f1795af5e64582b524d62e68bd0bbe0a40932e4ad9263d3cf77641",
+        "server_head_hex": "827f0000000000010000",
+        "why": "the shortest 64-bit length (RFC 6455 section 5.7: a 64 KiB binary message)"
+      }
+    ],
+    "heads": [
+      {
+        "expect_masked": true,
+        "fin": true,
+        "hdr_len": 6,
+        "head_hex": "828537fa213d",
+        "len": 5,
+        "mask_hex": "37fa213d",
+        "op": 2,
+        "why": "a client frame"
+      },
+      {
+        "expect_masked": false,
+        "fin": true,
+        "hdr_len": 2,
+        "head_hex": "8205",
+        "len": 5,
+        "mask_hex": null,
+        "op": 2,
+        "why": "a server frame"
+      },
+      {
+        "expect_masked": true,
+        "fin": false,
+        "hdr_len": 6,
+        "head_hex": "028337fa213d",
+        "len": 3,
+        "mask_hex": "37fa213d",
+        "op": 2,
+        "why": "the first fragment of a message"
+      },
+      {
+        "expect_masked": true,
+        "fin": false,
+        "hdr_len": 6,
+        "head_hex": "008337fa213d",
+        "len": 3,
+        "mask_hex": "37fa213d",
+        "op": 0,
+        "why": "a continuation, not the last"
+      },
+      {
+        "expect_masked": false,
+        "fin": true,
+        "hdr_len": 2,
+        "head_hex": "8000",
+        "len": 0,
+        "mask_hex": null,
+        "op": 0,
+        "why": "the last continuation, empty"
+      },
+      {
+        "expect_masked": true,
+        "fin": true,
+        "hdr_len": 6,
+        "head_hex": "818537fa213d",
+        "len": 5,
+        "mask_hex": "37fa213d",
+        "op": 1,
+        "why": "a text frame: its head is read, its message refused"
+      },
+      {
+        "expect_masked": true,
+        "fin": true,
+        "hdr_len": 6,
+        "head_hex": "89fd37fa213d",
+        "len": 125,
+        "mask_hex": "37fa213d",
+        "op": 9,
+        "why": "the longest control payload"
+      },
+      {
+        "expect_masked": false,
+        "fin": true,
+        "hdr_len": 2,
+        "head_hex": "8802",
+        "len": 2,
+        "mask_hex": null,
+        "op": 8,
+        "why": "a close"
+      },
+      {
+        "expect_masked": false,
+        "fin": true,
+        "hdr_len": 4,
+        "head_hex": "827e007e",
+        "len": 126,
+        "mask_hex": null,
+        "op": 2,
+        "why": "a 16-bit length"
+      },
+      {
+        "expect_masked": true,
+        "fin": true,
+        "hdr_len": 14,
+        "head_hex": "82ff000000000001000037fa213d",
+        "len": 65536,
+        "mask_hex": "37fa213d",
+        "op": 2,
+        "why": "a 64-bit length"
+      },
+      {
+        "expect_masked": true,
+        "fin": true,
+        "hdr_len": 14,
+        "head_hex": "82ff000000000004000037fa213d",
+        "len": 262144,
+        "mask_hex": "37fa213d",
+        "op": 2,
+        "why": "the largest frame: 262144 bytes"
+      }
+    ],
+    "incomplete": [
+      {
+        "expect_masked": true,
+        "head_hex": "",
+        "why": "nothing"
+      },
+      {
+        "expect_masked": true,
+        "head_hex": "82",
+        "why": "one byte"
+      },
+      {
+        "expect_masked": true,
+        "head_hex": "c2",
+        "why": "one byte with RSV1 set: nothing is checked before two bytes"
+      },
+      {
+        "expect_masked": true,
+        "head_hex": "82fe00",
+        "why": "a 16-bit length cut"
+      },
+      {
+        "expect_masked": false,
+        "head_hex": "827f00000000000100",
+        "why": "a 64-bit length cut"
+      },
+      {
+        "expect_masked": true,
+        "head_hex": "828537fa21",
+        "why": "a masking key cut"
+      },
+      {
+        "expect_masked": true,
+        "head_hex": "82fe007e37",
+        "why": "a masking key cut after a 16-bit length"
+      }
+    ],
+    "reject": [
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "c28537fa213d",
+        "why": "RSV1 set (no extension was agreed)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "a28537fa213d",
+        "why": "RSV2 set"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "928537fa213d",
+        "why": "RSV3 set"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "f0ff",
+        "why": "every bit of the first byte set"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "838537fa213d",
+        "why": "opcode 3 (reserved, data)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "878537fa213d",
+        "why": "opcode 7 (reserved, data)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "8b8037fa213d",
+        "why": "opcode 0xB (reserved, control)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "8f00",
+        "why": "opcode 0xF (reserved, control)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "098537fa213d",
+        "why": "a ping without FIN"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "0802",
+        "why": "a close without FIN"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "89fe007e37fa213d",
+        "why": "a ping of 126 bytes"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "8a7e007e",
+        "why": "a pong of 126 bytes"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "887f",
+        "why": "a close with a 64-bit length"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "820548656c6c6f",
+        "why": "an unmasked frame from a client"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "828537fa213d7f9f4d5158",
+        "why": "a masked frame from a server"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "827f0000000000040001",
+        "why": "an unmasked client frame over the limit: the mask check comes first"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "82fe007d37fa213d",
+        "why": "125 in the 16-bit form (not minimal)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "827e0000",
+        "why": "0 in the 16-bit form (not minimal)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": true,
+        "head_hex": "82ff000000000000ffff37fa213d",
+        "why": "65535 in the 64-bit form (not minimal)"
+      },
+      {
+        "close": 1002,
+        "expect_masked": false,
+        "head_hex": "827f000000000000007e",
+        "why": "126 in the 64-bit form (not minimal)"
+      },
+      {
+        "close": 1009,
+        "expect_masked": true,
+        "head_hex": "82ff0000000000040001",
+        "why": "262145 bytes, one over the limit (refused before its masking key)"
+      },
+      {
+        "close": 1009,
+        "expect_masked": false,
+        "head_hex": "827f0000000000100000",
+        "why": "1 MiB"
+      },
+      {
+        "close": 1009,
+        "expect_masked": true,
+        "head_hex": "82ff800000000000000037fa213d",
+        "why": "a 64-bit length with its top bit set"
+      },
+      {
+        "close": 1009,
+        "expect_masked": false,
+        "head_hex": "827fffffffffffffffff",
+        "why": "the largest 64-bit length"
+      }
+    ],
+    "sequences": [
+      {
+        "code": null,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": "48656c6c6f"
+          }
+        ],
+        "messages": [
+          {
+            "hex": "48656c6c6f",
+            "len": 5,
+            "sha256": "185f8db32271fe25f561a6fc938b2e264306ec304eda518007d1764826381969"
+          }
+        ],
+        "outcome": "end",
+        "why": "one binary message"
+      },
+      {
+        "code": null,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_hex": "48656c"
+          },
+          {
+            "fin": true,
+            "op": 9,
+            "payload_hex": "70"
+          },
+          {
+            "fin": false,
+            "op": 0,
+            "payload_hex": ""
+          },
+          {
+            "fin": true,
+            "op": 10,
+            "payload_hex": ""
+          },
+          {
+            "fin": true,
+            "op": 0,
+            "payload_hex": "6c6f"
+          }
+        ],
+        "messages": [
+          {
+            "hex": "48656c6c6f",
+            "len": 5,
+            "sha256": "185f8db32271fe25f561a6fc938b2e264306ec304eda518007d1764826381969"
+          }
+        ],
+        "outcome": "end",
+        "why": "a message in three fragments, with a ping and a pong between them"
+      },
+      {
+        "code": null,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": ""
+          }
+        ],
+        "messages": [
+          {
+            "hex": "",
+            "len": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "outcome": "end",
+        "why": "an empty message"
+      },
+      {
+        "code": 1000,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": "61"
+          },
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": "62"
+          },
+          {
+            "fin": true,
+            "op": 8,
+            "payload_hex": "03e8"
+          },
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": "63"
+          }
+        ],
+        "messages": [
+          {
+            "hex": "61",
+            "len": 1,
+            "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+          },
+          {
+            "hex": "62",
+            "len": 1,
+            "sha256": "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"
+          }
+        ],
+        "outcome": "close",
+        "why": "two messages, then a close 1000: nothing after the close is read"
+      },
+      {
+        "code": null,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 8,
+            "payload_hex": ""
+          }
+        ],
+        "messages": [],
+        "outcome": "close",
+        "why": "a close without a status code"
+      },
+      {
+        "code": 1001,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_hex": "6162"
+          },
+          {
+            "fin": true,
+            "op": 8,
+            "payload_hex": "03e9627965"
+          }
+        ],
+        "messages": [],
+        "outcome": "close",
+        "why": "a close inside a message (the message is dropped; the reason text is ignored)"
+      },
+      {
+        "code": 1002,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 8,
+            "payload_hex": "03"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a close with a 1-byte payload"
+      },
+      {
+        "code": 1003,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 1,
+            "payload_hex": "48656c6c6f"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a text message"
+      },
+      {
+        "code": 1003,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 1,
+            "payload_hex": "4865"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "the first fragment of a text message"
+      },
+      {
+        "code": 1002,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 0,
+            "payload_hex": "78"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a continuation with no message open"
+      },
+      {
+        "code": 1002,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_hex": "61"
+          },
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": "62"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a binary frame while a message is open"
+      },
+      {
+        "code": 1002,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_hex": "61"
+          },
+          {
+            "fin": true,
+            "op": 1,
+            "payload_hex": "62"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a text frame while a message is open: the open message decides"
+      },
+      {
+        "code": null,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": true,
+            "op": 9,
+            "payload_len": 125
+          },
+          {
+            "fin": true,
+            "op": 2,
+            "payload_hex": "78"
+          }
+        ],
+        "messages": [
+          {
+            "hex": "78",
+            "len": 1,
+            "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+          }
+        ],
+        "outcome": "end",
+        "why": "the longest ping, then a message"
+      },
+      {
+        "code": null,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_len": 131072
+          },
+          {
+            "fin": true,
+            "op": 0,
+            "payload_len": 131072
+          }
+        ],
+        "messages": [
+          {
+            "len": 262144,
+            "sha256": "dd3fa1f7590c9fe53d96dcb2db5c191be2a8e5ba861467f450e418f6ea56d6b4"
+          }
+        ],
+        "outcome": "end",
+        "why": "a message of exactly 262144 bytes in two fragments"
+      },
+      {
+        "code": 1009,
+        "expect_masked": true,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_len": 262144
+          },
+          {
+            "fin": true,
+            "op": 0,
+            "payload_hex": "00"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a message one byte over the limit, in two fragments"
+      },
+      {
+        "code": null,
+        "expect_masked": false,
+        "frames": [
+          {
+            "fin": false,
+            "op": 2,
+            "payload_hex": "4865"
+          },
+          {
+            "fin": true,
+            "op": 9,
+            "payload_hex": ""
+          },
+          {
+            "fin": true,
+            "op": 0,
+            "payload_hex": "6c6c6f"
+          }
+        ],
+        "messages": [
+          {
+            "hex": "48656c6c6f",
+            "len": 5,
+            "sha256": "185f8db32271fe25f561a6fc938b2e264306ec304eda518007d1764826381969"
+          }
+        ],
+        "outcome": "end",
+        "why": "a fragmented message from a server"
+      },
+      {
+        "code": 1003,
+        "expect_masked": false,
+        "frames": [
+          {
+            "fin": true,
+            "op": 1,
+            "payload_hex": "48656c6c6f"
+          }
+        ],
+        "messages": [],
+        "outcome": "fail",
+        "why": "a text message from a server"
+      }
+    ]
+  },
+  "inputs": {
+    "mask_hex": "37fa213d",
+    "max_control": 125,
+    "max_message": 262144,
+    "payload_pattern": "byte i is i mod 251"
+  },
+  "name": "WebSocket frames: binary and control frames both ways, frame heads, and frame sequences",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_WSS_TRANSPORT_V1.md"
+}

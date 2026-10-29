@@ -1,0 +1,185 @@
+{
+  "description": "RAVEN_LAN_BEACON_V1 §4 and §6. A query is nonce[16] || 8 slots of 18 bytes. A named target Y's slot is h[0..16] || (port as u16 big-endian XOR h[16..18]) with h = HMAC-SHA256(K_q,e(alice->Y), nonce || ip16(src)); ip16 of an IPv4 address is ::ffff:a.b.c.d, of an IPv6 address its 16 bytes (never a zone). The other slots hold the given padding in slot order (fresh random bytes in a real query, whose slot order is random too). A receiver tries each contact C's K_q(C->receiver) at the epochs e'-1, e', e'+1 of its own clock against every slot (constant-time compare), at most one match per contact; the port is slot[16..18] XOR h[16..18]. books lists each person's contacts. Keys: lbcn_pair_keys_001.json",
+  "deterministic": true,
+  "expected": {
+    "epoch": 2833333,
+    "epoch_window_bob": [
+      {
+        "port": null,
+        "receiver_epoch": 2833331
+      },
+      {
+        "port": 7420,
+        "receiver_epoch": 2833332
+      },
+      {
+        "port": 7420,
+        "receiver_epoch": 2833333
+      },
+      {
+        "port": 7420,
+        "receiver_epoch": 2833334
+      },
+      {
+        "port": null,
+        "receiver_epoch": 2833335
+      }
+    ],
+    "matches": [
+      {
+        "found": [],
+        "receiver": "alice"
+      },
+      {
+        "found": [
+          {
+            "contact": "alice",
+            "port": 7420
+          }
+        ],
+        "receiver": "bob"
+      },
+      {
+        "found": [
+          {
+            "contact": "alice",
+            "port": 7420
+          }
+        ],
+        "receiver": "carol"
+      },
+      {
+        "found": [],
+        "receiver": "dave"
+      }
+    ],
+    "other_sources_bob": [
+      {
+        "port": null,
+        "src": "192.168.1.21"
+      },
+      {
+        "port": null,
+        "src": "10.0.0.20"
+      },
+      {
+        "port": 7420,
+        "src": "::ffff:192.168.1.20"
+      },
+      {
+        "port": null,
+        "src": "::192.168.1.20"
+      },
+      {
+        "port": null,
+        "src": "fe80::1"
+      }
+    ],
+    "query_hex": "000102030405060708090a0b0c0d0e0fa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11aa209e79924b388c378244719c846a5ca2da2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a315a088ffdf290c64a915f86f2ffe4e92b39da4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+    "query_len": 160,
+    "slots": [
+      {
+        "h_hex": "1aa209e79924b388c378244719c846a5d6d1dff1d07cdcee41201d7bf5f31011",
+        "slot": 2,
+        "slot_hex": "1aa209e79924b388c378244719c846a5ca2d",
+        "target": "carol"
+      },
+      {
+        "h_hex": "15a088ffdf290c64a915f86f2ffe4e92af6121eed1de716c9472117118359f8c",
+        "slot": 5,
+        "slot_hex": "15a088ffdf290c64a915f86f2ffe4e92b39d",
+        "target": "bob"
+      }
+    ],
+    "src_ip16_hex": "00000000000000000000ffffc0a80114"
+  },
+  "inputs": {
+    "books": {
+      "alice": [
+        "bob",
+        "carol",
+        "dave"
+      ],
+      "bob": [
+        "alice",
+        "carol",
+        "dave"
+      ],
+      "carol": [
+        "alice",
+        "bob",
+        "dave"
+      ],
+      "dave": [
+        "alice",
+        "bob",
+        "carol"
+      ]
+    },
+    "epoch_seconds": 1700000000,
+    "nonce_hex": "000102030405060708090a0b0c0d0e0f",
+    "padding": [
+      {
+        "hex": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+        "slot": 0
+      },
+      {
+        "hex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "slot": 1
+      },
+      {
+        "hex": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "slot": 3
+      },
+      {
+        "hex": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "slot": 4
+      },
+      {
+        "hex": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+        "slot": 6
+      },
+      {
+        "hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "slot": 7
+      }
+    ],
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      },
+      "carol": {
+        "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "source": "inline: RFC 8032 section 7.1 test 3"
+      },
+      "dave": {
+        "ed_public_hex": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+        "seed_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "source": "inline: 32 bytes of 0x44 (not the dave of shared-vectors/v1/identities.json)"
+      }
+    },
+    "port": 7420,
+    "querier": "alice",
+    "src": "192.168.1.20",
+    "targets": [
+      {
+        "name": "bob",
+        "slot": 5
+      },
+      {
+        "name": "carol",
+        "slot": 2
+      }
+    ]
+  },
+  "name": "LAN beacon query: alice names bob (slot 5) and carol (slot 2)",
+  "protocol_version": "rvn1"
+}

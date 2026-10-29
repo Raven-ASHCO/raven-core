@@ -1,0 +1,149 @@
+{
+  "description": "entry = type u8 (1 manifest, 2 advisory, 3 key set) | digest[32] | logged_at_ms u64; leaf = SHA-256(0x00 || entry), node = SHA-256(0x01 || left || right), split at the largest power of two below the size (RFC 6962 §2.1); STH = \"RTL1\" | 0x01 | kind 0x01 | reserved u16 | tree_size u64 | root_hash[32] | timestamp_ms u64 | key_set_digest[32] | signature block over \"rvn1/tlog/sth/v1\\0\" || bytes[0..88]; snapshot = \"RTL1\" | 0x01 | kind 0x02 | reserved u16 | entry_count u32 | entries | sth_len u16 | STH (RAVEN_TRANSPARENCY_LOG_V1 §2-§5). The test log: entry 0 is the test key set (type 3, digest of keyset_001); entry i >= 1 is an advisory (odd i, type 2) or a manifest (even i, type 1) with the synthetic digest SHA-256(\"rvn1/tlog/test-artifact\\0\" || \"advisory\" or \"manifest\" || i as u32 BE); entry i is logged at 1792713600000 + i days (ms). A tree head over n entries is signed at 1792713600000 + n days. Prefix consistency both ways (RAVEN_TRANSPARENCY_LOG_V1 §6): the snapshots of the first 5 entries (rtl1_snapshot_5_001) and of the first 8 (head signed by keys 0 and 2). A longer log that starts with the stored one EXTENDS it (store it), a shorter prefix is OLDER (keep the stored one), equal entries are SAME",
+  "deterministic": true,
+  "expected": {
+    "eight": {
+      "check": "OK",
+      "root_hex": "195d52069aec56c40c97887ab0669b0f4118d7c586870549d5ae5955a209f1a4",
+      "snapshot_hex": "52544c31010200000000000803d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002600607430f1f7d7e6b55822a991719c87e2dc68ad5c9ff8517dcaf607818578b000001a16b3508000186b07086bbdf47a0d7e356ee8b08aef7792a3ab15b78772e3d5828645a1654fc000001a1705b64000221d01292ef7ed2fa1b845c48d2ace0bb908221169acd2dbd357a78cf996a8f9b000001a17581c00001e81123907bddaa372e3b4a9c8c4f9c30b513ef84e9d377cc015a7ee9a0cd9d40000001a17aa81c0002323e37f4dda8aa57f54a3b17992a886a18cc82b4387c478a5788bbf4739d4cdc000001a17fce78000121f50c8c68c67f83d749fe0ea6c09c0e6840f52e40104ae5e50e3f20fead1dbd000001a184f4d400024739213564c8a8306cbf800dc7a5fe5f8d889ad429b7c0c611eb70788013e2eb000001a18a1b300000db52544c31010100000000000000000008195d52069aec56c40c97887ab0669b0f4118d7c586870549d5ae5955a209f1a4000001a18f418c00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332020001323af9f523289f7ce922a741f44577e5b4556e10c752b9e4b33f409e749374452cdea5bc73231a3e49c3747c6fff973d98fdd24ac49830eb4980324b112b07022dfa668ad5354d9bea1221382d24de091c976b0346c658b6f1af73e43c4ea6812884247f04efb103832801de758ff5b4694058ba9de99c4fad852d1d90f1710c",
+      "sth_hex": "52544c31010100000000000000000008195d52069aec56c40c97887ab0669b0f4118d7c586870549d5ae5955a209f1a4000001a18f418c00d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332020001323af9f523289f7ce922a741f44577e5b4556e10c752b9e4b33f409e749374452cdea5bc73231a3e49c3747c6fff973d98fdd24ac49830eb4980324b112b07022dfa668ad5354d9bea1221382d24de091c976b0346c658b6f1af73e43c4ea6812884247f04efb103832801de758ff5b4694058ba9de99c4fad852d1d90f1710c",
+      "tree_size": 8
+    },
+    "five": {
+      "check": "OK",
+      "root_hex": "2c198d165f8052d9976a0a012698fc00a713fc3fb0529f0e17eacfbc558c54a7",
+      "snapshot_hex": "52544c31010200000000000503d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332000001a1660eac0002600607430f1f7d7e6b55822a991719c87e2dc68ad5c9ff8517dcaf607818578b000001a16b3508000186b07086bbdf47a0d7e356ee8b08aef7792a3ab15b78772e3d5828645a1654fc000001a1705b64000221d01292ef7ed2fa1b845c48d2ace0bb908221169acd2dbd357a78cf996a8f9b000001a17581c00001e81123907bddaa372e3b4a9c8c4f9c30b513ef84e9d377cc015a7ee9a0cd9d40000001a17aa81c0000db52544c310101000000000000000000052c198d165f8052d9976a0a012698fc00a713fc3fb0529f0e17eacfbc558c54a7000001a17fce7800d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202007366a0420299d226e9fe2934b99ffeeb1fc7d082120f65b3cab1ebb2c7dbf3116225c64dc83c955101876b41f3b5ad30058fdf825cfd7ee7840ff81954981f0e01479db82882787fef1dfef60588dd897c681c1608bd4a643f5804a34acddf0032ba7378921913577d0d4d8e8e969d80bc9cdf4c8cfbd0a7336f86da39eacd6b0e",
+      "sth_hex": "52544c310101000000000000000000052c198d165f8052d9976a0a012698fc00a713fc3fb0529f0e17eacfbc558c54a7000001a17fce7800d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c33202007366a0420299d226e9fe2934b99ffeeb1fc7d082120f65b3cab1ebb2c7dbf3116225c64dc83c955101876b41f3b5ad30058fdf825cfd7ee7840ff81954981f0e01479db82882787fef1dfef60588dd897c681c1608bd4a643f5804a34acddf0032ba7378921913577d0d4d8e8e969d80bc9cdf4c8cfbd0a7336f86da39eacd6b0e",
+      "tree_size": 5
+    },
+    "pairs": [
+      {
+        "consistency": "EXTENDS",
+        "new": "eight",
+        "stored": "five"
+      },
+      {
+        "consistency": "OLDER",
+        "new": "five",
+        "stored": "eight"
+      },
+      {
+        "consistency": "SAME",
+        "new": "five",
+        "stored": "five"
+      }
+    ]
+  },
+  "inputs": {
+    "eight": {
+      "entries": [
+        {
+          "digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+          "logged_at_ms": 1792713600000,
+          "type": 3
+        },
+        {
+          "digest_hex": "600607430f1f7d7e6b55822a991719c87e2dc68ad5c9ff8517dcaf607818578b",
+          "logged_at_ms": 1792800000000,
+          "type": 2
+        },
+        {
+          "digest_hex": "86b07086bbdf47a0d7e356ee8b08aef7792a3ab15b78772e3d5828645a1654fc",
+          "logged_at_ms": 1792886400000,
+          "type": 1
+        },
+        {
+          "digest_hex": "21d01292ef7ed2fa1b845c48d2ace0bb908221169acd2dbd357a78cf996a8f9b",
+          "logged_at_ms": 1792972800000,
+          "type": 2
+        },
+        {
+          "digest_hex": "e81123907bddaa372e3b4a9c8c4f9c30b513ef84e9d377cc015a7ee9a0cd9d40",
+          "logged_at_ms": 1793059200000,
+          "type": 1
+        },
+        {
+          "digest_hex": "323e37f4dda8aa57f54a3b17992a886a18cc82b4387c478a5788bbf4739d4cdc",
+          "logged_at_ms": 1793145600000,
+          "type": 2
+        },
+        {
+          "digest_hex": "21f50c8c68c67f83d749fe0ea6c09c0e6840f52e40104ae5e50e3f20fead1dbd",
+          "logged_at_ms": 1793232000000,
+          "type": 1
+        },
+        {
+          "digest_hex": "4739213564c8a8306cbf800dc7a5fe5f8d889ad429b7c0c611eb70788013e2eb",
+          "logged_at_ms": 1793318400000,
+          "type": 2
+        }
+      ],
+      "sth": {
+        "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+        "root_hash_hex": "195d52069aec56c40c97887ab0669b0f4118d7c586870549d5ae5955a209f1a4",
+        "signers": [
+          0,
+          2
+        ],
+        "timestamp_ms": 1793404800000,
+        "tree_size": 8
+      }
+    },
+    "five": {
+      "entries": [
+        {
+          "digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+          "logged_at_ms": 1792713600000,
+          "type": 3
+        },
+        {
+          "digest_hex": "600607430f1f7d7e6b55822a991719c87e2dc68ad5c9ff8517dcaf607818578b",
+          "logged_at_ms": 1792800000000,
+          "type": 2
+        },
+        {
+          "digest_hex": "86b07086bbdf47a0d7e356ee8b08aef7792a3ab15b78772e3d5828645a1654fc",
+          "logged_at_ms": 1792886400000,
+          "type": 1
+        },
+        {
+          "digest_hex": "21d01292ef7ed2fa1b845c48d2ace0bb908221169acd2dbd357a78cf996a8f9b",
+          "logged_at_ms": 1792972800000,
+          "type": 2
+        },
+        {
+          "digest_hex": "e81123907bddaa372e3b4a9c8c4f9c30b513ef84e9d377cc015a7ee9a0cd9d40",
+          "logged_at_ms": 1793059200000,
+          "type": 1
+        }
+      ],
+      "sth": {
+        "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+        "root_hash_hex": "2c198d165f8052d9976a0a012698fc00a713fc3fb0529f0e17eacfbc558c54a7",
+        "signers": [
+          0,
+          1
+        ],
+        "timestamp_ms": 1793145600000,
+        "tree_size": 5
+      }
+    },
+    "key_set": {
+      "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+      "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+      "public_keys_hex": [
+        "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+        "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce"
+      ],
+      "seeds_hex": [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333"
+      ],
+      "threshold": 2
+    }
+  },
+  "name": "rtl1_consistency_001",
+  "protocol_version": "rvn1"
+}

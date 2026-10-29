@@ -1,0 +1,45 @@
+{
+  "description": "RAVEN_ROUTE_HINTS_V1 §14: K_pair = HKDF-SHA256(salt K_root, ikm seed, info 'rvn1/pair-seed/v1', 32 bytes), K_root the R2 pairwise root of the two Ed25519 identity keys (shared-vectors/rvn1/lan_beacon/lbcn_pair_keys_001.json); K_pair takes K_root's place in K_medium = HKDF-Expand-SHA256(PRK, info 'medium' || medium, 32 bytes): 0x01 Bluetooth LE, 0x02 LAN beacon, 0x03 link knock. The leader is the numerically smaller identity key",
+  "deterministic": true,
+  "expected": {
+    "alice_pub_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "bob_pub_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "generations": [
+      {
+        "generation": 1,
+        "k_ble_hex": "b7ccb70895e00a385f2ff46d10df00f9897bb8efa1bc2b60090a6c68b5505726",
+        "k_lan_hex": "0af2a9e6df5654b6bac5c9cd5612bdaf9f16564d78285d4ecbfa7e222fd9d952",
+        "k_link_hex": "206c2d8637dcb32efd34dc097e3b50214b4df9a0944f990094467742891985e4",
+        "k_pair_hex": "ee26bb4b47c0ded410b00e0311faefa079b738d964cdb3fd8038609ee88b0059",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      {
+        "generation": 2,
+        "k_ble_hex": "a87e939e63c3b3cb8f3bd975ed15361fbac0ca4d7a71bb8dfb33803f916477c3",
+        "k_lan_hex": "51a11ea37983300ddddefa4880179e949400a3db40718817c85d8ae4de6ac417",
+        "k_link_hex": "942a9e1d34b962ba926522ce02f4052c435300378cc088a022811f36a440d14e",
+        "k_pair_hex": "76b11fdd10c93d32bea4b2ceb84729ca6a97927e6d88b0430cd60e27cf821143",
+        "seed_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+      }
+    ],
+    "k_root_hex": "4a7b4e88f966358051ad5a45a0374f88f37627182cce69a27860717269c504a1",
+    "leader": "bob"
+  },
+  "inputs": {
+    "alice_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "bob_seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+    "kdf_info": "rvn1/pair-seed/v1",
+    "seeds": [
+      {
+        "generation": 1,
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      {
+        "generation": 2,
+        "seed_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+      }
+    ]
+  },
+  "name": "Pair seed KDF (design B W-B4)",
+  "protocol_version": "rvn1"
+}

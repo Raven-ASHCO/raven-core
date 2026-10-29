@@ -1,0 +1,15 @@
+{
+  "description": "RVNAPP/1 app frame inside the ATSAM plaintext of an indexed-session Message",
+  "deterministic": true,
+  "expected": {
+    "app_id_hex": "abababababababababababababababab",
+    "body": "",
+    "class": "app",
+    "content_type": "a2a-response/1"
+  },
+  "inputs": {
+    "plaintext_hex": "52564e4150502f31206132612d726573706f6e73652f312061626162616261626162616261626162616261626162616261626162616261620a"
+  },
+  "name": "valid_response_empty_body_001",
+  "protocol_version": "rvn1"
+}

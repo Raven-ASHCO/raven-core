@@ -1,0 +1,11 @@
+{
+  "description": "RFC1 v1 custody frame(s); header magic RFC1 | version | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "524643310103010203040506070801e0a276f22b4634ef7d0cbeffb551327cea4b0023464594e13c58345ce2d34460",
+    "frame_len": 47
+  },
+  "inputs": {},
+  "name": "RELEASE one digest",
+  "protocol_version": "rvn1"
+}

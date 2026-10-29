@@ -1,0 +1,14 @@
+{
+  "description": "An RRH1 frame (the sender seed's P2P_ID, then a PAIR_SEED entry, type 0x08, of 39 bytes instead of 40) that breaks RAVEN_ROUTE_HINTS_V1 §14: the entry is dropped alone with an RRH1_MALFORMED debug log, and the frame and its P2P_ID are kept",
+  "deterministic": true,
+  "expected": {
+    "frame_kept": true,
+    "pair_seed": null,
+    "reason": "PAIR_SEED length 39 (exactly 40)"
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f08002700000003303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f000000"
+  },
+  "name": "PAIR_SEED of 39 bytes",
+  "protocol_version": "rvn1"
+}

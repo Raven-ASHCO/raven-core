@@ -1,0 +1,32 @@
+{
+  "description": "SUCCESS, granted lifetime, epoch, the request's nonce, protocol and internal port, the assigned external port and IPv4 (::ffff:a.b.c.d)",
+  "deterministic": true,
+  "expected": {
+    "epoch": 3600,
+    "kind": "pcp",
+    "lifetime": 7200,
+    "map": {
+      "external_ip": "11.0.2.9",
+      "external_port": 7423,
+      "internal_port": 7423,
+      "nonce_hex": "117a021fb22cdbf08252fdff",
+      "protocol": 6
+    },
+    "opcode": 1,
+    "result": 0
+  },
+  "inputs": {
+    "answers": "pcp_map_v4_req_001.json",
+    "gateway": {
+      "epoch_s": 3600,
+      "external_ipv4": "11.0.2.9",
+      "max_lifetime_s": 7200
+    },
+    "reply_hex": "0281000000001c2000000e10000000000000000000000000117a021fb22cdbf08252fdff060000001cff1cff00000000000000000000ffff0b000209",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "PCP MAP response, IPv4 TCP",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

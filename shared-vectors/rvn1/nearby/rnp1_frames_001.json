@@ -1,0 +1,88 @@
+{
+  "description": "RAVEN_NEARBY_LINK_V1 §6. OPEN = 0x10 || chan; DATA = 0x11 || chan || seq u16 big-endian || payload (1 to max_tx - 4 bytes); CREDIT = 0x12 || chan || add u16 big-endian (1 to 64); FIN = 0x13 || chan || next_seq u16 big-endian; RESET = 0x1f || code (1 PROTOCOL, 2 IDLE, 3 LIMIT, 4 SHUTDOWN, 5 MTU, 6 DUPLICATE). chan is 0 or 1. max_tx = min(ATT_MTU - 3, 512) of the sending direction; each frame is one ATT PDU value. DATA payloads are counting bytes 0x00, 0x01, ... (mod 256)",
+  "deterministic": true,
+  "expected": {
+    "frames": [
+      {
+        "frame": {
+          "chan": 0,
+          "kind": "OPEN"
+        },
+        "frame_hex": "1000",
+        "max_tx": 64,
+        "name": "open"
+      },
+      {
+        "frame": {
+          "chan": 0,
+          "kind": "DATA",
+          "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b",
+          "seq": 0
+        },
+        "frame_hex": "11000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b",
+        "max_tx": 64,
+        "name": "data_max_tx_64"
+      },
+      {
+        "frame": {
+          "chan": 1,
+          "kind": "DATA",
+          "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4",
+          "seq": 1
+        },
+        "frame_hex": "11010001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4",
+        "max_tx": 185,
+        "name": "data_max_tx_185"
+      },
+      {
+        "frame": {
+          "chan": 0,
+          "kind": "DATA",
+          "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafb",
+          "seq": 4660
+        },
+        "frame_hex": "11001234000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafb",
+        "max_tx": 512,
+        "name": "data_max_tx_512"
+      },
+      {
+        "frame": {
+          "add": 4,
+          "chan": 1,
+          "kind": "CREDIT"
+        },
+        "frame_hex": "12010004",
+        "max_tx": 64,
+        "name": "credit"
+      },
+      {
+        "frame": {
+          "chan": 0,
+          "kind": "FIN",
+          "next_seq": 1093
+        },
+        "frame_hex": "13000445",
+        "max_tx": 64,
+        "name": "fin"
+      },
+      {
+        "frame": {
+          "code": 3,
+          "kind": "RESET"
+        },
+        "frame_hex": "1f03",
+        "max_tx": 64,
+        "name": "reset_limit"
+      }
+    ]
+  },
+  "inputs": {
+    "max_tx_values": [
+      64,
+      185,
+      512
+    ]
+  },
+  "name": "RNP1 frames: one of each kind, DATA at the largest payload of three frame sizes",
+  "protocol_version": "rvn1"
+}

@@ -1,0 +1,11 @@
+{
+  "description": "RFC1 v1 custody frame(s); header magic RFC1 | version | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "5246433101020102030405060708011111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000000004",
+    "frame_len": 65
+  },
+  "inputs": {},
+  "name": "FETCH one tag, no cursor",
+  "protocol_version": "rvn1"
+}

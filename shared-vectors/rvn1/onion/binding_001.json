@@ -1,0 +1,16 @@
+{
+  "description": "RAVEN_ONION_CARRIER_V1 §3: the onion binding. signing_input = 'RAVEN-ONION-BIND-V1' || 0x00 || hs_id[32] || raven_pub[32] || issued_s u64 BE; binding = hs_id[32] || issued_s u64 BE || Ed25519 signature by the Raven identity over signing_input (104 bytes); card text = base64url without padding. The identity is RFC 8032 test 1 (alice); the onion key is RFC 8032 test 2's public key",
+  "deterministic": true,
+  "expected": {
+    "binding_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c000000006adb4c404959c7d6fe493676806cf42a20e488350c009edf62f6b6eadb2cc7a016af0708e8552a860d3aa6295c8ae5f8e745d61c003af4dd447662d060533c6729019104",
+    "card_text": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0ZgwAAAAAattMQElZx9b-STZ2gGz0KiDkiDUMAJ7fYva26tssx6AWrwcI6FUqhg06pilciuX450XWHAA69N1EdmLQYFM8ZykBkQQ",
+    "dial": "onion:3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "raven_pub_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "signing_input_hex": "524156454e2d4f4e494f4e2d42494e442d5631003d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660cd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a000000006adb4c40"
+  },
+  "inputs": {
+    "hs_id_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    "issued_s": 1792756800,
+    "raven_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+  }
+}

@@ -1,0 +1,43 @@
+# Contributing to Raven
+
+Thank you for helping. A few rules keep Raven safe and reviewable.
+
+## Before you start
+
+- **Security problems:** never in a public issue. Write to security@raven-messager.com
+  ([SECURITY.md](SECURITY.md)).
+- **Bugs:** open an issue with the commit you tested, the crate or binary, your operating system,
+  whether it was a debug or release build (and any `RAVEN_LAB_*` switch you set), the steps, and
+  what you expected.
+- **Larger changes:** open an issue first, so we can agree on the approach.
+
+## Making a change
+
+1. Fork, branch, change, and add or update tests.
+2. Run the checks for what you touched (from `node/`, with the file-backed test stores of the
+   README's "Test" section):
+   ```sh
+   cargo fmt --check
+   cargo clippy --locked -p <crate> --all-targets -- -D warnings
+   cargo test --locked -p <crate>
+   ```
+3. Open a pull request that says what changed and why.
+
+## Rules
+
+- **Wire formats are versioned, never edited in place.** A protocol change updates the spec in
+  `protocol/`, the vectors in `shared-vectors/` (`python3 protocol/reference/generate_rvn1.py`) and
+  the Python reference tests, and regenerates `docs/PROTOCOL_FREEZE_HASHES_V1.md` with
+  `bash scripts/freeze_protocol_hashes.sh` in the same pull request.
+- **Lab features stay off in release builds** until their release gate is signed. Do not flip a
+  `*_PRODUCTION_ENABLED` constant in a feature pull request.
+- **New dependencies** need a reason in the pull request and an exact version.
+- **No personal data** in code, tests or docs: use sample names (Alice, Bob), documentation
+  addresses (192.0.2.x, 2001:db8::) and `example` domains.
+- English only in product text, docs and comments.
+
+## License
+
+By contributing you agree that your contribution is licensed under the GNU Affero General Public
+License v3.0 ([LICENSE](LICENSE)). The Raven name and visual assets are covered by
+[TRADEMARK.md](TRADEMARK.md) and [ASSET_LICENSE.md](ASSET_LICENSE.md).

@@ -1,0 +1,95 @@
+[package]
+name = "raven-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAVEN V1 protocol core — identity, address, envelope, queue, sealed payload"
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hkdf = { workspace = true }
+chacha20poly1305 = { workspace = true }
+bech32 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+rusqlite = { workspace = true }
+base64 = { workspace = true }
+ml-kem = { workspace = true, features = ["zeroize"] }
+libcrux-ml-kem = { version = "=0.0.10", optional = true, default-features = false, features = ["mlkem768", "incremental"] }
+# Pinned Signal SPQR for Full Braid Encode/Decode only (Task 0 audit). AGPL-3.0-only.
+spqr = { git = "https://github.com/signalapp/SparsePostQuantumRatchet", rev = "fd320484dcec89004021e6fdc7481825f5f261fa", optional = true, default-features = false, features = ["test-utils"] }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+snow = { workspace = true }
+# Linux passphrase vault KDF (docs/design/2026-10-linux-keystore.md). `zeroize`
+# wipes the Argon2 working memory after each derivation.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2"
+security-framework-sys = "2"
+
+# Free space on the profile's disk (`disk_space`): statfs / statvfs; the
+# network interfaces (`netifs`): getifaddrs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+] }
+
+# Secret Service — glibc desktop only (not musl static releases). R1
+# (docs/design/2026-10-linux-keystore.md): the frozen Raven no-prompt fork of
+# secret-service 2.0.2 (API superset of upstream; provenance:
+# scripts/verify_secret_service_2_0_2_raven_noprompt.sh) replaces the crates.io
+# client, so identity creation can use the add-only, prompt-refusing
+# `create_item_no_prompt` and every caller links the audited code.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+secret-service = { path = "../../third_party/secret-service-2.0.2-raven-noprompt" }
+# Direct D-Bus access belongs only to the durable Full Braid lab. Existing
+# production-facing stores continue to use the unmodified crates.io client.
+zbus = { version = "1.9", optional = true }
+zvariant = { version = "2.10", optional = true }
+zvariant_derive = { version = "2.10", optional = true }
+
+[dev-dependencies]
+sha3 = "0.12.0"
+tempfile = { workspace = true }
+
+[features]
+default = []
+test-helpers = []
+# Lab-only compatibility for the pre-ATSAM demo cipher.  This construction
+# derives its key from public identity material and therefore provides no
+# confidentiality.  Production/default builds must never enable it.
+unsafe-demo-crypto = []
+# Lab-only ML-KEM-768 incremental encapsulation via libcrux. Not for production.
+mlkem768-incremental-lab = ["dep:libcrux-ml-kem"]
+# Lab-only Full Braid Slice 2. Requires Slice 1 KEM + git-pinned spqr Encode/Decode.
+# Not for production; companion Hybrid Ratchet V2 remains NOT YET APPROVED.
+full-braid-lab = ["mlkem768-incremental-lab", "dep:spqr"]
+# Task 0A.2 lab-only: one-process SQLCipher 4.17.0 (vendored OpenSSL) via feature
+# unification. Release builds must fail closed (see build.rs). Not production.
+full-braid-durable-lab = [
+    "rusqlite/bundled-sqlcipher-vendored-openssl",
+    "dep:zbus",
+    "dep:zvariant",
+    "dep:zvariant_derive",
+]

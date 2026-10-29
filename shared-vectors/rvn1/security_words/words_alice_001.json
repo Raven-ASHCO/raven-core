@@ -1,0 +1,54 @@
+{
+  "description": "SHA-256(label || ed_pub): the first 9 bytes are 9 indexes; the 10th is the GF(2^8) check. device_fingerprint_v1 of the same key alongside: both MUST be shown for the same key.",
+  "deterministic": true,
+  "expected": {
+    "check_index": 248,
+    "data_indexes": [
+      241,
+      80,
+      25,
+      253,
+      153,
+      114,
+      81,
+      125,
+      98
+    ],
+    "device_fingerprint_v1": "If4x-36FU-omFi",
+    "digest_hex": "f15019fd9972517d626aa11ab5eded396fdbd7da5297f600bcd035d4fdeac25e",
+    "indexes": [
+      241,
+      80,
+      25,
+      253,
+      153,
+      114,
+      81,
+      125,
+      98,
+      248
+    ],
+    "text": "turtle frog bread wolf paper laptop funnel mango honey wagon",
+    "words": [
+      "turtle",
+      "frog",
+      "bread",
+      "wolf",
+      "paper",
+      "laptop",
+      "funnel",
+      "mango",
+      "honey",
+      "wagon"
+    ]
+  },
+  "inputs": {
+    "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "label_ascii": "rvn1/security-words/v1",
+    "wordlist_sha256": "86bd5c396943a48f1e53572e4756738916039f83a7afcefb7dce44620ea7c3f9"
+  },
+  "name": "Security words, alice",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

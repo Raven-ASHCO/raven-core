@@ -1,0 +1,15 @@
+{
+  "description": "version 0, opcode 128 + 1 (what miniupnpd sends), result 1 (unsupported version), epoch: the router speaks NAT-PMP only",
+  "deterministic": true,
+  "expected": {
+    "kind": "natpmp_only"
+  },
+  "inputs": {
+    "reply_hex": "0081000100000e10",
+    "sent_natpmp_op": null,
+    "sent_pcp_op": 1
+  },
+  "name": "NAT-PMP-only router answers a PCP MAP request",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}

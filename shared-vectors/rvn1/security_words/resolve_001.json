@@ -1,0 +1,111 @@
+{
+  "description": "exact, plural, prefix, errors",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "result": [
+          "ok",
+          0
+        ],
+        "token": "airport"
+      },
+      {
+        "result": [
+          "ok",
+          0
+        ],
+        "token": "AIRPORT"
+      },
+      {
+        "result": [
+          "ok",
+          0
+        ],
+        "token": "air"
+      },
+      {
+        "result": [
+          "ambiguous",
+          "ai"
+        ],
+        "token": "ai"
+      },
+      {
+        "result": [
+          "ok",
+          0
+        ],
+        "token": "airports"
+      },
+      {
+        "result": [
+          "ok",
+          158
+        ],
+        "token": "pens"
+      },
+      {
+        "result": [
+          "ok",
+          23
+        ],
+        "token": "boxes"
+      },
+      {
+        "result": [
+          "ok",
+          232
+        ],
+        "token": "tomatoes"
+      },
+      {
+        "result": [
+          "ok",
+          3
+        ],
+        "token": "\uff41\uff50\uff50\uff4c\uff45"
+      },
+      {
+        "result": [
+          "ok",
+          3
+        ],
+        "token": "app\u200ble"
+      },
+      {
+        "result": [
+          "unknown",
+          "xyzzy"
+        ],
+        "token": "xyzzy"
+      },
+      {
+        "result": [
+          "ambiguous",
+          "s"
+        ],
+        "token": "s"
+      },
+      {
+        "result": [
+          "non_latin",
+          "\u0634\u0647\u0642\u062d\u062e\u0642\u0641"
+        ],
+        "token": "\u0634\u0647\u0642\u062d\u062e\u0642\u0641"
+      },
+      {
+        "result": [
+          "non_latin",
+          "caf\u00e9"
+        ],
+        "token": "caf\u00e9"
+      }
+    ]
+  },
+  "inputs": {},
+  "name": "Security words single-token resolution",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_SECURITY_WORDS_V1.md",
+  "status": "draft"
+}

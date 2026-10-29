@@ -1,0 +1,15 @@
+{
+  "description": "Negative RFC1 v1 custody handoff frame (RAVEN_CUSTODY_HANDOFF_V1.md); the reply is what a listener serving the handoff ops sends once its link gate and contact rule passed",
+  "deterministic": true,
+  "expected": {
+    "decode": "MALFORMED",
+    "reply_frame_hex": "52464331018801020304050607080b0000",
+    "reply_frame_len": 17
+  },
+  "inputs": {
+    "frame_hex": "52464331010801020304050607080100",
+    "frame_len": 16
+  },
+  "name": "TAGS REGISTER with count 0: MALFORMED",
+  "protocol_version": "rvn1"
+}

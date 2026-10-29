@@ -1,0 +1,11 @@
+{
+  "description": "RFC1 letter custody frame(s) (RAVEN_FRIEND_CUSTODY_V1.md §10); header magic RFC1 | version 1 | op | req_id[8]",
+  "deterministic": true,
+  "expected": {
+    "frame_hex": "524643310105010203040506070801777777777777777777777777777777777777777777777777777777777777777702",
+    "frame_len": 48
+  },
+  "inputs": {},
+  "name": "FETCH_LETTERS after a cursor, at most two letters",
+  "protocol_version": "rvn1"
+}

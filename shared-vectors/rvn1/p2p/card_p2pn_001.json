@@ -1,0 +1,22 @@
+{
+  "description": "A raven-card/3 of a profile whose rotation is on: p2p= is the PeerId of the epoch at now, p2pn= the next epoch's. p2pn= needs p2p=; readers accept the fields in any order; the line stays within the card v3 bound of 1530 characters (RAVEN_ROUTE_HINTS_V1.md section 9)",
+  "deterministic": true,
+  "expected": {
+    "card": "raven-card/3 address=rvn1q99hxkkpwnjqvdjswutw6hy63f6lhah5vgqtqsyw pub_hex=c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a fingerprint=S3Na-wXTk-BjZQ p2p=12D3KooWSBtsH9jpyCXZaVp5Rz4KdEFdK3EUuiZTkHNuSiJeDH61 p2pn=12D3KooWFcmNyr74s9dgQCCwi9xhL4MKjkUg8yPP6kieXiZ1xFyg relay=/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWGNVqdLkhYq5TwfmewaPTzhwqAjTAMrg2AB1g2rW1NG1W",
+    "card_len": 369,
+    "epoch": 741,
+    "legacy_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+    "p2p": "12D3KooWSBtsH9jpyCXZaVp5Rz4KdEFdK3EUuiZTkHNuSiJeDH61",
+    "p2pn": "12D3KooWFcmNyr74s9dgQCCwi9xhL4MKjkUg8yPP6kieXiZ1xFyg",
+    "phase_s": 183555
+  },
+  "inputs": {
+    "epoch_len_s": 2419200,
+    "now_unix": 1792627200,
+    "raven_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+    "relay": "/ip4/203.0.113.7/tcp/7423/p2p/12D3KooWGNVqdLkhYq5TwfmewaPTzhwqAjTAMrg2AB1g2rW1NG1W"
+  },
+  "name": "PeerId rotation: card p2pn=",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_P2P_PEER_ROTATION_V1.md"
+}

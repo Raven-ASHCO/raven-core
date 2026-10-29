@@ -1,0 +1,237 @@
+{
+  "description": "RAVEN_LAN_BEACON_V1 §2.1 and §3. contact_keys: contact keys that get no beacon keys (bad_key) for alice: one that does not decode as an Ed25519 point, is not canonically encoded (re-compressing the decoded point gives other bytes), has small order, is her own key, or is not 32 bytes. shared_secrets: Montgomery u-coordinates for which X25519 with alice's scalar gives the all-zero Z, refused as non-contributory (no key that passes the contact_keys checks maps to one). datagrams: a datagram whose length is neither 160..=191 (a query: a tail of up to 31 bytes after its 160 is ignored) nor 48..=63 (an answer: a tail of up to 15 bytes after its 48) is dropped with no effect, and an answer with port 0 is refused: bob's book (books) finds nobody in it as a query from query_src at the vectors' epoch, and alice's keys for bob open nothing in it as an answer to q_nonce from answer_src to answer_dst",
+  "deterministic": true,
+  "expected": {
+    "contact_keys": [
+      {
+        "len": 32,
+        "peer_pub_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+        "result": "bad_key",
+        "what": "small order: the identity point (order 1)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "bad_key",
+        "what": "small order: order 2 (y = p - 1)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "result": "bad_key",
+        "what": "small order: order 4 (y = 0)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "0000000000000000000000000000000000000000000000000000000000000080",
+        "result": "bad_key",
+        "what": "small order: order 4 (y = 0, sign bit set)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+        "result": "bad_key",
+        "what": "small order: order 8"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+        "result": "bad_key",
+        "what": "small order: order 8 (sign bit set)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+        "result": "bad_key",
+        "what": "small order: order 8, the other y"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+        "result": "bad_key",
+        "what": "small order: order 8, the other y (sign bit set)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "bad_key",
+        "what": "not canonical: y = p + 3, which decodes to the point with y = 3 (not weak)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "result": "bad_key",
+        "what": "not canonical: y = p + 3 with the sign bit set"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "bad_key",
+        "what": "not canonical: the identity point as y = p + 1"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "0100000000000000000000000000000000000000000000000000000000000080",
+        "result": "bad_key",
+        "what": "not canonical: the identity point with the sign bit set (x = 0)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "result": "bad_key",
+        "what": "not canonical: the order-2 point with the sign bit set (x = 0)"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "0200000000000000000000000000000000000000000000000000000000000000",
+        "result": "bad_key",
+        "what": "not a point: y = 2"
+      },
+      {
+        "len": 32,
+        "peer_pub_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "result": "bad_key",
+        "what": "the own key (alice's)"
+      },
+      {
+        "len": 31,
+        "peer_pub_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af466",
+        "result": "bad_key",
+        "what": "31 bytes: bob's key without its last byte"
+      },
+      {
+        "len": 33,
+        "peer_pub_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c00",
+        "result": "bad_key",
+        "what": "33 bytes: bob's key and one more byte"
+      }
+    ],
+    "datagrams": [
+      {
+        "alice_opens": null,
+        "bob_finds": [],
+        "datagram_hex": "",
+        "len": 0,
+        "what": "empty"
+      },
+      {
+        "alice_opens": null,
+        "bob_finds": [],
+        "datagram_hex": "000102030405060708090a0b0c0d0e0fa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11aa209e79924b388c378244719c846a5ca2da2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a315a088ffdf290c64a915f86f2ffe4e92b39da4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "len": 159,
+        "what": "the query of lbcn_query_001.json cut to 159 bytes"
+      },
+      {
+        "alice_opens": null,
+        "bob_finds": [],
+        "datagram_hex": "000102030405060708090a0b0c0d0e0fa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11aa209e79924b388c378244719c846a5ca2da2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a315a088ffdf290c64a915f86f2ffe4e92b39da4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a50000000000000000000000000000000000000000000000000000000000000000",
+        "len": 192,
+        "what": "that query and a 32-byte tail (192 bytes: one more than a tail may have)"
+      },
+      {
+        "alice_opens": null,
+        "bob_finds": [],
+        "datagram_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e",
+        "len": 47,
+        "what": "the answer of lbcn_answer_001.json cut to 47 bytes"
+      },
+      {
+        "alice_opens": null,
+        "bob_finds": [],
+        "datagram_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e0800000000000000000000000000000000",
+        "len": 64,
+        "what": "that answer and a 16-byte tail (64 bytes: one more than a tail may have)"
+      },
+      {
+        "alice_opens": null,
+        "bob_finds": [],
+        "datagram_hex": "101112131415161718191a1b1c1d1e1f8ffda91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08",
+        "len": 48,
+        "what": "that answer with port 0 (its tag verifies)"
+      }
+    ],
+    "shared_secrets": [
+      {
+        "result": "non_contributory",
+        "u_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "what": "u = 0 (order 2)",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "result": "non_contributory",
+        "u_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+        "what": "u = 1 (order 4)",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "result": "non_contributory",
+        "u_hex": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "what": "order 8",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "result": "non_contributory",
+        "u_hex": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "what": "order 8, the other u",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "result": "non_contributory",
+        "u_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "what": "u = p - 1 (a small-order point of the twist)",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "result": "non_contributory",
+        "u_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "what": "u = p (0, not reduced)",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "result": "non_contributory",
+        "u_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "what": "u = p + 1 (1, not reduced)",
+        "z_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
+  },
+  "inputs": {
+    "answer_dst": "192.168.1.20",
+    "answer_src": "192.168.1.30",
+    "books": {
+      "bob": [
+        "alice",
+        "carol",
+        "dave"
+      ]
+    },
+    "epoch_seconds": 1700000000,
+    "own": "alice",
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      },
+      "carol": {
+        "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "source": "inline: RFC 8032 section 7.1 test 3"
+      },
+      "dave": {
+        "ed_public_hex": "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+        "seed_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "source": "inline: 32 bytes of 0x44 (not the dave of shared-vectors/v1/identities.json)"
+      }
+    },
+    "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+    "query_src": "192.168.1.20"
+  },
+  "name": "LAN beacon negatives: refused contact keys, non-contributory secrets, dropped datagrams",
+  "protocol_version": "rvn1"
+}

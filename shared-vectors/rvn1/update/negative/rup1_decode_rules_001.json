@@ -1,0 +1,715 @@
+{
+  "description": "header = \"RUP1\" | version 0x01 | op u8 | req_id[4]; 0x01 HAVE (one-way, req_id zero) adv_serial u64 | adv_digest[32] | log_size u32 | log_root[32] | n u8 (0..=4) | offers (build_serial u64 | target_len u8 | target | manifest_digest[32] | payload_len u64); 0x02 GET_ADVISORY, 0x03 GET_LOG (empty); 0x04 GET_MANIFEST manifest_digest[32]; 0x05 GET_CHUNKS manifest_digest[32] | first u32 | count u8 (1..=8); 0x06 GET_ROTATION key_set_digest[32] (answered ADVISORY); 0x82 ADVISORY rad1_len u16 | RAD1 | RTL1 snapshot; 0x83 LOG snapshot; 0x84 MANIFEST manifest_len u16 | RRB1 | snapshot; 0x85 CHUNK (non-terminal) index u32 | len u32 | bytes | path_len u8 (0..=11) | path[32] x path_len; 0x86 CHUNKS_END code u8 (0 OK) | sent u8 (0..=8); 0xFF ERROR code u8 (1 UNSUPPORTED, 2 NOT_FOUND, 3 BUSY, 4 RATE_LIMITED, 5 POLICY_DENIED, 6 MALFORMED, others kept as unknown); every frame at most 65,511 bytes (RAVEN_UPDATE_EXCHANGE_V1 §3). Decode order (§4): the magic (NOT_RUP1), the header and the frame length 10..=65,511 (TRUNCATED, TOO_LONG), the version (BAD_VERSION), the op (UNKNOWN_OP), then each field in order with its cap, then nothing after (TRAILING_BYTES). result: OK or the refusal; listener: what a listener does with the frame (§6): REQUEST, HAVE, ERROR UNSUPPORTED (another version, an op below 0x80 it does not know), ERROR MALFORMED (a known request breaking a rule), DROP (anything else: replies and HAVEs are never answered). Frames are whole (frame_hex) or head_hex | fill | tail_hex as in rup1_chunk_path_001.json",
+  "deterministic": true,
+  "expected": {
+    "cases": [
+      {
+        "frame_hex": "52555032010352550001",
+        "listener": "DROP",
+        "name": "other_magic",
+        "result": "NOT_RUP1"
+      },
+      {
+        "frame_hex": "5246433101015255000100000000",
+        "listener": "DROP",
+        "name": "rfc1_frame",
+        "result": "NOT_RUP1"
+      },
+      {
+        "frame_hex": "525550310103",
+        "listener": "DROP",
+        "name": "header_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "52555031",
+        "listener": "DROP",
+        "name": "header_only_magic",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "52555031000352550001",
+        "listener": "ERROR UNSUPPORTED",
+        "name": "version_0",
+        "result": "BAD_VERSION"
+      },
+      {
+        "frame_hex": "52555031020352550001",
+        "listener": "ERROR UNSUPPORTED",
+        "name": "version_2",
+        "result": "BAD_VERSION"
+      },
+      {
+        "frame_hex": "5255503102835255000101",
+        "listener": "ERROR UNSUPPORTED",
+        "name": "version_2_reply",
+        "result": "BAD_VERSION"
+      },
+      {
+        "frame_hex": "52555031010052550001",
+        "listener": "ERROR UNSUPPORTED",
+        "name": "op_0x00",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame_hex": "52555031010752550001",
+        "listener": "ERROR UNSUPPORTED",
+        "name": "op_0x07",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame_hex": "52555031017f52550001",
+        "listener": "ERROR UNSUPPORTED",
+        "name": "op_0x7f",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame_hex": "52555031018052550001",
+        "listener": "DROP",
+        "name": "op_0x80",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame_hex": "52555031018152550001",
+        "listener": "DROP",
+        "name": "op_0x81",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame_hex": "52555031018752550001",
+        "listener": "DROP",
+        "name": "op_0x87",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame_hex": "5255503101fe52550001",
+        "listener": "DROP",
+        "name": "op_0xfe",
+        "result": "UNKNOWN_OP"
+      },
+      {
+        "frame": {
+          "fill_len": 65502,
+          "fill_start": 0,
+          "head_hex": "52555031010352550001",
+          "len": 65512,
+          "sha256_hex": "b3140bd8ee1bfad11325b794e509a0b81873a86459c7c77f3dd13e7fac32929c",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "ERROR MALFORMED",
+        "name": "too_long_get_log",
+        "result": "TOO_LONG"
+      },
+      {
+        "frame": {
+          "fill_len": 65502,
+          "fill_start": 0,
+          "head_hex": "52555031018352550001",
+          "len": 65512,
+          "sha256_hex": "de15508740a8aeef4f36841b0b4c8dabac98721a03b7f180e9deb0217414979b",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "too_long_log",
+        "result": "TOO_LONG"
+      },
+      {
+        "frame": {
+          "fill_len": 65502,
+          "fill_start": 0,
+          "head_hex": "52555031020352550001",
+          "len": 65512,
+          "sha256_hex": "1a3ee2242e8735379bb344fd3ceb46bd8b0d100470b42b873cc717884c8aa42c",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "ERROR UNSUPPORTED",
+        "name": "too_long_version_2",
+        "result": "TOO_LONG"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "listener": "HAVE",
+        "name": "have_nothing",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000514616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "HAVE",
+        "name": "have_one_offer",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310101525500010000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "DROP",
+        "name": "have_req_id",
+        "result": "NONZERO_REQ_ID"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000003101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "DROP",
+        "name": "have_serial_without_digest",
+        "result": "BAD_ADVISORY_REF"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000000adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "DROP",
+        "name": "have_digest_without_serial",
+        "result": "BAD_ADVISORY_REF"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000578101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "HAVE",
+        "name": "have_log_size_1400",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000579101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "DROP",
+        "name": "have_log_size_1401",
+        "result": "BAD_LOG_REF"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadffffffff101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "DROP",
+        "name": "have_log_size_max",
+        "result": "BAD_LOG_REF"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000000101010101010101010101010101010101010101010101010101010101010101000",
+        "listener": "DROP",
+        "name": "have_root_without_log",
+        "result": "BAD_LOG_REF"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003000000000000000000000000000000000000000000000000000000000000000000",
+        "listener": "DROP",
+        "name": "have_log_without_root",
+        "result": "BAD_LOG_REF"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101005",
+        "listener": "DROP",
+        "name": "have_five_offers",
+        "result": "TOO_MANY_OFFERS"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad000000031010101010101010101010101010101010101010101010101010101010101010ff",
+        "listener": "DROP",
+        "name": "have_255_offers",
+        "result": "TOO_MANY_OFFERS"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000014616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_build_serial_0",
+        "result": "BAD_SERIAL"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000500a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_empty",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000542616161616161616161616161616161616161616161616161616161616161612d62626262626262626262626262626262626262626262626262626262626262622d78a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_65",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000514414152434836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_upper_case",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad0000000310101010101010101010101010101010101010101010101010101010101010100100000000000000050761617263683634a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_one_part",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad0000000310101010101010101010101010101010101010101010101010101010101010100100000000000000050f616172636836342d2d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_empty_part",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000514616172636836342d6170706c652f64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_slash",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000509616172636836342dffa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_target_not_utf8",
+        "result": "BAD_TARGET"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000514616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a10000000000000000",
+        "listener": "DROP",
+        "name": "have_payload_0",
+        "result": "BAD_PAYLOAD_LEN"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000514616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a10000000004000000",
+        "listener": "HAVE",
+        "name": "have_payload_64_mib",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001000000000000000514616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a10000000004000001",
+        "listener": "DROP",
+        "name": "have_payload_over_64_mib",
+        "result": "BAD_PAYLOAD_LEN"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101002000000000000000514616172636836342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a0000000000000006137838365f36342d6170706c652d64617277696ea1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1000000000000087a",
+        "listener": "DROP",
+        "name": "have_duplicate_offer",
+        "result": "DUPLICATE_OFFER"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad00000003101010101010101010101010101010101010101010101010101010101010101001",
+        "listener": "DROP",
+        "name": "have_offer_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad0000000310101010101010101010101010101010101010101010101010101010101010100100000000000000051461617263",
+        "listener": "DROP",
+        "name": "have_target_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad000000031010101010101010101010101010101010101010101010101010101010101010",
+        "listener": "DROP",
+        "name": "have_fixed_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310101000000000000000000000001adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad0000000310101010101010101010101010101010101010101010101010101010101010100000",
+        "listener": "DROP",
+        "name": "have_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "52555031010100000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000578eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee04ffffffffffffffff40616161616161616161616161616161616161616161616161616161616161612d6262626262626262626262626262626262626262626262626262626262626262b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00000000004000000ffffffffffffffff40636363636363636363636363636363636363636363636363636363636363632d6262626262626262626262626262626262626262626262626262626262626262b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b10000000004000000ffffffffffffffff40646464646464646464646464646464646464646464646464646464646464642d6262626262626262626262626262626262626262626262626262626262626262b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b20000000004000000ffffffffffffffff40656565656565656565656565656565656565656565656565656565656565652d6262626262626262626262626262626262626262626262626262626262626262b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b30000000004000000",
+        "listener": "HAVE",
+        "name": "have_longest",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "52555031010252550001",
+        "listener": "REQUEST",
+        "name": "get_advisory",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "5255503101025255000100",
+        "listener": "ERROR MALFORMED",
+        "name": "get_advisory_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "52555031010352550001",
+        "listener": "REQUEST",
+        "name": "get_log",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "5255503101035255000100",
+        "listener": "ERROR MALFORMED",
+        "name": "get_log_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "525550310104525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "listener": "REQUEST",
+        "name": "get_manifest",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310104525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "listener": "ERROR MALFORMED",
+        "name": "get_manifest_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310104525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00",
+        "listener": "ERROR MALFORMED",
+        "name": "get_manifest_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "525550310106525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "listener": "REQUEST",
+        "name": "get_rotation",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "52555031010652550001",
+        "listener": "ERROR MALFORMED",
+        "name": "get_rotation_empty",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310106525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "listener": "ERROR MALFORMED",
+        "name": "get_rotation_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310106525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00",
+        "listener": "ERROR MALFORMED",
+        "name": "get_rotation_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000000008",
+        "listener": "REQUEST",
+        "name": "get_chunks_8",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000043d08",
+        "listener": "REQUEST",
+        "name": "get_chunks_last_8",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000000000",
+        "listener": "ERROR MALFORMED",
+        "name": "get_chunks_count_0",
+        "result": "BAD_COUNT"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000000009",
+        "listener": "ERROR MALFORMED",
+        "name": "get_chunks_count_9",
+        "result": "BAD_COUNT"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a0000044402",
+        "listener": "ERROR MALFORMED",
+        "name": "get_chunks_past_the_last",
+        "result": "BAD_INDEX"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5affffffff01",
+        "listener": "ERROR MALFORMED",
+        "name": "get_chunks_first_max",
+        "result": "BAD_INDEX"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00000000",
+        "listener": "ERROR MALFORMED",
+        "name": "get_chunks_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310105525500015a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a000000000100",
+        "listener": "ERROR MALFORMED",
+        "name": "get_chunks_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "525550310182525500010002aabbcc",
+        "listener": "DROP",
+        "name": "advisory_small",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310182525500010000cc",
+        "listener": "DROP",
+        "name": "advisory_rad1_0",
+        "result": "BAD_RAD1_LEN"
+      },
+      {
+        "frame": {
+          "fill_len": 32770,
+          "fill_start": 0,
+          "head_hex": "525550310182525500018001",
+          "len": 32782,
+          "sha256_hex": "9cb7ed1f05a062a6ca94b15474bbd20baa5fc59a1f32309fc99bff3a59ad0dfe",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "advisory_rad1_32769",
+        "result": "BAD_RAD1_LEN"
+      },
+      {
+        "frame_hex": "52555031018252550001ffff01",
+        "listener": "DROP",
+        "name": "advisory_rad1_65535",
+        "result": "BAD_RAD1_LEN"
+      },
+      {
+        "frame_hex": "525550310182525500010009aa",
+        "listener": "DROP",
+        "name": "advisory_rad1_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "5255503101825255000100",
+        "listener": "DROP",
+        "name": "advisory_len_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310182525500010001aa",
+        "listener": "DROP",
+        "name": "advisory_no_snapshot",
+        "result": "BAD_SNAPSHOT_LEN"
+      },
+      {
+        "frame": {
+          "fill_len": 58024,
+          "fill_start": 0,
+          "head_hex": "525550310182525500010001aa",
+          "len": 58037,
+          "sha256_hex": "fd9689834ed630a401a6b7c361ceff1ac04170ea0e7300f1de15e1893670e014",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "advisory_snapshot_58024",
+        "result": "BAD_SNAPSHOT_LEN"
+      },
+      {
+        "frame": {
+          "fill_len": 65499,
+          "fill_start": 0,
+          "head_hex": "525550310182525500018000",
+          "len": 65511,
+          "sha256_hex": "8486388fcb76eea17c87786e0433bd1d2b125c8fd10e8529fffda44143c50850",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "advisory_at_the_frame_limit",
+        "result": "OK"
+      },
+      {
+        "frame": {
+          "fill_len": 65500,
+          "fill_start": 0,
+          "head_hex": "525550310182525500018000",
+          "len": 65512,
+          "sha256_hex": "a8fe47b56ba8a4258b9bd466816d48b608fb19368422236e40ff7b628f9e116d",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "advisory_over_the_frame_limit",
+        "result": "TOO_LONG"
+      },
+      {
+        "frame": {
+          "fill_len": 65499,
+          "fill_start": 0,
+          "head_hex": "525550310182525500011d34",
+          "len": 65511,
+          "sha256_hex": "c63d3de1df3ca03a243ad69bfc9a0efb2a0e0ec74a20bfab2c98a9d6c92a5b2c",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "advisory_always_fits",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "5255503101835255000152",
+        "listener": "DROP",
+        "name": "log_one_byte",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "52555031018352550001",
+        "listener": "DROP",
+        "name": "log_empty",
+        "result": "BAD_SNAPSHOT_LEN"
+      },
+      {
+        "frame": {
+          "fill_len": 58023,
+          "fill_start": 0,
+          "head_hex": "52555031018352550001",
+          "len": 58033,
+          "sha256_hex": "5c3ffc784ffeb4000f68a368d84aafceca4faff6d87c36e2543bb7901ec024e7",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "log_58023",
+        "result": "OK"
+      },
+      {
+        "frame": {
+          "fill_len": 58024,
+          "fill_start": 0,
+          "head_hex": "52555031018352550001",
+          "len": 58034,
+          "sha256_hex": "f74242736b17465a4d45641a857043a573f0c684a37f722a926c49347ac1ae98",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "log_58024",
+        "result": "BAD_SNAPSHOT_LEN"
+      },
+      {
+        "frame_hex": "525550310184525500010001aabb",
+        "listener": "DROP",
+        "name": "manifest_small",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310184525500010000bb",
+        "listener": "DROP",
+        "name": "manifest_len_0",
+        "result": "BAD_MANIFEST_LEN"
+      },
+      {
+        "frame": {
+          "fill_len": 5200,
+          "fill_start": 0,
+          "head_hex": "52555031018452550001144f",
+          "len": 5212,
+          "sha256_hex": "f6e1d8f2f1e9af04c8e9e18b859b39c22642bc30eed322c99e1c8d20ebc58878",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "manifest_len_5199",
+        "result": "BAD_MANIFEST_LEN"
+      },
+      {
+        "frame_hex": "525550310184525500010005aa",
+        "listener": "DROP",
+        "name": "manifest_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310184525500010001aa",
+        "listener": "DROP",
+        "name": "manifest_no_snapshot",
+        "result": "BAD_SNAPSHOT_LEN"
+      },
+      {
+        "frame": {
+          "fill_len": 63221,
+          "fill_start": 0,
+          "head_hex": "52555031018452550001144e",
+          "len": 63233,
+          "sha256_hex": "50b8938132b414a42096b566aadc03b6c335b66a50c766d88ba37d9b7c69045e",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "manifest_longest",
+        "result": "OK"
+      },
+      {
+        "frame": {
+          "fill_len": 58024,
+          "fill_start": 0,
+          "head_hex": "525550310184525500010001aa",
+          "len": 58037,
+          "sha256_hex": "9acee1e43cfbbbf0915e3ea5d2d2e61f5874fb028ab49c9cbc13755689dde3df",
+          "tail_hex": "",
+          "xor_at": null
+        },
+        "listener": "DROP",
+        "name": "manifest_snapshot_58024",
+        "result": "BAD_SNAPSHOT_LEN"
+      },
+      {
+        "frame_hex": "525550310186525500010008",
+        "listener": "DROP",
+        "name": "chunks_end_ok_8",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "52555031018652550001c800",
+        "listener": "DROP",
+        "name": "chunks_end_unknown_code",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310186525500010009",
+        "listener": "DROP",
+        "name": "chunks_end_sent_9",
+        "result": "BAD_COUNT"
+      },
+      {
+        "frame_hex": "5255503101865255000100",
+        "listener": "DROP",
+        "name": "chunks_end_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "52555031018652550001000100",
+        "listener": "DROP",
+        "name": "chunks_end_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "5255503101ff52550001ff",
+        "listener": "DROP",
+        "name": "error_255",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "5255503101ff5255000100",
+        "listener": "DROP",
+        "name": "error_code_0",
+        "result": "BAD_CODE"
+      },
+      {
+        "frame_hex": "5255503101ff52550001",
+        "listener": "DROP",
+        "name": "error_cut",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "5255503101ff525500010200",
+        "listener": "DROP",
+        "name": "error_trailing",
+        "result": "TRAILING_BYTES"
+      },
+      {
+        "frame_hex": "525550310185525500010000000100000003010203017777777777777777777777777777777777777777777777777777777777777777",
+        "listener": "DROP",
+        "name": "chunk_small",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "5255503101855255000100000000000000010100",
+        "listener": "DROP",
+        "name": "chunk_no_path",
+        "result": "OK"
+      },
+      {
+        "frame_hex": "525550310185525500010000",
+        "listener": "DROP",
+        "name": "chunk_cut_in_index",
+        "result": "TRUNCATED"
+      },
+      {
+        "frame_hex": "525550310185525500010000000000000001010000",
+        "listener": "DROP",
+        "name": "chunk_trailing",
+        "result": "TRAILING_BYTES"
+      }
+    ]
+  },
+  "inputs": {},
+  "name": "rup1_decode_rules_001",
+  "protocol_version": "rvn1"
+}

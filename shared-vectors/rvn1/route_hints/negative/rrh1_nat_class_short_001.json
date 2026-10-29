@@ -1,0 +1,14 @@
+{
+  "description": "An RRH1 frame (the sender seed's P2P_ID, then a NAT_CLASS entry, type 0x22, of 4 bytes instead of 5) that breaks RAVEN_ROUTE_HINTS_V1 §13.1: the entry is dropped alone with an RRH1_MALFORMED debug log, and the frame and its P2P_ID are kept",
+  "deterministic": true,
+  "expected": {
+    "frame_kept": true,
+    "nat_class": null,
+    "reason": "NAT_CLASS length 4 (exactly 5)"
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f22000404040000"
+  },
+  "name": "NAT_CLASS of 4 bytes",
+  "protocol_version": "rvn1"
+}

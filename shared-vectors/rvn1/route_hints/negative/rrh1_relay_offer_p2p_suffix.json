@@ -1,0 +1,16 @@
+{
+  "description": "A version-1 RELAY_OFFER record that breaks one rule of RAVEN_ROUTE_HINTS_V1 §11.2: decode_offer refuses it as malformed. In an RRH1 frame (frame_hex: the sender seed's P2P_ID, then this record as entry type 0x20) the record is dropped with an RRH1_MALFORMED debug log and the frame is kept",
+  "deterministic": true,
+  "expected": {
+    "frame_kept": true,
+    "offers_kept": 0,
+    "reason": "an address goes on past its transport (/p2p/<PeerId>): host and transport only",
+    "record": "malformed"
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f2000730100a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a9987367014f2f6970342f31312e302e322e372f7463702f373432372f7032702f313244334b6f6f574d383262445959677a67586161794844645663694665336247764a363971486e62537a744e554a3933335651",
+    "record_hex": "0100a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a9987367014f2f6970342f31312e302e322e372f7463702f373432372f7032702f313244334b6f6f574d383262445959677a67586161794844645663694665336247764a363971486e62537a744e554a3933335651"
+  },
+  "name": "RELAY_OFFER address with a /p2p suffix",
+  "protocol_version": "rvn1"
+}

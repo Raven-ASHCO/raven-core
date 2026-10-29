@@ -1,0 +1,18 @@
+{
+  "description": "RAVEN_NEARBY_LINK_V1 §6. The receiver has the given role on a pipe that just came UP (no channel open; the central owns channel 0, the peripheral channel 1; W0 = 8 credits each way of a new channel instance; at most 64 outstanding) and frames are at most max_rx bytes. It applies the frames in order: every frame before fails_at is accepted, frame fails_at is refused with the error, and the receiver sends reset_hex; the pipe is then dead",
+  "deterministic": true,
+  "expected": {
+    "error": "PROTOCOL",
+    "fails_at": 0,
+    "reset_hex": "1f01"
+  },
+  "inputs": {
+    "frames_hex": [
+      "1000"
+    ],
+    "max_rx": 185,
+    "role": "central"
+  },
+  "name": "RNP1 negative: the peripheral opens the central's channel 0",
+  "protocol_version": "rvn1"
+}

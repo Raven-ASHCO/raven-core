@@ -1,0 +1,284 @@
+{
+  "description": "RAD1 = \"RAD1\" | 0x01 | flags 0x00 | entry_count u16 | serial u64 | issued_at_ms u64 | key_set_digest[32] | prev_digest[32] | entries | sig_count u8 | (key_index u8 | Ed25519 signature[64]) * sig_count; entry = kind u8 | severity u8 | target_len u8 | target | arg_len u16 | arg | text_id u16; signing input \"rvn1/advisory/v1\\0\" || bytes before the signature block; advisory_digest = SHA-256(\"rvn1/advisory/digest/v1\\0\" || all bytes) (RAVEN_SECURITY_ADVISORY_V1 §3, §6). Key rotation (RAVEN_SECURITY_ADVISORY_V1 §6.2): advisory #3 (after rad1_three_of_three_001), signed by keys 1 and 2 of the test key set, adds a KEY_SET entry naming the next set (seeds 0x22, 0x33, 0x44 x 32, threshold 2: key 0x11 replaced). Advisory #4 names the next set's digest and is signed by its keys 0 and 2 (seeds 0x22 and 0x44): it verifies under the next set and is WRONG_KEY_SET under the old one",
+  "deterministic": true,
+  "expected": {
+    "after": {
+      "advisory_digest_hex": "c7ad3ec5ae63b9650b508af5aaa8380fa35824a474f2e70cb66c6856083ec0d7",
+      "advisory_hex": "52414431010000070000000000000004000001a17581c000beebcef752d19d3afa4b3e637358d52b3a8feaefade215f103927d140fbc502f57548872b330538aa908beda3ba7e329e1422903a3972d38745948ec3e6ff4bf01010c70616972696e69742f312f3100000001010206727372312f3100000002020005726176656e000800000000000000070003030216666561747572652f667269656e642d637573746f647900000004030112666561747572652f6c616e2d626561636f6e000000000400066e6f74696365003854657374206e6f7469636520323a2073657373696f6e2072657365742056312069732062726f6b656e3b2075706461746520526176656e2e00007f000b6675747572652f6b696e64000301020300000200f39ebafb3666d5044b9f2ba23aacd2410cc1e5153a76ca854b5756e6c61667e1526b111478c8d95c57f95cf186d5a65b2bcebc92ab4fad49773c28f8407ad00f0218945b07b13ed5115a3935d7c552f24e4534496ad8c55af3c276c828a3a92ba5b7fabf10019132d802391f4de3b204aa623f761615634a12eb55de6bcd82410f",
+      "entries": [
+        {
+          "kind": "SUITE_STATUS",
+          "severity": "DEPRECATED",
+          "target": "pairinit/1/1",
+          "understood": true
+        },
+        {
+          "kind": "SUITE_STATUS",
+          "severity": "BROKEN",
+          "target": "rsr1/1",
+          "understood": true
+        },
+        {
+          "kind": "RELEASE_FLOOR",
+          "release_floor": 7,
+          "severity": "INFO",
+          "target": "raven",
+          "understood": true
+        },
+        {
+          "kind": "FEATURE_HOLD",
+          "severity": "BROKEN",
+          "target": "feature/friend-custody",
+          "understood": true
+        },
+        {
+          "kind": "FEATURE_HOLD",
+          "severity": "DEPRECATED",
+          "target": "feature/lan-beacon",
+          "understood": true
+        },
+        {
+          "kind": "NOTICE",
+          "notice_text": "Test notice 2: session reset V1 is broken; update Raven.",
+          "severity": "INFO",
+          "target": "notice",
+          "understood": true
+        },
+        {
+          "kind": "UNKNOWN",
+          "severity": "INFO",
+          "target": "future/kind",
+          "understood": false
+        }
+      ],
+      "signed_len": 284,
+      "signing_input_hex": "72766e312f61647669736f72792f76310052414431010000070000000000000004000001a17581c000beebcef752d19d3afa4b3e637358d52b3a8feaefade215f103927d140fbc502f57548872b330538aa908beda3ba7e329e1422903a3972d38745948ec3e6ff4bf01010c70616972696e69742f312f3100000001010206727372312f3100000002020005726176656e000800000000000000070003030216666561747572652f667269656e642d637573746f647900000004030112666561747572652f6c616e2d626561636f6e000000000400066e6f74696365003854657374206e6f7469636520323a2073657373696f6e2072657365742056312069732062726f6b656e3b2075706461746520526176656e2e00007f000b6675747572652f6b696e6400030102030000"
+    },
+    "after_verify_next": "OK",
+    "after_verify_old": "WRONG_KEY_SET",
+    "rotation": {
+      "advisory_digest_hex": "57548872b330538aa908beda3ba7e329e1422903a3972d38745948ec3e6ff4bf",
+      "advisory_hex": "52414431010000080000000000000003000001a1705b6400d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332144b436451eb4b5cc68da1227316d3e49bf95ca511d697605d59cc4b2c19604e01010c70616972696e69742f312f3100000001010206727372312f3100000002020005726176656e000800000000000000070003030216666561747572652f667269656e642d637573746f647900000004030112666561747572652f6c616e2d626561636f6e000000000400066e6f74696365003854657374206e6f7469636520323a2073657373696f6e2072657365742056312069732062726f6b656e3b2075706461746520526176656e2e00007f000b6675747572652f6b696e64000301020300000500046b6579730063010203a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ced759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c480005020120e6940b5979cb02a108ea93bff949a51c2c73242a7222804f36b903d8b9c839d0195c8c155654c9d9873ed4f2c1c3b51da8897192165c6877ad4766dd31ea000278a4125b698c034b3baa756ccff7d043c63e66bc2d0258135be0cd8ed62f879bf3a670d4a00b969492e906f2edd1fce7862f30bfb54a77ebbf3b011fbf1acd01",
+      "entries": [
+        {
+          "kind": "SUITE_STATUS",
+          "severity": "DEPRECATED",
+          "target": "pairinit/1/1",
+          "understood": true
+        },
+        {
+          "kind": "SUITE_STATUS",
+          "severity": "BROKEN",
+          "target": "rsr1/1",
+          "understood": true
+        },
+        {
+          "kind": "RELEASE_FLOOR",
+          "release_floor": 7,
+          "severity": "INFO",
+          "target": "raven",
+          "understood": true
+        },
+        {
+          "kind": "FEATURE_HOLD",
+          "severity": "BROKEN",
+          "target": "feature/friend-custody",
+          "understood": true
+        },
+        {
+          "kind": "FEATURE_HOLD",
+          "severity": "DEPRECATED",
+          "target": "feature/lan-beacon",
+          "understood": true
+        },
+        {
+          "kind": "NOTICE",
+          "notice_text": "Test notice 2: session reset V1 is broken; update Raven.",
+          "severity": "INFO",
+          "target": "notice",
+          "understood": true
+        },
+        {
+          "kind": "UNKNOWN",
+          "severity": "INFO",
+          "target": "future/kind",
+          "understood": false
+        },
+        {
+          "key_set_digest_hex": "beebcef752d19d3afa4b3e637358d52b3a8feaefade215f103927d140fbc502f",
+          "kind": "KEY_SET",
+          "severity": "INFO",
+          "target": "keys",
+          "understood": true
+        }
+      ],
+      "signed_len": 394,
+      "signing_input_hex": "72766e312f61647669736f72792f76310052414431010000080000000000000003000001a1705b6400d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332144b436451eb4b5cc68da1227316d3e49bf95ca511d697605d59cc4b2c19604e01010c70616972696e69742f312f3100000001010206727372312f3100000002020005726176656e000800000000000000070003030216666561747572652f667269656e642d637573746f647900000004030112666561747572652f6c616e2d626561636f6e000000000400066e6f74696365003854657374206e6f7469636520323a2073657373696f6e2072657365742056312069732062726f6b656e3b2075706461746520526176656e2e00007f000b6675747572652f6b696e64000301020300000500046b6579730063010203a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ced759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c480005"
+    },
+    "rotation_verify": "OK",
+    "succession": "NEXT"
+  },
+  "inputs": {
+    "after": {
+      "entries": [
+        {
+          "arg_hex": "",
+          "kind": 1,
+          "severity": 1,
+          "target": "pairinit/1/1",
+          "text_id": 1
+        },
+        {
+          "arg_hex": "",
+          "kind": 1,
+          "severity": 2,
+          "target": "rsr1/1",
+          "text_id": 2
+        },
+        {
+          "arg_hex": "0000000000000007",
+          "kind": 2,
+          "severity": 0,
+          "target": "raven",
+          "text_id": 3
+        },
+        {
+          "arg_hex": "",
+          "kind": 3,
+          "severity": 2,
+          "target": "feature/friend-custody",
+          "text_id": 4
+        },
+        {
+          "arg_hex": "",
+          "kind": 3,
+          "severity": 1,
+          "target": "feature/lan-beacon",
+          "text_id": 0
+        },
+        {
+          "arg_hex": "54657374206e6f7469636520323a2073657373696f6e2072657365742056312069732062726f6b656e3b2075706461746520526176656e2e",
+          "kind": 4,
+          "severity": 0,
+          "target": "notice",
+          "text_id": 0
+        },
+        {
+          "arg_hex": "010203",
+          "kind": 127,
+          "severity": 0,
+          "target": "future/kind",
+          "text_id": 0
+        }
+      ],
+      "issued_at_ms": 1792972800000,
+      "key_set_digest_hex": "beebcef752d19d3afa4b3e637358d52b3a8feaefade215f103927d140fbc502f",
+      "prev_digest_hex": "57548872b330538aa908beda3ba7e329e1422903a3972d38745948ec3e6ff4bf",
+      "serial": 4,
+      "signers": [
+        0,
+        2
+      ]
+    },
+    "key_set": {
+      "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+      "key_set_hex": "010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+      "public_keys_hex": [
+        "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+        "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+        "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce"
+      ],
+      "seeds_hex": [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333"
+      ],
+      "threshold": 2
+    },
+    "next_key_set": {
+      "key_set_digest_hex": "beebcef752d19d3afa4b3e637358d52b3a8feaefade215f103927d140fbc502f",
+      "key_set_hex": "010203a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ced759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+      "public_keys_hex": [
+        "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+        "17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
+        "d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48"
+      ],
+      "seeds_hex": [
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333",
+        "4444444444444444444444444444444444444444444444444444444444444444"
+      ],
+      "threshold": 2
+    },
+    "rotation": {
+      "entries": [
+        {
+          "arg_hex": "",
+          "kind": 1,
+          "severity": 1,
+          "target": "pairinit/1/1",
+          "text_id": 1
+        },
+        {
+          "arg_hex": "",
+          "kind": 1,
+          "severity": 2,
+          "target": "rsr1/1",
+          "text_id": 2
+        },
+        {
+          "arg_hex": "0000000000000007",
+          "kind": 2,
+          "severity": 0,
+          "target": "raven",
+          "text_id": 3
+        },
+        {
+          "arg_hex": "",
+          "kind": 3,
+          "severity": 2,
+          "target": "feature/friend-custody",
+          "text_id": 4
+        },
+        {
+          "arg_hex": "",
+          "kind": 3,
+          "severity": 1,
+          "target": "feature/lan-beacon",
+          "text_id": 0
+        },
+        {
+          "arg_hex": "54657374206e6f7469636520323a2073657373696f6e2072657365742056312069732062726f6b656e3b2075706461746520526176656e2e",
+          "kind": 4,
+          "severity": 0,
+          "target": "notice",
+          "text_id": 0
+        },
+        {
+          "arg_hex": "010203",
+          "kind": 127,
+          "severity": 0,
+          "target": "future/kind",
+          "text_id": 0
+        },
+        {
+          "arg_hex": "010203a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ced759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48",
+          "kind": 5,
+          "severity": 0,
+          "target": "keys",
+          "text_id": 5
+        }
+      ],
+      "issued_at_ms": 1792886400000,
+      "key_set_digest_hex": "d84b699ba48b5eeb0a5c8a5db90ae266069605d5d61a6e15159dba2fcd12c332",
+      "prev_digest_hex": "144b436451eb4b5cc68da1227316d3e49bf95ca511d697605d59cc4b2c19604e",
+      "serial": 3,
+      "signers": [
+        1,
+        2
+      ]
+    }
+  },
+  "name": "rad1_key_rotation_001",
+  "protocol_version": "rvn1"
+}

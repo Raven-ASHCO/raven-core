@@ -1,0 +1,104 @@
+{
+  "description": "epoch_seed(e) = SHA-256(\"raven/libp2p-epoch-key/v1\" || be64(e) || raven seed) is the libp2p Ed25519 secret seed of epoch e; the PeerId is base58(00 24 08 01 12 20 || public key). The legacy (non-rotating) key SHA-256(\"raven/libp2p-peer-key/v1\" || seed) is listed to show it differs from every epoch key. own_schedule(active = 23) is the previous epoch, the active one and 6 ahead",
+  "deterministic": true,
+  "expected": {
+    "epochs": [
+      {
+        "ed25519_public_hex": "dc5cf99492787f58ebe65bb886a4aa527a14441bea5caed92c9f30c623dc6cb6",
+        "epoch": 0,
+        "epoch_seed_hex": "f6c9d3e6f6016995304aefd8f377767ad70f781dc94fb133b1f42f0d014d6d00",
+        "peer_id": "12D3KooWQea6ANvGpGTz8C4UMFVZx56yEM22ZcBFVRcyH5XjqMmF"
+      },
+      {
+        "ed25519_public_hex": "e98ecda440eb2fa979bf8ddd3c4521e5972873413d388121b382802b1bb7d6cf",
+        "epoch": 1,
+        "epoch_seed_hex": "ba57c5138a915766e3a7c8d4c82a270cec03ec226c0523ceb2d48ddc96268b47",
+        "peer_id": "12D3KooWRY5TY7KgzuBgb4tNoQpB9XD4JyZfZ2Pao2LPssyXfPG2"
+      },
+      {
+        "ed25519_public_hex": "bafcab5160a93a402043b7b995c1c07b16f4d98da074b42253ef18f87aeac958",
+        "epoch": 2,
+        "epoch_seed_hex": "b05e730851a1d2801281e854b012da889a9556e6d7da96130127008b59b21c53",
+        "peer_id": "12D3KooWNQHTnBkQT99fcwHnJB7Qm7FMjGCSwbYhsNKtSXL7yYEB"
+      },
+      {
+        "ed25519_public_hex": "76887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee",
+        "epoch": 23,
+        "epoch_seed_hex": "c7730bb233721e9df553c828c24d732aa5f195679e66352f48a151bdb8fd5d35",
+        "peer_id": "12D3KooWHo4xUSj1EMhbco929MzpVqBiVbvHFz7xuGJcyxypnxLm"
+      },
+      {
+        "ed25519_public_hex": "10ca4a1e37452ebb22b41fc471bf221c7870fd7b4eceac3ee6db0fb2722e3e3a",
+        "epoch": 1099511627776,
+        "epoch_seed_hex": "e29042de094e1cde89064b97068d57e8ebd32680dc9a6eee2aade102668ea197",
+        "peer_id": "12D3KooWAwubdSGnPQ928UtjcrDaPLhTmkAYms4ordY8xvvr6Uy7"
+      },
+      {
+        "ed25519_public_hex": "2cf3993588303d56c92598a70e74179d5fdc56d97b9f1438b06ae7d19c68d060",
+        "epoch": 18446744073709551615,
+        "epoch_seed_hex": "dce9fd1c59d8b83a68c520a9d80492e46d263e5106cd6d91eb4c9082b09de008",
+        "peer_id": "12D3KooWCqqYhA2qJTh3vTF1JbK7ZobEmBY378AHUdHvtL1J6gHm"
+      }
+    ],
+    "legacy_peer_id": "12D3KooWAJtnd7RLuVnEWuxwmTYPRSrPd1a1RTf82Z5YWTcxJdBL",
+    "legacy_seed_hex": "2e5e55bbbd6ef2cf05292100938595b43e19664dd02876ae6dcd62beecd05a39",
+    "own_schedule": [
+      {
+        "ed25519_public_hex": "959100480866730f188470b45ffa060017b3dd1d41f3e97c7b09581dca4be8e9",
+        "epoch": 22
+      },
+      {
+        "ed25519_public_hex": "76887413ecbb58a60af94bca6c207e34fe6ad6a3a4d5f257c060e07e503e1dee",
+        "epoch": 23
+      },
+      {
+        "ed25519_public_hex": "bbec45004b671118f2f20bdf3270e24c69023f9f23558f169c1eb23f0415bd2b",
+        "epoch": 24
+      },
+      {
+        "ed25519_public_hex": "b318c008a7852f2724a9303c1beacc41d62097d94d1a73b1ae0fe88da04533dd",
+        "epoch": 25
+      },
+      {
+        "ed25519_public_hex": "de2ec4cb066c1e5106fa858a2ead54aebea4b7749a1dc610639906d88f366e91",
+        "epoch": 26
+      },
+      {
+        "ed25519_public_hex": "33c1cddede7a116c45cf4b847e1b952d593cd2d0a166d6d2bac32880eff4ccd5",
+        "epoch": 27
+      },
+      {
+        "ed25519_public_hex": "c70dc69caae8a4099f98f0aeede3e28cbad14819b367049d7306d29da66fd9ff",
+        "epoch": 28
+      },
+      {
+        "ed25519_public_hex": "f537e2257f365c30c2ce363e7724ae9edc5a77884e5c2eed12b4c05161bfb19c",
+        "epoch": 29
+      }
+    ],
+    "own_schedule_at_0": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "inputs": {
+    "epochs": [
+      0,
+      1,
+      2,
+      23,
+      1099511627776,
+      18446744073709551615
+    ],
+    "raven_seed_hex": "5151515151515151515151515151515151515151515151515151515151515151",
+    "schedule_active": 23
+  },
+  "name": "PeerId rotation: epoch keys",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_P2P_PEER_ROTATION_V1.md"
+}

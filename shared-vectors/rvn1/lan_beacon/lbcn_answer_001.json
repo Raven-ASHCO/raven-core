@@ -1,0 +1,113 @@
+{
+  "description": "RAVEN_LAN_BEACON_V1 §5 and §7. Bob answers alice's query of lbcn_query_001.json (q_nonce is its nonce). An answer is r_nonce[16] || port_x[2] || tag[30] with h = HMAC-SHA256(K_r(bob->alice), q_nonce || r_nonce || ip16(src) || ip16(dst)), port_x = port as u16 big-endian XOR h[0..2] and tag = h[2..32]; src is the answerer's bound address, dst the query's source. To open it, the querier recomputes h with K_r(answerer->querier) for a target of that query and compares the tag in constant time; port_x is not covered by the tag, and port 0 is refused. Each row of opens is one open with the keys of opener for peer (port null: refused). Keys: lbcn_pair_keys_001.json",
+  "deterministic": true,
+  "expected": {
+    "answer_hex": "101112131415161718191a1b1c1d1e1f9301a91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08",
+    "answer_len": 48,
+    "dst_ip16_hex": "00000000000000000000ffffc0a80114",
+    "h_hex": "8ffda91d7563c726056eec9cba53d2e1d3b83d069e56e6a9769813b246ed0e08",
+    "opens": [
+      {
+        "dst": "192.168.1.20",
+        "opener": "alice",
+        "peer": "bob",
+        "port": 7420,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "192.168.1.30",
+        "what": "alice opens it with her keys for bob"
+      },
+      {
+        "dst": "::ffff:192.168.1.20",
+        "opener": "alice",
+        "peer": "bob",
+        "port": 7420,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "::ffff:192.168.1.30",
+        "what": "the same with both addresses in their IPv4-mapped form"
+      },
+      {
+        "dst": "192.168.1.20",
+        "opener": "alice",
+        "peer": "bob",
+        "port": null,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0e",
+        "src": "192.168.1.30",
+        "what": "another query's nonce"
+      },
+      {
+        "dst": "192.168.1.20",
+        "opener": "alice",
+        "peer": "bob",
+        "port": null,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "192.168.1.31",
+        "what": "another source"
+      },
+      {
+        "dst": "192.168.1.21",
+        "opener": "alice",
+        "peer": "bob",
+        "port": null,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "192.168.1.30",
+        "what": "another destination"
+      },
+      {
+        "dst": "192.168.1.30",
+        "opener": "alice",
+        "peer": "bob",
+        "port": null,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "192.168.1.20",
+        "what": "source and destination swapped"
+      },
+      {
+        "dst": "192.168.1.20",
+        "opener": "carol",
+        "peer": "bob",
+        "port": null,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "192.168.1.30",
+        "what": "carol's keys for bob"
+      },
+      {
+        "dst": "192.168.1.20",
+        "opener": "bob",
+        "peer": "alice",
+        "port": null,
+        "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+        "src": "192.168.1.30",
+        "what": "bob's own keys for alice (the other direction)"
+      }
+    ],
+    "src_ip16_hex": "00000000000000000000ffffc0a8011e"
+  },
+  "inputs": {
+    "answerer": "bob",
+    "dst": "192.168.1.20",
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      },
+      "bob": {
+        "ed_public_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        "seed_hex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "source": "shared-vectors/v1/identities.json bob (RFC 8032 section 7.1 test 2)"
+      },
+      "carol": {
+        "ed_public_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+        "seed_hex": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "source": "inline: RFC 8032 section 7.1 test 3"
+      }
+    },
+    "port": 7420,
+    "q_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+    "querier": "alice",
+    "r_nonce_hex": "101112131415161718191a1b1c1d1e1f",
+    "src": "192.168.1.30"
+  },
+  "name": "LAN beacon answer: bob answers alice's query",
+  "protocol_version": "rvn1"
+}

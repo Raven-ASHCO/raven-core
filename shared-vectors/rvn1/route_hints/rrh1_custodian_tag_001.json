@@ -1,0 +1,37 @@
+{
+  "description": "tag = SHA-256(domain || sender_pub || receiver_pub || custodian_pub), all contact-book Ed25519 device keys (32 bytes each); domain is the ASCII string below, with no length prefix or terminator. Rows 1 and 2: the vector sender to the vector receiver, custodians C1 and C2. Row 3: C1 in the other direction, an unrelated tag",
+  "deterministic": true,
+  "expected": {
+    "rows": [
+      {
+        "custodian_pub_hex": "e2fe2a39b7326642827d6d82d497622cd6c297fe78270eaa436b01f086b6f3cb",
+        "receiver_pub_hex": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+        "sender_pub_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+        "tag_hex": "c905be8b5b326d8efda3e011c40d5df1e0e2762b8db468d89b44bd485e62a235"
+      },
+      {
+        "custodian_pub_hex": "5b6489c9c7fd0dcf50545e7c164886ef40491ec06c7f1b123041797e8117535e",
+        "receiver_pub_hex": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+        "sender_pub_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+        "tag_hex": "50d3558c933a1097ec98c12475aff65c3292cac5d49f69ffc83666dd4096fed8"
+      },
+      {
+        "custodian_pub_hex": "e2fe2a39b7326642827d6d82d497622cd6c297fe78270eaa436b01f086b6f3cb",
+        "receiver_pub_hex": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+        "sender_pub_hex": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7",
+        "tag_hex": "70ec6361923c3f735464a93e3ead2472785b1db43db45488eadd5b667213489b"
+      }
+    ]
+  },
+  "inputs": {
+    "domain": "raven/rrh1/custodian-tag/v1",
+    "seeds_hex": {
+      "c1": "7171717171717171717171717171717171717171717171717171717171717171",
+      "c2": "7272727272727272727272727272727272727272727272727272727272727272",
+      "receiver": "5252525252525252525252525252525252525252525252525252525252525252",
+      "sender": "5151515151515151515151515151515151515151515151515151515151515151"
+    }
+  },
+  "name": "RRH1 CUSTODIAN_TAG (§12): the pair-blinded custodian id",
+  "protocol_version": "rvn1"
+}

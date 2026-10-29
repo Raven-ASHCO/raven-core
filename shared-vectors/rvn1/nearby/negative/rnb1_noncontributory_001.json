@@ -1,0 +1,82 @@
+{
+  "description": "RAVEN_NEARBY_LINK_V1 §2 (the checks of RAVEN_LAN_BEACON_V1 §2.1). contact_keys: alice derives no RNB1 keys for an Ed25519 contact key of small order (BAD_KEY, refused before X25519). shared_secrets: Montgomery u-coordinates for which X25519 with alice's scalar gives the all-zero Z (NONCONTRIBUTORY); no key that passes the contact-key checks maps to one, so this is the second line",
+  "deterministic": true,
+  "expected": {
+    "contact_keys": [
+      {
+        "peer_pub_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "0000000000000000000000000000000000000000000000000000000000000080",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+        "result": "BAD_KEY"
+      },
+      {
+        "peer_pub_hex": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+        "result": "BAD_KEY"
+      }
+    ],
+    "shared_secrets": [
+      {
+        "montgomery_u_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "result": "NONCONTRIBUTORY"
+      },
+      {
+        "montgomery_u_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+        "result": "NONCONTRIBUTORY"
+      },
+      {
+        "montgomery_u_hex": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "result": "NONCONTRIBUTORY"
+      },
+      {
+        "montgomery_u_hex": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "result": "NONCONTRIBUTORY"
+      },
+      {
+        "montgomery_u_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "NONCONTRIBUTORY"
+      },
+      {
+        "montgomery_u_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "NONCONTRIBUTORY"
+      },
+      {
+        "montgomery_u_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "result": "NONCONTRIBUTORY"
+      }
+    ]
+  },
+  "inputs": {
+    "own": "alice",
+    "people": {
+      "alice": {
+        "ed_public_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "source": "shared-vectors/v1/identities.json alice (RFC 8032 section 7.1 test 1)"
+      }
+    }
+  },
+  "name": "RNB1 negative: small-order contact keys and the all-zero pairwise secret",
+  "protocol_version": "rvn1"
+}

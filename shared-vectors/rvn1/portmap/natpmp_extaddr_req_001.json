@@ -1,0 +1,14 @@
+{
+  "description": "version 0, opcode 0 (the probe, sent with the PCP ANNOUNCE)",
+  "deterministic": true,
+  "expected": {
+    "request_hex": "0000"
+  },
+  "inputs": {
+    "client_ip": "192.168.1.20",
+    "op": 0
+  },
+  "name": "NAT-PMP external address request",
+  "protocol_version": "rvn1",
+  "spec_reference": "RAVEN_PORT_MAPPING_V1.md"
+}
