@@ -184,9 +184,11 @@ The token is 32 random bytes per helper life. Only ephemeral loopback ports are 
 ## §7 The card field
 
 `raven whoami --card` adds `onion=<binding>` (§3, base64url without padding, 139 characters) to
-a `raven-card/2` or `raven-card/3` while the gate is open and the node's binding exists. A reader
-of this version accepts the field once, on `/2` and `/3`, and refuses the card when the binding
-does not verify against the card's own `pub_hex`. Readers built before this field refuse such a
+the card, of any version, while the gate is open and the node's binding exists. A reader of this
+version accepts the field once, on any version, and refuses the card when the binding does not
+verify against the card's own `pub_hex`. It is the one route a release build puts into a card, and
+the one it reads from a card besides a local-network `lan=`: the other route fields are not signed
+([`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §9.1). Readers built before this field refuse such a
 card (an unknown field); `raven whoami --card --compat` leaves it out. The contact book keeps it
 in the contact's row (`onion`).
 

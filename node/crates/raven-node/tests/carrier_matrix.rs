@@ -23,9 +23,10 @@
 //!   set with `raven contact set-addr`). `raven send --carrier auto` (the
 //!   default) reaches each other over Internet direct, names the carrier only in
 //!   verbose mode, and a stranger holding B's card is refused before B
-//!   identifies itself. Runs under the debug lab unlock (`RAVEN_LAB_TEST_A=1`)
-//!   while `INTERNET_DIRECT_PRODUCTION_ENABLED` is false, and without it once
-//!   the flag is flipped.
+//!   identifies itself. Runs under the debug lab unlock (`RAVEN_LAB_TEST_A=1`):
+//!   Internet direct is on in release builds since 2026-10, but a card
+//!   carries an Internet route only in the lab (`RAVEN_ROUTE_HINTS_V1.md`
+//!   §9.1; release cards carry none).
 //!
 //! - **C4 outbox restart (P2a):** A and B on loopback with a confirmed session.
 //!   B goes down, A sends (queued: `raven send` ends at once and says raven-node
@@ -1005,7 +1006,10 @@ impl Profile {
         cmd.env("RAVEN_LAB_TOR", "0")
             .env("RAVEN_LAB_STUN_DISCOVERY", "0")
             .env("RAVEN_LAB_HORIZON", "0")
-            .env("RAVEN_LAB_GROUPS", "0");
+            .env("RAVEN_LAB_GROUPS", "0")
+            // Bluetooth nearby (on in macOS release builds): a send would
+            // plan a nearby route no radio serves here.
+            .env("RAVEN_LAB_NEARBY", "0");
         if self.lab_internet {
             cmd.env("RAVEN_LAB_TEST_A", "1");
         }
@@ -1905,10 +1909,12 @@ fn second_loopback() -> &'static str {
     }
 }
 
-/// The Internet direct lab unlock is needed only while the P1 flag is off;
-/// after the flip C2 runs the production path unchanged.
+/// The lab unlock for the Internet direct cases. The P1 flag is on since
+/// 2026-10, but these cases exchange cards with Internet routes, which only
+/// the lab writes and reads (`RAVEN_ROUTE_HINTS_V1.md` §9.1: a release card
+/// carries no unsigned route).
 fn internet_lab_unlock() -> bool {
-    !raven_core::INTERNET_DIRECT_PRODUCTION_ENABLED
+    true
 }
 
 fn lab_ready() -> bool {
@@ -3191,9 +3197,12 @@ fn c11_a_real_address_change_is_noticed_on_linux() {
     );
 }
 
-/// The p2p lab unlock is needed only while the P3 flag is off.
+/// The lab unlock for the p2p cases. The P3 flag is on since 2026-10, but
+/// these cases exchange cards with a PeerId and relays (`p2p=`, `via=`,
+/// `relay=`), which only the lab writes and reads (`RAVEN_ROUTE_HINTS_V1.md`
+/// §9.1: a release card carries no unsigned route).
 fn p2p_lab_unlock() -> bool {
-    !raven_core::P2P_PRODUCTION_ENABLED
+    true
 }
 
 /// The `listen_addrs` of a relay status file.
@@ -4276,9 +4285,21 @@ fn c6_forced_relay_both_ways_and_strangers_are_refused() {
         )),
         "{reach}"
     );
+    // Router port mapping is on in release builds since 2026-10 (and off in
+    // this profile's policy): a relayed node is told it could turn it on.
+    let mapping = if raven_core::port_map_live_enabled() {
+        " Turn on router port mapping: raven node upnp on."
+    } else {
+        ""
+    };
     assert_eq!(
         status_row(reach, "what to do"),
-        Some("nothing to do: contacts reach you through your relay. Keep it running."),
+        Some(
+            format!(
+                "nothing to do: contacts reach you through your relay. Keep it running.{mapping}"
+            )
+            .as_str()
+        ),
         "{reach}"
     );
     assert!(!reach.contains("12D3KooW"), "{reach}");
@@ -4482,8 +4503,7 @@ fn c6_forced_relay_both_ways_and_strangers_are_refused() {
         );
         refused.all()
     };
-    let relay_hint =
-        "the contact's relay refused this node: ask its operator to `raven relay allow`";
+    let relay_hint = "the contact's relay refused this node: ask its operator to allow your PeerId";
     let node_hint = "the contact's node refused the p2p connection at once";
     let out = probe("bob", "c6 stranger probe");
     assert!(!b.inbox().contains("c6 stranger probe"));
@@ -7636,8 +7656,16 @@ fn c25_an_installed_relay_takes_reservations_on_443() {
     let a_card = saved_relays_card(&a);
     let b_card = saved_relays_card(&b);
     assert!(a_card.contains(&format!(" via={via443}")), "{a_card}");
-    for c in [&a_card, &b_card] {
-        kit(&["allow", "--card", c]);
+    // The installed relay's own raven runs without the lab unlock, so it
+    // reads no PeerId from a card (`RAVEN_ROUTE_HINTS_V1.md` §9.1): each
+    // friend gives the operator the line `raven whoami --peer-id` prints.
+    for p in [&a, &b] {
+        let id = p.raven(&["whoami", "--peer-id"], None);
+        assert!(id.ok, "{} whoami --peer-id:\n{}", p.name, id.all());
+        let peer_id = id.stdout.trim().to_string();
+        assert!(peer_id.starts_with("12D3KooW"), "{peer_id}");
+        assert!(a_card.contains(&peer_id) || b_card.contains(&peer_id));
+        kit(&["allow", &peer_id]);
     }
     let start = |p: &Profile| {
         p.start_service_p2p_opts(&P2pStart {
@@ -7842,7 +7870,7 @@ fn c26_unreachable_contacts_are_explained() {
     assert!(
         wait_until(LOG_TIMEOUT, || {
             list = a.raven(&["outbox", "list"], None).all();
-            list.contains("last: NOT_REACHABLE (offline: not connected to their relay)")
+            list.contains("last: offline: not connected to their relay")
         }),
         "{list}"
     );
@@ -10743,9 +10771,9 @@ fn custody_env(wan: bool) -> Vec<(&'static str, &'static str)> {
         ("RAVEN_LAB_CUSTODY_AFTER_MS", "0"),
         ("RAVEN_LAB_CUSTODY_FETCH_MS", "1000"),
     ];
-    if wan {
-        env.push(("RAVEN_LAB_CUSTODY_WAN", "1"));
-    }
+    // Custody over the internet is on in release builds since 2026-10: a
+    // profile without it closes it (a debug build's "0").
+    env.push(("RAVEN_LAB_CUSTODY_WAN", if wan { "1" } else { "0" }));
     env
 }
 
@@ -11216,7 +11244,8 @@ fn c33_wan_custody_gates_and_refusals() {
         wait_until(Duration::from_secs(60), || {
             a.raven(&["outbox", "list"], None)
                 .stdout
-                .contains("CUSTODIAN_NOT_OFFERING")
+                // CUSTODIAN_NOT_OFFERING, as `raven outbox list` words it.
+                .contains("doesn't hold messages for you, or not over the internet")
         }),
         "no CUSTODIAN_NOT_OFFERING:\n{}\n{}",
         a.raven(&["outbox", "list"], None).all(),

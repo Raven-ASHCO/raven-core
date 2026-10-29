@@ -4,8 +4,9 @@
 # /usr/local/bin/raven-relay (Linux) or ~/.local/bin/raven-relay (macOS).
 #
 #   raven-relay card                  the via= lines and the `raven relay use` line for friends
-#   raven-relay allow --card '<card>' let a friend use the relay (compare the fingerprint)
-#   raven-relay allow --cards FILE    several friends at once (all or nothing)
+#   raven-relay allow <PeerId>        let a friend use the relay (their `raven whoami --peer-id`)
+#   raven-relay allow --card '<card>' the same from a lab card that names a PeerId
+#   raven-relay allow --cards FILE    several lab cards at once (all or nothing)
 #   raven-relay deny <PeerId>         stop letting one use it
 #   raven-relay status                allow-list (PeerIds, labels), the relay's addresses, state, counts
 #   raven-relay logs                  the relay's last log lines (counts only)
@@ -28,8 +29,9 @@ die() {
 usage() {
   cat <<'EOF'
 raven-relay card                  the via= lines and the `raven relay use` line for friends
-raven-relay allow --card '<card>' let a friend use the relay (compare the fingerprint)
-raven-relay allow --cards FILE    several friends at once (all or nothing)
+raven-relay allow <PeerId>        let a friend use the relay (their `raven whoami --peer-id`)
+raven-relay allow --card '<card>' the same from a lab card that names a PeerId
+raven-relay allow --cards FILE    several lab cards at once (all or nothing)
 raven-relay deny <PeerId>         stop letting one use it
 raven-relay status                allow-list (PeerIds, labels), the relay's addresses, state, counts
 raven-relay logs                  the relay's last log lines (counts only)

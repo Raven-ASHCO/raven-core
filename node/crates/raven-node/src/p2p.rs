@@ -1687,14 +1687,16 @@ fn closed_at_once_since(peer: &PeerId, since: Instant) -> bool {
 fn refusal_hint(target_closed: bool, relay_closed: bool) -> Option<&'static str> {
     if target_closed {
         Some(
-            "the contact's node refused the p2p connection at once: it may not have this \
-             node's p2p= PeerId yet (send your card again: raven whoami --card)",
+            "the contact's node refused the p2p connection at once: it may not know this \
+             node's PeerId yet (it learns it once the two of you are connected over Tor or the \
+             local network, and only after it verified you)",
         )
     } else if relay_closed {
         Some(
-            "the contact's relay refused this node: ask its operator to `raven relay allow` \
-             your card (this node tries that relay again within 10 minutes, or as soon as the \
-             contact names it again)",
+            "the contact's relay refused this node: ask its operator to allow your PeerId \
+             (`raven whoami --peer-id` prints it; they run `raven relay allow <PeerId>`) (this \
+             node tries that relay again within 10 minutes, or as soon as the contact names it \
+             again)",
         )
     } else {
         None
@@ -12503,12 +12505,15 @@ mod tests {
         let target = refusal_hint(true, false).unwrap();
         assert!(
             target.contains("refused the p2p connection at once")
-                && target.contains("send your card again: raven whoami --card"),
+                && target.contains("once the two of you are connected over Tor"),
             "{target}"
         );
         assert_eq!(refusal_hint(true, true), Some(target), "the contact first");
         let relay = refusal_hint(false, true).unwrap();
-        assert!(relay.contains("`raven relay allow` your card"), "{relay}");
+        assert!(
+            relay.contains("`raven whoami --peer-id` prints it"),
+            "{relay}"
+        );
         assert!(
             relay.contains("tries that relay again within 10 minutes"),
             "{relay}"

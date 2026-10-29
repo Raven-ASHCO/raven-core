@@ -103,6 +103,25 @@ fn cards_friends_words_and_old_code() {
         assert_eq!(parsed["routes"][0]["kind"], "lan");
         assert_eq!(parsed["routes"][0]["preview"], false);
     }
+    assert_eq!(parsed["ignored_routes"], json!([]), "{parsed}");
+    assert!(parsed["note"].is_null(), "{parsed}");
+    // A card's Internet address is never read (no key signs it; this test
+    // runs without the lab unlock): the card is, and the app gets one line
+    // to show about what was left out.
+    if b_card_text.starts_with("raven-card/1") {
+        let inet_card = format!("{b_card_text} inet=203.0.113.7:7422");
+        let parsed = ok(&a.client, "card.parse", json!({"text": inet_card}));
+        assert_eq!(parsed["address"], b.me["address"]);
+        assert_eq!(parsed["has_address"], false, "{parsed}");
+        assert_eq!(parsed["ignored_routes"], json!(["internet"]), "{parsed}");
+        assert!(
+            parsed["note"]
+                .as_str()
+                .unwrap()
+                .starts_with("note: Raven ignored this card's inet=: no key signs"),
+            "{parsed}"
+        );
+    }
 
     // Friends: saved as not verified, each with a name.
     assert_eq!(

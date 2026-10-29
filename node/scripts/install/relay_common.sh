@@ -279,8 +279,8 @@ relay_print_next_steps() {
   local wrapper=$1 installer=$2
   echo "Next:"
   echo "  1. ${wrapper} card                      the via= lines, and the 'raven relay use ...' line for each friend"
-  echo "  2. ${wrapper} allow --card '<card>'     for EVERY friend who sends or is reached through the relay"
-  echo "     (compare the fingerprint it prints with that friend; --cards FILE adds several, deny removes one)"
+  echo "  2. ${wrapper} allow <PeerId>            for EVERY friend who sends or is reached through the relay"
+  echo "     (each friend reads theirs from 'raven whoami --peer-id'; take it from them directly; deny removes one)"
   echo "  3. ${wrapper} status                    allow-list (friends' PeerIds, your labels), the relay's addresses, state, counts"
   echo "     (remove PeerIds, labels and public IPs before you share its output; the logs carry counts only)"
   echo "Privacy: the relay passes encrypted bytes only and holds no Raven identity. It learns both PeerIds and"

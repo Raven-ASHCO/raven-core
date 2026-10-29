@@ -397,7 +397,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         card: bool,
         /// With --card: the Internet address friends dial (your public IP or DNS
-        /// name and the forwarded port, e.g. 203.0.113.7:7422).
+        /// name and the forwarded port, e.g. 203.0.113.7:7422). Lab only (a
+        /// debug build with RAVEN_LAB_TEST_A=1): a card carries no Internet
+        /// address otherwise; verified friends learn yours inside an encrypted
+        /// link.
         #[arg(long, value_name = "HOST:PORT", requires = "card")]
         inet: Option<String>,
         /// With --card: the LAN address friends on your network dial.
@@ -406,12 +409,19 @@ enum Commands {
         /// With --card: a relay you reserve on (its multiaddr ending in
         /// /p2p/<relay PeerId>), or your own direct libp2p address (repeatable,
         /// at most 2). Adds p2p=<your PeerId> and via= (a raven-card/2); without
-        /// it the relays of `raven node p2p on` are used when p2p is on.
+        /// it the relays of `raven node p2p on` are used when p2p is on. Lab
+        /// only (a debug build with RAVEN_LAB_TEST_A=1): a card carries no
+        /// PeerId or relay otherwise.
         #[arg(long, value_name = "MULTIADDR", requires = "card")]
         via: Vec<String>,
         /// With --card: print a card older ravens read (raven-card/1 or /2).
         #[arg(long, default_value_t = false, requires = "card")]
         compat: bool,
+        /// Print this profile's p2p network ID (PeerId), one line: what a
+        /// friend who runs a relay for you allows (`raven-relay allow
+        /// <PeerId>`). A card carries no PeerId.
+        #[arg(long, default_value_t = false, conflicts_with_all = ["card", "json"])]
+        peer_id: bool,
     },
     /// Send one message to a contact (the text comes from stdin).
     #[command(long_about = concat!(
@@ -1887,9 +1897,10 @@ enum RelayCommands {
         addrs: Vec<String>,
     },
     /// Let a friend use this relay (connect, reserve, and open circuits to the
-    /// others on the list): a contact (@tag; its card's p2p= PeerId), a
-    /// PeerId, or --card with their card line (its fingerprint is shown, and
-    /// on a terminal you confirm it once).
+    /// others on the list): a contact (@tag; the PeerId Raven learned from
+    /// them once you were connected), a PeerId (the line their `raven whoami
+    /// --peer-id` prints), or --card with a lab card line that names one (its
+    /// fingerprint is shown, and on a terminal you confirm it once).
     Allow {
         who: Option<String>,
         #[arg(long, value_name = "CARD|FILE")]
@@ -2406,6 +2417,83 @@ struct ContactCard {
     /// The owner's Tor onion binding (`onion=`, lab): one that verified
     /// against the card's own key.
     onion: Option<raven_core::onion::OnionBinding>,
+    /// The route fields this card held that were not read because cards
+    /// carry no addresses ([`card_routes_live`]), in card field order
+    /// (`inet`, `p2p`, `p2pn`, `via`, `relay`): what [`ignored_routes_note`]
+    /// names. Empty when none was ignored.
+    ignored: Vec<&'static str>,
+}
+
+/// Whether contact cards carry, and readers take, their route fields that no
+/// key signs: `inet=`, `p2p=`, `via=` and a `raven-card/3`'s `p2pn=` and
+/// `relay=` ([`raven_core::route_hints::card_routes_live`]). Never in a
+/// release build: a card is copied around in plain text, and anyone on its
+/// way could name their own host in those fields (comparing security words
+/// checks the key only), so an unsigned address in a card must never steer a
+/// dial. A card carries the key, a LAN address only when the user puts one
+/// in (`--lan`, kept to the local network) and the signed `onion=`; the
+/// addresses Raven finds reach a verified friend only inside an encrypted,
+/// authenticated link (route hints). A debug build keeps the old fields
+/// under the lab unlock (`RAVEN_LAB_TEST_A=1`), for the lab harnesses.
+fn card_routes_live() -> bool {
+    #[cfg(test)]
+    if let Some(on) = CARD_ROUTES_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    raven_core::route_hints::card_routes_live()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests set [`card_routes_live`] per thread (the lab unlock is a
+    /// process-wide variable).
+    static CARD_ROUTES_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`card_routes_live`] as `on` on this test thread until the guard drops.
+#[cfg(test)]
+pub(crate) struct CardRoutesForTest;
+
+#[cfg(test)]
+impl CardRoutesForTest {
+    pub(crate) fn set(on: bool) -> Self {
+        CARD_ROUTES_TEST.with(|c| c.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for CardRoutesForTest {
+    fn drop(&mut self) {
+        CARD_ROUTES_TEST.with(|c| c.set(None));
+    }
+}
+
+/// The one-line note a reader of a card prints when it left route fields
+/// out ([`ContactCard::ignored`]); `None` when it left none out.
+fn ignored_routes_note(ignored: &[&str]) -> Option<String> {
+    let names: Vec<String> = ignored.iter().map(|f| format!("{f}=")).collect();
+    let fields = match names.as_slice() {
+        [] => return None,
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Some(format!(
+        "note: Raven ignored this card's {fields}: no key signs a card's addresses, so Raven \
+         never dials one; your friend's addresses reach you inside your encrypted link once \
+         you are connected (over Tor or the local network)"
+    ))
+}
+
+/// Said when `raven whoami --card` is asked for a route field that cards no
+/// longer carry ([`card_routes_live`]).
+fn card_route_flag_refused(flag: &str) -> String {
+    format!(
+        "{flag}: a card carries no Internet or p2p address in this raven (anyone who handles \
+         a card could change it unseen). Hand out the card without it: once you are \
+         connected, Raven tells your verified friends your addresses inside your encrypted \
+         link"
+    )
 }
 
 /// Which card a line is: `raven-card/1` (Internet and LAN routes), `/2`
@@ -2635,7 +2723,9 @@ fn format_card_as(
         device_fingerprint_v1(&pub_bytes)
     );
     if version != CardVersion::V3 {
-        if !internet.is_empty() {
+        // Never an unsigned Internet address unless cards carry routes
+        // ([`card_routes_live`]); callers refuse to be asked for one.
+        if !internet.is_empty() && card_routes_live() {
             card.push_str(&format!(" inet={internet}"));
         }
         if !lan.is_empty() {
@@ -2830,15 +2920,36 @@ fn parse_card(line: &str) -> Result<ContactCard, String> {
             );
         }
     }
-    let internet = match fields.get("inet") {
-        Some(v) => parse_internet_dial(v).map_err(|e| format!("card inet: {e}"))?,
-        None => String::new(),
-    };
     let lan = match fields.get("lan") {
         Some(v) => parse_lan_dial(v).map_err(|e| format!("card lan: {e}"))?,
         None => String::new(),
     };
+    // The fields no key signs are not read at all (their values are not
+    // even parsed) unless cards carry routes ([`card_routes_live`]); the
+    // card stays, and the reader says which it left out.
+    let read_routes = card_routes_live();
+    let mut ignored: Vec<&'static str> = Vec::new();
+    if !read_routes {
+        for field in ["inet", "p2p", "p2pn"] {
+            if fields.contains_key(field) {
+                ignored.push(field);
+            }
+        }
+        if !via.is_empty() {
+            ignored.push(if version == CardVersion::V3 {
+                "relay"
+            } else {
+                "via"
+            });
+        }
+    }
+    let internet = match fields.get("inet") {
+        Some(_) if !read_routes => String::new(),
+        Some(v) => parse_internet_dial(v).map_err(|e| format!("card inet: {e}"))?,
+        None => String::new(),
+    };
     let p2p = match (version, fields.get("p2p")) {
+        (_, Some(_)) if !read_routes => None,
         (CardVersion::V3, Some(peer)) => {
             let route = P2pRoute::read_relays(peer, &via)?;
             Some(match fields.get("p2pn") {
@@ -2880,6 +2991,7 @@ fn parse_card(line: &str) -> Result<ContactCard, String> {
         p2p,
         version,
         onion,
+        ignored,
     })
 }
 
@@ -2931,6 +3043,15 @@ fn own_card_route(
     policy: &NodePolicy,
     v3: bool,
 ) -> Result<Option<P2pRoute>, String> {
+    // No PeerId or relay address in a card unless cards carry routes
+    // ([`card_routes_live`]): friends learn both inside an encrypted link.
+    if !card_routes_live() {
+        return if via.is_empty() {
+            Ok(None)
+        } else {
+            Err(card_route_flag_refused("--via"))
+        };
+    }
     if via.is_empty() && policy.p2p_listen.trim().is_empty() {
         return Ok(None);
     }
@@ -3108,6 +3229,14 @@ fn cmd_whoami_card(
     via: &[String],
     compat: bool,
 ) -> Result<(), String> {
+    if !card_routes_live() {
+        if inet.is_some() {
+            return Err(card_route_flag_refused("--inet"));
+        }
+        if !via.is_empty() {
+            return Err(card_route_flag_refused("--via"));
+        }
+    }
     let inet = inet
         .map(|v| parse_internet_dial(v).map_err(|e| format!("--inet: {e}")))
         .transpose()?
@@ -3210,6 +3339,7 @@ fn parse_card_or_invite(text: &str) -> Result<ContactCard, String> {
             p2p: None,
             version: CardVersion::V1,
             onion: None,
+            ignored: Vec::new(),
         }),
         Some(Err(e)) => Err(format!("--card: that is an invite line, but {e}")),
         None => parse_card(text),
@@ -15638,9 +15768,12 @@ pub fn run() {
             lan,
             via,
             compat,
+            peer_id,
         }) => match try_load_identity(&data_dir) {
             Ok(Some(id)) => {
-                if card {
+                if peer_id {
+                    println!("{}", raven_core::p2p_route::active_peer_id(&id, None));
+                } else if card {
                     exit_on_err(cmd_whoami_card(
                         &data_dir,
                         &id,
@@ -15660,7 +15793,7 @@ pub fn run() {
                     eprintln!("{{\"error\":\"no_identity\"}}");
                     std::process::exit(1);
                 }
-                if card {
+                if card || peer_id {
                     eprintln!("no identity — run `raven init` first");
                     std::process::exit(1);
                 }
@@ -16167,6 +16300,9 @@ pub fn run() {
                         "warning: this is YOUR OWN identity, not a friend's. Nobody else can be reached with it; ask your friend for THEIR invite (`ash whoami`)."
                     );
                 }
+                if let Some(note) = card.as_ref().and_then(|c| ignored_routes_note(&c.ignored)) {
+                    eprintln!("{C_DIM}{note}{C_RESET}");
+                }
                 match &card {
                     // An invite line (or a card without routes).
                     Some(c) if c.internet.is_empty() && c.lan.is_empty() && c.p2p.is_none() => {
@@ -16197,7 +16333,11 @@ pub fn run() {
                     ext::flush_security_sink();
                     std::process::exit(1);
                 }
-                if card.as_ref().is_some_and(|c| c.version == CardVersion::V3) {
+                // (A /3 card read without its routes holds no relay either.)
+                if card
+                    .as_ref()
+                    .is_some_and(|c| c.version == CardVersion::V3 && c.p2p.is_some())
+                {
                     println!("{C_DIM}{}{C_RESET}", v3_card_note(&petname, &public_tag));
                 }
                 // Its Tor onion binding (lab): signed by its key, checked
@@ -26301,6 +26441,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
 
     #[test]
     fn cards_round_trip_and_parse_strictly() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x0a);
         let card = format_card(&a, "203.0.113.7:7422", "192.168.1.20:7420");
         assert!(card.starts_with("raven-card/1 address=rvn1"), "{card}");
@@ -26379,6 +26521,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// node_policy.json's only while no service answers.
     #[test]
     fn own_card_uses_the_daemons_current_relays() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let dir = tempfile::tempdir().unwrap();
         let a = ident(0x1c);
         let manual = format!(
@@ -26480,6 +26624,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// cannot smuggle p2p fields in.
     #[test]
     fn p2p_cards_round_trip_and_parse_strictly() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x0c);
         let peer = raven_core::p2p_route::local_peer_id(&a);
         let relay = raven_core::p2p_route::local_peer_id(&ident(0x0d));
@@ -26538,6 +26684,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// `contact add --card` (its limit is computed from the field maxima).
     #[test]
     fn the_longest_valid_card_round_trips() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x0e);
         let peer = raven_core::p2p_route::local_peer_id(&a);
         let relay = raven_core::p2p_route::local_peer_id(&ident(0x0f));
@@ -26589,6 +26737,103 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert!(device_fingerprint_v1(&a.public_key_bytes()).len() <= CARD_FINGERPRINT_MAX);
     }
 
+    /// A card's route fields no key signs (`inet=`, `p2p=`, `via=`, a /3
+    /// card's `p2pn=` and `relay=`) are never written into a card and never
+    /// read from one outside the lab ([`card_routes_live`]): a reader keeps
+    /// the card (its key, `lan=`, the signed `onion=`), takes no route from
+    /// it, and names what it left out in one line; `whoami --card` asked
+    /// for an Internet address or a relay refuses.
+    #[test]
+    fn cards_carry_and_readers_take_no_unsigned_routes_outside_the_lab() {
+        let a = ident(0x2a);
+        let peer = raven_core::p2p_route::local_peer_id(&a);
+        let relay = raven_core::p2p_route::local_peer_id(&ident(0x2b));
+        let via = format!("/ip4/198.51.100.7/tcp/7423/p2p/{relay}");
+        let route = P2pRoute::parse(&peer, &[&via]).unwrap();
+        let relays = P2pRoute::parse_relays(&peer, &[&via]).unwrap();
+        let (v2, v3) = {
+            let _lab = super::CardRoutesForTest::set(true);
+            (
+                format_card_with(&a, "203.0.113.7:7422", "192.168.1.20:7420", Some(&route)),
+                format_card_as(CardVersion::V3, &a, "", "", Some(&relays)),
+            )
+        };
+        assert!(
+            v2.contains(" inet=") && v2.contains(" p2p=") && v2.contains(" via="),
+            "{v2}"
+        );
+        let _release = super::CardRoutesForTest::set(false);
+
+        // Writing: no Internet route and no p2p route, ever.
+        let card = format_card(&a, "203.0.113.7:7422", "192.168.1.20:7420");
+        assert!(!card.contains("inet="), "{card}");
+        assert!(card.contains(" lan=192.168.1.20:7420"), "{card}");
+        let policy = NodePolicy {
+            p2p_listen: "7423".into(),
+            p2p_relays: vec![via.clone()],
+            ..NodePolicy::default()
+        };
+        assert_eq!(own_card_route(&a, &[], &policy, true).unwrap(), None);
+        assert!(
+            own_card_route(&a, std::slice::from_ref(&via), &policy, false)
+                .unwrap_err()
+                .starts_with("--via: a card carries no Internet or p2p address")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let refused = cmd_whoami_card(dir.path(), &a, Some("203.0.113.7:7422"), None, &[], false)
+            .unwrap_err();
+        assert!(refused.starts_with("--inet: "), "{refused}");
+        let refused = cmd_whoami_card(
+            dir.path(),
+            &a,
+            None,
+            None,
+            std::slice::from_ref(&via),
+            false,
+        )
+        .unwrap_err();
+        assert!(refused.starts_with("--via: "), "{refused}");
+
+        // Reading: the card stays, its unsigned routes do not.
+        let read = parse_card(&v2).unwrap();
+        assert_eq!(read.pub_hex, hex::encode(a.public_key_bytes()));
+        assert_eq!(read.lan, "192.168.1.20:7420");
+        assert!(read.internet.is_empty());
+        assert_eq!(read.p2p, None);
+        assert_eq!(read.ignored, ["inet", "p2p", "via"]);
+        let note = ignored_routes_note(&read.ignored).unwrap();
+        assert!(
+            note.starts_with("note: Raven ignored this card's inet=, p2p= and via=: "),
+            "{note}"
+        );
+        assert!(!note.contains('\n'), "{note}");
+        let read3 = parse_card(&v3).unwrap();
+        assert_eq!((read3.version, read3.p2p.clone()), (CardVersion::V3, None));
+        assert_eq!(read3.ignored, ["p2p", "relay"]);
+        // An unsigned value is not even parsed: a malformed one is ignored too.
+        let odd = parse_card(&format!("{} inet=not-an-address", format_card(&a, "", ""))).unwrap();
+        assert_eq!(odd.ignored, ["inet"]);
+        assert_eq!(
+            ignored_routes_note(&odd.ignored).unwrap(),
+            "note: Raven ignored this card's inet=: no key signs a card's addresses, so Raven \
+             never dials one; your friend's addresses reach you inside your encrypted link once \
+             you are connected (over Tor or the local network)"
+        );
+        // Nothing left out: no note.
+        let plain = parse_card(&format_card(&a, "", "")).unwrap();
+        assert!(plain.ignored.is_empty());
+        assert_eq!(ignored_routes_note(&plain.ignored), None);
+        // The card's structure is still checked strictly.
+        assert!(parse_card(&format!("{v2} inet=203.0.113.8:1"))
+            .unwrap_err()
+            .contains("twice"));
+        assert!(
+            parse_card(&format!("{} p2pn={peer}", format_card(&a, "", "")))
+                .unwrap_err()
+                .contains("unknown")
+        );
+    }
+
     /// Card v3 (route hints spec §9): `p2p=` and up to four `relay=`
     /// addresses of at most two relays, no address of its owner. It round
     /// trips, keeps its own length limit, and is refused strictly, except
@@ -26596,6 +26841,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// rotation) is read and checked like `p2p=`.
     #[test]
     fn v3_cards_round_trip_and_parse_strictly() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x1a);
         let peer = raven_core::p2p_route::local_peer_id(&a);
         let (r1, r2, r3) = (
@@ -26780,6 +27027,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// PeerIds are this raven's epoch keys of the profile.
     #[test]
     fn rotation_card_vector_reads() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../shared-vectors/rvn1/p2p/card_p2pn_001.json");
         let v: serde_json::Value =
@@ -26816,6 +27065,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// version is refused with the "update raven" hint.
     #[test]
     fn card_p2pn_round_trip_and_old_version_refused_with_update_hint() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../shared-vectors/rvn1/p2p/card_p2pn_001.json");
         let v: serde_json::Value =
@@ -26929,6 +27180,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// fits it, and no bound grew for it.
     #[test]
     fn card_max_len_covers_p2pn() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         // 1530 before the Tor onion field (lab), which any card may carry.
         const { assert!(CARD_MAX_LEN_V3 == 1530 + CARD_ONION_FIELD_LEN) };
         let a = ident(0x23);
@@ -27029,6 +27282,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// and p2pn=) is read under its own limit; /1 and /2 lines keep theirs.
     #[test]
     fn the_longest_v3_card_round_trips_under_its_own_limit() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x1e);
         let peer = raven_core::p2p_route::local_peer_id(&a);
         let name = |len: usize| -> String {
@@ -27132,6 +27387,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// otherwise exactly the card it printed before.
     #[test]
     fn whoami_prints_v3_only_when_live_and_the_card_is_relays_only() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x21);
         let peer = raven_core::p2p_route::local_peer_id(&a);
         let r1 = raven_core::p2p_route::local_peer_id(&ident(0x22));
@@ -27205,6 +27462,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     /// RWS1 drops the WSS `relay=` and keeps that one).
     #[test]
     fn cards_never_put_wss_vias_into_raven_card_2() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let a = ident(0x31);
         let peer = raven_core::p2p_route::local_peer_id(&a);
         let r1 = raven_core::p2p_route::local_peer_id(&ident(0x32));
@@ -28698,6 +28957,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
 
     #[test]
     fn card_arg_reads_text_or_one_line_file() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::CardRoutesForTest::set(true);
         let dir = tempfile::tempdir().unwrap();
         let a = ident(0x0a);
         let card = format_card(&a, "203.0.113.7:7422", "");
@@ -30857,16 +31118,18 @@ mod relay_kit_doc_tests {
             raven >= 4 && wrapped >= 6,
             "{raven} raven, {wrapped} raven-relay"
         );
-        // The commands a contact and an operator need are all there.
+        // The commands a contact and an operator need are all there (a
+        // release card names no PeerId: friends give theirs with
+        // `raven whoami --peer-id`; `--card` reads a lab card).
         for want in [
             "raven relay use",
+            "raven-relay allow <PeerId>",
             "raven-relay allow --card",
-            "raven-relay allow --cards",
             "raven-relay card",
             "raven-relay deny",
             "raven-relay status",
             "raven-relay probe",
-            "raven whoami --card",
+            "raven whoami --peer-id",
         ] {
             assert!(doc.contains(want), "RELAY_KIT.md lacks `{want}`");
         }

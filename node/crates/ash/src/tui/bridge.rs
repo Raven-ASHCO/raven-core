@@ -30,6 +30,9 @@ pub(super) use super::super::ID_CONFLICT_NOTE;
 // Contacts as cli.rs stores them.
 pub(super) use super::super::{load_contacts, Contact};
 // Cards: the longest line `contact add --card` takes.
+/// Tests: cli.rs's `card_routes_live` set on this thread.
+#[cfg(test)]
+pub(super) use super::super::CardRoutesForTest;
 pub(super) use super::super::CARD_MAX_LEN;
 // Addresses: the check `contact set-dial` makes, and the store worker's save.
 pub(super) use super::super::{parse_lan_dial, update_contact_lan_dial};
@@ -316,6 +319,9 @@ pub(super) struct FriendPreview {
     /// The friend's Tor onion binding (`onion=`, lab): one their own key
     /// signed (cli.rs's `parse_card` refuses any other).
     pub(super) onion: Option<Box<raven_core::onion::OnionBinding>>,
+    /// The card's route fields left out because cards carry no addresses
+    /// (cli.rs's `card_routes_live`): AF-2 says so in one line.
+    pub(super) ignored: Vec<&'static str>,
 }
 
 impl FriendPreview {
@@ -330,6 +336,7 @@ impl FriendPreview {
             words: key_words(&key),
             lan: card.lan,
             internet: card.internet,
+            ignored: card.ignored,
         })
     }
 }
@@ -492,6 +499,7 @@ pub(super) fn parse_raven_invite(text: &str) -> Option<Result<FriendPreview, Str
                 internet: String::new(),
                 p2p: None,
                 onion: None,
+                ignored: Vec::new(),
             })
         })
     })
@@ -2583,6 +2591,8 @@ mod tests {
 
     #[test]
     fn views_carry_the_public_parts_only() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = CardRoutesForTest::set(true);
         let id = Identity::from_seed(&[0x31; 32]);
         let me = me_view(&id);
         assert_eq!(me.pub_hex, hex::encode(id.public_key_bytes()));

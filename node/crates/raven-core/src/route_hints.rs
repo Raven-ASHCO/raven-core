@@ -65,6 +65,19 @@ pub fn route_hints_live() -> bool {
     ) && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_ROUTE_HINTS)
 }
 
+/// Whether contact cards carry, and readers take, the route fields no key
+/// signs (`inet=`, `p2p=`, `via=`, a `raven-card/3`'s `p2pn=` and `relay=`;
+/// spec §9.1): only a debug build with the lab unlock (`RAVEN_LAB_TEST_A=1`),
+/// for the lab harnesses; never a release build. A card is copied around in
+/// plain text and comparing security words checks the key only, so an
+/// unsigned address in a card must never steer a dial: the addresses a
+/// verified friend needs travel in these hints, inside an encrypted,
+/// authenticated link. `lan=` (kept to the local network) and the signed
+/// `onion=` are not affected.
+pub fn card_routes_live() -> bool {
+    crate::pair_init::lab_test_a_enabled()
+}
+
 /// RRH1 on this carrier: the hints gate AND the carrier's own gate.
 pub fn route_hints_live_on(carrier: OutboxCarrier) -> bool {
     route_hints_live()
@@ -1929,6 +1942,19 @@ mod tests {
 
     /// 2026-10: route hints are on in release builds; a debug build closes
     /// them with `RAVEN_LAB_ROUTE_HINTS=0`, and then no carrier carries them.
+    /// Spec §9.1: a card's unsigned route fields are a lab matter only. A
+    /// release build never writes or reads them, whatever the lab unlock
+    /// says (CI sets every switch in its release run).
+    #[test]
+    fn card_routes_lab_switch_is_inert_in_release() {
+        let unlock = std::env::var(crate::pair_init::LAB_TEST_A)
+            .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"));
+        assert_eq!(card_routes_live(), cfg!(debug_assertions) && unlock);
+        if !cfg!(debug_assertions) {
+            assert!(!card_routes_live(), "release");
+        }
+    }
+
     #[test]
     fn production_flag_is_on_and_a_closed_gate_closes_every_carrier() {
         const {

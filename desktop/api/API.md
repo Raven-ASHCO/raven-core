@@ -74,7 +74,7 @@ changes. Fields marked `?` may be missing.
 | `identity.create` | `{display_name?}` | `{address, words: [10], old_code, note?}` (`note`: a problem that did not stop setup, e.g. the first prekey) |
 | `identity.me` | – | `{display_name?, address, words: [10], old_code, card, invite}` |
 | `card.make` | `{include_address: bool}` | `{card, invite, address_included?: "ip:port", address_missing?: "not_receiving" \| "this_computer_only" \| "no_network"}` |
-| `card.parse` | `{text}` | `{short_address, has_address, routes: [{kind, label, preview: bool}], address, already_saved: bool, already_verified: bool}` (never returns the friend's security words or old code) |
+| `card.parse` | `{text}` | `{short_address, has_address, routes: [{kind, label, preview: bool}], address, already_saved: bool, already_verified: bool, ignored_routes: [kind], note: string\|null}` (never returns the friend's security words or old code). `ignored_routes`: the route kinds (`internet`, `p2p`) the card named that were left out, because no key signs a card's addresses and release builds never read them; `note` is the one line to show about it, `null` when nothing was left out |
 | `contacts.list` | – | `{contacts: [Contact]}` |
 | `contacts.add` | `{text, name}` | `{contact: Contact}` (saved as not verified) |
 | `contacts.rename` | `{address, name}` | `{contact}` |

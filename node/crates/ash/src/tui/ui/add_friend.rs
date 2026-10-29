@@ -110,6 +110,11 @@ const NO_ROUTE: &str = "No network address included. You can add one later.";
 const LAN_ONLY_HERE: &str = "This invite has no local-network address, and this version of \
                              Raven can only use the local network.";
 const REACHED_AT: &str = "Can be reached at: ";
+/// AF-2, under the routes, when the card held Internet or p2p addresses that
+/// Raven left out (cli.rs's `card_routes_live`).
+pub(super) const ROUTES_IGNORED: &str = "Its Internet and p2p addresses were left out: no \
+                                         key signs a card's addresses. Raven learns where \
+                                         your friend is once you are connected.";
 const PREVIEW: &str = ", Preview, not in this release";
 pub(super) const NAME_QUESTION: &str = "What do you want to call them?";
 pub(super) const NAME_PLACEHOLDER: &str = "Name";
@@ -744,8 +749,15 @@ fn route_rows(friend: &FriendPreview, look: &Look, width: u16) -> Vec<Line<'stat
             preview(controller::P2P_PREVIEW)
         ));
     }
+    let ignored = if friend.ignored.is_empty() {
+        Vec::new()
+    } else {
+        rows(ROUTES_IGNORED, width)
+    };
     if routes.is_empty() {
-        return rows(NO_ROUTE, width);
+        let mut lines = rows(NO_ROUTE, width);
+        lines.extend(ignored);
+        return lines;
     }
     // The routes after the first line up under it.
     let indent = u16::try_from(cells(REACHED_AT)).unwrap_or(0);
@@ -764,6 +776,7 @@ fn route_rows(friend: &FriendPreview, look: &Look, width: u16) -> Vec<Line<'stat
     if friend.lan.is_empty() && lan_only_build() {
         lines.extend(rows(LAN_ONLY_HERE, width));
     }
+    lines.extend(ignored);
     lines
 }
 
@@ -1648,6 +1661,8 @@ mod tests {
 
     #[test]
     fn af2_routes_in_plain_words() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = bridge::CardRoutesForTest::set(true);
         // No address at all.
         let app = af2(Vec::new(), &testkit::me(BOB).invite, "");
         let shown = screen(&app);
@@ -1675,6 +1690,30 @@ mod tests {
             );
             assert!(!shown.contains("can only use the local network"), "{shown}");
         }
+        assert_no_code(&testkit::render(&app, 80, 24));
+    }
+
+    /// A card's Internet and p2p addresses are left out outside the lab
+    /// (cli.rs's `card_routes_live`): AF-2 shows none of them and says so in
+    /// one line; a card without any shows no such line.
+    #[test]
+    fn af2_says_a_cards_unsigned_routes_were_left_out() {
+        let id = raven_core::identity::Identity::from_seed(&[BOB; 32]);
+        let card = {
+            let _lab = bridge::CardRoutesForTest::set(true);
+            bridge::format_card_with(&id, "203.0.113.9:7420", "", None).expect("a card")
+        };
+        let _release = bridge::CardRoutesForTest::set(false);
+        let app = af2(Vec::new(), &card, "");
+        let shown = screen(&app);
+        assert!(!shown.contains("203.0.113.9"), "{shown}");
+        assert!(shown.contains(NO_ROUTE), "{shown}");
+        assert!(
+            shown.contains("Its Internet and p2p addresses were left out: no key signs a card's"),
+            "{shown}"
+        );
+        let app = af2(Vec::new(), &testkit::card(BOB, ""), "");
+        assert!(!screen(&app).contains("were left out"));
         assert_no_code(&testkit::render(&app, 80, 24));
     }
 

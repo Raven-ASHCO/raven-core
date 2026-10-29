@@ -610,13 +610,48 @@ raven-card/3 address=<rvn1> pub_hex=<64 hex> fingerprint=<fp> p2p=<PeerId> [rela
   copied around in plain text; a public address goes only inside RRH1 on an
   authenticated, encrypted link to a verified contact (DIRECT, INET_DIRECT).
   Readers are unchanged: a `raven-card/2` naming a direct `via=` or an
-  `inet=` is read as before.
+  `inet=` is read as before (in lab builds; a release reader takes no
+  unsigned route from any card, §9.1).
 - Pre-v3 readers refuse /3 with "card version … is not supported (update
   raven)". /3 readers built before the `p2pn` and dropped-`relay` rules
   (2026-10-21) refuse a card with either; /3 readers of 2026-10-21 until the
   `p2pn` check (2026-10-22) accept any `p2pn` value and ignore it. No release
   build prints /3 (route hints are production disabled), and no release build
   writes `p2pn` (PeerId rotation is production disabled).
+
+### 9.1 Unsigned card routes (release builds, October 2026)
+
+No key signs a card's route fields, and comparing security words checks the
+key only, so anyone who handles a card on its way could name their own host
+in them. Once Internet direct and p2p were switched on in release builds, an
+address in a card could steer a dial (and the dialler's signed identity and
+IP address) to that host. From October 2026:
+
+- **Writers.** A release build never writes `inet=`, `p2p=`, `via=`,
+  `p2pn=` or `relay=` into a card it creates. `raven whoami --card` refuses
+  `--inet` and `--via` with the reason; the p2p route of `raven node p2p on`
+  is not added. A card carries the identity (`address`, `pub_hex`,
+  `fingerprint`), the signed `onion=` binding while the Tor carrier has one
+  ([`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) §7), and `lan=`
+  only when the user puts one in (`--lan`). With no p2p route a card is a
+  `raven-card/1`.
+- **Readers.** A release build reads a card with those fields as before
+  (version, known fields, each once, length limits), but never parses or
+  keeps their values: no Internet route, PeerId, `p2pn` or relay comes from a
+  card, so none is ever dialled. The reader prints one line naming the fields
+  it left out. `lan=` is kept under the local-network rule (a card's LAN
+  route is dialled only at a loopback, private, link-local or unique-local
+  address, even for a verified contact); `onion=` is kept only when it
+  verifies against the card's own key.
+- **Where addresses travel instead.** A verified friend's public, LAN and
+  relay addresses and PeerId reach the other side only in RRH1 (this spec),
+  over an authenticated, encrypted link; the first link can be made over Tor
+  with the card's signed `onion=`, or on the local network.
+- **Lab.** A debug build with the lab unlock (`RAVEN_LAB_TEST_A=1`) still
+  writes and reads the fields as described above, for the lab harnesses.
+- A relay operator who allows a friend (`raven-relay allow`) takes the
+  friend's PeerId from `raven whoami --peer-id`, since a card no longer
+  carries it.
 
 ## 10. Vectors
 

@@ -472,6 +472,10 @@ impl Inner {
             "address": friend.address,
             "already_saved": saved.is_some(),
             "already_verified": saved.unwrap_or(false),
+            // Route kinds the card named that were left out (no key signs a
+            // card's addresses), and the one line to show about them.
+            "ignored_routes": friend.ignored_routes,
+            "note": bridge::ignored_routes_note(&friend),
         }))
     }
 

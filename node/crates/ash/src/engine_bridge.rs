@@ -291,11 +291,16 @@ pub struct FriendPreview {
     /// The friend's Tor onion binding (a card's `onion=`, lab), as text:
     /// signed by the friend's key, checked when the card was read.
     pub onion: Option<String>,
+    /// The route kinds the card named that were left out because cards
+    /// carry no addresses (cli.rs's `card_routes_live`): `internet` for
+    /// `inet=`, `p2p` for `p2p=`, `p2pn=`, `via=` and `relay=`; each once.
+    pub ignored_routes: Vec<&'static str>,
 }
 
 /// One card line or invite line, as `contact add --card` reads it.
 pub fn parse_card_or_invite(text: &str) -> Result<FriendPreview, String> {
     super::parse_card_or_invite(text).map(|card| FriendPreview {
+        ignored_routes: ignored_kinds(&card.ignored),
         p2p: card.p2p.as_ref().map(|r| P2pView {
             peer_id: r.peer_id.clone(),
             via: r.via.clone(),
@@ -310,6 +315,30 @@ pub fn parse_card_or_invite(text: &str) -> Result<FriendPreview, String> {
             .as_ref()
             .map(raven_core::onion::OnionBinding::to_text),
     })
+}
+
+/// [`FriendPreview::ignored_routes`] of a card's ignored fields.
+fn ignored_kinds(fields: &[&str]) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    for field in fields {
+        let kind = if *field == "inet" { "internet" } else { "p2p" };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+/// The note to show when a card's route fields were left out
+/// ([`FriendPreview::ignored_routes`]), as `raven contact add --card` prints
+/// it; `None` when none was.
+pub fn ignored_routes_note(preview: &FriendPreview) -> Option<String> {
+    let fields: Vec<&str> = preview
+        .ignored_routes
+        .iter()
+        .map(|kind| if *kind == "internet" { "inet" } else { "p2p" })
+        .collect();
+    super::ignored_routes_note(&fields)
 }
 
 /// A friend's Tor onion binding from their card (`onion`, binding text),

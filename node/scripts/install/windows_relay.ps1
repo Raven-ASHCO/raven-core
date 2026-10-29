@@ -5,7 +5,7 @@
 #
 # The relay holds NO Raven identity and touches no keystore: only its own libp2p key
 # (relay_key.ed25519 in -RelayDir), and it relays only between the PeerIds you allow
-# (raven-relay allow --card ...). It passes encrypted bytes. It learns both PeerIds and IPs of
+# (raven-relay allow <PeerId>). It passes encrypted bytes. It learns both PeerIds and IPs of
 # every circuit, its timing and byte counts; never a message, never a Raven ID.
 # The task runs only while you are signed in, and a sleeping PC relays nothing (design Q9: no
 # Windows service, no boot task). Task Scheduler keeps no log: `raven-relay status` shows the
@@ -395,7 +395,7 @@ Write-Host "Router: forward TCP+UDP $Port to this PC$(if ($Tcp443 -eq 'direct') 
 Write-Host "The task runs only while you are signed in; a sleeping PC relays nothing (Q9). Logs: none (Task Scheduler keeps no stderr); raven-relay status shows the state and counts."
 Write-Host "Next (in $BinDir, or add it to PATH):"
 Write-Host "  1. raven-relay card                     the via= lines, and the 'raven relay use ...' line for each friend"
-Write-Host "  2. raven-relay allow --card '<card>'    for EVERY friend who sends or is reached through the relay (compare the fingerprint)"
+Write-Host "  2. raven-relay allow <PeerId>           for EVERY friend who sends or is reached through the relay (their 'raven whoami --peer-id', taken from them directly)"
 Write-Host "  3. raven-relay status                   allow-list (friends' PeerIds, your labels), the relay's addresses, state, counts"
 Write-Host "     (remove PeerIds, labels and public IPs before you share its output)"
 Write-Host "Update: re-run this script (kit.conf remembers the settings; the PeerId is kept). Rollback: -Rollback. Uninstall: -Uninstall."

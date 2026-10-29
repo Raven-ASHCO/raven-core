@@ -1817,7 +1817,9 @@ fn contact_add_card_accepts_the_invite_line_whoami_prints() {
 /// `raven whoami --card` prints a raven-card/3 (PeerId and relays, no
 /// address) only with the route hints lab switch; `--compat`, an address of
 /// yours, or a build without the switch print exactly today's raven-card/2.
-/// A friend's raven adds the /3 card and says it holds no address.
+/// A friend's raven adds the /3 card and says it holds no address. Cards
+/// with routes are lab cards (the lab unlock `RAVEN_LAB_TEST_A=1`): see
+/// [`cards_carry_no_unsigned_routes_outside_the_lab`].
 #[test]
 fn whoami_card_is_v3_only_with_route_hints_and_compat_prints_todays_card() {
     let bob_dir = short_dir();
@@ -1828,7 +1830,8 @@ fn whoami_card_is_v3_only_with_route_hints_and_compat_prints_todays_card() {
     let card = |extra: &[&str], hints: bool| {
         let mut c = ash(bob_dir.path());
         c.args(["whoami", "--card", "--via", &via, "--via", &fallback])
-            .args(extra);
+            .args(extra)
+            .env("RAVEN_LAB_TEST_A", "1");
         if hints {
             c.env("RAVEN_LAB_ROUTE_HINTS", "1");
         } else {
@@ -1865,7 +1868,8 @@ fn whoami_card_is_v3_only_with_route_hints_and_compat_prints_todays_card() {
     let dir = short_dir();
     plant_identity(dir.path());
     let mut c = ash(dir.path());
-    c.args(["contact", "add", "--card", v3.trim(), "--petname", "Bob"]);
+    c.args(["contact", "add", "--card", v3.trim(), "--petname", "Bob"])
+        .env("RAVEN_LAB_TEST_A", "1");
     let o = run(c, "");
     let out = text(&o.stdout);
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
@@ -1883,6 +1887,117 @@ fn whoami_card_is_v3_only_with_route_hints_and_compat_prints_todays_card() {
     assert_eq!(rows[0]["p2p_via"], serde_json::json!([via, fallback]));
     assert!(rows[0].get("lan_dial").is_none_or(|v| v == ""), "{book}");
     assert!(rows[0].get("internet_dial").is_none(), "{book}");
+}
+
+/// Outside the lab (a release build, or a debug build without the lab
+/// unlock) a card carries no unsigned route: `raven whoami --card` prints
+/// the key (and `onion=` once Tor is up) and refuses `--inet` and `--via`;
+/// `raven contact add --card` keeps a lab card's key and LAN address, takes
+/// none of its Internet or p2p routes and says so in one line on stderr.
+#[test]
+fn cards_carry_no_unsigned_routes_outside_the_lab() {
+    let bob_dir = short_dir();
+    plant_identity_seed(bob_dir.path(), 0x44);
+    let relay = raven_core::p2p_route::local_peer_id(&Identity::from_seed(&[0x45; 32]));
+    let via = format!("/ip4/198.51.100.7/tcp/7423/p2p/{relay}");
+    let whoami = |extra: &[&str], lab: bool| {
+        let mut c = ash(bob_dir.path());
+        c.args(["whoami", "--card"]).args(extra);
+        if lab {
+            c.env("RAVEN_LAB_TEST_A", "1");
+        } else {
+            c.env_remove("RAVEN_LAB_TEST_A");
+        }
+        run(c, "")
+    };
+    let plain = whoami(&[], false);
+    assert_eq!(code(&plain), 0, "{}", text(&plain.stderr));
+    let card = text(&plain.stdout);
+    assert!(card.starts_with("raven-card/1 "), "{card}");
+    for absent in ["inet=", "p2p=", "via=", "relay=", "lan="] {
+        assert!(!card.contains(absent), "{card}");
+    }
+    for (flag, value) in [("--inet", "203.0.113.7:7422"), ("--via", via.as_str())] {
+        let o = whoami(&[flag, value], false);
+        assert_eq!(code(&o), 1, "{flag}: {}", text(&o.stdout));
+        assert!(
+            text(&o.stderr).contains(&format!(
+                "{flag}: a card carries no Internet or p2p address in this raven"
+            )),
+            "{}",
+            text(&o.stderr)
+        );
+        assert!(text(&o.stdout).is_empty());
+    }
+    // The LAN address the user puts in stays (kept to the local network).
+    let lan = whoami(&["--lan", "192.168.1.20:7420"], false);
+    assert!(text(&lan.stdout).contains(" lan=192.168.1.20:7420"));
+
+    // A lab card with every route, read outside the lab.
+    let lab_card = text(
+        &whoami(
+            &[
+                "--inet",
+                "203.0.113.7:7422",
+                "--lan",
+                "192.168.1.20:7420",
+                "--via",
+                &via,
+            ],
+            true,
+        )
+        .stdout,
+    );
+    assert!(
+        lab_card.contains(" inet=") && lab_card.contains(" via="),
+        "{lab_card}"
+    );
+    let dir = short_dir();
+    plant_identity(dir.path());
+    let mut c = ash(dir.path());
+    c.args([
+        "contact",
+        "add",
+        "--card",
+        lab_card.trim(),
+        "--petname",
+        "Bob",
+    ])
+    .env_remove("RAVEN_LAB_TEST_A");
+    let o = run(c, "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert_eq!(
+        err.matches(
+            "note: Raven ignored this card's inet=, p2p= and via=: no key signs a card's \
+                     addresses, so Raven never dials one"
+        )
+        .count(),
+        1,
+        "{err}"
+    );
+    let book = std::fs::read_to_string(dir.path().join("contacts.json")).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(&book).unwrap();
+    assert_eq!(rows[0]["lan_dial"], "192.168.1.20:7420", "{book}");
+    assert!(
+        rows[0].get("internet_dial").is_none_or(|v| v == ""),
+        "{book}"
+    );
+    assert!(rows[0].get("p2p").is_none_or(|v| v == ""), "{book}");
+    assert!(
+        rows[0]
+            .get("p2p_via")
+            .is_none_or(|v| v == &serde_json::json!([])),
+        "{book}"
+    );
+    // Its network ID for a relay operator, on request.
+    let mut c = ash(bob_dir.path());
+    c.args(["whoami", "--peer-id"]);
+    let id = run(c, "");
+    assert_eq!(
+        text(&id.stdout).trim(),
+        raven_core::p2p_route::local_peer_id(&Identity::from_seed(&[0x44; 32]))
+    );
 }
 
 /// `raven contact hide-ip` and `raven node hide-ip` say what they change,

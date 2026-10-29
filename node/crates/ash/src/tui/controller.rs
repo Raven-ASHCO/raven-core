@@ -1895,6 +1895,8 @@ mod tests {
     /// rotation it stays the fixed PeerId.
     #[test]
     fn my_card_names_the_running_nodes_epoch_peer_id() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = bridge::CardRoutesForTest::set(true);
         let (dir, controller) = profile();
         raven_core::node_policy::save_policy(
             dir.path(),

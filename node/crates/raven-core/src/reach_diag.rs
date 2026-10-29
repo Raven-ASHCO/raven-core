@@ -525,7 +525,9 @@ pub enum Fix {
     TheyWriteFirst,
     /// The contact needs a new relay.
     TheyNeedNewRelay,
-    /// Send the contact your card again.
+    /// The contact's node does not admit this node yet: it must have
+    /// verified this node and learned its network ID (over a first link on
+    /// Tor or the local network; lab cards also carry it).
     ResendCard,
     /// Ask whoever runs the relay to wake that computer.
     WakeRelay,

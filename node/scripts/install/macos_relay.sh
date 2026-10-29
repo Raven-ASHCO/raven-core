@@ -6,7 +6,7 @@
 #
 # The relay is `raven-node relay`: it holds NO Raven identity and touches no
 # keystore, only its own libp2p key (relay_key.ed25519), and it relays only
-# between the PeerIds you allow (`raven-relay allow --card ...`). It passes
+# between the PeerIds you allow (`raven-relay allow <PeerId>`). It passes
 # encrypted bytes. It learns both PeerIds and IPs of every circuit, its timing
 # and byte counts; never a message, never a Raven ID. Its log (relay.log, cut
 # at 1 MiB, checked at every start too) carries counts only. What

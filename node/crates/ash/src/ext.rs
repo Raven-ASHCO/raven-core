@@ -3076,12 +3076,13 @@ fn p2p_next_step(d: &Diag, ctx: &SendCtx, n: &ReachNames, mode: StepMode) -> Opt
             }
         ),
         Fix::ResendCard => format!(
-            "Send {who} your card again (`raven whoami --card`) and ask {who} to add it (`raven \
-             contact add --card …`){}",
+            "Make sure {who} verified you (`raven contact verify` on both computers). {who}'s \
+             node learns this computer's network ID once you are connected over Tor or the local \
+             network{}",
             if queued {
-                format!("; it goes out once {who} has.")
+                "; RAVEN keeps trying meanwhile."
             } else {
-                ", then send again.".into()
+                ", then send again."
             }
         ),
         Fix::WakeRelay if d.relay.is_none() => format!(

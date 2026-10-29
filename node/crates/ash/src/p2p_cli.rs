@@ -185,8 +185,8 @@ fn contact_direct_address(contact: &Contact) -> Result<String, String> {
     let label = contact.primary_label();
     let peer = p2p_route::normalize_peer_id(&contact.p2p).map_err(|_| {
         format!(
-            "{label} has no p2p PeerId saved: add their card again (`raven contact add --card …`) \
-             or ask them for `raven relay card`"
+            "{label} has no p2p PeerId saved yet (Raven learns it from them once you are \
+             connected): ask them for `raven relay card`"
         )
     })?;
     contact
@@ -459,10 +459,17 @@ pub(super) fn cmd_node_p2p_asking(
              name or tag).{C_RESET}"
         );
     }
-    println!(
-        "{C_DIM}your card now carries p2p=<your PeerId> and a via= per relay: `raven whoami \
-         --card`{C_RESET}"
-    );
+    if super::card_routes_live() {
+        println!(
+            "{C_DIM}your card now carries p2p=<your PeerId> and a via= per relay: `raven whoami \
+             --card`{C_RESET}"
+        );
+    } else {
+        println!(
+            "{C_DIM}your verified friends learn your PeerId and relays inside your encrypted \
+             links once you are connected; a card carries neither{C_RESET}"
+        );
+    }
     if !raven_core::p2p_live_enabled() {
         println!(
             "{C_PURPLE}note{C_RESET}: the p2p carrier is not enabled in this build \
@@ -1876,7 +1883,9 @@ fn gate_row(gate: &P2pGateStatus) -> String {
         "NOBODY: contacts.json or blocked_pubs.json cannot be read; only your relays are admitted"
             .to_string()
     } else if gate.contacts == 0 {
-        "no verified contact has a p2p= PeerId yet (add their card and verify it)".to_string()
+        "no verified contact has a p2p PeerId yet (each is learned from the friend once you \
+         are connected)"
+            .to_string()
     } else {
         format!(
             "verified contacts {}, relays {}",
@@ -3396,9 +3405,11 @@ pub(super) fn section_what_to_do(info: &P2pStatusInfo, ctx: &ReachCtx) -> Option
                  raven-node keeps trying."
             ),
         },
-        Fix::ResendCard => {
-            format!("send {who} your card again (`raven whoami --card`) and ask {who} to add it.")
-        }
+        Fix::ResendCard => format!(
+            "make sure {who} verified you (`raven contact verify` on both computers); {who}'s \
+             node learns this computer's network ID once you are connected over Tor or the local \
+             network."
+        ),
         Fix::TheyNeedNewRelay => format!(
             "{who} needs a new relay (a friend of {who}'s who offers relaying); raven-node keeps \
              trying."
@@ -3602,13 +3613,23 @@ pub(super) fn cmd_relay_use_with(
     };
     cmd_node_p2p_with(data_dir, Some(on), tty, ask)?;
     println!("{C_DIM}{}{C_RESET}", relay_use_saved(&vias));
-    println!(
-        "next: 1) restart raven-node: {}\n      2) give the relay's operator your card (raven \
-         whoami --card): they allow it (raven-relay allow --card …) and compare your \
-         fingerprint\n      3) send the same card to your contacts, so they reach you through \
-         this relay",
-        service_restart_hint()
-    );
+    if super::card_routes_live() {
+        println!(
+            "next: 1) restart raven-node: {}\n      2) give the relay's operator your card \
+             (raven whoami --card): they allow it (raven-relay allow --card …) and compare your \
+             fingerprint\n      3) send the same card to your contacts, so they reach you \
+             through this relay",
+            service_restart_hint()
+        );
+    } else {
+        println!(
+            "next: 1) restart raven-node: {}\n      2) give the relay's operator your network \
+             ID (raven whoami --peer-id): they allow it (raven-relay allow <PeerId>)\n      3) \
+             your verified contacts learn this relay inside your encrypted links once you are \
+             connected",
+            service_restart_hint()
+        );
+    }
     Ok(())
 }
 
@@ -3664,8 +3685,8 @@ fn resolve_peer_id(data_dir: &Path, who: &str) -> Result<(String, String, String
         .or_else(|| proven_learned_peer(data_dir, contact))
         .ok_or_else(|| {
             format!(
-                "{} has no p2p PeerId saved: add their raven-card/2 (`raven contact add --card \
-                 …`) or pass the PeerId",
+                "{} has no p2p PeerId yet (Raven learns it from them once you are connected): \
+                 pass the PeerId they read out (`raven whoami --peer-id`)",
                 contact.primary_label()
             )
         })?;
@@ -3698,10 +3719,13 @@ fn contact_with_peer(data_dir: &Path, peer: &str) -> Option<(String, String)> {
 
 /// The p2p PeerId of a card `raven relay allow` takes.
 fn card_peer_id(card: super::ContactCard) -> Result<(String, String), String> {
-    let route = card.p2p.ok_or(
+    let route = card.p2p.ok_or(if super::card_routes_live() {
         "that card has no p2p= PeerId (a raven-card/2): ask for `raven whoami --card` after \
-         `raven node p2p on`",
-    )?;
+         `raven node p2p on`"
+    } else {
+        "that card names no PeerId (a card carries no network ID in this raven): ask your \
+         friend for the line `raven whoami --peer-id` prints and allow that PeerId"
+    })?;
     Ok((route.peer_id, card.fingerprint))
 }
 
@@ -7798,8 +7822,9 @@ mod tests {
         });
         assert!(
             empty.starts_with(
-                "no verified contact has a p2p= PeerId yet (add their card and verify it); \
-                 refused 0 connection(s) from others and 2 hole-punch dial(s)"
+                "no verified contact has a p2p PeerId yet (each is learned from the friend once \
+                 you are connected); refused 0 connection(s) from others and 2 hole-punch \
+                 dial(s)"
             ),
             "{empty}"
         );
@@ -7910,6 +7935,8 @@ mod tests {
 
     #[test]
     fn relay_allow_reads_peer_ids_cards_and_contacts() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::super::CardRoutesForTest::set(true);
         let dir = tmp();
         let friend = raven_core::Identity::from_seed(&[9; 32]);
         let peer = p2p_route::local_peer_id(&friend);
@@ -9002,6 +9029,8 @@ mod tests {
     /// before (the harness and the netns script).
     #[test]
     fn relay_allow_prints_the_fingerprint_and_asks_only_on_a_tty() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::super::CardRoutesForTest::set(true);
         let friend = raven_core::Identity::from_seed(&[0x61; 32]);
         let peer = p2p_route::local_peer_id(&friend);
         let card = p2p_card(0x61);
@@ -9063,6 +9092,8 @@ mod tests {
     /// one bad line allows nobody.
     #[test]
     fn relay_allow_cards_file_is_all_or_nothing() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::super::CardRoutesForTest::set(true);
         let dir = tmp();
         let files = tmp();
         let good = format!(
@@ -9138,6 +9169,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_foreign_owned_relay_folder_is_refused() {
+        // A lab card's routes (cards carry none outside the lab: card_routes_live).
+        let _card_routes = super::super::CardRoutesForTest::set(true);
         use std::os::unix::fs::MetadataExt;
         let foreign = Path::new("/");
         let euid = std::fs::metadata(tmp().path()).unwrap().uid();
