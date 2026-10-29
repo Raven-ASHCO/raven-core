@@ -253,13 +253,15 @@ unsafe fn view(sd: PSECURITY_DESCRIPTOR) -> Result<DaclView, String> {
     })
 }
 
-/// The DACL of `path` as it is on disk.
+/// The DACL of `path` as it is on disk (the tests' view; the restrict
+/// paths read it with its error code, [`read_dacl_coded`]).
+#[cfg(test)]
 pub(crate) fn read_dacl(path: &Path) -> Result<DaclView, String> {
     read_dacl_coded(path).map_err(|(_, text)| text)
 }
 
-/// [`read_dacl`] with the Windows error code of a failed read (0 when the
-/// call succeeded but its descriptor was empty).
+/// The DACL of `path` as it is on disk, or the Windows error code of a
+/// failed read (0 when the call succeeded but its descriptor was empty).
 fn read_dacl_coded(path: &Path) -> Result<DaclView, (u32, String)> {
     let name = wide(path);
     let mut dacl: *mut ACL = null_mut();

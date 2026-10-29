@@ -992,6 +992,7 @@ mod with_the_gate {
         );
     }
 
+    #[cfg(unix)]
     fn shown_dir(world: &World) -> String {
         shown(&world.dir())
     }

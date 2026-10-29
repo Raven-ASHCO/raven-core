@@ -115,7 +115,7 @@ const NO_LEARNING_CODES: [&str; 2] = ["IPC_FRAME", "LEARNING_HOLD"];
 /// `LearningPlan` for one contact (64 hex device key). `Ok(None)` when the
 /// service has no learning ([`NO_LEARNING_CODES`]); `Err` when the service
 /// cannot be asked or answers otherwise.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(all(test, unix)), allow(dead_code))]
 pub fn learning_plan(data_dir: &Path, peer_pub_hex: &str) -> Result<Option<LearningPlan>, String> {
     learning_plan_within(data_dir, peer_pub_hex, IPC_IO_TIMEOUT)
 }
