@@ -480,6 +480,17 @@ let mut policy = |pt: &[u8]| match app_channel::classify(pt) {
 };
 ```
 
+**The receiver guard (added before the release, October 2026;
+[`RAVEN_APP_PAYLOAD_V1.md`](../../protocol/RAVEN_APP_PAYLOAD_V1.md) §3.1).**
+The policy also defers an app frame whose sender (the session-bound
+certificate's identity key) is not a verified, unblocked contact
+(`app_sender_not_verified`), and a new frame past the rate windows: 30 a
+minute per sender device and content type, 120 a minute per content type
+(`app_sender_rate`); a frame the inbox holds or handled already takes no
+slot. `AppSubmit` refuses a contact who is not verified
+(`CONTACT_NOT_VERIFIED`, before any dial) and `AgentSign` signs only for a
+verified contact. The sketch above predates these rules.
+
 `AppStore::admit` reads **metadata only** (counts, sizes, id lookups). It needs no keystore access, so no Keychain round trip happens inside the session-store transaction. Lock order is session-store transaction, then `app_channel.sqlite3` (read). The reverse nesting never occurs.
 
 **The candidates loop.** `ApplicationDeferred` ends the loop like any non-`RouteTagMismatch` result, because the route tag matched. It maps to `return Ok(Vec::new())` **before** `map_err`, so the link stays open.

@@ -66,13 +66,14 @@
 | `APP_PEER_BACKLOG` | app channel | retry later: the peer has not acknowledged 128 or more messages on the session; sealing more could put it past the forward-jump limit |
 | `APP_PEER_UNREACHABLE`, `APP_PAIR_BUDGET` | app channel | retry later: no usable session and the peer did not answer (nothing sealed), or the automatic pairing budget (4 per peer per 24 h, 60 s apart) is used up |
 | `APP_STORE`, `APP_CONSUMER_BUSY` | app channel | app store I/O (transient); another consumer is bound (use takeover) |
+| `CONTACT_NOT_VERIFIED` | app channel | the contact is not verified: app payloads go to, and are taken from, verified contacts only ([`RAVEN_APP_PAYLOAD_V1.md`](RAVEN_APP_PAYLOAD_V1.md) §3.1) |
 | `GROUP_HOLD` | groups | groups are not enabled in this build ([`RAVEN_GROUP_V1.md`](RAVEN_GROUP_V1.md)) |
 | `GROUP_NOT_FOUND`, `GROUP_AMBIGUOUS` | groups | local: no group by that name or id, or several match (use more of its id) |
 | `GROUP_NOT_ADMIN`, `GROUP_ADMIN_CANNOT_LEAVE`, `GROUP_NOT_MEMBER` | groups | local: only the admin adds and removes; the admin cannot leave; this profile left or was removed |
 | `GROUP_TOO_LARGE`, `GROUP_NOT_A_FRIEND`, `GROUP_ALREADY_MEMBER`, `GROUP_BAD_NAME`, `GROUP_BAD_BODY` | groups | local: more than 16 members (or 64 groups); a member to add is no current, unblocked friend; already in; a name of 1-64 characters; a body of 1-8,192 bytes of chat text |
 | `GROUP_QUEUE_FULL`, `GROUP_NO_ROUTE` | groups | retry later: group copies would pass the groups' 128 stage entries or a friend's 32 waiting messages; none of the other members is this profile's friend |
 | `GROUP_NO_IDENTITY`, `GROUP_STORE` | groups | local: no identity yet; `groups.json` cannot be read or written (nothing is written over a file that cannot be read) |
-| `AGENT_SIGN_FIELDS`, `AGENT_SIGN_SENDER`, `AGENT_SIGN_RECIPIENT_NOT_CONTACT`, `AGENT_SIGN_TIME`, `AGENT_SIGN_RATE` | AgentSign | the delegation statement was refused (fields, sender is not this node, recipient not a contact, time window), or the rate window is full |
+| `AGENT_SIGN_FIELDS`, `AGENT_SIGN_SENDER`, `AGENT_SIGN_RECIPIENT_NOT_CONTACT`, `AGENT_SIGN_TIME`, `AGENT_SIGN_RATE` | AgentSign | the delegation statement was refused (fields, sender is not this node, recipient not a verified contact, time window), or the rate window is full |
 | `RSR1_MALFORMED`, `RSR1_WRONG_SIGNER`, `RSR1_WRONG_SUBJECT`, `RSR1_BAD_SIGNATURE` | session reset | an RSR1 frame was refused ([`RAVEN_SESSION_RESET_V1.md`](RAVEN_SESSION_RESET_V1.md) §4); debug log only |
 | `RRH1_MALFORMED` | route hints | an RRH1 frame was ignored whole ([`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §5.1), or one RELAY_OFFER record in a kept frame was dropped (§11.2); debug log only, never a close or a reply |
 | `LAN_OFF` | lan | local: `raven lan off` is in effect (no LAN listener, LAN dial or beacon) |

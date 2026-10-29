@@ -341,6 +341,15 @@ fn resolve(
             return err("CONTACTS_UNREADABLE", "the contact book cannot be read")
         }
     };
+    // Who may be sent to (RAVEN_APP_PAYLOAD_V1 §3.1): a verified contact
+    // only, whose node takes app payloads from verified contacts only.
+    if !book.pinned {
+        return err(
+            raven_core::outbox::CONTACT_NOT_VERIFIED,
+            "app payloads go to verified contacts only: compare security words with them \
+             first (raven contact verify)",
+        );
+    }
     let device = *identity;
     let routes = crate::outbox::send_plan(ctx, &device, book, now)
         .auto_dial(&device, ctx.connected, &mut |r, pinned| {
@@ -1601,16 +1610,28 @@ fn agent_sign_inner(
                 .map_err(|e| ("IDENTITY_UNAVAILABLE", e.to_string()))?,
         ),
     };
+    agent_sign_as(data_dir, &identity, statement, now_secs)
+}
+
+/// [`agent_sign_inner`] with the identity given.
+fn agent_sign_as(
+    data_dir: &Path,
+    identity: &raven_core::identity::Identity,
+    statement: &raven_core::agent_sign::AgentDelegationStatement,
+    now_secs: u64,
+) -> AppResult<(String, String, [u8; 64])> {
     let own = identity.address();
     // An RVN1 address is a hash of the key: find the contact whose key
     // encodes to it, then run the usual admission (blocked, unreadable).
     let recipient_key = contact_key_for_address(data_dir, &statement.recipient)?;
+    // A verified contact only (RAVEN_APP_PAYLOAD_V1 §3.1): the app channel
+    // carries tasks and answers between verified contacts alone.
     let is_contact = |recipient: &str| {
         recipient == statement.recipient
             && recipient_key.is_some_and(|key| {
                 matches!(
                     contact_admission(data_dir, &key),
-                    ContactAdmission::Allowed(_)
+                    ContactAdmission::Allowed(c) if c.pinned
                 )
             })
     };
@@ -1626,7 +1647,7 @@ fn agent_sign_inner(
             "too many signatures in the last minute; retry shortly",
         );
     }
-    let sig = raven_core::agent_sign::sign(&identity, &bytes);
+    let sig = raven_core::agent_sign::sign(identity, &bytes);
     Ok((own, hex::encode(identity.public_key_bytes()), sig))
 }
 
@@ -1764,7 +1785,7 @@ mod tests {
     #[test]
     fn resolve_leaves_out_an_off_link_learned_lan_route_like_the_worker() {
         let node = Node::new(0x61);
-        rig::contacts(node.dir(), &node.bob, SAVED, "", false);
+        rig::contacts(node.dir(), &node.bob, SAVED, "", true);
         node.seen();
         let (saved, learned) = (rig::lan(SAVED), rig::lan(LEARNED));
         let at = |on_link: fn(IpAddr) -> Option<bool>| {
@@ -1809,7 +1830,7 @@ mod tests {
     #[test]
     fn an_app_record_never_brings_back_an_off_link_learned_route() {
         let node = Node::new(0x65);
-        rig::contacts(node.dir(), &node.bob, SAVED, "", false);
+        rig::contacts(node.dir(), &node.bob, SAVED, "", true);
         node.seen();
         let learned = rig::lan(LEARNED);
         let here = AttemptCtx {
@@ -1995,6 +2016,43 @@ mod tests {
         assert_eq!(node.nodial.dials(), 0);
     }
 
+    /// AgentSign (§4.2) signs a delegation only for a verified contact
+    /// (RAVEN_APP_PAYLOAD_V1 §3.1): a contact who is not verified, like a
+    /// stranger, is AGENT_SIGN_RECIPIENT_NOT_CONTACT and nothing is signed.
+    #[test]
+    fn agent_sign_signs_for_a_verified_contact_only() {
+        let node = Node::new(0x71);
+        let bob = Identity::from_seed(&[0x72; 32]);
+        assert_eq!(bob.public_key_bytes(), node.bob);
+        let now = now_ms() / 1000;
+        let statement = raven_core::agent_sign::AgentDelegationStatement {
+            context: raven_core::agent_sign::AGENT_DELEGATION_CONTEXT.into(),
+            sender: node.alice.address(),
+            recipient: bob.address(),
+            task_id: "3f2a9c0d1e2b4f5a6b7c8d9e0f1a2b3c".into(),
+            kind: "answer".into(),
+            issued_at: now,
+            expires_at: now + 3_600,
+            payload_sha256_hex: "ab".repeat(32),
+            nonce_hex: "cd".repeat(16),
+        };
+        let sign = || agent_sign_as(node.dir(), &node.alice, &statement, now);
+        rig::contacts(node.dir(), &[0x01; 32], SAVED, "", true);
+        assert_eq!(sign().unwrap_err().0, "AGENT_SIGN_RECIPIENT_NOT_CONTACT");
+        rig::contacts(node.dir(), &node.bob, SAVED, "", false);
+        assert_eq!(sign().unwrap_err().0, "AGENT_SIGN_RECIPIENT_NOT_CONTACT");
+        rig::contacts(node.dir(), &node.bob, SAVED, "", true);
+        let (address, public, sig) = sign().unwrap();
+        assert_eq!(address, node.alice.address());
+        assert_eq!(public, hex::encode(node.alice.public_key_bytes()));
+        let bytes = raven_core::agent_sign::build(&statement).unwrap();
+        assert!(raven_core::agent_sign::verify(
+            &node.alice.public_key_bytes(),
+            &bytes,
+            &sig
+        ));
+    }
+
     /// RN-11: the admission codes stand, before any plan or dial.
     #[test]
     fn resolve_keeps_the_admission_codes() {
@@ -2009,6 +2067,10 @@ mod tests {
         blocks.save(node.dir()).unwrap();
         assert_eq!(code(&node), "CONTACT_BLOCKED");
         raven_core::BlockList::default().save(node.dir()).unwrap();
+        // RAVEN_APP_PAYLOAD_V1 §3.1: a contact who is not verified gets no
+        // app payload (their node would not take it).
+        rig::contacts(node.dir(), &node.bob, SAVED, "", false);
+        assert_eq!(code(&node), "CONTACT_NOT_VERIFIED");
         std::fs::write(node.dir().join("contacts.json"), "{not json").unwrap();
         assert_eq!(code(&node), "CONTACTS_UNREADABLE");
         assert_eq!(node.nodial.dials(), 0);

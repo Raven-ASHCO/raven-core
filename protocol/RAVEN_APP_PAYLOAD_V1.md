@@ -1,9 +1,12 @@
 # RAVEN App Payload V1 (`RVNAPP/1`)
 
-**Status:** Draft; **production disabled** (`APP_CHANNEL_PRODUCTION_ENABLED =
-false`; on macOS also `APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED = false`). Lab
-unlock: debug builds with `RAVEN_LAB_TEST_A=1`. The receive-side rules of §3
-are always on (they make a receiver app-safe).
+**Status:** Draft; **on in release builds since October 2026**
+(`APP_CHANNEL_PRODUCTION_ENABLED = true`; on macOS
+`APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED = true`, the owner's decision on UID-only
+IPC, recorded in `docs/THREAT_MODEL.md` §3.16), not independently reviewed. A
+debug build closes it with `RAVEN_LAB_TEST_A=0`. The receive-side rules of §3
+are always on (they make a receiver app-safe), and the guard of §3.1 decides
+which app payloads a node takes.
 **Design:** [`docs/design/2026-10-rdap-app-channel.md`](../docs/design/2026-10-rdap-app-channel.md)
 (revision 2).
 **Not a wire change:** an app payload is the AEAD plaintext of an ordinary
@@ -53,6 +56,36 @@ step 7):
 A **deferred** object commits nothing (no receipt, inbox row, ACK intent or
 ratchet change) and is accepted later as a fresh object from the same bytes.
 The link stays open and other frames in the same dial are unaffected.
+
+### 3.1 The guard: who, what, how big, how often
+
+A receiver takes an app payload (commits it, stores it in the app inbox,
+ACKs it) only when every rule below holds; otherwise it defers it as above
+(nothing committed; the sender's retries are fresh tries). Chat is never
+judged by these rules.
+
+| Rule | Value | Deferred as |
+|---|---|---|
+| **Who:** the sender (the session-bound certificate's identity key) is a current, unblocked contact whose key this user verified (security words or code checked) | an unverified contact, a stranger, a blocked contact, an unreadable contact book | `app_sender_not_verified` |
+| **What:** the content type is registered (§2) | `a2a-request/1`, `a2a-response/1`; `test/1` under the lab unlock only | `app_type_unregistered` |
+| **How big:** the frame parses strictly (§1) | body at most 49,024 bytes, header at most 128, frame at most 49,152 | `app_reserved_invalid` |
+| **How often:** new payloads of one content type in the last 60 s | at most 30 from one sender device, at most 120 from all senders together (each type counted on its own) | `app_sender_rate` |
+| **How many waiting:** the app inbox has room (§3, below) | 16 per sender and type, 128 items and 4 MiB in total | `app_inbox_full` |
+
+A copy of a payload the inbox holds or already handled (the same sender and
+message id, or the same sender and app id) is taken without counting against
+the rate, so a resend after a lost ACK always settles. The rate windows live
+in the receiving process's memory (a restart starts them empty).
+
+The sending node applies the same "who" rule first: `AppSubmit` to a contact
+who is not verified is refused with `CONTACT_NOT_VERIFIED` before any dial,
+and `AgentSign` signs a delegation only for a verified contact
+(`AGENT_SIGN_RECIPIENT_NOT_CONTACT` otherwise). A sender also refuses an
+unregistered type (`APP_BAD_CONTENT_TYPE`) and a body over the limit
+(`APP_PAYLOAD_TOO_LARGE`), and keeps its own limits: 16 app payloads in flight
+per contact (`APP_QUEUE_FULL`), the automatic pairing budget
+(`APP_PAIR_BUDGET`) and the AgentSign rate windows (60 tasks a minute; 30
+answers a minute per recipient and 120 in total; `AGENT_SIGN_RATE`).
 
 Because a deferred object leaves the receiver's message lane behind, a sender
 seals no new app payload on a session while 128 or more of its messages there

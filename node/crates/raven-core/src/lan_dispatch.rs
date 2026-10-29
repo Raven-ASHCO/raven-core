@@ -2465,8 +2465,15 @@ fn handle_indexed_message(
         .map(|env| env.message_id)
         .unwrap_or([0u8; 16]);
     let sender_device = peer.cert.device_ed_pub;
+    let sender_identity = peer.cert.user_ed_pub;
     let mut policy = |plaintext: &[u8]| {
-        crate::app_channel::inbound_policy(data_dir, &sender_device, &message_id, plaintext)
+        crate::app_channel::inbound_policy(
+            data_dir,
+            &sender_identity,
+            &sender_device,
+            &message_id,
+            plaintext,
+        )
     };
     let mut chosen = None;
     for key in candidates {
@@ -3934,7 +3941,9 @@ mod tests {
                 .unwrap()
                 .confirm_verified_pair_response(&key, &init, &response, now())
                 .unwrap();
-            Self {
+            // App payloads come from verified friends only (the receiver
+            // guard, RAVEN_APP_PAYLOAD_V1 §3.1): both have checked the words.
+            let lab = Self {
                 alice,
                 bob,
                 a_dir,
@@ -3942,7 +3951,24 @@ mod tests {
                 a_bundle,
                 b_bundle,
                 key,
-            }
+            };
+            lab.set_alice_verified(true);
+            lab
+        }
+
+        /// Whether Bob's book has Alice verified (pinned).
+        fn set_alice_verified(&self, pinned: bool) {
+            let contacts = serde_json::json!([{
+                "petname": "Alice",
+                "pub_hex": hex::encode(self.a_bundle.cert.device_ed_pub),
+                "address": "",
+                "pinned": pinned,
+            }]);
+            std::fs::write(
+                self.b_dir.path().join("contacts.json"),
+                serde_json::to_string_pretty(&contacts).unwrap(),
+            )
+            .unwrap();
         }
 
         fn seal(&self, text: &str) -> Vec<u8> {
@@ -4194,6 +4220,26 @@ mod tests {
                 .unwrap(),
             Dedup::LineageRevoked
         );
+    }
+
+    /// The receiver guard (RAVEN_APP_PAYLOAD_V1 §3.1) on the real receive
+    /// path: an app payload from a contact Bob has not verified is deferred
+    /// (no inbox row, no ACK, nothing committed) while chat from them flows,
+    /// and the same bytes are taken once Bob verified them.
+    #[test]
+    fn an_unverified_contacts_app_payload_waits_until_they_are_verified() {
+        let lab = AppLab::new();
+        lab.set_alice_verified(false);
+        let task = lab.seal(&app_frame("a2a-request/1", 9, "{\"task\":1}"));
+        assert!(lab.deliver(&task).is_empty(), "deferred: no ACK");
+        assert_eq!(lab.bob_inbox_len(), 0);
+        assert!(lab.bob_app_items().is_empty());
+        assert_eq!(lab.deliver(&lab.seal("chat flows")).len(), 1);
+        lab.set_alice_verified(true);
+        assert_eq!(lab.deliver(&task).len(), 1, "taken once verified");
+        let items = lab.bob_app_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].content_type, "a2a-request/1");
     }
 
     #[test]

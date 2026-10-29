@@ -235,13 +235,110 @@ pub fn chat_text_allowed(text: &str) -> bool {
 /// How long a received item waits for RDAP before it expires (§7.4).
 pub use crate::app_store::APP_INBOX_ITEM_TTL_MS;
 
-/// §7.2: the application policy for one opened plaintext from
-/// `sender_device` (ATSAM_ENDPOINT_TRANSACTION_V1 §1 step 7). Chat is
-/// accepted; an app frame only when the gate is live, its type is registered
-/// and the inbox has room. Metadata reads only: no keystore inside the
-/// session-store transaction.
+// ------------------------------------------------------------------ guard
+
+/// The receiver guard's rate window (RAVEN_APP_PAYLOAD_V1 §3.1).
+pub const APP_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// New app payloads of one content type taken from one sender per
+/// [`APP_RATE_WINDOW`]; more are deferred (the sender retries later).
+pub const APP_RATE_PER_SENDER_TYPE: usize = 30;
+/// New app payloads of one content type taken from all senders together per
+/// [`APP_RATE_WINDOW`].
+pub const APP_RATE_PER_TYPE: usize = 120;
+
+/// Who may send this node an app payload (RAVEN_APP_PAYLOAD_V1 §3.1): a
+/// current, unblocked contact whose key is verified (security words or code
+/// checked). An unverified contact's app payloads are deferred, never
+/// stored: an agent task acts on this computer, so it comes only from
+/// someone the user checked. A book that cannot be read admits nobody.
+pub fn sender_may_send(data_dir: &Path, sender_identity: &[u8; 32]) -> bool {
+    matches!(
+        crate::outbox::contact_admission(data_dir, sender_identity),
+        crate::outbox::ContactAdmission::Allowed(c) if c.pinned
+    )
+}
+
+/// The guard's rate windows: when each payload taken in the last
+/// [`APP_RATE_WINDOW`] was taken, per (sender device, content type) and per
+/// content type.
+#[derive(Default)]
+pub struct AppRate {
+    per_sender: std::collections::HashMap<
+        ([u8; 32], String),
+        std::collections::VecDeque<std::time::Instant>,
+    >,
+    per_type: std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>,
+}
+
+impl AppRate {
+    /// Take one slot for a new payload of `content_type` from `sender` at
+    /// `now`; `false` (nothing taken) when either window is full.
+    pub fn take(&mut self, sender: &[u8; 32], content_type: &str, now: std::time::Instant) -> bool {
+        let fresh = |q: &mut std::collections::VecDeque<std::time::Instant>| {
+            while q
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= APP_RATE_WINDOW)
+            {
+                q.pop_front();
+            }
+            !q.is_empty()
+        };
+        self.per_sender.retain(|_, q| fresh(q));
+        self.per_type.retain(|_, q| fresh(q));
+        let key = (*sender, content_type.to_string());
+        let mine = self.per_sender.get(&key).map_or(0, |q| q.len());
+        let all = self.per_type.get(content_type).map_or(0, |q| q.len());
+        if mine >= APP_RATE_PER_SENDER_TYPE || all >= APP_RATE_PER_TYPE {
+            return false;
+        }
+        self.per_sender.entry(key).or_default().push_back(now);
+        self.per_type
+            .entry(content_type.to_string())
+            .or_default()
+            .push_back(now);
+        true
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unit tests keep their own windows (the process-wide ones are shared
+    /// by every test thread).
+    static TEST_RATE: std::cell::RefCell<AppRate> = std::cell::RefCell::new(AppRate::default());
+}
+
+/// [`AppRate::take`] on this process's windows.
+fn take_rate_slot(sender: &[u8; 32], content_type: &str) -> bool {
+    let now = std::time::Instant::now();
+    #[cfg(test)]
+    {
+        TEST_RATE.with(|r| r.borrow_mut().take(sender, content_type, now))
+    }
+    #[cfg(not(test))]
+    {
+        static RATE: std::sync::OnceLock<std::sync::Mutex<AppRate>> = std::sync::OnceLock::new();
+        RATE.get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(sender, content_type, now)
+    }
+}
+
+/// §7.2 and the receiver guard (RAVEN_APP_PAYLOAD_V1 §3.1): the application
+/// policy for one opened plaintext from `sender_device` of the identity
+/// `sender_identity` (the session-bound certificate's user key;
+/// ATSAM_ENDPOINT_TRANSACTION_V1 §1 step 7). Chat is accepted. An app frame
+/// is taken only when the gate is live, its type is registered (what), its
+/// sender is a verified contact (who), the frame keeps the size limits (how
+/// big: it parsed), the sender and the type are within their rate windows
+/// (how often: [`APP_RATE_PER_SENDER_TYPE`], [`APP_RATE_PER_TYPE`]) and the
+/// inbox has room (how many). A copy of a payload already held or handled
+/// is taken without a slot. Anything else is deferred: nothing is committed
+/// and the sender retries the same bytes. Metadata and the contact book
+/// only: no keystore inside the session-store transaction.
 pub fn inbound_policy(
     data_dir: &Path,
+    sender_identity: &[u8; 32],
     sender_device: &[u8; 32],
     message_id: &[u8; 16],
     plaintext: &[u8],
@@ -262,6 +359,9 @@ pub fn inbound_policy(
     if !content_type_registered(&frame.content_type, lab_unlocked()) {
         return InboundPolicy::Defer("app_type_unregistered");
     }
+    if !sender_may_send(data_dir, sender_identity) {
+        return InboundPolicy::Defer("app_sender_not_verified");
+    }
     let admitted = AppStore::open(data_dir, &MetadataOnly).and_then(|store| {
         store.admit(
             sender_device,
@@ -272,7 +372,11 @@ pub fn inbound_policy(
         )
     });
     match admitted {
-        Ok(Admit::Room | Admit::Duplicate | Admit::AlreadyDone) => InboundPolicy::Accept,
+        Ok(Admit::Duplicate | Admit::AlreadyDone) => InboundPolicy::Accept,
+        Ok(Admit::Room) if take_rate_slot(sender_device, &frame.content_type) => {
+            InboundPolicy::Accept
+        }
+        Ok(Admit::Room) => InboundPolicy::Defer("app_sender_rate"),
         Ok(Admit::Full) => InboundPolicy::Defer("app_inbox_full"),
         // Fail closed: commit nothing; the sender retries the same bytes.
         Err(_) => InboundPolicy::Defer("app_store_unavailable"),
@@ -679,6 +783,137 @@ mod tests {
     use super::*;
 
     const ID: [u8; 16] = [0xab; 16];
+
+    /// A contact book with `rows` (`(key, pinned)`) and, with `blocked`, the
+    /// first key on the block list.
+    fn book(dir: &Path, rows: &[([u8; 32], bool)], blocked: bool) {
+        let rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(key, pinned)| {
+                serde_json::json!({"petname": "Friend", "pub_hex": hex::encode(key),
+                                   "address": "", "pinned": pinned})
+            })
+            .collect();
+        std::fs::write(
+            dir.join("contacts.json"),
+            serde_json::to_string(&rows).unwrap(),
+        )
+        .unwrap();
+        let mut blocks = crate::chat_history::BlockList::default();
+        if blocked {
+            blocks.block(&hex::encode(rows_key(&rows[0])));
+        }
+        blocks.save(dir).unwrap();
+    }
+
+    fn rows_key(row: &serde_json::Value) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(row["pub_hex"].as_str().unwrap(), &mut key).unwrap();
+        key
+    }
+
+    fn request(n: u32) -> ([u8; 16], String) {
+        let mut mid = [0u8; 16];
+        mid[..4].copy_from_slice(&n.to_be_bytes());
+        let frame = encode_frame(CT_A2A_REQUEST, &mid, "{}", false).unwrap();
+        (mid, frame)
+    }
+
+    /// RAVEN_APP_PAYLOAD_V1 §3.1, who: only a verified, unblocked contact's
+    /// app payloads are taken; an unverified contact's, a stranger's and a
+    /// blocked contact's are deferred (nothing committed), while their chat
+    /// is not the guard's business.
+    #[test]
+    fn the_guard_takes_app_payloads_from_verified_contacts_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let friend = [0x51; 32];
+        let (mid, frame) = request(1);
+        let policy = |dir: &Path| inbound_policy(dir, &friend, &friend, &mid, frame.as_bytes());
+        let not_verified = InboundPolicy::Defer("app_sender_not_verified");
+        assert_eq!(policy(dir.path()), not_verified, "no contact book");
+        book(dir.path(), &[([0x52; 32], true)], false);
+        assert_eq!(policy(dir.path()), not_verified, "a stranger");
+        book(dir.path(), &[(friend, false)], false);
+        assert_eq!(policy(dir.path()), not_verified, "not verified");
+        assert_eq!(
+            inbound_policy(dir.path(), &friend, &friend, &mid, b"hello"),
+            InboundPolicy::Accept,
+            "chat is not the guard's"
+        );
+        book(dir.path(), &[(friend, true)], true);
+        assert_eq!(policy(dir.path()), not_verified, "blocked");
+        book(dir.path(), &[(friend, true)], false);
+        assert_eq!(policy(dir.path()), InboundPolicy::Accept, "verified");
+        assert!(sender_may_send(dir.path(), &friend));
+        // What and how big stay the frame's: an unregistered type or an
+        // oversized body is deferred whoever sends it.
+        let unregistered = format!("RVNAPP/1 x-other/1 {}\n{{}}", hex::encode(mid));
+        assert_eq!(
+            inbound_policy(dir.path(), &friend, &friend, &mid, unregistered.as_bytes()),
+            InboundPolicy::Defer("app_type_unregistered")
+        );
+        let big = format!(
+            "RVNAPP/1 a2a-request/1 {}\n{}",
+            hex::encode(mid),
+            "a".repeat(MAX_APP_BODY_BYTES + 1)
+        );
+        assert_eq!(
+            inbound_policy(dir.path(), &friend, &friend, &mid, big.as_bytes()),
+            InboundPolicy::Defer("app_reserved_invalid")
+        );
+    }
+
+    /// RAVEN_APP_PAYLOAD_V1 §3.1, how often: at most
+    /// [`APP_RATE_PER_SENDER_TYPE`] new payloads of a type from one sender a
+    /// minute (more are deferred and taken once the window moves on), at
+    /// most [`APP_RATE_PER_TYPE`] from everyone, each type and each sender
+    /// on its own.
+    #[test]
+    fn the_guard_limits_how_often_a_sender_may_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let (alice, bob) = ([0x61; 32], [0x62; 32]);
+        book(dir.path(), &[(alice, true), (bob, true)], false);
+        for n in 0..APP_RATE_PER_SENDER_TYPE as u32 {
+            let (mid, frame) = request(n);
+            assert_eq!(
+                inbound_policy(dir.path(), &alice, &alice, &mid, frame.as_bytes()),
+                InboundPolicy::Accept,
+                "{n}"
+            );
+        }
+        let (mid, frame) = request(1_000);
+        assert_eq!(
+            inbound_policy(dir.path(), &alice, &alice, &mid, frame.as_bytes()),
+            InboundPolicy::Defer("app_sender_rate")
+        );
+        // Another sender, and the same sender's answers, have their own.
+        assert_eq!(
+            inbound_policy(dir.path(), &bob, &bob, &mid, frame.as_bytes()),
+            InboundPolicy::Accept
+        );
+        let answer = encode_frame(CT_A2A_RESPONSE, &mid, "{}", false).unwrap();
+        assert_eq!(
+            inbound_policy(dir.path(), &alice, &alice, &mid, answer.as_bytes()),
+            InboundPolicy::Accept
+        );
+
+        // The windows themselves.
+        let t0 = std::time::Instant::now();
+        let mut rate = AppRate::default();
+        for _ in 0..APP_RATE_PER_SENDER_TYPE {
+            assert!(rate.take(&alice, CT_A2A_REQUEST, t0));
+        }
+        assert!(!rate.take(&alice, CT_A2A_REQUEST, t0));
+        assert!(!rate.take(&alice, CT_A2A_REQUEST, t0 + APP_RATE_WINDOW / 2));
+        assert!(rate.take(&alice, CT_A2A_REQUEST, t0 + APP_RATE_WINDOW));
+        let mut rate = AppRate::default();
+        for n in 0..APP_RATE_PER_TYPE {
+            let sender = [n as u8; 32];
+            assert!(rate.take(&sender, CT_A2A_REQUEST, t0), "{n}");
+        }
+        assert!(!rate.take(&[0xff; 32], CT_A2A_REQUEST, t0), "everyone's");
+        assert!(rate.take(&[0xff; 32], CT_A2A_RESPONSE, t0), "another type");
+    }
 
     #[test]
     fn reconcile_never_judges_a_record_whose_seal_may_still_be_committing() {

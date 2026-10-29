@@ -390,7 +390,13 @@ fn accept_message(
     // The same application policy and delivery as a direct link (app
     // channel §7.2, CORE-13): the session-bound certificate, never a bundle.
     let mut policy = |plaintext: &[u8]| {
-        crate::app_channel::inbound_policy(data_dir, &peer, &env.message_id, plaintext)
+        crate::app_channel::inbound_policy(
+            data_dir,
+            &cert.user_ed_pub,
+            &peer,
+            &env.message_id,
+            plaintext,
+        )
     };
     let accepted = match store.accept_message_envelope_with_policy(
         key,
