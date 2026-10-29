@@ -161,6 +161,11 @@ Every gate stays as it was.
   id from a later session is refused while nothing re-seals), and the first
   inbound body wins whatever the gates; a different body is a marked
   conflict. No wire byte changes.
+- **Friend Custody V1 / Custody Handoff V1.** [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md)
+  §7: an object whose outer signature is not the sender's is released and
+  blames no custodian (no security event, no strike).
+  [`RAVEN_CUSTODY_HANDOFF_V1.md`](RAVEN_CUSTODY_HANDOFF_V1.md) §3.3 says why
+  a DELIVER has no signer to check. No wire byte changes.
 
 ## Freeze record changes (2026-10-29, security review round 1)
 
