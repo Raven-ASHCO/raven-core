@@ -2069,7 +2069,9 @@ fn c1_lan_direct_both_ways_and_c3_stranger_is_not_accepted() {
 /// transports design §6.4): two services with no prior session. An
 /// agent payload handed to Alice's node pairs in the daemon and is delivered;
 /// Bob's node serves it to its one consumer and never as chat; a resubmit
-/// with the same ref and body is the same object. Lab unlock on both sides.
+/// with the same ref and body is the same object. Lab unlock on both sides;
+/// each has verified the other (app payloads go to, and are taken from,
+/// verified contacts only: RAVEN_APP_PAYLOAD_V1 §3.1).
 #[test]
 #[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
 fn c7a_app_channel_pairs_delivers_and_stays_out_of_chat() {
@@ -2082,8 +2084,8 @@ fn c7a_app_channel_pairs_delivers_and_stays_out_of_chat() {
     let b = Profile::create_with(root.path(), "cb", true);
     let a_svc = a.start_service();
     let b_svc = b.start_service();
-    a.add_contact(&b, "bob", &b_svc.lan_dial);
-    b.add_contact(&a, "alice", &a_svc.lan_dial);
+    a.pin_contact(&b, "bob", Some(&b_svc.lan_dial));
+    b.pin_contact(&a, "alice", Some(&a_svc.lan_dial));
 
     let submit = |body: &str| {
         a.raven(
@@ -13468,17 +13470,17 @@ const STRIKE_LINES: [&str; 2] = [
 /// unlock, friend custody's timers (leave a message with a friend at once,
 /// fetch every 500 ms), the handoff gate (`RAVEN_LAB_CUSTODY_HANDOFF=1`)
 /// with the forwarder's 500 ms interval, and route hints (the friends ride
-/// RRH1), for every process of it.
+/// RRH1), for every process of it. WAN custody only where `wan` says so:
+/// release builds have it on since 2026-10 (`FRIEND_CUSTODY_WAN_ENABLED`),
+/// so the others close it (a debug build's "0"), as before the switch-on.
 fn handoff_profile(root: &Path, name: &'static str, wan: bool) -> Profile {
     let mut p = Profile::new(root, name, true)
         .with_route_hints()
         .with_lab_env("RAVEN_LAB_CUSTODY_AFTER_MS", "0")
         .with_lab_env("RAVEN_LAB_CUSTODY_FETCH_MS", "500")
         .with_lab_env("RAVEN_LAB_CUSTODY_FORWARD_MS", "500")
-        .with_lab_env("RAVEN_LAB_CUSTODY_HANDOFF", "1");
-    if wan {
-        p = p.with_lab_env("RAVEN_LAB_CUSTODY_WAN", "1");
-    }
+        .with_lab_env("RAVEN_LAB_CUSTODY_HANDOFF", "1")
+        .with_lab_env("RAVEN_LAB_CUSTODY_WAN", if wan { "1" } else { "0" });
     p.init();
     p
 }
@@ -14056,11 +14058,12 @@ fn nearby_status(p: &Profile) -> String {
     out.stdout
 }
 
-/// The `bluetooth` row says the radio is on (the engine runs).
+/// The `radio` row says the radio is on (the engine runs; "on, central
+/// only" counts too).
 fn radio_on(p: &Profile) -> bool {
     nearby_status(p).lines().any(|l| {
         let mut w = l.split_whitespace();
-        w.next() == Some("bluetooth") && w.next() == Some("on")
+        w.next() == Some("radio") && w.next().map(|v| v.trim_end_matches(',')) == Some("on")
     })
 }
 
