@@ -6,10 +6,10 @@
 | **Amends** | [`WAIVER-LAN-DIRECT-2026-10-07`](WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md) §2, §4, §5 and §6, next to its [P2a](WAIVER_LAN_DIRECT_P2A_AMENDMENT_DRAFT.md), [session reset](WAIVER_LAN_DIRECT_SESSION_RESET_AMENDMENT_DRAFT.md), [route hints](WAIVER_LAN_DIRECT_ROUTE_HINTS_AMENDMENT_DRAFT.md) and [cutoff](WAIVER_LAN_DIRECT_CUTOFF_AMENDMENT_DRAFT.md) amendments (none is edited) |
 | **Not covered** | Friend custody, on the LAN or over the internet: its own draft [`WAIVER_FRIEND_CUSTODY_DRAFT.md`](WAIVER_FRIEND_CUSTODY_DRAFT.md). Everything in §5 below |
 | **Decision** | One Phase 3 LAN amendment with three sections, (A) every interface, (B) the beacon, (C) renewal, instead of separate drafts (Phase 3 owner decision "renewal paperwork and scope"). Each section's gate is flipped on its own, in the order of §7 |
-| **Design** | [`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md) §3 "Phase 3" items 1, 2 and 4 (components C8 and C9), decision D7; plan `docs/roadmap/plans/phase3-design.json` |
+| **Design** | the any-network reachability plan (not published) §3 "Phase 3" items 1, 2 and 4 (components C8 and C9), decision D7; plan `docs/roadmap/plans/phase3-design.json` |
 | **Wire** | (A) none. (B) [`protocol/RAVEN_LAN_BEACON_V1.md`](../protocol/RAVEN_LAN_BEACON_V1.md) and [`RAVEN_PRIVATE_RENDEZVOUS_V1.md`](../protocol/RAVEN_PRIVATE_RENDEZVOUS_V1.md) revision 4 §5.3a (not yet approved); vectors `shared-vectors/rvn1/lan_beacon/`. (C) none: an ordinary [`RAVEN_PAIR_INIT_V1.md`](../protocol/RAVEN_PAIR_INIT_V1.md) exchange |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` ("Local network"); [`OFFLINE_GUIDE.md`](OFFLINE_GUIDE.md); [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) §4 |
-| **Real rows** | [`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md) |
+| **Real rows** | an unpublished test checklist |
 | **Approver** | Protocol owner (signature pending) |
 | **Date drafted** | 2026-10-22 |
 | **Review by** | Same date as the LAN waiver (2027-01-07) |
@@ -239,7 +239,7 @@ real rows):
   [`PROTOCOL_FREEZE_HASHES_V1.md`](PROTOCOL_FREEZE_HASHES_V1.md) checked.
 - **Release inertness:** the release-mode CI step (`inert`, `production_flag`)
   green.
-- **Real rows** ([`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md)):
+- **Real rows** (an unpublished test checklist):
   R1, R1b, R11a-f and R21-R24.
 
 Flip order, each in its own reviewed commit, after signature:

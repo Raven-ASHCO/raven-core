@@ -4,7 +4,7 @@
 > (`NEARBY_PRODUCTION_ENABLED = false`) <!-- gate: NEARBY_PRODUCTION_ENABLED=false -->
 > until the owner signs [`WAIVER_NEARBY_DRAFT.md`](WAIVER_NEARBY_DRAFT.md)
 > after the hardware rows in
-> [`PHYSICAL_NEARBY_LAPTOPS.md`](PHYSICAL_NEARBY_LAPTOPS.md). Until then
+> an unpublished test checklist. Until then
 > `raven nearby status` says "held in this build" and every other `raven
 > nearby` command changes nothing. This guide says how it works once it is
 > released, and how developers try it today (section 9).
@@ -341,8 +341,7 @@ export RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1
 
 The second line puts RavenNearby.app next to the debug raven-node, where it
 is found first. Release builds read neither switch. The step-by-step
-hardware rows, with test homes, are
-[`PHYSICAL_NEARBY_LAPTOPS.md`](PHYSICAL_NEARBY_LAPTOPS.md). Without
+hardware rows are in an unpublished test checklist. Without
 hardware, `raven-node nearby-ether` (debug builds) is a fake Bluetooth
 "air" on loopback that the carrier matrix (C50-C53, C56) and the fault
 matrix (`RAVEN_FAULT_NEARBY=1`, s63-s67, s67b and s72-s74) use; no real radio is
@@ -356,4 +355,4 @@ opened there.
 - Specification: [`RAVEN_NEARBY_LINK_V1.md`](../protocol/RAVEN_NEARBY_LINK_V1.md).
 - Threat model: [`THREAT_MODEL.md`](THREAT_MODEL.md) section 1.1.
 - Waiver draft (unsigned): [`WAIVER_NEARBY_DRAFT.md`](WAIVER_NEARBY_DRAFT.md).
-- Hardware rows N1-N12: [`PHYSICAL_NEARBY_LAPTOPS.md`](PHYSICAL_NEARBY_LAPTOPS.md).
+- Hardware rows N1-N12: an unpublished test checklist.

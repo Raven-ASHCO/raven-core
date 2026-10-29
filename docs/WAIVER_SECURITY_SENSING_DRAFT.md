@@ -26,7 +26,7 @@
 | **Wire** | None: the codes are local and never sent; no frame, field, error code, vector or freeze hash changes (R7 answers with the existing `RATE_LIMITED`) |
 | **Threat model** | [`THREAT_MODEL.md`](THREAT_MODEL.md) §3.3, §3.5, §3.10, §3.11, §3.14, §3.15 |
 | **User docs** | `raven security --help`; [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) section 10 |
-| **Real rows** | [`P6_REAL_ROWS_CHECKLIST.md`](P6_REAL_ROWS_CHECKLIST.md): R30 (waits for P6.32) |
+| **Real rows** | an unpublished test checklist: R30 (waits for P6.32) |
 
 ## 1. Why a waiver is needed
 

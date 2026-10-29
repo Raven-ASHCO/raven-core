@@ -23,7 +23,7 @@ waiver (`docs/WAIVER_P2P_RELAY_DRAFT.md`, whose §6 lists route hints as a lapse
 condition) and of the LAN-direct waiver (RLX1, RRH1 on LAN links).
 **Audience:** re-implementers of the LAN / Internet / p2p direct links and of
 the dial planner.
-**Design:** [`docs/design/2026-10-any-network-reachability.md`](../docs/design/2026-10-any-network-reachability.md)
+**Design:** the any-network reachability plan (an internal design document, not published)
 (Phase 2 item 1, C5).
 
 ---

@@ -239,7 +239,7 @@ builds open them with `RAVEN_LAB_ROUTE_HINTS=1` and `RAVEN_LAB_FRIEND_RELAY=1`
 (with `RAVEN_LAB_TEST_A=1`). While they are off, raven-node sends no route
 hints, never relays for your contacts and never picks a relay by itself, and
 `raven relay offer` and `raven relay auto` say so. Their real-world rows are in
-[`P2_REAL_ROWS_CHECKLIST.md`](P2_REAL_ROWS_CHECKLIST.md).
+an unpublished test checklist.
 
 Phase 4 of the any-network plan (networks that let only web traffic out,
 router port mapping with NAT-PMP, PCP and IPv6 pinholes, the NAT mapping
@@ -254,7 +254,7 @@ and `RAVEN_LAB_PEER_ROTATION=1`), each with `RAVEN_LAB_TEST_A=1`. They wait
 for unsigned drafts: [`WAIVER_WSS_PROXY_DRAFT.md`](WAIVER_WSS_PROXY_DRAFT.md),
 [`WAIVER_PORT_MAP_DRAFT.md`](WAIVER_PORT_MAP_DRAFT.md) and §10 of the p2p
 relay draft; their real-world rows are in
-[`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md). While they are off a
+an unpublished test checklist. While they are off a
 node behaves as in Phase 2: `raven-node relay --wss` exits with `WSS_HOLD`, no
 proxy is used, the router is asked through UPnP only, every hole punch is
 tried and the network ID stays fixed; the commands below say so when you use

@@ -22,7 +22,7 @@
 | **Design** | [`design/2026-10-friend-custody.md`](design/2026-10-friend-custody.md) §20; the Phase 5 multi-hop design (`docs/roadmap/plans/phase45-design.json`, part "multi-hop delivery") |
 | **Wire** | [`protocol/RAVEN_CUSTODY_HANDOFF_V1.md`](../protocol/RAVEN_CUSTODY_HANDOFF_V1.md) (RHW1 inside RFC1 version byte 1, codes 14-16); [`protocol/RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §4 (CUSTODIAN_TAG flag bit 0 `HANDOFF_INBOX`); vectors `shared-vectors/rvn1/custody/rhw1_*_001.json`, `rfc1_tags_*_001.json`, `rfc1_handoff_replies_001.json`, `custody/negative/`, `route_hints/rrh1_custody_handoff_inbox_001.json` |
 | **User docs** | [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) §9; `raven node custody handoff on|off` prints its disclosure |
-| **Real rows** | [`P5_REAL_ROWS_CHECKLIST.md`](P5_REAL_ROWS_CHECKLIST.md): R28 (LAN mule) for this record; R29 (WAN chain) for the internet amendment |
+| **Real rows** | an unpublished test checklist: R28 (LAN mule) for this record; R29 (WAN chain) for the internet amendment |
 
 ## 1. Why a waiver is needed
 

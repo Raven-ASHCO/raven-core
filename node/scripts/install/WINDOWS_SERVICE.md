@@ -36,7 +36,7 @@ Dedicated IPC only: `raven-node ipc --data-dir $Data`.
 
 ## Bluetooth nearby
 
-No installer turns Bluetooth nearby on, and `windows_service.ps1` changes nothing for it: `raven.exe nearby enable` does, in a build that has it (feature `nearby-radio`; held while `NEARBY_PRODUCTION_ENABLED = false`). The nearby radio uses WinRT Bluetooth in raven-node's user session, which is what the logon task gives it; a Windows service (session 0) is not supported for nearby (row N8 of [`PHYSICAL_NEARBY_LAPTOPS.md`](../../../docs/PHYSICAL_NEARBY_LAPTOPS.md) tests the logon task). `raven.exe nearby status` shows whether this PC's adapter, and Windows for an unpackaged process, allow the peripheral role: "on, central only" means it reaches contacts that advertise for it, never the other way round, and two central-only PCs cannot reach each other. Guide: [`docs/NEARBY.md`](../../../docs/NEARBY.md).
+No installer turns Bluetooth nearby on, and `windows_service.ps1` changes nothing for it: `raven.exe nearby enable` does, in a build that has it (feature `nearby-radio`; held while `NEARBY_PRODUCTION_ENABLED = false`). The nearby radio uses WinRT Bluetooth in raven-node's user session, which is what the logon task gives it; a Windows service (session 0) is not supported for nearby (hardware row N8 tests the logon task). `raven.exe nearby status` shows whether this PC's adapter, and Windows for an unpackaged process, allow the peripheral role: "on, central only" means it reaches contacts that advertise for it, never the other way round, and two central-only PCs cannot reach each other. Guide: [`docs/NEARBY.md`](../../../docs/NEARBY.md).
 
 ## Named pipe IPC
 

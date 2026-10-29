@@ -1428,8 +1428,7 @@ identity and can never be a custodian.
 The wan script `node/scripts/wan_two_network_test.sh` has the arms the real
 rows use: `custodian on|off`, `mailbox on`, `wait-held TAG [SECS]`,
 `hand-off TAG` and `custody-status`, and `report` adds counts-only custody
-lines ([`docs/P3_REAL_ROWS_CHECKLIST.md`](../P3_REAL_ROWS_CHECKLIST.md)
-section 5: R10, R10b, R10r, R11g).
+lines (rows R10, R10b, R10r and R11g of an unpublished test checklist).
 
 ## 20. Multi-hop: custody handoff (Phase 5)
 
@@ -1495,4 +1494,4 @@ ordinary RFC1 FETCH; Bob's ACK comes back F2 -> F1 the mirrored way.
 - **Release path.** [`docs/WAIVER_FRIEND_CUSTODY_HANDOFF_DRAFT.md`](../WAIVER_FRIEND_CUSTODY_HANDOFF_DRAFT.md)
   (unsigned; LAN only, after the custody LAN flip), real rows R28 (LAN mule)
   and R29 (WAN chain, for a later internet amendment) in
-  [`docs/P5_REAL_ROWS_CHECKLIST.md`](../P5_REAL_ROWS_CHECKLIST.md).
+  an unpublished test checklist.

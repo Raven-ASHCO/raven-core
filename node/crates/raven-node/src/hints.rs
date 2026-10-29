@@ -672,6 +672,7 @@ impl LinkCtl {
             lab_local: raven_core::p2p_local_candidates_enabled(),
             offers_live: raven_core::relay_offers_live(),
             nat_live: raven_core::nat_class_live_enabled(),
+            stun_live: raven_core::portmap_gate::stun_discovery_live_enabled(),
             rotation_live: raven_core::peer_rotation_live_enabled(),
             seeds_live: crate::pair_seed::live(),
             now_ms: crate::now_ms(),
@@ -699,6 +700,10 @@ struct ApplyCtx {
     offers_live: bool,
     /// [`raven_core::nat_class_live_enabled`]: a NAT_CLASS is kept.
     nat_live: bool,
+    /// [`raven_core::portmap_gate::stun_discovery_live_enabled`]: an
+    /// INET_DIRECT address is kept (spec §13.3; security review 2026-10-29
+    /// #9: kept while the gate was closed).
+    stun_live: bool,
     /// [`raven_core::peer_rotation_live_enabled`]: a pinned contact's
     /// PEER_SCHEDULE is kept (and a snapshot without one forgets it).
     rotation_live: bool,
@@ -823,6 +828,11 @@ fn apply_frame_as(
     // With the NAT_CLASS gate closed nothing of it is stored (Phase 2).
     if !ctx.nat_live {
         valid.nat_class = None;
+    }
+    // With the STUN discovery gate closed no INET_DIRECT address is stored
+    // (spec §13.3).
+    if !ctx.stun_live {
+        valid.inet.clear();
     }
     // Not part of the learned routes: its own file (below).
     let schedule = valid.peer_schedule.take();
@@ -3896,6 +3906,7 @@ mod tests {
             lab_local: false,
             offers_live: false,
             nat_live: false,
+            stun_live: true,
             rotation_live: false,
             seeds_live: false,
             now_ms: T0,
@@ -3951,8 +3962,14 @@ mod tests {
             ttl_s: 3600,
             p2p_id: Some(peer_id_bytes(&pid(PEER)).unwrap()),
             nat_class: Some(class),
+            inet: vec![route_hints::InetDirect {
+                flags: 0,
+                addr: "1.1.1.1:7422".parse().unwrap(),
+            }],
             ..RouteHints::default()
         });
+        // Security review 2026-10-29 #9: the STUN discovery gate (spec
+        // §13.3) closed with the NAT_CLASS gate here: no INET_DIRECT kept.
         let apply = |nat_live: bool, now_ms: u64| ApplyCtx {
             carrier: OutboxCarrier::P2p,
             keys,
@@ -3962,6 +3979,7 @@ mod tests {
             lab_local: false,
             offers_live: false,
             nat_live,
+            stun_live: nat_live,
             rotation_live: false,
             seeds_live: false,
             now_ms,
@@ -3969,6 +3987,7 @@ mod tests {
         apply_frame(dd, &peer_frame, &apply(false, T0)).unwrap();
         let held = learned_routes::learned(dd, &keys.peer, T0).unwrap();
         assert_eq!(held.nat_class, None, "gate closed: not stored");
+        assert!(held.inet.is_empty(), "STUN gate closed: no INET_DIRECT");
         let peer_frame = route_hints::encode(&RouteHints {
             generation: 10,
             ..route_hints::decode(&peer_frame).unwrap()
@@ -3976,6 +3995,7 @@ mod tests {
         apply_frame(dd, &peer_frame, &apply(true, T0 + 1)).unwrap();
         let held = learned_routes::learned(dd, &keys.peer, T0 + 1).unwrap();
         assert_eq!(held.nat_class, Some(class));
+        assert_eq!(held.inet.len(), 1, "STUN gate open: kept");
     }
 
     /// Phase 4 (P4.27): PEER_SCHEDULE goes to every verified contact while
@@ -4059,6 +4079,7 @@ mod tests {
             lab_local: false,
             offers_live: false,
             nat_live: false,
+            stun_live: true,
             rotation_live,
             seeds_live: false,
             now_ms,
@@ -4167,6 +4188,7 @@ mod tests {
             lab_local: false,
             offers_live: true,
             nat_live: false,
+            stun_live: true,
             rotation_live: false,
             seeds_live: false,
             now_ms: T0,
@@ -5094,6 +5116,7 @@ mod tests {
                 lab_local: false,
                 offers_live: false,
                 nat_live: false,
+                stun_live: true,
                 rotation_live: false,
                 seeds_live: live[to],
                 now_ms: now,
@@ -5188,6 +5211,7 @@ mod tests {
             lab_local: false,
             offers_live: false,
             nat_live: false,
+            stun_live: true,
             rotation_live: false,
             seeds_live: false,
             now_ms: T0,
@@ -5921,6 +5945,7 @@ mod tests {
             lab_local: false,
             offers_live: false,
             nat_live: false,
+            stun_live: true,
             rotation_live: false,
             seeds_live: false,
             now_ms: crate::now_ms(),

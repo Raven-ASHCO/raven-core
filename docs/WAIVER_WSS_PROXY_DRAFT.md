@@ -17,9 +17,9 @@
 | **Review by** | the review-by date of the p2p relay waiver |
 | **Withdrawal** | Set `WSS_PROXY_PRODUCTION_ENABLED = false` (proxy dials only) or both flags `false` in `node/crates/raven-core/src/wss_gate.rs`. The const asserts there keep the proxy gate off while WSS is off, and WSS off while `P2P_PRODUCTION_ENABLED` is off |
 | **Spec** | [`RAVEN_WSS_TRANSPORT_V1.md`](../protocol/RAVEN_WSS_TRANSPORT_V1.md) (RWS1) |
-| **Design** | [`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md) §3 "Phase 4" and decision D10; the Phase 4 plan `docs/roadmap/plans/phase45-design.json` (`.designs[0]`, owner decisions O4-1 to O4-8 and O4-16) |
+| **Design** | the any-network reachability plan (not published) §3 "Phase 4" and decision D10; the Phase 4 plan `docs/roadmap/plans/phase45-design.json` (`.designs[0]`, owner decisions O4-1 to O4-8 and O4-16) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` (section "libp2p: relay and hole punching", "Networks that let only web traffic out"); [`RELAY_KIT.md`](RELAY_KIT.md) |
-| **Real rows** | [`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md): R8w and R8p required, R8m optional |
+| **Real rows** | an unpublished test checklist: R8w and R8p required, R8m optional |
 
 ## 1. Why a waiver is needed
 
@@ -210,7 +210,7 @@ All open until recorded; none of the software runs replaces the real rows.
   (`generate_wss.py`), `scripts/freeze_protocol_hashes.sh --check` green, the
   dependency audit unchanged (no new crate), and `node/Cargo.lock` with no
   new package for Phase 4.
-- **Real rows** ([`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md),
+- **Real rows** (an unpublished test checklist,
   with `node/scripts/r8_only_443.sh` / `r8_only_443.ps1`): **R8w** (only TCP 443
   and DNS out; a VPS relay with `--wss 443`; delivered 10/10 both ways,
   relayed, relay transport `wss`) and **R8p** (nothing out but an HTTPS proxy

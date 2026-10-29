@@ -14,9 +14,9 @@ Sprint 0 inventory of raven-swarm status vs that target: [`docs/network/raven-sw
 | Localhost carrier checks | `bridge_abc_demo`, `internet_dial_smoke`, `libp2p_swarm_smoke` | Bridge/store software behavior plus an explicit raw-Internet production hold |
 | Phase 2 on loopback | `cargo test -p raven-node --test carrier_matrix -- --ignored` (C17-C26, C35) and `scripts/lan_fault_matrix.py` (s04/s04b/s04c/s04p with `RAVEN_FAULT_HINTS=1`; s39-s49 with `RAVEN_FAULT_P2P=1`, s41-s44 also with `RAVEN_FAULT_FRIEND=1`; s48o also with `RAVEN_FAULT_NETWATCH=1`) | Route hints, friend relays and automatic relay choice, the relay kit, and why a contact cannot be reached (C26, s48, s48c, s49), including no route to the internet (C35, s48o: LAN only, no relay, VPS, UPnP or port advice). Lab switches only, every gate off; one machine, no NAT |
 | Phase 3 LAN on loopback | `cargo test -p raven-node --test carrier_matrix -- --ignored` (C27-C30) and `scripts/lan_fault_matrix.py` with `RAVEN_FAULT_BEACON=1` (s04, s80-s84, s86, s87) | The LAN listener on every interface (`--lan-listen auto`: both families, local sources only, `raven lan off` and `on` live) and the contact-only LAN beacon: C29 over real multicast (a free UDP port, never 7420; skipped only with `RAVEN_HARNESS_NO_MULTICAST=1`), the rest on a lab bus (127.0.0.1 only) with a Sniffer that hears every datagram. Lab switches only, both gates off; one machine, no NAT |
-| Phase 3 renewal and custody on loopback | `cargo test -p raven-node --test carrier_matrix -- --ignored` (C31-C34) and `scripts/lan_fault_matrix.py` with `RAVEN_FAULT_RENEW=1` (s85, s85b) or `RAVEN_FAULT_CUSTODY=1 RAVEN_FAULT_P2P=1 RAVEN_FAULT_HINTS=1` (s30p, s30w; s30r also with `RAVEN_FAULT_FRIEND=1`) | Session renewal near a session's end and its fallback side (C31, s85, s85b: what waits keeps about a day). Friend custody over p2p: announced custodians, deposits and fetches over relay circuits with a byte scan of the custodian's files (C32, s30p), the two WAN switches and the refusals (C33, s30w), a friend relay and a custodian on one node (C34, s30r). Real rows: [`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md). Lab switches only, every gate off; one machine, no NAT |
+| Phase 3 renewal and custody on loopback | `cargo test -p raven-node --test carrier_matrix -- --ignored` (C31-C34) and `scripts/lan_fault_matrix.py` with `RAVEN_FAULT_RENEW=1` (s85, s85b) or `RAVEN_FAULT_CUSTODY=1 RAVEN_FAULT_P2P=1 RAVEN_FAULT_HINTS=1` (s30p, s30w; s30r also with `RAVEN_FAULT_FRIEND=1`) | Session renewal near a session's end and its fallback side (C31, s85, s85b: what waits keeps about a day). Friend custody over p2p: announced custodians, deposits and fetches over relay circuits with a byte scan of the custodian's files (C32, s30p), the two WAN switches and the refusals (C33, s30w), a friend relay and a custodian on one node (C34, s30r). Real rows: an unpublished test checklist. Lab switches only, every gate off; one machine, no NAT |
 | Friend relay rehearsal | `node/scripts/wan_two_network_test.sh friend-dry-run` | `friend-host` and `friend-use` on loopback, each in its own test home: the user's relay is the host's, picked from its offer and reserved. Not a WAN claim |
-| Three-node rehearsal | `node/scripts/wan_two_network_test.sh three-dry-run` | A relay, two always-listening nodes and a stranger on loopback: 3/3 messages `path=relayed` through a true circuit, the stranger refused by the recipient's peer gate. No NAT; a rehearsal of the real rows R3/R5/R9/R14 ([`P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md`](P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md)), not a WAN claim |
+| Three-node rehearsal | `node/scripts/wan_two_network_test.sh three-dry-run` | A relay, two always-listening nodes and a stranger on loopback: 3/3 messages `path=relayed` through a true circuit, the stranger refused by the recipient's peer gate. No NAT; a rehearsal of the real rows R3/R5/R9/R14 (an unpublished test checklist), not a WAN claim |
 
 ## Run Docker substitute
 
@@ -122,9 +122,7 @@ three-rooms-beacon (the beacon on UDP 7420 inside the namespaces only).
 
 Software substitutes **maximize** confidence that routing policy + relay/store paths work.  
 They **do not** replace a carrier-grade NAT matrix or libp2p DCUtR on the public Internet.
-Those are the owner-run real rows R3, R5, R9 and R14:
-[`P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md`](P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md); for
-Phase 2 (route hints, friend relays, the relay kit, the diagnosis) the rows in
-[`P2_REAL_ROWS_CHECKLIST.md`](P2_REAL_ROWS_CHECKLIST.md); for Phase 3 (the local
-network, friend custody, session renewal) the rows in
-[`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md).
+Those are the owner-run real rows R3, R5, R9 and R14, the Phase 2 rows (route
+hints, friend relays, the relay kit, the diagnosis) and the Phase 3 rows (the
+local network, friend custody, session renewal), kept in an unpublished test
+checklist.

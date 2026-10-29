@@ -11,22 +11,15 @@
 
 ## 1. Why
 
-Field test of 2026-10-28 (build 183cbe68, lab set S5A: `TEST_A`, `HORIZON`,
-`PORT_MAP`, `V6_PINHOLE`, `NAT_CLASS`, `ROUTE_HINTS`, `FRIEND_RELAY`,
-`CUSTODY_WAN`; consents on for UPnP, the IPv6 pinhole, the relay offer, node
-custody and custody use). Two Macs and a Windows laptop.
-
-- The home router answers none of UPnP, NAT-PMP and PCP. Its NAT is
-  endpoint-independent and port-preserving (RX0: three STUN servers saw the
-  same public address and port), with address-and-port-dependent filtering
-  (part 2 of the research, §2.3). No IPv6.
-- The owner forwarded TCP 17422, TCP+UDP 17423 and TCP+UDP 17427 to mac-b.
-- mac-b never learned its public address. Its status said "relaying YES, but
-  this computer has no public address to offer", reachability `unknown`, so
-  its relay offer and its route hints carried no internet address.
-- When mac-a moved to a phone hotspot, both of its sends were queued with
-  "you and mac-b are both behind NAT": mac-a had never been told an address
-  of mac-b that works from outside.
+A lab field test on 2026-10-28 (two Macs and a Windows laptop, debug builds with
+the p2p, port-mapping, route-hint, friend-relay and custody lab switches) showed
+the gap. Behind a router that answered none of UPnP, NAT-PMP and PCP (its NAT
+endpoint-independent and port-preserving, with address-and-port-dependent
+filtering; no IPv6), a node with port forwards never learned its public address:
+its status said "relaying YES, but this computer has no public address to
+offer", reachability `unknown`, so its relay offer and its route hints carried
+no internet address. A friend that moved to a phone hotspot then had no address
+of it that worked from outside, and its sends were queued as "both behind NAT".
 
 The cause: every source of a public address in Raven needs something the
 field did not have. UPnP and NAT-PMP/PCP need a router that answers. AutoNAT
@@ -133,8 +126,8 @@ exposes no way to send a STUN request on it, and it does not set
   the p2p TCP listener) or TCP and QUIC on a port that only a forward or a
   router mapping can open; a UDP STUN query cannot tell whether a TCP forward
   exists. Their address is the public IP with the port they listen on,
-  guessed only where the NAT keeps ports (`no_nat` or `stable_kept`: the
-  field's home router): a NAT that shifts its outbound ports is rarely set up
+  guessed only where the NAT keeps ports (`no_nat` or `stable_kept`, as in
+  the field test): a NAT that shifts its outbound ports is rarely set up
   with a same-port forward, and the guess would cost every friend a dial
   that never answers. It is offered as unconfirmed until a contact comes in
   through it (§4.4).
@@ -284,7 +277,7 @@ through it from outside:
 
 - p2p: an inbound libp2p connection (not a relay circuit) from a contact the
   peer gate admits, from a globally routable IP that is not this computer's
-  own public IP (a hairpin through the home router proves nothing), on the
+  own public IP (a hairpin through the router proves nothing), on the
   TCP or QUIC listener: that transport's discovered address is confirmed for
   24 h, listed among the confirmed DIRECT entries, and the reachability
   class becomes `public` (a new fact in `reach_class`: an authenticated
@@ -464,18 +457,11 @@ back.
 
 ## 11. Three-machine field test (lab builds)
 
-Debug builds, lab set S5A plus `RAVEN_LAB_STUN_DISCOVERY=1` and
-`RAVEN_LAB_SERVERLESS_PUNCH=1` on all three machines (S5A already has
-`RAVEN_LAB_TEST_A=1`, `RAVEN_LAB_NAT_CLASS=1`, `RAVEN_LAB_ROUTE_HINTS=1` and
-`RAVEN_LAB_FRIEND_RELAY=1`). No `RAVEN_LAB_STUN_SERVERS`: the public list. The
-consents stay as in the field run; `raven node stun` is on by default.
-
-| Row | Setup | Pass |
-|---|---|---|
-| F1 | mac-b at home with the forwards (TCP 17422, TCP+UDP 17423 and 17427); `raven node stun` on each machine | mac-b: public address found, NAT stable (port kept), anchored; `raven relay status` offered with no `--external` |
-| F2 | mac-a and mac-b exchange a message at home (route hints), then mac-a moves to the phone hotspot and sends 10 | 10/10 delivered `direct` to the discovered address; mac-b's status then says reached from outside (reach class public) |
-| F3 | mac-a on the hotspot reserves on mac-b's offered relay | the offer turns CONFIRMED; win-c and mac-a exchange through it if win-c can reach mac-b's public address from home (router hairpin), else custody at mac-b carries it |
-| F4 | Serverless punch: remove the 17423 forward (keep 17427); mac-a on the hotspot exchanges a message with mac-b through mac-b's relay (route hints over the relayed link), then `raven relay offer off` on mac-b and only mac-b's node restarted (mac-a keeps running, so its hotspot mapping stays the one mac-b learned; a direct connection DCUtR made goes with the restart); mac-a sends 10 | `raven node stun` on mac-a says its hotspot NAT class; with `stable_*` on both sides the messages arrive over a punched connection within 16 minutes (punch counts in `raven doctor`); with `varies` the punch is skipped and the messages wait (recorded) |
+The real-network rows (public address discovery behind a router with port
+forwards, a laptop moving to a phone hotspot, a relay offer that turns
+confirmed, and a serverless punch without the forward) run on debug builds with
+`RAVEN_LAB_STUN_DISCOVERY=1` and `RAVEN_LAB_SERVERLESS_PUNCH=1` on top of the
+p2p lab switches, from an unpublished test checklist.
 
 ## 12. Owner decisions asked
 

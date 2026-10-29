@@ -1,0 +1,29 @@
+Raven core (protocol, node, CLI, terminal app and desktop engine)
+Copyright (C) 2026 ASHCO
+https://raven-messager.com
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+details: the full text is in the file LICENSE.
+
+The Raven name and visual assets are also described in TRADEMARK.md and
+ASSET_LICENSE.md.
+
+Additional terms: PENDING DECISION
+----------------------------------
+
+The two terms below were part of the former license notice. They are not part
+of LICENSE (the standard GNU AGPL-3.0 text). They are kept here, word for word,
+until the copyright holder decides whether to keep, change or drop them.
+
+ - The name "RAVEN" and associated branding may not be used to endorse or
+   promote products derived from this software without specific prior
+   written permission.
+ - The visual design, UI assets, and app icons are not covered by this
+   license and remain proprietary.

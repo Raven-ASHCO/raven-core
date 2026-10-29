@@ -293,7 +293,10 @@ fn apply_msg(
         changed: true,
         work: false,
     };
-    if forwarded {
+    // Security review 2026-10-29 #11: a signed receipt goes only to a
+    // carrier that is a member (never a membership oracle for anyone
+    // else holding an old message).
+    if forwarded && roster.has(peer) {
         // Tell the author through the member that passed it on.
         g.push_intent(Intent {
             id: new_intent_id(),
@@ -413,10 +416,15 @@ fn apply_leave(
     let Some(roster) = g.roster() else {
         return dropped(file);
     };
+    // Security review 2026-10-29 #11: a leave is tied to its epoch: only
+    // one made for the roster held counts (an old leave, delivered again
+    // after the member was added back, removed it again). A leave that
+    // crossed a newer roster is made again by its member.
     if roster.admin != *me
         || l.from == roster.admin
         || *peer != l.from
         || !roster.has(&l.from)
+        || l.epoch != roster.epoch
         || !l.verify()
     {
         return dropped(file);
@@ -453,7 +461,9 @@ fn apply_sync(file: &mut GroupsFile, me: &Key, peer: &Key, s: &GroupSync, now_ms
     let Some(roster) = g.roster() else {
         return dropped(file);
     };
-    if roster.admin != *me || !(roster.has(peer) || g.was_removed(peer)) {
+    // Security review 2026-10-29 #11: a removed member is sent no later
+    // roster (it got the one that removed it); only members are answered.
+    if roster.admin != *me || !roster.has(peer) {
         return dropped(file);
     }
     let key = hex::encode(peer);

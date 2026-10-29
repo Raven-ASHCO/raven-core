@@ -1361,6 +1361,7 @@ fn recent_failures(
         routes,
         &reach.failed,
         reach.tor_busy,
+        reach.lan_seen_s,
         known,
         super::ext::on_our_network,
     )
@@ -1378,10 +1379,17 @@ fn recent_failures_with(
     routes: &[DialRoute],
     failed: &[super::ipc_client::RouteFailure],
     tor_busy: bool,
+    lan_seen_s: Option<u64>,
     known: &ProbePlan,
     on_net: impl Fn(std::net::IpAddr) -> bool,
 ) -> Vec<Option<(String, u64)>> {
-    let stopped = friend_raven_stopped(failed, on_net);
+    // Security review 2026-10-29 #10: a refusal at the friend's *old* LAN
+    // address (another computer has it now) kept Tor out of the race. It
+    // says the friend's Raven stopped only while raven-node also had a LAN
+    // link with the friend lately (`lan_seen_s`, within
+    // [`LAN_SEEN_SPAN_S`]); otherwise Tor stays in the race.
+    let seen_here = lan_seen_s.is_some_and(|s| s <= LAN_SEEN_SPAN_S);
+    let stopped = seen_here && friend_raven_stopped(failed, on_net);
     let failure_of = |route: &DialRoute| {
         failed
             .iter()
@@ -4457,7 +4465,7 @@ mod tests {
         let routes = [lan.clone(), p2p.clone(), tor.clone()];
         let plan = ProbePlan::in_order(3);
         let here = |_: std::net::IpAddr| true;
-        let recent = recent_failures_with(&routes, &all, false, &plan, here);
+        let recent = recent_failures_with(&routes, &all, false, Some(30), &plan, here);
         let (errors, age) = every_route_failed(&routes, &recent, &plan).unwrap();
         assert_eq!(
             errors,
@@ -4477,7 +4485,7 @@ mod tests {
             fail("p2p_dial", &p2p.dial, 15, "no answer"),
             fail("onion_dial", &tor.dial, 4, "no answer"),
         ];
-        let recent = recent_failures_with(&routes, &away, false, &plan, here);
+        let recent = recent_failures_with(&routes, &away, false, Some(30), &plan, here);
         assert!(every_route_failed(&routes, &recent, &plan).is_none());
         assert_eq!(
             skipped_routes(&recent, &plan)
@@ -4490,10 +4498,10 @@ mod tests {
         // or still dials, and the outbox carries a message to it, Tor
         // first): left out of this send's race, with its failure or, while
         // its dial still runs, as busy; quick queue when the rest failed.
-        let busy = recent_failures_with(&routes, &away, true, &plan, here);
+        let busy = recent_failures_with(&routes, &away, true, Some(30), &plan, here);
         assert_eq!(busy[2], Some(("no answer".to_string(), 4)));
         assert!(every_route_failed(&routes, &busy, &plan).is_some());
-        let running = recent_failures_with(&routes, &away[..2], true, &plan, here);
+        let running = recent_failures_with(&routes, &away[..2], true, Some(30), &plan, here);
         assert_eq!(running[2], Some((TOR_BUSY.to_string(), 0)));
         let skipped = skipped_routes(&running, &plan);
         assert!(
@@ -4501,15 +4509,24 @@ mod tests {
             "{skipped:?}"
         );
         // Not busy: Tor is probed whatever failed.
-        let idle = recent_failures_with(&routes, &away[..2], false, &plan, here);
+        let idle = recent_failures_with(&routes, &away[..2], false, Some(30), &plan, here);
         assert_eq!(idle[2], None);
         // A refusal at an address not on this network (another computer
         // took the old address) is no sign the friend's Raven stopped.
-        let elsewhere = recent_failures_with(&routes, &all, false, &plan, |_| false);
+        let elsewhere = recent_failures_with(&routes, &all, false, Some(30), &plan, |_| false);
         assert!(elsewhere[2].is_none(), "Tor stays in the race");
+        // Security review 2026-10-29 #10: a refusal at an address on this
+        // network, but the friend not seen on this LAN lately (an old
+        // address another computer took): Tor stays in the race, no quick
+        // queue.
+        for unseen in [None, Some(LAN_SEEN_SPAN_S + 1)] {
+            let old_address = recent_failures_with(&routes, &all, false, unseen, &plan, here);
+            assert!(old_address[2].is_none(), "Tor stays in the race");
+            assert!(every_route_failed(&routes, &old_address, &plan).is_none());
+        }
         // Only two failed lately: no quick queue; those two are left out of
         // the race, the third is probed.
-        let recent = recent_failures_with(&routes, &all[..2], false, &plan, here);
+        let recent = recent_failures_with(&routes, &all[..2], false, Some(30), &plan, here);
         assert!(every_route_failed(&routes, &recent, &plan).is_none());
         let left_out = skipped_routes(&recent, &plan);
         assert_eq!(left_out.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1]);
@@ -4527,6 +4544,7 @@ mod tests {
             &[moved.clone(), p2p.clone(), tor.clone()],
             &all,
             false,
+            Some(30),
             &plan,
             here,
         );

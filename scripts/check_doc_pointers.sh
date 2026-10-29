@@ -64,7 +64,6 @@ else
   lease_says docs/WAIVER_PORT_MAP_DRAFT.md "up to ${v4_s} s, a pinhole"
   lease_says docs/WAIVER_PORT_MAP_DRAFT.md "up to ${v6_s} s)"
   lease_says docs/WAIVER_PORT_MAP_DRAFT.md "${v4_s} s / ${v6_s} s leases"
-  lease_says docs/design/2026-10-any-network-reachability.md "(${v4_s} s; a pinhole ${v6_s} s)"
   lease_says protocol/RAVEN_PORT_MAPPING_V1.md "Every IPv4 mapping asks for ${v4_s} s"
   lease_says protocol/RAVEN_PORT_MAPPING_V1.md "every IPv6 pinhole for ${v6_s} s"
   for f in docs/INSTALL_*.md; do
@@ -74,15 +73,14 @@ fi
 # Fourth pass (Phase 6 P6.52): the Phase 6b documents. Their relative links
 # resolve; every Phase 6b gate (`pub const NAME: bool = VALUE;` in raven-core
 # security_gate.rs) is named with the state the code gives it ("`NAME =
-# VALUE`") in the real-row checklist and in at least one waiver draft, so a
-# flipped gate fails here until its papers say so; and no line outside a code
+# VALUE`") in at least one waiver draft, so a flipped gate fails here until
+# its papers say so; and no line outside a code
 # block says that passive listening can be detected (a line that names both
 # "passive" and "detect..." must also say that it cannot be).
-P6B_CHECKLIST=docs/P6_REAL_ROWS_CHECKLIST.md
 P6B_WAIVERS=(docs/WAIVER_SECURITY_SENSING_DRAFT.md docs/WAIVER_TRAFFIC_ANALYSIS_DRAFT.md
   docs/WAIVER_LOCAL_PROTECTION_DRAFT.md docs/WAIVER_SECURITY_UPDATES_DRAFT.md)
 P6B_DOCS=(docs/THREAT_MODEL.md docs/SECURITY_EVENTS.md docs/SAFETY_OFFLINE.md
-  docs/SIGNING_NOTARIZATION_CHECKLIST.md docs/RELEASE_KEY_CEREMONY.md "$P6B_CHECKLIST"
+  docs/SIGNING_NOTARIZATION_CHECKLIST.md docs/RELEASE_KEY_CEREMONY.md
   "${P6B_WAIVERS[@]}" docs/design/2026-10-traffic-analysis.md
   docs/design/2026-10-suite-retirement.md)
 for f in "${P6B_DOCS[@]}"; do
@@ -100,10 +98,6 @@ if [[ -z "$p6b_gates" ]]; then
 fi
 while IFS= read -r gate; do
   [[ -n "$gate" ]] || continue
-  if ! grep -qF -- "\`$gate\`" "$P6B_CHECKLIST"; then
-    echo "P6B_GATE_DOC: $P6B_CHECKLIST does not name \`$gate\` (the state in security_gate.rs)" >&2
-    bad=1
-  fi
   if ! grep -qF -- "\`$gate\`" "${P6B_WAIVERS[@]}"; then
     echo "P6B_GATE_DOC: no Phase 6b waiver draft names \`$gate\` (the state in security_gate.rs)" >&2
     bad=1

@@ -492,7 +492,7 @@ happens before it is renewed:
   the job into `raven-serverless.yml` as a required check is part of the
   owner's flip commit.
 - Real rows R3, R5, R9 and R14, run per
-  [`P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md`](P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md)
+  an unpublished test checklist
   (true circuits through a relay on a third machine, with
   `wan_two_network_test.sh`'s three-node mode) and recorded under
   `node/proof_artifacts/wan3-<ROW>-<UTC>/`, plus the stage-12 p2p slice:
@@ -603,7 +603,7 @@ edits none of them, and the freeze manifest is not regenerated here.
 
 > **DRAFT. NOT SIGNED, NOT IN FORCE.** This section amends §2, §4, §5, §6, §7
 > and §8 above for Phase 2 of the any-network plan
-> ([`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md)
+> (the any-network reachability plan, not published,
 > §3, "Phase 2"). It can be signed only together with, or after, the record
 > above. Its gates stay `false` until it is signed: `ROUTE_HINTS_PRODUCTION_ENABLED`
 > (`node/crates/raven-core/src/route_hints.rs`) and
@@ -621,7 +621,7 @@ edits none of them, and the freeze manifest is not regenerated here.
 | **Companion** | [`WAIVER_LAN_DIRECT_ROUTE_HINTS_AMENDMENT_DRAFT.md`](WAIVER_LAN_DIRECT_ROUTE_HINTS_AMENDMENT_DRAFT.md) (unsigned): RLX1 in LAN Noise XX message 3, RRH1 on LAN links, LAN_PORT to unverified local contacts, announce dials. Both are signed before either gate flips |
 | **Specs** | [`RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) (RRH1, RLX1, card v3 §9, RELAY_OFFER §11); [`RAVEN_ERROR_CODES_V1.md`](../protocol/RAVEN_ERROR_CODES_V1.md) §2.1 (the diagnosis reason block) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` (section "libp2p: relay and hole punching"); [`RELAY_KIT.md`](RELAY_KIT.md) |
-| **Real rows** | [`P2_REAL_ROWS_CHECKLIST.md`](P2_REAL_ROWS_CHECKLIST.md) |
+| **Real rows** | an unpublished test checklist |
 | **Approver** | Protocol owner (signature pending) |
 | **Date drafted** | 2026-10-17 |
 | **Review by** | the review-by date of the record above |
@@ -959,7 +959,7 @@ All open until recorded; none of it replaces the real rows.
 - **Vectors and freeze:** `shared-vectors/rvn1/route_hints/`,
   `lan/noise_xx_handshake_002.json`, and
   [`PROTOCOL_FREEZE_HASHES_V1.md`](PROTOCOL_FREEZE_HASHES_V1.md) checked.
-- **Real rows** ([`P2_REAL_ROWS_CHECKLIST.md`](P2_REAL_ROWS_CHECKLIST.md),
+- **Real rows** (an unpublished test checklist,
   results under `node/proof_artifacts/p2-<ROW>-<UTC>/`): R8 (443-only through a
   kit relay), R13 (a friend relay laptop closes its lid, two other
   operators), R3/R5/R9 after a relay change without new cards, R15 (hide my
@@ -1002,7 +1002,7 @@ Not signed.
 
 > **DRAFT. NOT SIGNED, NOT IN FORCE.** This section amends §2 and §6 above
 > for Phase 3 item 3 of the any-network plan
-> ([`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md)
+> (the any-network reachability plan, not published,
 > §3, "Phase 3"): friend custody over the internet. It can be signed only
 > together with, or after, the record above and its Phase 2 amendment (§9:
 > custody offers and tags ride RRH1), and together with the custody record
@@ -1021,7 +1021,7 @@ Not signed.
 | **Covers** | RFC1 V1 friend custody frames on `/raven/link/1.0.0` links between verified contacts (direct, hole-punched or relayed) |
 | **Companion** | [`WAIVER_FRIEND_CUSTODY_DRAFT.md`](WAIVER_FRIEND_CUSTODY_DRAFT.md) (unsigned). The Internet direct draft ([`WAIVER_INTERNET_DIRECT_DRAFT.md`](WAIVER_INTERNET_DIRECT_DRAFT.md)) is unchanged: 7422 stays off and does not carry custody |
 | **Specs** | [`RAVEN_FRIEND_CUSTODY_V1.md`](../protocol/RAVEN_FRIEND_CUSTODY_V1.md) §6 (the WAN link rule) and §10 (requester budgets); [`RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §12 |
-| **Real rows** | [`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md): R10, R10b (R10r optional) |
+| **Real rows** | an unpublished test checklist: R10, R10b (R10r optional) |
 | **Approver** | Protocol owner (signature pending) |
 | **Date drafted** | 2026-10-22 |
 | **Review by** | the review-by date of the record above |
@@ -1059,7 +1059,7 @@ Not signed.
 > **DRAFT. NOT SIGNED, NOT IN FORCE.** This section amends §2, §4, §5, §6, §7
 > and §8 above for the NAT mapping class and PeerId rotation of Phase 4 of
 > the any-network plan
-> ([`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md)
+> (the any-network reachability plan, not published,
 > §3, "Phase 4"). It can be signed only together with, or after, the record
 > above and its Phase 2 amendment (§9): both features ride route hints. Its
 > gates stay `false` until it is signed: `NAT_CLASS_PRODUCTION_ENABLED` and
@@ -1078,7 +1078,7 @@ Not signed.
 | **Companions** | [`WAIVER_WSS_PROXY_DRAFT.md`](WAIVER_WSS_PROXY_DRAFT.md) (WSS on 443, HTTPS proxies) and [`WAIVER_PORT_MAP_DRAFT.md`](WAIVER_PORT_MAP_DRAFT.md) (NAT-PMP, PCP, IPv6 pinholes): unsigned drafts, signed and flipped independently of this amendment |
 | **Specs** | [`RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §13 (NAT_CLASS §13.1, PEER_SCHEDULE §13.2, old peers §13.3; card v3 `p2pn=` §9); [`RAVEN_P2P_PEER_ROTATION_V1.md`](../protocol/RAVEN_P2P_PEER_ROTATION_V1.md) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` (section "libp2p: relay and hole punching"); [`RELAY_KIT.md`](RELAY_KIT.md) (relay schedules) |
-| **Real rows** | [`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md): R25 and R26 (NAT class), R27 (rotation); the plan names them R15-R17, which Phase 2 already holds |
+| **Real rows** | an unpublished test checklist: R25 and R26 (NAT class), R27 (rotation); the plan names them R15-R17, which Phase 2 already holds |
 | **Approver** | Protocol owner (signature pending) |
 | **Date drafted** | 2026-10-22 |
 | **Review by** | the review-by date of the record above |
@@ -1230,7 +1230,7 @@ All open until recorded; none of it replaces the real rows.
   `epoch_phase_001.json`, `relay_schedule_text_001.json`,
   `card_p2pn_001.json`, the route hint vectors and negatives above, and
   [`PROTOCOL_FREEZE_HASHES_V1.md`](PROTOCOL_FREEZE_HASHES_V1.md) checked.
-- **Real rows** ([`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md),
+- **Real rows** (an unpublished test checklist,
   results under `node/proof_artifacts/p4-<ROW>-<UTC>/`): R25 (the classifier
   on real networks: a home line, a phone hotspot, a SIM dongle, with two relays
   on different /24s), R26 (both laptops on different hotspots: no DCUtR

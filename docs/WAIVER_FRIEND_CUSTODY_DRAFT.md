@@ -19,11 +19,11 @@
 | **Decision** | Enable friend custody (RFC1 V1) between verified friends in default and release builds, first on the local network, later over p2p links, under this waiver instead of waiting for an independent review |
 | **Review by** | `<YYYY-MM-DD>`: at most 3 months after signature |
 | **Withdrawal** | Set `FRIEND_CUSTODY_WAN_ENABLED = false`, or both consts `false`, in `node/crates/raven-core/src/custody_gate.rs` |
-| **Design** | [`design/2026-10-friend-custody.md`](design/2026-10-friend-custody.md) (revision 2, and §19 "Over the internet"); [`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md) §3 Phase 3 item 3 (C9) |
+| **Design** | [`design/2026-10-friend-custody.md`](design/2026-10-friend-custody.md) (revision 2, and §19 "Over the internet"); the any-network reachability plan (not published) §3 Phase 3 item 3 (C9) |
 | **Wire** | [`protocol/RAVEN_FRIEND_CUSTODY_V1.md`](../protocol/RAVEN_FRIEND_CUSTODY_V1.md) (RFC1, version byte 1); [`protocol/RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §4 and §12 (RRH1 entries 0x06 CUSTODY_OFFER and 0x07 CUSTODIAN_TAG); vectors `shared-vectors/rvn1/custody/` and `shared-vectors/rvn1/route_hints/rrh1_custody_001.json`, `rrh1_custodian_tag_001.json` |
 | **Companions** | [`SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md`](SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md) (a RELEASE deletes the object; signed before the first flip); the route hints records (learned custody rides RRH1, so it also needs `ROUTE_HINTS_PRODUCTION_ENABLED`) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` ("Friend mailboxes"); [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) §9 |
-| **Real rows** | [`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md): R10, R10b, R11g (R10r optional) |
+| **Real rows** | an unpublished test checklist: R10, R10b, R11g (R10r optional) |
 
 ## 1. Why a waiver is needed
 

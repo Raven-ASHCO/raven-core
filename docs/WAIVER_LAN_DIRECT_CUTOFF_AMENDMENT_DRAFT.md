@@ -200,7 +200,7 @@ Recorded in `docs/roadmap/PROGRESS_LOG.md` (the cutoff pack's exit entry).
   on all three systems.
 - **Hardware, open:** real row R11j (another Raven laptop at a friend's old
   DHCP address, with a packet capture) to confirm M0 on real hardware; its
-  steps are in [`P3_REAL_ROWS_CHECKLIST.md`](P3_REAL_ROWS_CHECKLIST.md)
+  steps are in an unpublished test checklist
   section 7.
 - **Review:** the cutoff pack's adversarial review, with every confirmed
   finding fixed or accepted with a recorded residual.

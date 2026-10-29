@@ -56,7 +56,7 @@
 # signature, e.g. a notarized one). RAVEN_INSTALL_NEARBY_ONLY=1 installs the
 # helper alone: nothing else is built, no plist is written, nothing starts, and
 # the raven-node in RAVEN_BIN_DIR stays as it is (installed earlier, or a lab
-# build: docs/PHYSICAL_NEARBY_LAPTOPS.md). Either way the install checks that
+# build). Either way the install checks that
 # raven-node's code signature is the same before and after the helper
 # (node/scripts/install/nearby_helper_selftest.sh runs it as a dry run).
 set -euo pipefail

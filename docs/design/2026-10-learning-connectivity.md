@@ -6,7 +6,7 @@
 | **Gate** | `LEARNING_PRODUCTION_ENABLED = false` in `node/crates/raven-core/src/learning.rs`, const-asserted with the other holds in `lan_gate::tests::global_production_flags_stay_false`. Debug builds open it per process with `RAVEN_LAB_LEARNING=1`; release builds never read the variable (`lan_gate::tests::learning_lab_switches_are_inert_without_debug_assertions`). |
 | **User switch** | `node_policy.learning` (`raven learning on|off`): unset is on while the gate is live (owner decision OD6a-4), `false` is off, and a policy that fails closed keeps it off. |
 | **Decisions** | Owner decisions OD6a-1 to OD6a-15, recommended options; OD6a-1 resolved to option (c): the store is sealed by the privacy pack's `at_rest` (kind 22). |
-| **Paperwork** | [`WAIVER_LEARNING_DRAFT.md`](../WAIVER_LEARNING_DRAFT.md) (unsigned, OD6a-12); real rows L1-L4 in [`P6A_REAL_ROWS_CHECKLIST.md`](../P6A_REAL_ROWS_CHECKLIST.md); threat model [`THREAT_MODEL.md`](../THREAT_MODEL.md) §3.7b. |
+| **Paperwork** | [`WAIVER_LEARNING_DRAFT.md`](../WAIVER_LEARNING_DRAFT.md) (unsigned, OD6a-12); real rows L1-L4 in an unpublished test checklist; threat model [`THREAT_MODEL.md`](../THREAT_MODEL.md) §3.7b. |
 | **Wire** | None. No frame, card field, route hint entry or error code changes; `protocol/`, `shared-vectors/` and the freeze hashes are untouched. |
 | **Plan** | `docs/roadmap/plans/phase6-design.json`, design "Phase 6a" and steps P6.2-P6.20 (the Phase 6 merged numbering). |
 | **Date** | 2026-10-23 |
@@ -587,7 +587,7 @@ has been checked statically only (`bash -n`, shellcheck); and the CI rows
 run) wait for GitHub Actions, which does not run at present (the
 organisation's billing).
 
-The owner's real rows L1-L4 ([`P6A_REAL_ROWS_CHECKLIST.md`](../P6A_REAL_ROWS_CHECKLIST.md))
+The owner's real rows L1-L4 (an unpublished test checklist)
 are required before any flip; the software runs do not replace them.
 
 ## 9. Non-goals: what learning does not solve

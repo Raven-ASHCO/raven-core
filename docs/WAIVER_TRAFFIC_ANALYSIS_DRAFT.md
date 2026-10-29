@@ -26,7 +26,7 @@
 | **Wire** | [`RAVEN_LINK_PADDING_V1.md`](../protocol/RAVEN_LINK_PADDING_V1.md) (PAD1, caps bit 9), [`RAVEN_LINK_KNOCK_V1.md`](../protocol/RAVEN_LINK_KNOCK_V1.md) (RLK1, RLX1 entry `0x7E PAD`, rendezvous medium `0x03`), [`RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §14 (the `PAIR_SEED` entry); vectors under `shared-vectors/rvn1/link/`, `pair_seed/`, `lan/noise_xx_handshake_003.json`; `PROTOCOL_VERSIONS.md` rows and freeze records. A peer without a feature never sees it: every one is negotiated |
 | **Threat model** | [`THREAT_MODEL.md`](THREAT_MODEL.md) §3.4, §3.14, §3.17 |
 | **User docs** | [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) sections 1, 4 and 12; `raven lan port --help` |
-| **Real rows** | [`P6_REAL_ROWS_CHECKLIST.md`](P6_REAL_ROWS_CHECKLIST.md): R35 |
+| **Real rows** | an unpublished test checklist: R35 |
 
 ## 1. Why a waiver is needed
 
@@ -170,7 +170,7 @@ the root's again; `pair_seeds.json` stays sealed and unread.
   the LAN default (P6.36), so with `auto` held a new Windows profile's task
   listens on 127.0.0.1:7420 until the installer runs again; fix it before the
   flip.
-- R35 on owner equipment; CI green; the external review of PAD1 and RLK1.
+- R35 on test equipment; CI green; the external review of PAD1 and RLK1.
 - [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) updated in the flip commit: its
   section 1, 4 and 12 markers for the flipped gate
   (`scripts/check_offline_guide.sh` fails until they match the code).

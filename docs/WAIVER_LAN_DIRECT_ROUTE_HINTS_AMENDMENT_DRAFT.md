@@ -5,7 +5,7 @@
 | **Status** | **DRAFT, not signed.** Nothing here is in force until the owner signs it. Until then `ROUTE_HINTS_PRODUCTION_ENABLED` stays `false` and route hints run only in debug builds with `RAVEN_LAB_ROUTE_HINTS=1`; with it off the LAN wire is byte-identical to today. |
 | **Amends** | [`WAIVER-LAN-DIRECT-2026-10-07`](WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md), its [P2a amendment](WAIVER_LAN_DIRECT_P2A_AMENDMENT_DRAFT.md) and its [session reset amendment](WAIVER_LAN_DIRECT_SESSION_RESET_AMENDMENT_DRAFT.md) (none is edited) |
 | **Companion** | The Phase 2 amendment of [`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md) (§9: route hints on p2p links, friend relays). Both are signed before `ROUTE_HINTS_PRODUCTION_ENABLED` is flipped (one gate for every link, owner decision "gate shape") |
-| **Design** | [`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md) §3, Phase 2 item 1 (C5) |
+| **Design** | the any-network reachability plan (not published) §3, Phase 2 item 1 (C5) |
 | **Wire** | [`protocol/RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §3.2 (RLX1), §4-§8 (RRH1); vector `shared-vectors/rvn1/lan/noise_xx_handshake_002.json` |
 | **Approver** | Protocol owner (signature pending) |
 | **Date drafted** | 2026-10-17 |
@@ -119,7 +119,7 @@ offer), the session profile, the objects and the admission rules of the waiver
   (`RAVEN_FAULT_OLD_BIN=<dir with the old ash and raven-node>`), both ways
   round: every message once, no dispatcher refusal, nothing learned.
 - The real row R16 (a LAN listen-port change between two Macs,
-  [`P2_REAL_ROWS_CHECKLIST.md`](P2_REAL_ROWS_CHECKLIST.md)).
+  an unpublished test checklist).
 - Before any LAN flip, the Swift/iOS LAN code, which is not in this tree, is
   checked against `lan/noise_xx_handshake_002.json`: it must accept a 75-byte
   message 3 and derive the same transport keys.

@@ -23,7 +23,7 @@
 | **Threat model** | [`THREAT_MODEL.md`](THREAT_MODEL.md) §3.7b |
 | **User docs** | `raven learning --help`; [`OFFLINE_GUIDE.md`](OFFLINE_GUIDE.md) §6 |
 | **Evidence** | The P6.8 simulator thresholds (`node/crates/raven-core/tests/learning_sim.rs`), carrier_matrix C70-C74, lan_fault_matrix s100-s106 and real rows L1-L4; each with its bar in §7 |
-| **Real rows** | [`P6A_REAL_ROWS_CHECKLIST.md`](P6A_REAL_ROWS_CHECKLIST.md): L1-L4 |
+| **Real rows** | an unpublished test checklist: L1-L4 |
 
 ## 1. Why a waiver is needed
 
@@ -216,7 +216,7 @@ Before signature (none of the software runs replaces the real rows):
   and Linux; netns `learn-flaky` with its green streak (advisory until then).
 - The release inert test (`cargo test --release -p raven-core --lib
   lan_gate::`) and `learning_boundary_check.sh` green.
-- **Real rows** ([`P6A_REAL_ROWS_CHECKLIST.md`](P6A_REAL_ROWS_CHECKLIST.md)):
+- **Real rows** (an unpublished test checklist):
   **L1** (a café or guest Wi-Fi with an unreliable LAN path), **L2** (home and
   office, per-network order), **L3** (a friend relay switched off mid-day),
   **L4** (two Macs and a carrier laptop with no internet over 2 days; only

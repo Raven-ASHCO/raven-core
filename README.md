@@ -90,6 +90,7 @@ python3 -m pytest -q`.
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security issues: please do not open a public issue; write to security@raven-messager.com
   ([SECURITY.md](SECURITY.md)).
-- License: GNU Affero General Public License v3.0 ([LICENSE](LICENSE)). The Raven name, logo and
-  app icons are covered separately by [TRADEMARK.md](TRADEMARK.md) and
+- Copyright (C) 2026 ASHCO. License: GNU Affero General Public License v3.0
+  ([LICENSE](LICENSE); notice and pending additional terms in [NOTICE](NOTICE)). The Raven name,
+  logo and app icons are covered separately by [TRADEMARK.md](TRADEMARK.md) and
   [ASSET_LICENSE.md](ASSET_LICENSE.md).

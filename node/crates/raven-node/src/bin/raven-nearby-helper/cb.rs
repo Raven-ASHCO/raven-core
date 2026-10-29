@@ -235,7 +235,16 @@ pub(crate) fn uuid_bytes(u: &CBUUID) -> Option<[u8; 16]> {
 
 /// A peer's handle: its identifier (macOS's, per app and device) as hex.
 fn peer_id(identifier: &objc2_foundation::NSUUID) -> String {
-    hex::encode(identifier.as_bytes())
+    // The UUID string, not `getUUIDBytes:`: objc2's debug check of that
+    // method's type encoding fails on current macOS ('*' against '[16C]')
+    // and stopped the helper in the field (r41). The same 32 hex digits.
+    identifier
+        .UUIDString()
+        .to_string()
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 fn peripheral_id(p: &CBPeripheral) -> String {

@@ -1,6 +1,6 @@
 //! Route hints (RRH1): a contact tells another contact how to reach it.
 //!
-//! Design: `docs/design/2026-10-any-network-reachability.md` (Phase 2 item 1,
+//! Design: the any-network reachability plan (not published) (Phase 2 item 1,
 //! C5). Normative wire format: `protocol/RAVEN_ROUTE_HINTS_V1.md`.
 //!
 //! RRH1 is a raw Noise-transport plaintext frame, like RLB1 and RSR1. It rides

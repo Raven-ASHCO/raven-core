@@ -2,7 +2,7 @@
 
 > **Legacy phone bridge.** This runbook is the older phone-to-bridge BLE profile (iOS GATT mesh,
 > `mock_ble`). Bluetooth nearby between laptops (RNL1) is a different profile, and its hardware rows
-> N1-N12 live in [`PHYSICAL_NEARBY_LAPTOPS.md`](PHYSICAL_NEARBY_LAPTOPS.md).
+> N1-N12 live in an unpublished test checklist.
 
 **Status:** `BLOCKED_HARDWARE` until three physical devices are operated by a human.  
 Software stand-in: `node/scripts/bridge_abc_demo.sh` (mock_ble over TCP).

@@ -7360,8 +7360,7 @@ mod lifecycle_tests {
     /// The relay kit says what `raven-relay status` prints: the allow-list
     /// (friends' PeerIds and the operator's labels) and the relay's own
     /// addresses. "Counts only" is the logs' promise, never the status
-    /// command's, and the real-rows checklist has status scrubbed before it
-    /// is recorded.
+    /// command's.
     #[test]
     fn relay_kit_never_calls_status_counts_only() {
         let root = repo_root();
@@ -7385,10 +7384,6 @@ mod lifecycle_tests {
         }
         let words = |rel: &str| read(rel).split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words("docs/RELAY_KIT.md").contains("so replace those before you share its output"));
-        assert!(words("docs/P2_REAL_ROWS_CHECKLIST.md").contains(
-            "`raven-relay status` before and after, with every friend PeerId, label and public \
-             IP replaced"
-        ));
     }
 
     /// The relay kit never offers `RAVEN_RELAY_TCP443=7443` for a 443 that

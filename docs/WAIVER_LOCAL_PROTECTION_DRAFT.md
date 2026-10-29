@@ -26,7 +26,7 @@
 | **Wire** | None on the network. Local IPC only: `Lock`, `Unlock { passphrase_b64 }` and `Status.locked` (`IPC_VERSION` stays 1) on the per-user socket or pipe; the passphrase field is redacted in `Debug`, never in a decode error, and wiped with the request frame |
 | **Threat model** | [`THREAT_MODEL.md`](THREAT_MODEL.md) §3.7a row T3b |
 | **User docs** | `raven lock --help`, `raven passphrase --help`; [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) section 5 |
-| **Real rows** | [`P6_REAL_ROWS_CHECKLIST.md`](P6_REAL_ROWS_CHECKLIST.md): R37 |
+| **Real rows** | an unpublished test checklist: R37 |
 
 ## 1. Why a waiver is needed
 

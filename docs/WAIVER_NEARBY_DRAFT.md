@@ -20,7 +20,7 @@
 | **Depends on** | The R2 amendment for its Bluetooth LE profile ([`RAVEN_PRIVATE_RENDEZVOUS_V1.md`](../protocol/RAVEN_PRIVATE_RENDEZVOUS_V1.md) §5.3b, revision 5, for owner approval). Custody over nearby also needs [`WAIVER_FRIEND_CUSTODY_DRAFT.md`](WAIVER_FRIEND_CUSTODY_DRAFT.md) |
 | **Design** | `docs/roadmap/plans/phase45-design.json`, `.designs[3]` (the Nearby design) and owner decisions O5-10 to O5-13 (`.review.owner_decisions`) |
 | **User docs** | [`NEARBY.md`](NEARBY.md); the install guides' "Bluetooth nearby" sections; the threat model's §1.1 ([`THREAT_MODEL.md`](THREAT_MODEL.md)) |
-| **Real rows** | [`PHYSICAL_NEARBY_LAPTOPS.md`](PHYSICAL_NEARBY_LAPTOPS.md): N1-N12 |
+| **Real rows** | an unpublished test checklist: N1-N12 |
 
 ## 1. Why a waiver is needed
 
@@ -211,7 +211,7 @@ rows.
   green, or its runner limitation recorded.
 - **Installer:** `node/scripts/install/nearby_helper_selftest.sh` (the macOS
   helper install leaves raven-node's code signature unchanged).
-- **Hardware rows** ([`PHYSICAL_NEARBY_LAPTOPS.md`](PHYSICAL_NEARBY_LAPTOPS.md)):
+- **Hardware rows** (an unpublished test checklist):
   N1-N4 10/10 each way per OS pair the owner can test (N4's central-only
   result recorded; Windows rows in a lab run with the public-address
   allowance until N7w); N5 the range curve; N6 the throughput (decides 5b);

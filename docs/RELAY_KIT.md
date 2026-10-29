@@ -376,4 +376,4 @@ out; and a relay that also holds cards maps PeerIds to Raven IDs.
 
 The owner-run rows for the kit (a Pi with a port forward, a VPS, a 443-only
 network, a Windows logon task) are in
-[`P2_REAL_ROWS_CHECKLIST.md`](P2_REAL_ROWS_CHECKLIST.md).
+an unpublished test checklist.

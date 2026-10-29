@@ -168,9 +168,9 @@ floor shows.
 - **Waits for P6.32** (the attack harness with traffic-tampering proxy modes, set aside by the owner
   on 2026-10-23): its rows C80-C85 and s110-s114, among them the impostor rows (s113) that put a
   fake listener at a friend's address, and the knock and padding rows that need a tampering proxy.
-- **Owner equipment:** real row R35 (a meeting on a hotspot the owner controls, captured with
-  tcpdump: sizes in the four classes, the knocked handshakes' ranges and silent mode), steps and
-  bars in [`P6_REAL_ROWS_CHECKLIST.md`](../P6_REAL_ROWS_CHECKLIST.md) section 7. A capture cannot
+- **Real row:** R35 (a meeting on a test hotspot, captured with tcpdump: sizes in the four
+  classes, the knocked handshakes' ranges and silent mode), steps and bars in an unpublished test
+  checklist. A capture cannot
   show that statics change per connection (Noise XX encrypts them); C86 is the evidence for that,
   and the row records it as not shown. The unsigned flip paperwork is
   [`WAIVER_TRAFFIC_ANALYSIS_DRAFT.md`](../WAIVER_TRAFFIC_ANALYSIS_DRAFT.md).

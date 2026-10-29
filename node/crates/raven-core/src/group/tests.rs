@@ -1513,3 +1513,109 @@ fn send_intent_for_tests(to: &Key, now_ms: u64) -> store::Intent {
         author: String::new(),
     }
 }
+
+/// Security review 2026-10-29 #11: a removed member's sync was answered with
+/// the current roster (who joined after its removal). Now only members are
+/// answered.
+#[test]
+fn a_removed_member_gets_no_later_roster() {
+    let mut admin = joined(1, &roster(1, &[2, 3], 1));
+    let me = key(1);
+    let none = HashSet::new();
+    let next = roster(1, &[3, 5], 2);
+    apply(
+        &mut admin,
+        &me,
+        &key(1),
+        &GroupFrame::State(next),
+        &none,
+        NOW,
+    );
+    assert!(admin.groups[0].was_removed(&key(2)));
+    admin.groups[0].intents.clear();
+    let sync = GroupFrame::Sync(GroupSync {
+        group: gid(),
+        epoch: 1,
+    });
+    apply(&mut admin, &me, &key(2), &sync, &none, NOW + 1);
+    assert!(intents_of(&admin, INTENT_SEND).is_empty());
+    // A member is still answered.
+    apply(&mut admin, &me, &key(3), &sync, &none, NOW + 2);
+    assert_eq!(intents_of(&admin, INTENT_SEND).len(), 1);
+}
+
+/// Security review 2026-10-29 #11: a non-member carrier (9) holding a
+/// genuine signed message got a signed receipt back (a membership
+/// oracle). Now no receipt goes to a non-member.
+#[test]
+fn no_receipt_goes_to_a_non_member_carrier() {
+    let me = key(3);
+    let mut file = joined(3, &roster(1, &[2, 3], 1));
+    let m = msg(2, 1, "old text", &[]);
+    apply(
+        &mut file,
+        &me,
+        &key(9),
+        &GroupFrame::Msg(m),
+        &HashSet::new(),
+        NOW,
+    );
+    assert!(intents_of(&file, INTENT_RECEIPT).is_empty());
+    // From a member that forwarded it: a receipt, through that member.
+    let m = msg_with_id(2, 1, "via 1", [0x77; 16], &[]);
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::Msg(m),
+        &HashSet::new(),
+        NOW,
+    );
+    let r = intents_of(&file, INTENT_RECEIPT);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].via, hex::encode(key(1)));
+}
+
+/// Security review 2026-10-29 #11: a leave was not tied to its epoch: the
+/// same frame delivered again after the member was added back removed it
+/// again. Now an older leave of a member removed since is refused.
+#[test]
+fn an_old_leave_after_a_readd_is_refused() {
+    let state = roster(1, &[2, 3], 1);
+    let mut admin = joined(1, &state);
+    let mut leave = GroupLeave {
+        group: state.group,
+        epoch: 1,
+        from: [0; 32],
+        at_ms: NOW,
+        sig: [0; 64],
+    };
+    leave.sign(&id(2));
+    let frame = GroupFrame::Leave(leave);
+    apply(&mut admin, &key(1), &key(2), &frame, &HashSet::new(), NOW);
+    assert_eq!(intents_of(&admin, INTENT_LEAVER).len(), 1);
+    super::rules::remove_leaver(&mut admin, &id(1), &state.group, &key(2), NOW);
+    admin.groups[0].intents.clear();
+    let back = roster(1, &[2, 3], 3);
+    apply(
+        &mut admin,
+        &key(1),
+        &key(1),
+        &GroupFrame::State(back),
+        &HashSet::new(),
+        NOW + 1,
+    );
+    assert!(group(&admin).roster().unwrap().has(&key(2)));
+    apply(
+        &mut admin,
+        &key(1),
+        &key(2),
+        &frame,
+        &HashSet::new(),
+        NOW + 2,
+    );
+    assert!(
+        intents_of(&admin, INTENT_LEAVER).is_empty(),
+        "the old leave is not acted on again"
+    );
+}

@@ -59,6 +59,9 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+
+#[cfg(target_os = "macos")]
+use std::os::unix::process::ExitStatusExt as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -247,6 +250,25 @@ pub(crate) fn open_at(
     backoff: Option<Arc<Mutex<Backoff>>>,
     hello_wait: Duration,
 ) -> Result<HelperRadio, RadioState> {
+    // On macOS the helper is started as its own responsible process, so
+    // the Bluetooth privacy check asks about RavenNearby (whose Info.plist
+    // carries the usage description) and not about whatever app started
+    // raven-node: a node started from a terminal, an IDE or another
+    // program's helper would otherwise be stopped by macOS (SIGABRT).
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("RAVEN_NEARBY_HELPER_INHERIT").is_none() {
+        let (pid, stdin, stdout) = disclaim::spawn(exe).map_err(|e| {
+            RadioState::Unsupported(format!("the nearby helper did not start: {e}"))
+        })?;
+        return start(
+            stdin,
+            stdout,
+            Some(Proc::Spawned { pid, status: None }),
+            tx,
+            backoff,
+            hello_wait,
+        );
+    }
     let mut child = Command::new(exe)
         .current_dir("/")
         .stdin(Stdio::piped())
@@ -261,7 +283,197 @@ pub(crate) fn open_at(
             "the nearby helper did not start: no pipes".into(),
         ));
     };
-    start(stdin, stdout, Some(child), tx, backoff, hello_wait)
+    start(
+        stdin,
+        stdout,
+        Some(Proc::Std(child)),
+        tx,
+        backoff,
+        hello_wait,
+    )
+}
+
+/// The helper process: a std child, or (macOS) one started with its own
+/// responsibility through `posix_spawn`.
+pub(crate) enum Proc {
+    Std(Child),
+    #[cfg(target_os = "macos")]
+    Spawned {
+        pid: libc::pid_t,
+        status: Option<ExitStatus>,
+    },
+}
+
+impl Proc {
+    fn kill(&mut self) {
+        match self {
+            Proc::Std(c) => {
+                let _ = c.kill();
+            }
+            #[cfg(target_os = "macos")]
+            Proc::Spawned { pid, status } => {
+                if status.is_none() {
+                    // SAFETY: plain syscall on a pid this process spawned and has not reaped.
+                    unsafe {
+                        libc::kill(*pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        match self {
+            Proc::Std(c) => c.wait(),
+            #[cfg(target_os = "macos")]
+            Proc::Spawned { pid, status } => {
+                if let Some(s) = status {
+                    return Ok(*s);
+                }
+                let mut raw: libc::c_int = 0;
+                loop {
+                    // SAFETY: waits on our own child; `raw` is a valid out pointer.
+                    let r = unsafe { libc::waitpid(*pid, &mut raw, 0) };
+                    if r == *pid {
+                        let s = ExitStatus::from_raw(raw);
+                        *status = Some(s);
+                        return Ok(s);
+                    }
+                    let e = std::io::Error::last_os_error();
+                    if e.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        match self {
+            Proc::Std(c) => c.try_wait(),
+            #[cfg(target_os = "macos")]
+            Proc::Spawned { pid, status } => {
+                if let Some(s) = status {
+                    return Ok(Some(*s));
+                }
+                let mut raw: libc::c_int = 0;
+                // SAFETY: non-blocking wait on our own child.
+                let r = unsafe { libc::waitpid(*pid, &mut raw, libc::WNOHANG) };
+                if r == *pid {
+                    let s = ExitStatus::from_raw(raw);
+                    *status = Some(s);
+                    Ok(Some(s))
+                } else if r == 0 {
+                    Ok(None)
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }
+        }
+    }
+}
+
+/// Starting the helper as its own responsible process on macOS
+/// (`responsibility_spawnattrs_setdisclaim`, in libSystem since macOS 10.14),
+/// with its stdin and stdout on pipes and stderr shared with raven-node.
+#[cfg(target_os = "macos")]
+mod disclaim {
+    use std::ffi::CString;
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::io::FromRawFd as _;
+    use std::path::Path;
+
+    extern "C" {
+        fn responsibility_spawnattrs_setdisclaim(
+            attrs: *mut libc::posix_spawnattr_t,
+            disclaim: libc::c_int,
+        ) -> libc::c_int;
+        fn posix_spawn_file_actions_addchdir_np(
+            actions: *mut libc::posix_spawn_file_actions_t,
+            path: *const libc::c_char,
+        ) -> libc::c_int;
+    }
+
+    fn pipe() -> io::Result<[libc::c_int; 2]> {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` has room for the two descriptors pipe(2) writes.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for fd in fds {
+            // SAFETY: fd was just returned by pipe(2).
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        Ok(fds)
+    }
+
+    fn close(fd: libc::c_int) {
+        // SAFETY: closes a descriptor this module owns.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+
+    /// The helper's pid, the write end of its stdin and the read end of its stdout.
+    pub(super) fn spawn(exe: &Path) -> io::Result<(libc::pid_t, File, File)> {
+        let path = CString::new(exe.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path has a NUL byte"))?;
+        let root = CString::new("/").expect("no NUL");
+        let input = pipe()?;
+        let output = match pipe() {
+            Ok(fds) => fds,
+            Err(e) => {
+                close(input[0]);
+                close(input[1]);
+                return Err(e);
+            }
+        };
+        let argv: [*mut libc::c_char; 2] =
+            [path.as_ptr() as *mut libc::c_char, std::ptr::null_mut()];
+        let mut pid: libc::pid_t = 0;
+        // SAFETY: the file actions and attributes are initialised before use and
+        // destroyed after posix_spawn; every pointer passed lives across the call.
+        let rc = unsafe {
+            let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
+            let mut attrs: libc::posix_spawnattr_t = std::mem::zeroed();
+            libc::posix_spawn_file_actions_init(&mut actions);
+            libc::posix_spawnattr_init(&mut attrs);
+            libc::posix_spawn_file_actions_adddup2(&mut actions, input[0], 0);
+            libc::posix_spawn_file_actions_adddup2(&mut actions, output[1], 1);
+            posix_spawn_file_actions_addchdir_np(&mut actions, root.as_ptr());
+            responsibility_spawnattrs_setdisclaim(&mut attrs, 1);
+            let rc = libc::posix_spawn(
+                &mut pid,
+                path.as_ptr(),
+                &actions,
+                &attrs,
+                argv.as_ptr(),
+                *libc::_NSGetEnviron(),
+            );
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            libc::posix_spawnattr_destroy(&mut attrs);
+            rc
+        };
+        close(input[0]);
+        close(output[1]);
+        if rc != 0 {
+            close(input[1]);
+            close(output[0]);
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        // SAFETY: both descriptors are ours and open; ownership moves into the Files.
+        Ok(unsafe {
+            (
+                pid,
+                File::from_raw_fd(input[1]),
+                File::from_raw_fd(output[0]),
+            )
+        })
+    }
 }
 
 /// The radio over a helper's stdin (`w`) and stdout (`r`); `child` is the
@@ -269,7 +481,7 @@ pub(crate) fn open_at(
 pub(crate) fn start(
     w: impl Write + Send + 'static,
     r: impl Read + Send + 'static,
-    child: Option<Child>,
+    child: Option<Proc>,
     tx: mpsc::Sender<RadioEvent>,
     backoff: Option<Arc<Mutex<Backoff>>>,
     hello_wait: Duration,
@@ -330,7 +542,7 @@ struct Link {
     /// closes and it exits).
     out: Mutex<Option<std_mpsc::Sender<String>>>,
     table: Mutex<Table>,
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<Proc>>,
     /// raven-node stopped the helper: its end is not news.
     stopped: AtomicBool,
     overflows: AtomicU64,
@@ -393,7 +605,7 @@ impl Link {
             });
         if reaped.is_err() {
             if let Some(c) = lock(&self.child).as_mut() {
-                let _ = c.kill();
+                c.kill();
                 let _ = c.wait();
             }
         }
@@ -410,7 +622,7 @@ impl Link {
                 match c.try_wait() {
                     Ok(Some(status)) => return Some(status),
                     Ok(None) if Instant::now() >= until => {
-                        let _ = c.kill();
+                        c.kill();
                         return c.wait().ok();
                     }
                     Ok(None) => {}

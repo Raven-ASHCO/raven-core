@@ -263,7 +263,12 @@ async fn side(dir: &Path, registry: &Path) -> Side {
         .unwrap();
     let forward = listener.local_addr().unwrap();
     let token: [u8; proto::TOKEN_LEN] = rand::random();
-    let serving = tokio::spawn(serve_forward(listener, token, dir.to_path_buf(), identity));
+    let serving = tokio::spawn(serve_forward(
+        listener,
+        Arc::new(std::sync::Mutex::new(token)),
+        dir.to_path_buf(),
+        identity,
+    ));
     let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
     let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
     let registry = registry.to_path_buf();
@@ -955,4 +960,68 @@ async fn a_self_check_that_reaches_the_service_makes_status_say_reachable() {
     if FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed) == links {
         assert_eq!(status.service_reachable, Some(true));
     }
+}
+
+/// A helper that reads its config line, keeps the token and ends at once.
+struct TokenRecorder(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Spawn for TokenRecorder {
+    fn spawn(&self) -> Result<Proc, String> {
+        let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
+        let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
+        let seen = Arc::clone(&self.0);
+        let done = async move {
+            let mut lines = LineReader::new(Box::pin(helper_in));
+            if let Some(line) = lines.next_line().await {
+                if let Ok(c) = serde_json::from_str::<proto::Config>(&line) {
+                    seen.lock().unwrap().push(c.token);
+                }
+            }
+            drop(helper_out);
+        };
+        Ok(Proc {
+            stdin: Box::pin(to_helper),
+            stdout: Box::pin(from_helper),
+            stderr: None,
+            done: Box::pin(done),
+            kill: None,
+        })
+    }
+}
+
+/// Security review 2026-10-29 #11 (spec §6: "32 random bytes per helper
+/// life"): the token was made once per run and every restarted helper got
+/// the same one. Now each life gets a fresh token, and the forward
+/// listener checks the current one.
+#[tokio::test(start_paused = true)]
+async fn every_helper_life_gets_a_fresh_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = Arc::new(Identity::from_seed(&[0x38; 32]));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let first = [0x11u8; proto::TOKEN_LEN];
+    let current = Arc::new(std::sync::Mutex::new(first));
+    let config = proto::Config {
+        v: proto::PROTO_VERSION,
+        state_dir: dir.path().join(TOR_DIR).to_string_lossy().into_owned(),
+        token: hex::encode(first),
+        forward: "127.0.0.1:9".into(),
+        port: raven_core::onion::ONION_VIRTUAL_PORT,
+        fresh_state: false,
+    };
+    let task = tokio::spawn(supervise(
+        Arc::new(TokenRecorder(Arc::clone(&seen))),
+        config,
+        Arc::clone(&current),
+        dir.path().to_path_buf(),
+        identity,
+    ));
+    tokio::time::sleep(Duration::from_secs(900)).await;
+    task.abort();
+    let tokens = seen.lock().unwrap().clone();
+    assert!(tokens.len() >= 2, "{tokens:?}");
+    assert_eq!(tokens[0], hex::encode(first));
+    let distinct: std::collections::HashSet<&String> = tokens.iter().collect();
+    assert_eq!(distinct.len(), tokens.len(), "a fresh token per life");
+    let now = *current.lock().unwrap();
+    assert!(tokens.contains(&hex::encode(now)));
 }

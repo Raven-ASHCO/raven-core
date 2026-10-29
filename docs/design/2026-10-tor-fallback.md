@@ -6,7 +6,7 @@
 | **Gate** | `ONION_PRODUCTION_ENABLED = false` (`node/crates/raven-core/src/onion_gate.rs`). Debug builds open it per process with the Lab Test A unlock (`RAVEN_LAB_TEST_A=1`) plus `RAVEN_LAB_TOR=1`; release builds never read either variable. |
 | **Build** | The Tor helper (`raven-tor-helper`, Arti inside) is built only with the cargo feature `tor` of `raven-node`. Without it the carrier still builds and is tested against a loopback helper. |
 | **Decision** | Owner approval 2026-10-28 (Tor onion services, new dependency Arti, lab first), changed the same day from "last resort" to "universal baseline, always on, raced against the direct paths". |
-| **Related** | [`2026-10-any-network-reachability.md`](2026-10-any-network-reachability.md) (D1: no project-run servers), [`RAVEN_ONION_CARRIER_V1.md`](../../protocol/RAVEN_ONION_CARRIER_V1.md) (wire and rules), [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §15 (ONION entry), [`RAVEN_CARRIER_CONFORMANCE_V1.md`](../../protocol/RAVEN_CARRIER_CONFORMANCE_V1.md) §11.9 (onion profile), research: `reports/Raven serverless internet reachability research - part 2.md` §3 (outside the repository). |
+| **Related** | the any-network reachability plan (not published) (D1: no project-run servers), [`RAVEN_ONION_CARRIER_V1.md`](../../protocol/RAVEN_ONION_CARRIER_V1.md) (wire and rules), [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §15 (ONION entry), [`RAVEN_CARRIER_CONFORMANCE_V1.md`](../../protocol/RAVEN_CARRIER_CONFORMANCE_V1.md) §11.9 (onion profile), research: `reports/Raven serverless internet reachability research - part 2.md` §3 (outside the repository). |
 | **Date** | 2026-10-28 |
 
 ## 1. The problem
@@ -348,8 +348,8 @@ The real-network check is the field test (§7).
 
 ## 7. Field test (three machines, real Tor)
 
-Machines: **M** = Mac on the phone hotspot (symmetric carrier NAT), **W** =
-Windows laptop behind a second router (double NAT), **S** = Mac Studio as an
+Machines: **M** = a laptop on a phone hotspot (symmetric carrier NAT), **W** =
+a laptop behind two routers (double NAT), **S** = a third computer as an
 observer only (it is not a contact of either, so no friend relay or custody
 can help). No port forwards. Fresh test profiles; never `~/.raven`.
 

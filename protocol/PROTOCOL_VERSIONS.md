@@ -168,7 +168,9 @@ Fixes from the 2026-10-29 security review; every gate stays as it was.
   older than 7 days or more than a day ahead is refused; message keys are
   kept until their `sent_ms` is 7 days old. Forwards are bounded per author
   (16 waiting per group) and every parked copy counts against the group
-  stage budget.
+  stage budget. A `leave` counts only for the roster epoch held, `sync` is
+  answered for current members only, and no `receipt` goes to a non-member
+  carrier.
 
 ## Freeze record changes (2026-10-28, Tor onion carrier)
 

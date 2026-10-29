@@ -58,7 +58,7 @@ Bridge / relay / store **never decrypt**. Endpoint ATSAM / Noise / interim seal 
 
 ## Honest limitations (software)
 
-- Internet reachability (rust-libp2p, transports P3): **held**. `raven-node` has a libp2p endpoint (TCP+QUIC, Circuit Relay v2 client, DCUtR, AutoNAT v2 client, opt-in UPnP-IGD) and a relay server (`raven-node relay`, `service --relay`), all behind `P2P_PRODUCTION_ENABLED=false` (debug lab unlock only). Proven on loopback (carrier_matrix C6, three OSes); the Linux network-namespace NAT simulation (C7) runs in an advisory lab job; no public DHT (transports design Q13); the real multi-NAT / CGNAT rows are not recorded yet (docs/design/2026-10-any-network-reachability.md §3).
+- Internet reachability (rust-libp2p, transports P3): **held**. `raven-node` has a libp2p endpoint (TCP+QUIC, Circuit Relay v2 client, DCUtR, AutoNAT v2 client, opt-in UPnP-IGD) and a relay server (`raven-node relay`, `service --relay`), all behind `P2P_PRODUCTION_ENABLED=false` (debug lab unlock only). Proven on loopback (carrier_matrix C6, three OSes); the Linux network-namespace NAT simulation (C7) runs in an advisory lab job; no public DHT (transports design Q13); the real multi-NAT / CGNAT rows are not recorded yet (the any-network reachability plan (not published) §3).
 - ML-KEM hybrid pairing in Rust: the ML-KEM-768 + X25519 hybrid is implemented in `raven-core` (`atsam_mlkem`, `pair_init`), but PairInit is production-disabled (live only on the unreviewed LAN-direct slice); the full PQ ratchet and iOS parity (OFF-MAIN) are still pending. Not a shipping claim.
 - Real GATT in headless `raven-node`: mock_ble for CI; iOS BLEMeshEngine for hardware.
 - External crypto review + notarized signing: **BLOCKED_HUMAN**.

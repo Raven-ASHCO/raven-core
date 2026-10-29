@@ -541,6 +541,17 @@ fn usable(ip: Ipv4Addr, lab_local: bool) -> bool {
         || (lab_local && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast())
 }
 
+/// Whether a contact's connection from `remote` can confirm the address
+/// STUN found: an outside IPv4 source only. The address is IPv4; an IPv6
+/// connection says nothing about whether the IPv4 port is reachable
+/// (security review 2026-10-29 #9).
+fn confirms_from(remote: IpAddr, lab_local: bool) -> bool {
+    match remote {
+        IpAddr::V4(v4) => usable(v4, lab_local),
+        IpAddr::V6(_) => false,
+    }
+}
+
 fn confirmed_now(s: &State, r: Reached, now: Instant) -> bool {
     s.confirmed
         .get(&r)
@@ -608,11 +619,7 @@ pub(crate) fn confirm(what: Reached, remote: IpAddr, lab_local: bool) -> bool {
     if !enabled() {
         return false;
     }
-    let outside = match remote {
-        IpAddr::V4(v4) => usable(v4, lab_local),
-        IpAddr::V6(_) => raven_core::p2p_route::is_global_ip(remote) || lab_local,
-    };
-    if !outside {
+    if !confirms_from(remote, lab_local) {
         return false;
     }
     let first = with_state(|s| {
@@ -945,6 +952,18 @@ mod tests {
             "{:?}",
             t0.elapsed()
         );
+    }
+
+    /// Security review 2026-10-29 #9: an IPv6 connection confirmed the
+    /// IPv4 address STUN found. Only an outside IPv4 source confirms.
+    #[test]
+    fn only_an_outside_ipv4_source_confirms_the_stun_address() {
+        assert!(confirms_from("1.1.1.1".parse().unwrap(), false));
+        assert!(!confirms_from("192.168.1.9".parse().unwrap(), false));
+        assert!(!confirms_from("2001:db8::9".parse().unwrap(), false));
+        assert!(!confirms_from("2606:4700::1111".parse().unwrap(), false));
+        assert!(!confirms_from("::1".parse().unwrap(), true));
+        assert!(confirms_from("127.0.0.1".parse().unwrap(), true));
     }
 
     #[test]

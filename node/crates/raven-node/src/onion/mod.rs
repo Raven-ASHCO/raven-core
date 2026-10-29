@@ -533,9 +533,13 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| format!("onion state directory: {}", netutil::io_error_text(&e)))?;
     restrict_dir(&state_dir);
+    // The token of the helper's current life (a fresh one per life,
+    // RAVEN_ONION_CARRIER_V1 §6): the forward listener reads it per
+    // connection.
+    let current_token = Arc::new(Mutex::new(token));
     let serving = tokio::spawn(serve_forward(
         listener,
-        token,
+        Arc::clone(&current_token),
         data_dir.clone(),
         identity.clone(),
     ));
@@ -548,7 +552,7 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
     };
-    match supervise(spawner, config, data_dir, identity).await {}
+    match supervise(spawner, config, current_token, data_dir, identity).await {}
 }
 
 struct AbortOnDrop(tokio::task::AbortHandle);
@@ -575,11 +579,25 @@ fn restrict_dir(dir: &Path) {
 async fn supervise(
     spawner: Arc<dyn Spawn>,
     mut config: proto::Config,
+    current_token: Arc<Mutex<[u8; proto::TOKEN_LEN]>>,
     data_dir: PathBuf,
     identity: Arc<Identity>,
 ) -> Infallible {
     let mut restarts = Restarts::default();
+    let mut first = true;
     loop {
+        // A fresh token for every helper life (security review 2026-10-29
+        // #11; RAVEN_ONION_CARRIER_V1 §6): a token an earlier helper held
+        // opens nothing once it is gone.
+        if !first {
+            let token = fresh_token();
+            *current_token.lock().unwrap_or_else(PoisonError::into_inner) = token;
+            if let Some(live) = live_lock().as_mut() {
+                live.token = token;
+            }
+            config.token = hex::encode(token);
+        }
+        first = false;
         restarts.started();
         update_status(|s| {
             *s = Status {
@@ -1164,7 +1182,7 @@ impl LineReader {
 /// per circuit.
 async fn serve_forward(
     listener: TcpListener,
-    token: [u8; proto::TOKEN_LEN],
+    current_token: Arc<Mutex<[u8; proto::TOKEN_LEN]>>,
     data_dir: PathBuf,
     identity: Arc<Identity>,
 ) -> Infallible {
@@ -1179,6 +1197,7 @@ async fn serve_forward(
         }
         let _ = stream.set_nodelay(true);
         let (waiting, kicked) = pre_token.enter();
+        let token = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
         let (dd, id) = (data_dir.clone(), identity.clone());
         let (admission, pre_token) = (Arc::clone(&admission), Arc::clone(&pre_token));
         tokio::spawn(async move {
@@ -1233,6 +1252,11 @@ async fn serve_forward(
             }
         });
     }
+}
+
+/// 32 random bytes: one helper life's token.
+fn fresh_token() -> [u8; proto::TOKEN_LEN] {
+    rand::random()
 }
 
 /// The forward listener's connections still owing the helper's header

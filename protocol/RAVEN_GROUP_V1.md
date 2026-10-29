@@ -151,7 +151,8 @@ roster, the frame is held (§4.3). A frame for an unknown group is held too.
   receipts and rosters too) counts against its group share of the
   outbound stage, and an own copy dropped from its pending work fails its
   line.
-- **Receipt** (when `P` ≠ `from`): the receiver signs a `receipt` with
+- **Receipt** (when `P` ≠ `from` and `P` is in the roster held; none to a
+  non-member carrier): the receiver signs a `receipt` with
   `of` = `id`, `to` = `from`, and seals it to `P` with `relay` = `[from]`.
 - A copy that did not come straight from its author is never forwarded.
 
@@ -161,11 +162,15 @@ and `to` is in `relay`, the roster and the receiver's friends: forwarded to
 `to` with `relay` = `[]`, once per `(to, of, from)`.
 
 **`leave`**: taken by the admin only, from a current member, verified under
-`from`; the admin then sends the next roster without `from`.
+`from`, and only when its `epoch` is the roster epoch the admin holds (an
+older leave, delivered again after the member was added back, is ignored;
+a leave that crossed a newer roster is made again by its member); the admin
+then sends the next roster without `from`.
 
-**`sync`**: taken by the admin only, from `P` a current or removed member;
-the admin answers with its roster, at most once per member and group every
-10 minutes.
+**`sync`**: taken by the admin only, from `P` a current member (a removed
+member got the roster that removed it and is sent no later one); the admin
+answers with its roster, at most once per member and group every 10
+minutes.
 
 ### 4.3 Held frames
 

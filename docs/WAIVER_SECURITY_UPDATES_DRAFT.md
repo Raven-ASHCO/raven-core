@@ -29,7 +29,7 @@
 | **Wire** | [`RAVEN_SECURITY_ADVISORY_V1.md`](../protocol/RAVEN_SECURITY_ADVISORY_V1.md) (RAD1, the suite registry), [`RAVEN_TRANSPARENCY_LOG_V1.md`](../protocol/RAVEN_TRANSPARENCY_LOG_V1.md) (RTL1), [`RAVEN_RELEASE_BUNDLE_V1.md`](../protocol/RAVEN_RELEASE_BUNDLE_V1.md) (RRB1 and RRBC), [`RAVEN_UPDATE_EXCHANGE_V1.md`](../protocol/RAVEN_UPDATE_EXCHANGE_V1.md) (RUP1, caps bit 10); vectors under `shared-vectors/rvn1/update/`; `PROTOCOL_VERSIONS.md` rows and freeze records. An old peer never sets bit 10 and never gets a RUP1 frame |
 | **Threat model** | [`THREAT_MODEL.md`](THREAT_MODEL.md) §3.5, §3.10, §3.14 |
 | **User docs** | `raven update --help`; the "Updating Raven" sections of [`INSTALL_macOS.md`](INSTALL_macOS.md), [`INSTALL_Linux.md`](INSTALL_Linux.md) and [`INSTALL_Windows.md`](INSTALL_Windows.md); [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) section 10 |
-| **Real rows** | [`P6_REAL_ROWS_CHECKLIST.md`](P6_REAL_ROWS_CHECKLIST.md): R31, R32, R33 |
+| **Real rows** | an unpublished test checklist: R31, R32, R33 |
 
 ## 1. Why a waiver is needed
 

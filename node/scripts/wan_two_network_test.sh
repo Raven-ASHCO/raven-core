@@ -35,7 +35,7 @@
 # hints):
 #   node/scripts/wan_two_network_test.sh custodian on|off
 #       hold sealed mail for your verified contacts (`ash node custody on
-#       --yes`; the Mac Studio's profile) or stop taking new mail, then
+#       --yes`; the custodian's profile) or stop taking new mail, then
 #       restart raven-node so its route hints carry the offer.
 #   node/scripts/wan_two_network_test.sh mailbox on
 #       use friends as mailboxes (`ash custody use on --yes`): leave sealed
@@ -81,7 +81,7 @@
 #
 # Three-node mode: a true circuit. R relays between A and B; the sender is not
 # the relay and has no connection to the recipient before it sends. The rows
-# R3, R5, R9 and R14 step by step: docs/P1_REAL_ROWS_R3_R5_R9_R14_CHECKLIST.md.
+# R3, R5, R9 and R14 are run step by step from an unpublished test checklist.
 # On the relay machine R (for example a VPS with a public IPv4; debug build):
 #   vps-relay start HOST [--kit]
 #                              start a dedicated relay in its own folder
@@ -153,7 +153,7 @@
 #   RAVEN_WAN_LAN_PORT, RAVEN_WAN_INET_PORT, RAVEN_WAN_P2P_PORT
 #                              7420, 7422, 7423
 #   RAVEN_WAN_RELAY_PORT       the relay's port (default 7423; 7424 when it shares a
-#                              machine with a service, e.g. the Mac Studio, D15)
+#                              machine with a service, e.g. an always-on desktop)
 #   RAVEN_WAN_RELAY_TRANSPORT  quic (default) or tcp: the VIA vps-relay gives out.
 #                              tcp where a network blocks UDP; record which
 #   RAVEN_WAN_FRIEND_PORT      the friend relay's port (default 7427)
@@ -676,7 +676,7 @@ vps_relay() {
 # egress443 print [RESOLVER]: the R8 egress filter (only TCP 443 out, and DNS
 # to RESOLVER), for macOS pf and for Linux nftables. Printed only, never
 # applied: the operator applies one with sudo for the row and removes it
-# afterwards (docs/P2_REAL_ROWS_CHECKLIST.md R8). The nftables rules are the
+# afterwards (real row R8). The nftables rules are the
 # netns only443 case's (node/scripts/netns_nat_dcutr.sh).
 egress443() {
   local sub="${1:-help}" resolver family=ip

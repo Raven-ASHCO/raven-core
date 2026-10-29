@@ -17,9 +17,9 @@
 | **Review by** | the review-by date of the p2p relay waiver |
 | **Withdrawal** | Set `V6_PINHOLE_PRODUCTION_ENABLED = false` (pinholes only) or both flags `false` in `node/crates/raven-core/src/portmap_gate.rs`. The const asserts there keep pinholes off while mapping is off, and mapping off while `P2P_PRODUCTION_ENABLED` is off. With both off the endpoint does Phase 1's UPnP-IGD, byte for byte |
 | **Spec** | [`RAVEN_PORT_MAPPING_V1.md`](../protocol/RAVEN_PORT_MAPPING_V1.md) (a client profile of RFC 6886 and RFC 6887; not a Raven wire) |
-| **Design** | [`design/2026-10-any-network-reachability.md`](design/2026-10-any-network-reachability.md) §3 "Phase 4" and decision D11; the Phase 4 plan `docs/roadmap/plans/phase45-design.json` (`.designs[1]`, owner decisions O4-9 to O4-11 and O4-16) |
+| **Design** | the any-network reachability plan (not published) §3 "Phase 4" and decision D11; the Phase 4 plan `docs/roadmap/plans/phase45-design.json` (`.designs[1]`, owner decisions O4-9 to O4-11 and O4-16) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` (section "Router port mapping") |
-| **Real rows** | [`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md): R2b and R2c |
+| **Real rows** | an unpublished test checklist: R2b and R2c |
 
 ## 1. Why a waiver is needed
 
@@ -164,7 +164,7 @@ All open until recorded; none of the software runs replaces the real rows.
 - **Vectors and fuzzing**: `generate_portmap.py` regenerates
   `shared-vectors/rvn1/portmap/` unchanged; the `portmap_reply` fuzz target
   in the stable smoke.
-- **Real rows** ([`P4_REAL_ROWS_CHECKLIST.md`](P4_REAL_ROWS_CHECKLIST.md)):
+- **Real rows** (an unpublished test checklist):
   **R2b** (a NAT-PMP-only or PCP-only router: direct with no relay, 10/10
   both ways) and **R2c** (IPv6 behind the router's default firewall with a PCP
   pinhole: inbound direct over IPv6), each on every OS the owner can test, plus
