@@ -3208,7 +3208,7 @@ pub(crate) fn explore_plan(
         return None;
     }
     let plan = peer_plan(ctx, peer, contact, now_ms());
-    let routes = plan.object_routes(peer, Some(&auto_record(peer))).routes;
+    let routes = plan.card_lan_localized(plan.object_routes(peer, Some(&auto_record(peer))).routes);
     let statics = raven_core::learning::rank::carriers_of(&plan.plain(peer));
     Some((routes, statics))
 }
@@ -3478,7 +3478,11 @@ impl PeerPlan {
             .object_routes(peer, Some(&auto_record(peer)))
             .routes
             .into_iter()
-            .filter_map(|r| localize(&r, self.contact.pinned).ok().map(|d| (r, d)))
+            .filter_map(|r| {
+                localize(&r, self.contact.localize_pinned(&r))
+                    .ok()
+                    .map(|d| (r, d))
+            })
             .collect();
         connected_first(&mut routes, connected, None);
         routes
@@ -3490,7 +3494,26 @@ impl PeerPlan {
     /// rule apply as to any send ([`Self::object_routes`]); the renewal step
     /// localizes LAN routes itself.
     pub(crate) fn renewal_routes(&self, peer: &[u8; 32]) -> Vec<OutboxRoute> {
-        self.object_routes(peer, Some(&auto_record(peer))).routes
+        self.card_lan_localized(self.object_routes(peer, Some(&auto_record(peer))).routes)
+    }
+
+    /// `routes` with each of the book's LAN routes that keep the
+    /// local-network rule ([`raven_core::outbox::ContactRoutes::lan_local_only`]:
+    /// a card's) localized now as an unverified contact's (the address it
+    /// resolves to on the local network, or left out): for the steps that
+    /// localize with the contact's verified state alone (renewal, the
+    /// horizon, an exploration probe). Blocking (a name resolves).
+    fn card_lan_localized(&self, routes: Vec<OutboxRoute>) -> Vec<OutboxRoute> {
+        routes
+            .into_iter()
+            .filter_map(|r| {
+                if self.contact.pinned && self.contact.lan_local_only(&r) {
+                    localize_lan_route(&r, false, LOCALIZE_RESOLVE_TIMEOUT).ok()
+                } else {
+                    Some(r)
+                }
+            })
+            .collect()
     }
 }
 
@@ -4240,7 +4263,7 @@ fn attempt_peer_inner(
                 .routes
                 .iter()
                 .filter(|r| !blocked(r))
-                .filter_map(|r| match localize(r, contact.pinned) {
+                .filter_map(|r| match localize(r, contact.localize_pinned(r)) {
                     Ok(d) => Some((r.clone(), d)),
                     Err(RouteRefusal::NotLocal) => {
                         unlocal = true;
@@ -4271,7 +4294,7 @@ fn attempt_peer_inner(
                     } else {
                         entry.blocked_code
                     }
-                } else if plan.unverified_withheld || unlocal {
+                } else if plan.unverified_withheld || (unlocal && !contact.pinned) {
                     CONTACT_NOT_VERIFIED
                 } else if unresolved {
                     code::NOT_REACHABLE
@@ -6869,6 +6892,20 @@ pub(crate) mod test_rig {
             dir.join("contacts.json"),
             format!(
                 r#"[{{"petname":"Peer","public_tag":"","alias":"","address":"","pub_hex":"{}","pinned":{pinned},"lan_dial":"{lan}","internet_dial":"{inet}"}}]"#,
+                hex::encode(peer)
+            ),
+        )
+        .unwrap();
+    }
+
+    /// [`contacts`] with the LAN route typed on this computer (or learned
+    /// after a delivery), not taken from a card: a verified contact's may
+    /// lie beyond the local network.
+    pub(crate) fn contacts_typed(dir: &Path, peer: &[u8; 32], lan: &str, inet: &str, pinned: bool) {
+        std::fs::write(
+            dir.join("contacts.json"),
+            format!(
+                r#"[{{"petname":"Peer","public_tag":"","alias":"","address":"","pub_hex":"{}","pinned":{pinned},"lan_dial":"{lan}","internet_dial":"{inet}","lan_dial_trusted":true}}]"#,
                 hex::encode(peer)
             ),
         )
@@ -10151,8 +10188,9 @@ mod tests {
             (0xD5, "127.0.0.1:9", false),
         ] {
             let rig = Rig::new(seed);
-            // Bob is verified: his LAN route may be any address.
-            contacts(rig.a.path(), &rig.bob_pub, dial, "", true);
+            // Bob is verified and his LAN route was typed here: it may be
+            // any address.
+            contacts_typed(rig.a.path(), &rig.bob_pub, dial, "", true);
             rig.set(UP);
             rig.stage("hello", DAY);
             let report = rig.attempt();
@@ -11126,9 +11164,19 @@ mod tests {
         let addr: std::net::SocketAddr = route.dial.parse().expect("the resolved literal");
         assert!(addr.ip().is_loopback(), "{route:?}");
         assert_eq!(rig.history(&mid).as_deref(), Some("delivered"));
-        // A verified contact is dialled at its public address as saved.
+        // A verified contact's public LAN address from a card (nobody signs
+        // a card's routes): still never dialled, and not "not verified".
         rig.stage("anywhere", DAY);
         contacts(rig.a.path(), &rig.bob_pub, "203.0.113.7:7420", "", true);
+        assert!(rig
+            .attempt()
+            .outcomes
+            .values()
+            .all(|o| *o == Outcome::Held(code::NO_ROUTE)));
+        assert_eq!(rig.net.log.lock().unwrap().len(), 1);
+        // Typed on this computer (or learned after a delivery): dialled at
+        // its public address as saved.
+        contacts_typed(rig.a.path(), &rig.bob_pub, "203.0.113.7:7420", "", true);
         assert!(matches!(only(&rig.attempt()), Outcome::Delivered { .. }));
         assert_eq!(rig.net.log.lock().unwrap()[1].0, lan("203.0.113.7:7420"));
     }
@@ -14676,6 +14724,65 @@ mod tests {
             plan(&test_ctx(dir.path(), alice, nodial.clone())).preferred,
             None
         );
+        assert_eq!(nodial.dials(), 0);
+    }
+
+    /// A card's LAN route (`lan=`: nobody signs a card's routes, and the
+    /// security words cover the key only) keeps the local-network rule for a
+    /// verified contact too: at a public address it is never dialled, by the
+    /// worker, AppSubmit or the announcer ([`PeerPlan::auto_dial`]), session
+    /// renewal and the horizon ([`PeerPlan::renewal_routes`]) or an
+    /// exploration probe ([`explore_plan`]). At a local address it goes as
+    /// before, and a LAN address typed on this computer or learned from the
+    /// contact's authenticated link may lie beyond the local network.
+    #[test]
+    fn a_cards_lan_route_stays_on_the_local_network_for_a_verified_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = Arc::new(Identity::from_seed(&[0x6e; 32]));
+        let bob = Identity::from_seed(&[0x6f; 32]).public_key_bytes();
+        let nodial = Arc::new(NoDial::default());
+        let ctx = test_ctx(dir.path(), Arc::clone(&alice), nodial.clone());
+        let plan = || {
+            let ContactAdmission::Allowed(c) = contact_admission(dir.path(), &bob) else {
+                panic!("Bob is a contact");
+            };
+            assert!(c.pinned, "Bob is verified");
+            peer_plan(&ctx, &bob, c, now_ms())
+        };
+        let dialled = || -> Vec<OutboxRoute> {
+            plan()
+                .auto_dial(&bob, never_connected, &mut |r, pinned| {
+                    localize_lan_route(r, pinned, LOCALIZE_RESOLVE_TIMEOUT)
+                })
+                .into_iter()
+                .map(|(_, dialled)| dialled)
+                .collect()
+        };
+        let book = |dial: &str, trusted: bool| {
+            std::fs::write(
+                dir.path().join("contacts.json"),
+                format!(
+                    r#"[{{"petname":"Bob","address":"","pub_hex":"{}","pinned":true,"lan_dial":"{dial}","lan_dial_trusted":{trusted}}}]"#,
+                    hex::encode(bob)
+                ),
+            )
+            .unwrap();
+        };
+        let public = lan("203.0.113.7:7420");
+        // From a card (or a book from before the mark): not dialled.
+        book(&public.dial, false);
+        assert!(dialled().is_empty());
+        assert!(plan().renewal_routes(&bob).is_empty());
+        assert!(explore_plan(&ctx, &bob).is_some_and(|(routes, _)| routes.is_empty()));
+        // A card's local address: as before.
+        let local = lan("192.168.1.40:7420");
+        book(&local.dial, false);
+        assert_eq!(dialled(), std::slice::from_ref(&local));
+        assert_eq!(plan().renewal_routes(&bob), [local]);
+        // Typed here, or learned after an authenticated delivery.
+        book(&public.dial, true);
+        assert_eq!(dialled(), std::slice::from_ref(&public));
+        assert_eq!(plan().renewal_routes(&bob), [public]);
         assert_eq!(nodial.dials(), 0);
     }
 

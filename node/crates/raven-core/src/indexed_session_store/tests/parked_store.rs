@@ -762,28 +762,43 @@ fn resealed_copy_after_prune_is_marked_received_again() {
     }
 }
 
-/// With session reset and the horizon both closed, the accept path writes
-/// no inbound-seen row: the store is as before.
+/// ATSAM_ENDPOINT_TRANSACTION_V1 §3, with session reset and the horizon
+/// both closed (nothing re-seals): the accept path still notes each message
+/// id, in either layout, and another object under that id from the same
+/// device in a later session is refused as a conflict before any state
+/// moves (no inbox row; the session's receive chain does not advance, so its
+/// next message is taken). A new id in the later session is taken.
 #[test]
-fn accept_notes_nothing_with_both_gates_closed() {
+fn a_seen_message_id_is_refused_in_a_later_session_while_nothing_reseals() {
     let _switches = DedupSwitches::set(false, false);
     for sealed_profile in [false, true] {
         let (_dir, _path, _backend, mut store) = store_in(sealed_profile);
-        let fixture = endpoint_fixture();
-        let peer = peer_of(&fixture);
-        store
-            .create_session(fixture.binding.clone(), fixture.root)
-            .unwrap();
-        accept_text(&mut store, &fixture, 0, [0x5B; 16], fixture.now_ms);
-        assert_eq!(inbox_copies_of(&mut store, &peer, &[0x5B; 16]).len(), 1);
-        assert!(!store.inbound_seen(&peer, &[0x5B; 16]).unwrap());
-        let count: i64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM endpoint_inbound_seen", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0);
+        let old = endpoint_fixture();
+        let new = second_session_fixture(1_000);
+        let peer = peer_of(&old);
+        store.create_session(old.binding.clone(), old.root).unwrap();
+        store.create_session(new.binding.clone(), new.root).unwrap();
+        let mid = [0x5B; 16];
+        accept_text(&mut store, &old, 0, mid, old.now_ms);
+        assert_eq!(inbox_copies_of(&mut store, &peer, &mid).len(), 1);
+        assert!(store.inbound_seen(&peer, &mid).unwrap(), "{sealed_profile}");
+
+        let reused = inbound_message_envelope(&new, 0, mid, b"other text");
+        assert!(matches!(
+            store.accept_message_envelope(
+                &new.key,
+                &reused.pack(),
+                &new.remote_certificate,
+                false,
+                new.now_ms,
+            ),
+            Err(IndexedSessionStoreError::LogicalMessageConflict)
+        ));
+        assert_eq!(inbox_copies_of(&mut store, &peer, &mid).len(), 1);
+        // The refusal moved nothing: index 0 of the later session still
+        // takes a message with a new id.
+        accept_text(&mut store, &new, 0, [0x5C; 16], new.now_ms);
+        assert_eq!(inbox_copies_of(&mut store, &peer, &[0x5C; 16]).len(), 1);
     }
 }
 
@@ -1041,4 +1056,50 @@ fn an_unseal_committing_mid_open_keeps_the_horizon_rows() {
         &open_test_store(&path, Arc::new(MemoryProtectedBackend::default())),
         &parked,
     );
+}
+
+/// A removed contact's sessions go at once, in either layout: each one's
+/// protected state (its root and chains) leaves the keystore with its head
+/// and endpoint rows, and another contact's session stays untouched.
+#[test]
+fn deleting_a_contacts_sessions_deletes_their_secrets_now() {
+    for sealed_profile in [false, true] {
+        let (_dir, _path, backend, mut store) = store_in(sealed_profile);
+        let first = endpoint_fixture();
+        let second = second_session_fixture(1_000);
+        let mut other = endpoint_fixture();
+        other.binding.key.init_id = [0x36; 16];
+        other.binding.key.responder_device_ed25519 = [0x77; 32];
+        other.binding.init_hash = [0x56; 32];
+        other.binding.session_id = session_id(&other.binding.init_hash);
+        other.key = other.binding.key.clone();
+        for f in [&first, &second, &other] {
+            store.create_session(f.binding.clone(), f.root).unwrap();
+        }
+        store
+            .register_outstanding_message(&first.key, &[0xBA; 16])
+            .unwrap();
+        let account = |f: &EndpointFixture| hex::encode(record_key_digest(&f.key).unwrap());
+        let peer = peer_of(&first);
+        assert_eq!(peer_of(&second), peer);
+        assert_eq!(store.delete_sessions_with_peer(&peer).unwrap(), 2);
+        for gone in [&first, &second] {
+            assert!(
+                backend.get(&account(gone)).unwrap().is_none(),
+                "{sealed_profile}"
+            );
+        }
+        assert!(backend.get(&account(&other)).unwrap().is_some());
+        assert_eq!(store.list_record_keys().unwrap(), vec![other.key.clone()]);
+        let outstanding: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM endpoint_outstanding_messages",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outstanding, 0);
+        assert_eq!(store.delete_sessions_with_peer(&peer).unwrap(), 0);
+    }
 }

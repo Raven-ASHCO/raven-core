@@ -20,10 +20,12 @@
 //! messages arrived under, kept until `keep_until_ms` (the sender's deadline
 //! plus a day), so a receiver collapses a re-sealed copy even after the
 //! first copy's inbox row was pruned or left the 2,000-entry history.
-//! While receiver dedup is live ([`crate::horizon::receiver_dedup_live`],
-//! P5.5) the accept path notes each message in its own transaction at its
-//! receive time, kept the horizon plus a day from then
-//! ([`IndexedSessionStore::inbound_received_again`] tells a later copy).
+//! The accept path notes each message in its own transaction at its receive
+//! time, whatever the gates, kept the horizon plus a day from then: while
+//! nothing re-seals, another object under a seen id from a later session is
+//! refused (ATSAM_ENDPOINT_TRANSACTION_V1 §3); while receiver dedup is live
+//! ([`crate::horizon::receiver_dedup_live`], P5.5)
+//! [`IndexedSessionStore::inbound_received_again`] tells a later copy.
 //! [`IndexedSessionStore::prune_expired_sessions`] deletes the rows past it.
 //!
 //! Both tables are additive (`CREATE TABLE IF NOT EXISTS`) in either schema,
@@ -731,6 +733,17 @@ pub(super) fn note_seen(
     };
     put(conn, layout, &row, None)?;
     Ok(existing.is_none())
+}
+
+/// Whether a message `message_id` from `peer` was seen (inside the accept
+/// path's transaction).
+pub(super) fn seen(
+    conn: &Connection,
+    layout: &Layout,
+    peer: &[u8; 32],
+    message_id: &[u8; 16],
+) -> Result<bool, IndexedSessionStoreError> {
+    Ok(load_one::<InboundSeen>(conn, layout, peer, message_id)?.is_some())
 }
 
 /// Delete the inbound-seen rows whose `keep_until_ms` has passed (the

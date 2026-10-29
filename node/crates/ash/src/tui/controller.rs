@@ -281,6 +281,10 @@ pub(super) struct RowView {
     /// `failed`, `expired`, `cancelled`, or empty.
     pub(super) delivery: String,
     pub(super) body: String,
+    /// The friend later sent different text under this message's id; the
+    /// body is the first text, which never changes
+    /// (`raven_core::ChatHistoryEntry::id_conflict`).
+    pub(super) id_conflict: bool,
 }
 
 /// Every friend's conversation, by key (`pub_hex`, lower case), each in the
@@ -781,6 +785,7 @@ impl Controller {
                     } else {
                         entry.body
                     },
+                    id_conflict: entry.id_conflict && entry.direction != "out",
                 });
         }
         Ok(conversations)
@@ -2109,7 +2114,7 @@ mod tests {
         );
         let why = refused.result.expect_err("a wrong-case code pins nothing");
         assert!(why.contains(bridge::FINGERPRINT_CASE_HINT), "{why}");
-        assert!(why.contains(&format!("got {HIDDEN_CODE}")), "{why}");
+        assert!(why.starts_with("fingerprint mismatch: "), "{why}");
         assert!(!why.contains(&bob.fingerprint), "{why}");
         assert_eq!(saved(&controller, &bob.pub_hex), None);
 
@@ -3485,6 +3490,7 @@ mod tests {
             preview: String::new(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 

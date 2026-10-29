@@ -578,6 +578,60 @@ mod tests {
         assert_eq!(stored, expected);
     }
 
+    /// `shared-vectors/rvn1/onion/noise_static_001.json` (spec §5.1, §11):
+    /// the onion link's own Noise static, written only under
+    /// `RAVEN_REGEN_SECURITY_VECTORS=1`, checked always.
+    #[test]
+    fn onion_noise_static_vector() {
+        use crate::lan_noise::{
+            derive_noise_static, derive_onion_noise_static, noise_static_public, HKDF_INFO,
+            ONION_HKDF_SALT,
+        };
+        const ALICE: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let alice = Identity::from_seed(&hex::decode(ALICE).unwrap().try_into().unwrap());
+        let onion = noise_static_public(&derive_onion_noise_static(&alice).unwrap());
+        let device = noise_static_public(&derive_noise_static(&alice).unwrap());
+        assert_ne!(onion, device);
+        let expected = serde_json::json!({
+            "description": "RAVEN_ONION_CARRIER_V1 §5.1: the onion link's Noise static. \
+                onion_static = HKDF-SHA256(salt = 'rvn1/onion-noise/v1', IKM = identity seed, \
+                info = 'static-x25519', 32 bytes) as an X25519 private key; never the device \
+                static of rvn1/lan/noise_static_001.json (same seed, other salt). The identity \
+                is RFC 8032 test 1 (alice)",
+            "deterministic": true,
+            "name": "Onion link Noise static X25519 derive",
+            "protocol_version": "rvn1",
+            "inputs": {
+                "device_seed_hex": ALICE,
+                "hkdf_salt": std::str::from_utf8(ONION_HKDF_SALT).unwrap(),
+                "hkdf_info": std::str::from_utf8(HKDF_INFO).unwrap(),
+            },
+            "expected": {
+                "onion_static_pub_hex": hex::encode(onion),
+                "device_static_pub_hex": hex::encode(device),
+            },
+        });
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for _ in 0..3 {
+            path.pop();
+        }
+        let path = path.join("shared-vectors/rvn1/onion/noise_static_001.json");
+        if std::env::var("RAVEN_REGEN_SECURITY_VECTORS").as_deref() == Ok("1") {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&expected).unwrap() + "\n",
+            )
+            .unwrap();
+        }
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("missing vector {}: {e}", path.display())),
+        )
+        .unwrap();
+        assert_eq!(stored, expected);
+    }
+
     #[test]
     fn the_signing_domain_is_not_an_agent_delegation() {
         assert!(!ONION_BIND_DOMAIN.starts_with(&crate::agent_sign::AGENT_DELEGATION_PREFIX[..2]));

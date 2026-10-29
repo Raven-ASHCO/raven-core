@@ -211,7 +211,12 @@ contact → the sender's outer signature (before any protected load) → room to
 owe the ACK → the session-bound certificate → the normal endpoint accept →
 history → the ACK, durably owed. Only then is the object released. Store
 errors that may clear (clock, forward jump, busy lane) keep the object at the
-custodian. Page-token order says nothing about when objects were written: a
+custodian. An object whose outer signature is not the sender's (someone else
+signed it and left it under the tag: a custodian checks only that its depositor
+signed what it holds, never whose tag it was left under) is released and blames
+nobody: it is no misbehaviour of the custodian (no security event, no strike),
+and the recipient logs only how many it released. Page-token order says nothing
+about when objects were written: a
 recipient takes a page's objects in order of their creation time, each at its
 own receive time, so they reach its inbox in the order they were written.
 

@@ -195,8 +195,11 @@ Retention: rows (payload included) stay until the envelope's `expires_at`, TTL-o
 
 ### 3.3 Custodian receiving HANDOFF/DELIVER (F2; D = link peer)
 
-Checks 1-7 as in 3.1. There is no signer check: the recipient's ingest checks the outer
-signature against its own session peer before any protected load.
+Checks 1-7 as in 3.1. There is no signer check: F2 holds no key to check against (the
+envelope names no sender, and the record carries none, so F2 never learns A, §5). The
+recipient's ingest checks the outer signature against its own session peer before any
+protected load, releases an object that fails it, and blames no custodian for it (friend
+custody spec §7): F2 could not have told.
 
 Then:
 

@@ -2533,7 +2533,10 @@ mod tests {
         let dir = book();
         let (_, _, code) = someone(0x51);
         let err = add(dir.path(), 0x51, "Bob", Some("AAAA-BBBB-CCCC")).unwrap_err();
-        assert!(err.contains(&code), "cli.rs says `got <code>`: {err}");
+        assert!(
+            !err.contains(&code),
+            "cli.rs never names the key's code: {err}"
+        );
         let plain = explain_contact_add(&err);
         assert_eq!(
             says(&plain),
@@ -2545,8 +2548,12 @@ mod tests {
         );
         assert_no_code(&plain.technical, &code);
         assert!(plain.technical.contains(controller::HIDDEN_CODE));
-        // What the user typed stays: it's theirs.
-        assert!(plain.technical.contains("expected"), "{}", plain.technical);
+        // What the user typed stays (as its shape): it's theirs.
+        assert!(
+            plain.technical.contains("is not this key's code"),
+            "{}",
+            plain.technical
+        );
     }
 
     #[test]

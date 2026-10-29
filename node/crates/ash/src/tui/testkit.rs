@@ -767,6 +767,7 @@ pub(super) fn row(
         created_at_ms: TEST_WALL_MS - minutes_ago * 60_000,
         delivery: delivery.into(),
         body: body.into(),
+        id_conflict: false,
     }
 }
 

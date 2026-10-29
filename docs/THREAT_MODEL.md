@@ -359,6 +359,31 @@ the user's responsibility, matching the pre-pivot model's §3.4. We also note
 number re-verification as a TODO; today the safety-number check is a manual
 compare-in-person-or-by-call flow, not an automated re-scan.
 
+**Who learns the dialer's identity (this version).** On LAN direct (and on
+Internet direct once it is live) the dialer sends its signed identity bind
+first, after Noise message 2; the listener answers with its own only to a
+dialer that names one of its contacts. Noise authenticates nothing about the
+listener before that bind, so whoever answers at the address dialled learns
+the dialer's Raven identity, its IP address and when it sends (never
+content: the bind and everything after it is checked against the contact's
+key, and a wrong key ends the link). Two ways to be that listener:
+
+- *At a contact's real address*: a reused DHCP lease, a planted listener or
+  an ARP spoof on the same network. Not prevented in this version; M0 and
+  the RLK1 knock below are the answer.
+- *By steering the dial*: a card's route fields (`lan=`, `inet=`, `p2p=`,
+  `via=`) are not signed (only `onion=` is), and comparing security words
+  checks the key only, so someone who alters a card in transit can name
+  their own host. A card's LAN route therefore keeps the local-network rule
+  even after the contact is verified: it is dialled only at a loopback,
+  private, link-local or unique-local address, whatever name it gives. Only
+  a LAN address typed on this computer (`--lan-dial`, `contact set-dial`) or
+  learned from the contact's own authenticated link may lie beyond the local
+  network; a LAN address saved before this rule counts as a card's until it
+  is typed again or learned. A card's Internet route (`inet=`) has no such
+  limit and is the remaining card exposure once Internet direct is live;
+  signed card routes are the planned fix.
+
 **Phase 6b (built, gated off; not in this version):**
 
 - *Impostor at a contact's address* (a reused DHCP address, a planted
@@ -605,6 +630,17 @@ cause duplicate delivery or reuse of stale state.
 monotonic queue transitions, and bounded ratchet prototypes have negative
 tests. Relays no longer durably deduplicate on an attacker-chosen public
 message ID alone.
+
+**A contact re-using a message id** (a modified client): message ids are
+unique per sender device across sessions, and the first received text of a
+message is final whatever the gates
+([`ATSAM_ENDPOINT_TRANSACTION_V1.md`](../protocol/ATSAM_ENDPOINT_TRANSACTION_V1.md)
+§3). While nothing re-seals (this version), another object under an id the
+contact used in an earlier session is refused; with session reset or the
+long horizon live it is taken as a copy, and a different text marks the
+message ("the sender later sent different text as this same message") but
+never replaces it. The seen record lasts 8 days; after that the chat
+history's first-text rule still holds while the row is kept.
 
 **Remaining gate:** endpoint replay acceptance must be committed atomically
 with authenticated AEAD open, receive-ratchet/skipped-key state, inbox dedup,
@@ -914,7 +950,19 @@ listener it also hands the same Noise static key on every network (Noise XX
 message 2; encrypted, so a passive observer does not see it), which links
 the laptop across networks. MAC addresses and computer names (DHCP, mDNS)
 come from the operating system; the user guide gives the habits that help
-([`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) sections 2 and 4).
+([`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) sections 2 and 4). Anyone who
+learned that static as a contact (or a former one) can recognise the
+listener's IP address with it.
+
+**The onion carrier (gated off: `ONION_PRODUCTION_ENABLED = false`).**
+Anyone holding a card can open an onion link and read Noise message 2
+before the contact gate. The onion link therefore answers with a static of
+its own (`RAVEN_ONION_CARRIER_V1.md` §5.1), derived under another HKDF salt
+and used on onion links only, never the device static above: it names
+nothing beyond the onion address the card already shows, and no LAN or
+Internet listener answers with it, so it cannot tie an IP address to the
+card's identity. The RIH1 hello still signs it. What stays: anyone holding
+a card can tell when the onion service is online (§12 of that spec).
 
 **Phase 6b (built, all gated off; none is in this version).** Each measure
 and what it does not hide; the full inventory of identifiers is in

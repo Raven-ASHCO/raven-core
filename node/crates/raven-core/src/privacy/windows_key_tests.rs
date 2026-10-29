@@ -45,6 +45,7 @@ fn row(n: u8) -> ChatHistoryEntry {
         preview: String::new(),
         body: format!("m{n}"),
         stored_at_ms: None,
+        id_conflict: false,
     }
 }
 

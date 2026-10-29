@@ -318,6 +318,17 @@ pub fn deliver_committed(
                     "received",
                     plaintext,
                 )?;
+            } else {
+                // A later copy is not written again; one with other text
+                // marks the first copy's row (ATSAM_ENDPOINT_TRANSACTION_V1
+                // §3), whose body stays.
+                crate::chat_history::ChatHistory::note_inbound_copy_persisted(
+                    data_dir,
+                    &hex::encode(sender_device),
+                    &hex::encode(message_id),
+                    Some(&String::from_utf8_lossy(plaintext)),
+                )
+                .map_err(|e| e.to_string())?;
             }
             Ok(true)
         }

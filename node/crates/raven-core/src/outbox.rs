@@ -2091,9 +2091,31 @@ pub struct ContactRoutes {
     /// ([`crate::onion::OnionBinding::verify`]); the newest of several
     /// rows. [`with_onion_route`] plans from it (or a newer learned one).
     pub onion: Option<crate::onion::OnionBinding>,
+    /// The book's LAN routes that keep the local-network rule even for a
+    /// verified contact ([`Self::lan_local_only`]): one a card gave (nobody
+    /// signs a card's route fields; the security words cover the key
+    /// only), or one saved before the book recorded where it came from.
+    pub card_lan: Vec<String>,
 }
 
 impl ContactRoutes {
+    /// Is `route` one of the book's LAN routes that only a local-network
+    /// address may answer, whatever the verified state ([`Self::card_lan`])?
+    /// Only a LAN address this computer's user typed, or one learned from
+    /// the contact's own authenticated link, may lie beyond the local
+    /// network for a verified contact.
+    pub fn lan_local_only(&self, route: &OutboxRoute) -> bool {
+        route.carrier == OutboxCarrier::Lan
+            && self.card_lan.iter().any(|dial| dial == route.dial.trim())
+    }
+
+    /// The `pinned` to localize `route` with ([`localize_lan_route`]): the
+    /// contact is verified, and `route` is not a LAN route that keeps the
+    /// local-network rule ([`Self::lan_local_only`]).
+    pub fn localize_pinned(&self, route: &OutboxRoute) -> bool {
+        self.pinned && !self.lan_local_only(route)
+    }
+
     /// May this contact be reached over `carrier`:
     /// [`carrier_allowed_for_contact`], and on the LAN under `raven lan
     /// verified-only on` a verified contact only.
@@ -2130,6 +2152,12 @@ struct ContactRouteRow {
     /// [`crate::onion::OnionBinding::from_text`]); empty: none.
     #[serde(default)]
     onion: String,
+    /// `lan_dial` was typed on this computer, or learned from the contact's
+    /// own authenticated link; false (or absent, a book from before) for a
+    /// card's `lan=`, which then keeps the local-network rule
+    /// ([`ContactRoutes::card_lan`]).
+    #[serde(default)]
+    lan_dial_trusted: bool,
 }
 
 /// The contact whose key is `peer_device`, or `None` when there is none. An
@@ -2155,6 +2183,7 @@ pub fn contact_routes(
             p2p_learned: None,
             lan_verified_only: false,
             onion: None,
+            card_lan: Vec::new(),
         });
         // Several rows for one key (an old book): verified only if all are,
         // hidden if any is.
@@ -2170,6 +2199,9 @@ pub fn contact_routes(
             (OutboxCarrier::Internet, &row.internet_dial),
         ] {
             if plausible_dial(dial) {
+                if carrier == OutboxCarrier::Lan && !row.lan_dial_trusted {
+                    entry.card_lan.push(dial.trim().to_string());
+                }
                 entry.routes.push(OutboxRoute {
                     carrier,
                     dial: dial.trim().to_string(),
@@ -2707,6 +2739,9 @@ pub fn contact_is_pinned(data_dir: &Path, peer_device: &[u8; 32]) -> Result<bool
 }
 
 /// May anything be exchanged with `peer` at all?
+// One per contact per plan, moved and never kept in bulk: the routes'
+// size (the card LAN list included) costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContactAdmission {
     /// A current, unblocked contact (with its routes and pin).
@@ -6087,6 +6122,8 @@ mod tests {
                 p2p_learned: None,
                 lan_verified_only: false,
                 onion: None,
+                // Not marked as typed or learned: a card's (or older).
+                card_lan: vec!["10.0.0.2:7420".into()],
             })
         );
         std::fs::write(dir.path().join("contacts.json"), b"{not json").unwrap();

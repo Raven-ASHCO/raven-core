@@ -105,6 +105,21 @@ idempotent insert.
 - Logical message uniqueness: `(session_id, sender_device, message_id)` maps to
   exactly one `object_digest`. A different authenticated object reusing that
   tuple is a sender/session integrity conflict, not a duplicate overwrite.
+- Message ids are unique per sender device **across sessions**. Every committed
+  message records `(sender_device, message_id)` in an inbound-seen row, whatever
+  the gates, kept until its receive time plus the message horizon plus one day
+  (8 days). A sender re-uses an id under a new session only when it re-seals
+  the same message (session reset, the long horizon). So:
+  - while neither re-seal mechanism is live, a new object under an id seen from
+    that device under another session is an integrity conflict and is refused
+    before the receive key is derived (no inbox row, no ACK);
+  - while one is live, such an object is taken as a copy of that message and
+    answered; the application keeps the first copy's body (below).
+- The first inbound body for `(sender_device, message_id)` wins, whatever the
+  gates. A copy with the same body changes nothing; another object under that
+  id (a refused one, or a copy with a different body) never replaces or
+  re-dates the first body: the application marks that message as a conflict
+  and shows the mark with it, never the other text as the message.
 - ACK intent primary key: the committed endpoint receipt. It contains the
   exact acknowledged message ID, expected remote device, status, and session
   binding locally; none of those fields is exposed in the routed ACK body.

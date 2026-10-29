@@ -1271,6 +1271,29 @@ fn a_delivered_send_names_the_person_keeps_the_status_line_and_drops_the_jargon(
     assert_eq!(net.bob_inbox(), vec!["hello Bob", "second"]);
 }
 
+/// Removing a contact deletes its secure sessions at once, their secrets
+/// included, rather than leaving them until they expire.
+#[test]
+fn removing_a_contact_deletes_its_sessions_now() {
+    let net = Net::new(true);
+    let o = net.send("hello Bob");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    let bob = Identity::from_seed(&[0x42; 32]).public_key_bytes();
+    let sessions = |dir: &Path| {
+        raven_core::IndexedSessionStore::open(dir)
+            .unwrap()
+            .find_confirmed_sessions_for_peer_at(&bob, raven_core::clock::now_ms())
+            .unwrap()
+            .len()
+    };
+    assert_eq!(sessions(net.a.path()), 1);
+    let mut c = ash(net.a.path());
+    c.args(["contact", "remove", "--petname", "Bob", "--yes"]);
+    let o = run(c, b"");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    assert_eq!(sessions(net.a.path()), 0);
+}
+
 /// Field test E2 r7: a secure connection set up again with a contact this
 /// computer has talked with is no "First time talking". Here Alice's
 /// session store has nothing of Bob any more (as after its prune, once the

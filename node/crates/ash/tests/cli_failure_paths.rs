@@ -408,7 +408,7 @@ fn security_words_pin_and_a_mismatch_never_shows_the_expected_words() {
     assert!(!book.exists(), "nothing saved on a mismatch");
 
     // Saved, not verified: `contact verify` without a terminal shows the
-    // contact as before, and no words yet.
+    // contact, and neither its words nor its code yet (blind entry, §8).
     let mut c = ash(dir.path());
     add_contact_args(
         &mut c,
@@ -423,9 +423,10 @@ fn security_words_pin_and_a_mismatch_never_shows_the_expected_words() {
     let out = text(&o.stdout);
     assert!(out.contains("pinned      no"), "{out}");
     assert!(
-        out.contains(&device_fingerprint_v1(&poline.public_key_bytes())),
+        !out.contains(&device_fingerprint_v1(&poline.public_key_bytes())),
         "{out}"
     );
+    assert!(out.contains("security code hidden until verified"), "{out}");
     assert_no_expected_words(&o);
 
     // --check with the wrong words, or not 10 words: exit 1, the reason,
@@ -1072,6 +1073,7 @@ fn rvnhist2_makes_the_snapshot_build_fail_closed_not_move_aside() {
             preview: String::new(),
             body: "rvnhist2".into(),
             stored_at_ms: None,
+            id_conflict: false,
         },
     )
     .unwrap();

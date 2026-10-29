@@ -1227,9 +1227,12 @@ pub fn classify_store_error_at(
 }
 
 /// The kind of a relayed-ingest outcome (S7, S18, S24) as far as the outcome
-/// alone tells it: junk a custodian served that fails before the contact's
-/// signature is the custodian's, and an object dated in our future is clock
-/// skew. `CUSTODY_REFUSED` is None here: it covers both pre-signature shape
+/// alone tells it: junk a custodian served that an honest one never serves
+/// (malformed, under another tag) is the custodian's, and an object dated in
+/// our future is clock skew. An outer signature that is not the contact's
+/// (`OUTER_SIGNATURE_INVALID`) is nobody's: a custodian checks only that its
+/// depositor signed an object, never whose tag it was left under, so any of
+/// its contacts that knows a tag can leave one an honest custodian serves. `CUSTODY_REFUSED` is None here: it covers both pre-signature shape
 /// refusals and store refusals after a valid signature (the contact's), so
 /// the store error's own [`classify_store_error`] with [`Via::Custodian`]
 /// names those (step P6.25).
@@ -1237,7 +1240,7 @@ pub fn classify_relayed(o: &RelayedOutcome) -> Option<SecKind> {
     match o {
         RelayedOutcome::MessageAccepted { .. } | RelayedOutcome::AckAccepted { .. } => None,
         RelayedOutcome::Refused(code) => match *code {
-            "CUSTODY_MALFORMED" | "OUTER_SIGNATURE_INVALID" => Some(SecKind::CustodianBadObject),
+            "CUSTODY_MALFORMED" => Some(SecKind::CustodianBadObject),
             _ => None,
         },
         RelayedOutcome::Retry(_, code) => (*code == "CLOCK").then_some(SecKind::ClockSkew),
@@ -2308,10 +2311,9 @@ mod tests {
                 "Refused:CUSTODY_MALFORMED",
                 Some(SecKind::CustodianBadObject),
             ),
-            (
-                "Refused:OUTER_SIGNATURE_INVALID",
-                Some(SecKind::CustodianBadObject),
-            ),
+            // Someone else's object under the tag: an honest custodian
+            // serves it too, so nobody is blamed.
+            ("Refused:OUTER_SIGNATURE_INVALID", None),
             ("Refused:CUSTODY_REFUSED", None),
             ("Refused:ENVELOPE_EXPIRED", None),
             // Phase 6 review sensing-1: a session an early re-key closed.

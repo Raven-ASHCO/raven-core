@@ -1655,6 +1655,14 @@ fn message_lines(
                 .map(|piece| Line::from(vec![lead.clone(), Span::styled(piece, t.text)])),
         );
     }
+    if bubble.id_conflict() {
+        let room = usize::from(width.saturating_sub(BODY_INDENT));
+        lines.extend(
+            wrap_text(bridge::ID_CONFLICT_NOTE, room)
+                .into_iter()
+                .map(|piece| Line::from(vec![lead.clone(), Span::styled(piece, t.secondary)])),
+        );
+    }
     lines
 }
 

@@ -1497,6 +1497,15 @@ impl Bubble<'_> {
         }
     }
 
+    /// The friend later sent different text under this message's id (the
+    /// body shown is the first).
+    pub(super) fn id_conflict(&self) -> bool {
+        match self {
+            Bubble::Row(row) => row.view.id_conflict,
+            Bubble::Pending(_) => false,
+        }
+    }
+
     /// Raw: shaped by display.rs when drawn.
     pub(super) fn body(&self) -> &str {
         match self {

@@ -909,7 +909,8 @@ The terminal-node profile is [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V
 (production disabled, `ONION_PRODUCTION_ENABLED = false`). Requirements:
 
 1. The link class is `OPAQUE_CIRCUIT`: the two Raven devices terminate one Raven link
-   (`Noise_XX_25519_ChaChaPoly_BLAKE2s`, prologue `raven/onion-link/v1`, RIH1 bind, RLB1) inside
+   (`Noise_XX_25519_ChaChaPoly_BLAKE2s`, prologue `raven/onion-link/v1`, the onion link's own
+   Noise static (`RAVEN_ONION_CARRIER_V1` §5.1), RIH1 bind, RLB1) inside
    one Tor stream to the receiver's v3 onion service; Tor relays forward Tor cells and are no
    participant.
 2. An onion address is a route hint only, and only from a binding the contact's pinned key

@@ -49,6 +49,7 @@ fn write_row(dir: &Path, friend: &str, mid: &str, direction: &str, body: &str, d
             preview: body.into(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         },
     )
     .expect("history row written");

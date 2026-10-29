@@ -38,6 +38,7 @@ fn friend(name: &str, id: &Identity) -> super::super::Contact {
         custodians: Vec::new(),
         hide_ip: false,
         onion: String::new(),
+        lan_dial_trusted: false,
     }
 }
 

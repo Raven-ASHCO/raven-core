@@ -1804,11 +1804,13 @@ fn contact_add_card_accepts_the_invite_line_whoami_prints() {
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
     assert!(out.contains("invite read"), "{out}");
     assert!(out.contains("contact saved: Bob"), "{out}");
-    // Saved under Bob's key, not pinned: pinning still needs --verify-fp.
+    // Saved under Bob's key, not pinned: his code is not shown until a check
+    // matched (blind entry), and the next step is comparing words.
     let bob = Identity::from_seed(&[0x42; 32]);
     let fp = raven_core::fingerprint::device_fingerprint_v1(&bob.public_key_bytes());
-    assert!(out.contains(&fp), "{out}");
+    assert!(!out.contains(&fp), "{out}");
     assert!(out.contains("not verified yet"), "{out}");
+    assert!(out.contains("raven contact verify Bob"), "{out}");
     assert!(!text(&o.stderr).contains("YOUR OWN identity"));
 }
 

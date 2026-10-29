@@ -1960,3 +1960,64 @@ fn custodian_routes_add_the_onion_route_last_for_wan_custody() {
     assert!(no_onion(plan(None, tor, false, true)), "no WAN custody");
     assert!(no_onion(plan(Some(0), tor, true, true)), "LAN-only offer");
 }
+
+/// A friend of the keeper who knows one of Bob's store tags (another of his
+/// keepers sees them) leaves objects it signed itself under that tag. The
+/// keeper checks only that its depositor signed them, so it serves them to
+/// Bob as an honest keeper would. Bob refuses and releases them, counts them
+/// as someone else's, and notes no misbehaviour against the keeper: no
+/// strike, so no third party can get a keeper blocked.
+#[test]
+fn someone_elses_objects_under_a_tag_are_released_and_blame_nobody() {
+    set_custody_gates_for_this_thread(Some(CustodyGates {
+        live: true,
+        wan: false,
+    }));
+    let w = world(0xA7);
+    let mallory = Identity::from_seed(&[0xEE; 32]);
+    contacts(
+        w.c.path(),
+        &[(&w.alice, "Alice"), (&w.bob, "Bob"), (&mallory, "Mallory")],
+    );
+    let real = w.seal("real");
+    let tag = IndexedSessionStore::open(w.a.path())
+        .unwrap()
+        .outbound_store_tag_for_object(&w.key, &real, now())
+        .unwrap();
+    let mut items = Vec::new();
+    let mut digests = Vec::new();
+    for i in 0..3u8 {
+        let mut env = Envelope::unpack(&real).unwrap();
+        env.message_id[0] ^= i + 1;
+        env.sign_with(&mallory);
+        digests.push(custody_digest(&env.pack()));
+        items.push(DepositItem {
+            recipient: w.bob.public_key_bytes(),
+            rso1: rfc1_rso1(tag, &env.pack()).unwrap(),
+        });
+    }
+    let answers = deposit_batch(&items, &mut w.carol_dial(&mallory)).unwrap();
+    assert!(answers.iter().all(|a| *a == Some(CustodyCode::Ok)));
+    let tags = inbound_tags(w.b.path(), &w.bob, &[w.alice.public_key_bytes()], now()).unwrap();
+    let mut state = FetchState::default();
+    let report = fetch_round(
+        w.b.path(),
+        &w.bob,
+        &tags,
+        &mut state,
+        now(),
+        MAX_PAGES_PER_TRIGGER,
+        &mut w.carol_dial(&w.bob),
+    );
+    assert!(report.misbehaviour.is_empty(), "{report:?}");
+    assert!(report.sender_events.is_empty(), "{report:?}");
+    assert_eq!((report.refused, report.foreign), (3, 3), "{report:?}");
+    assert_eq!(report.accepted_messages, 0);
+    for digest in &digests {
+        assert!(
+            state.pending_release.contains(digest) || state.released.contains(digest),
+            "released at the keeper"
+        );
+    }
+    set_custody_gates_for_this_thread(None);
+}

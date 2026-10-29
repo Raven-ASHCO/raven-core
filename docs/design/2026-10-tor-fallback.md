@@ -36,7 +36,10 @@ reach every friend over Tor.
 Raven Noise link as Internet direct (same code: RIH1 identity bind, contact
 gate, RLB1 offers, ATSAM sessions, PairInit, sealed ACKs). Only its Noise
 prologue differs (`raven/onion-link/v1`) so a transcript made over Tor can
-never complete against the TCP listener or the reverse. Tor authenticates
+never complete against the TCP listener or the reverse, and its Noise
+static: a key of the onion link's own (`RAVEN_ONION_CARRIER_V1` §5.1), so
+what anyone holding a card reads from message 2 over Tor matches no LAN or
+Internet listener. Tor authenticates
 nothing for Raven; the Raven handshake authenticates the friend.
 
 **Every send races the paths** ("happy eyeballs"):

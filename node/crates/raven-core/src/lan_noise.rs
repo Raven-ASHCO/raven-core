@@ -19,6 +19,11 @@ pub const BIND_DOMAIN: &[u8] = b"rvn1/lan-noise/v1";
 pub const BIND_LEN: usize = 32 + 64;
 pub const HKDF_SALT: &[u8] = b"rvn1/lan-noise/v1";
 pub const HKDF_INFO: &[u8] = b"static-x25519";
+/// HKDF salt of the onion carrier's own Noise static
+/// (RAVEN_ONION_CARRIER_V1 §5.1). Same seed and info as the device static,
+/// another salt: a different key that cannot be matched against the static
+/// LAN and Internet listeners answer with.
+pub const ONION_HKDF_SALT: &[u8] = b"rvn1/onion-noise/v1";
 /// Largest Noise message snow will read or write (handshake or transport).
 /// LAN/Internet framers reject longer `u32_be` lengths before allocating.
 pub const MAX_NOISE_MSG: usize = 65535;
@@ -50,8 +55,47 @@ pub enum LanNoiseError {
 /// Knowing this key is equivalent to impersonating the identity on LAN, so it
 /// is returned in a wrapper that wipes it on drop.
 pub fn derive_noise_static(identity: &Identity) -> Result<Zeroizing<[u8; 32]>, LanNoiseError> {
+    derive_static_with(identity, HKDF_SALT)
+}
+
+/// The onion carrier's Noise static (RAVEN_ONION_CARRIER_V1 §5.1): HKDF-SHA256
+/// of the identity seed under [`ONION_HKDF_SALT`]. Anyone holding a card can
+/// open an onion link and read the responder's static from message 2; this
+/// key is used on onion links only, so it names nothing beyond the onion
+/// address the card already shows. The RIH1 hello signs it, so a contact
+/// still authenticates it. Wiped on drop.
+pub fn derive_onion_noise_static(
+    identity: &Identity,
+) -> Result<Zeroizing<[u8; 32]>, LanNoiseError> {
+    derive_static_with(identity, ONION_HKDF_SALT)
+}
+
+/// Which Noise static a link uses (RAVEN_ONION_CARRIER_V1 §5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkStatic {
+    /// The device static ([`derive_noise_static`]): LAN, Internet direct,
+    /// p2p and nearby links, and the key noise pins (M0) record.
+    Device,
+    /// The onion carrier's own static ([`derive_onion_noise_static`]).
+    Onion,
+}
+
+impl LinkStatic {
+    /// This link's static private key from the identity seed.
+    pub fn derive(self, identity: &Identity) -> Result<Zeroizing<[u8; 32]>, LanNoiseError> {
+        match self {
+            Self::Device => derive_noise_static(identity),
+            Self::Onion => derive_onion_noise_static(identity),
+        }
+    }
+}
+
+fn derive_static_with(
+    identity: &Identity,
+    salt: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, LanNoiseError> {
     let mut seed = identity.seed_bytes();
-    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &seed);
+    let hk = Hkdf::<Sha256>::new(Some(salt), &seed);
     seed.zeroize();
     let mut okm = Zeroizing::new([0u8; 32]);
     hk.expand(HKDF_INFO, okm.as_mut_slice())
@@ -454,6 +498,25 @@ mod tests {
         let noise = derive_noise_static(&id).unwrap();
         assert_ne!(*noise, id.seed_bytes());
         assert_ne!(*noise, [0u8; 32]);
+    }
+
+    #[test]
+    fn onion_static_is_not_the_device_static() {
+        // A stranger reads the onion responder's static from message 2; it
+        // must not match the static a LAN or Internet listener answers with.
+        let id = alice();
+        let device = noise_static_public(&derive_noise_static(&id).unwrap());
+        let onion = noise_static_public(&derive_onion_noise_static(&id).unwrap());
+        assert_ne!(device, onion);
+        assert_eq!(
+            noise_static_public(&LinkStatic::Onion.derive(&id).unwrap()),
+            onion
+        );
+        assert_eq!(
+            noise_static_public(&LinkStatic::Device.derive(&id).unwrap()),
+            device
+        );
+        assert_ne!(*derive_onion_noise_static(&id).unwrap(), id.seed_bytes());
     }
 
     #[test]

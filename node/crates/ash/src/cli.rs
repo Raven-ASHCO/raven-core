@@ -2106,6 +2106,15 @@ struct Contact {
     /// hint only. Omitted from the file while empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     onion: String,
+    /// `lan_dial` was typed on this computer (`--lan-dial`, `contact
+    /// set-dial`, the prompt) or learned from the contact's own
+    /// authenticated link after a delivery. False for a card's `lan=`
+    /// (nobody signs a card's routes; the security words cover the key
+    /// only): such a route keeps the local-network rule even for a verified
+    /// contact (`raven_core::outbox::ContactRoutes::card_lan`). Omitted
+    /// from the file while false; a book from before reads false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    lan_dial_trusted: bool,
 }
 
 impl Contact {
@@ -2194,11 +2203,29 @@ fn save_contacts(data_dir: &Path, contacts: &[Contact]) -> Result<(), String> {
 /// The profile's identity, created when it has none (`init`, the first
 /// run): a profile created here picks its random LAN port too (Phase 6b
 /// P6.36, while that gate is live).
+/// [`raven_core::load_or_create_profile_identity`]; a profile whose
+/// identity this call created is sealed at once where this build seals
+/// (privacy pack PP.4, [`at_rest_notices`] under `policy`), as the desktop
+/// engine does, so what this process writes next (its prekey, the device
+/// secret, contacts, routes) is never written plain. Before, only the next
+/// process sealed them. The error is raven-core's redacted reason.
+fn create_profile_identity(
+    data_dir: &Path,
+    policy: raven_core::at_rest::MigratePolicy,
+) -> Result<Identity, String> {
+    let fresh = !raven_core::identity_store::identity_recorded(data_dir).unwrap_or(true);
+    let (id, _) =
+        raven_core::load_or_create_profile_identity(data_dir).map_err(|e| e.redacted_display())?;
+    if fresh {
+        let _ = at_rest_notices(data_dir, policy, false);
+    }
+    Ok(id)
+}
+
 fn ensure_identity(data_dir: &Path) -> Identity {
-    match raven_core::load_or_create_profile_identity(data_dir) {
-        Ok((id, _)) => id,
-        Err(e) => {
-            let raw = e.redacted_display();
+    match create_profile_identity(data_dir, raven_core::at_rest::MigratePolicy::Auto) {
+        Ok(id) => id,
+        Err(raw) => {
             eprintln!("secure identity store: {raw}");
             if raw.contains("continuity violation") {
                 let c = c();
@@ -4153,6 +4180,9 @@ fn commit_invite_contact(
 /// both views so they cannot diverge.
 pub(crate) fn delivery_suffix(e: &raven_core::ChatHistoryEntry) -> String {
     if e.direction != "out" {
+        if e.id_conflict {
+            return format!(" {C_PURPLE}{ID_CONFLICT_NOTE}{C_RESET}");
+        }
         return String::new();
     }
     match e.delivery.as_str() {
@@ -4620,6 +4650,9 @@ fn update_contact_lan_dial(data_dir: &Path, pub_hex: &str, dial: &str) -> Result
     for c in contacts.iter_mut() {
         if c.pub_hex.eq_ignore_ascii_case(&want) {
             c.lan_dial = dial.to_string();
+            // Typed on this computer, or one that just reached and
+            // authenticated the contact: never a card's.
+            c.lan_dial_trusted = true;
             found = true;
             break;
         }
@@ -5596,6 +5629,23 @@ fn contact_fingerprint(c: &Contact) -> String {
     }
 }
 
+/// [`contact_fingerprint`] as the terminal shows it: the old code of a
+/// verified contact, [`CODE_HIDDEN`] for one that is not verified
+/// (RAVEN_SECURITY_WORDS_V1 §8 rule 1: no part of a friend's code is shown
+/// before a check matched, or a user could "verify" a card by copying back
+/// what Raven printed).
+fn shown_fingerprint(c: &Contact) -> String {
+    if c.pinned {
+        contact_fingerprint(c)
+    } else {
+        CODE_HIDDEN.into()
+    }
+}
+
+/// Shown instead of the code of a key that is not verified.
+/// The terminal app's words too (`tui::controller::HIDDEN_CODE`).
+const CODE_HIDDEN: &str = "[security code hidden until verified]";
+
 fn normalize_tag(tag: &str) -> String {
     sanitize_terminal_line(tag.trim().trim_start_matches('@')).to_lowercase()
 }
@@ -6416,8 +6466,9 @@ fn add_contact(
     verify_fp: Option<&str>,
     lan_dial: &str,
 ) -> Result<(), String> {
-    add_contact_with_routes(
-        data_dir, address, pub_hex, petname, public_tag, verify_fp, lan_dial, "", None,
+    // A LAN address given here was typed on this computer.
+    save_contact_from(
+        data_dir, address, pub_hex, petname, public_tag, verify_fp, lan_dial, "", None, true, true,
     )
 }
 
@@ -6425,6 +6476,8 @@ fn add_contact(
 /// empty one keeps what the contact already had, a non-empty one is validated
 /// before anything else is looked at and replaces it. `verify_fp` is what the
 /// friend read out, their security words or old code ([`security_check`]).
+/// The LAN route is a card's or invite's: it keeps the local-network rule
+/// ([`Contact::lan_dial_trusted`]).
 #[allow(clippy::too_many_arguments)]
 fn add_contact_with_routes(
     data_dir: &Path,
@@ -6452,7 +6505,8 @@ fn add_contact_with_routes(
 }
 
 /// [`add_contact_with_routes`]; `report` false leaves out the "contact
-/// saved" summary (`contact verify` says what it did itself).
+/// saved" summary (`contact verify` says what it did itself). A LAN route
+/// given here is a card's ([`save_contact_from`]).
 #[allow(clippy::too_many_arguments)]
 fn save_contact(
     data_dir: &Path,
@@ -6465,6 +6519,37 @@ fn save_contact(
     internet_dial: &str,
     p2p: Option<&P2pRoute>,
     report: bool,
+) -> Result<(), String> {
+    save_contact_from(
+        data_dir,
+        address,
+        pub_hex,
+        petname,
+        public_tag,
+        verify_fp,
+        lan_dial,
+        internet_dial,
+        p2p,
+        report,
+        false,
+    )
+}
+
+/// [`save_contact`]; `lan_typed`: a non-empty `lan_dial` was typed on this
+/// computer, not taken from a card or invite ([`Contact::lan_dial_trusted`]).
+#[allow(clippy::too_many_arguments)]
+fn save_contact_from(
+    data_dir: &Path,
+    address: &str,
+    pub_hex: &str,
+    petname: &str,
+    public_tag: &str,
+    verify_fp: Option<&str>,
+    lan_dial: &str,
+    internet_dial: &str,
+    p2p: Option<&P2pRoute>,
+    report: bool,
+    lan_typed: bool,
 ) -> Result<(), String> {
     let new_inet = if internet_dial.trim().is_empty() {
         None
@@ -6515,8 +6600,10 @@ fn save_contact(
                 } else {
                     String::new()
                 };
+                // Never the key's own code: it is shown once a check matched.
                 return Err(format!(
-                    "fingerprint mismatch: got {fp}, expected {}{case}",
+                    "fingerprint mismatch: {} is not this key's code{case}; nothing saved \
+                     (ask them to read their code out again)",
                     sanitize_terminal_line(exp)
                 ));
             }
@@ -6582,19 +6669,22 @@ fn save_contact(
             }
             eprintln!(
                 "  old fp={}  {}",
-                contact_fingerprint(c),
+                shown_fingerprint(c),
                 sanitize_terminal_line(&c.address)
             );
-            eprintln!("  new fp={fp}  {}", sanitize_terminal_line(&address));
             eprintln!(
-                "{C_DIM}DHT/gossip cannot overwrite a pin. To replace it deliberately: verify the new fingerprint out-of-band, run{C_RESET}"
+                "  new fp={CODE_HIDDEN}  {}",
+                sanitize_terminal_line(&address)
+            );
+            eprintln!(
+                "{C_DIM}DHT/gossip cannot overwrite a pin. To replace it deliberately: compare security words with them in person or by phone, run{C_RESET}"
             );
             eprintln!(
                 "  ash contact remove --address {}",
                 sanitize_terminal_line(&c.address)
             );
             eprintln!(
-                "{C_DIM}then add the new key again with --verify-fp <new fingerprint>.{C_RESET}"
+                "{C_DIM}then add the new key again and check it with them: raven contact verify.{C_RESET}"
             );
             note_key_change_attempt(&c.pub_hex);
             return Err("KEY_CHANGE_REFUSED_WITHOUT_REPIN".into());
@@ -6621,7 +6711,7 @@ fn save_contact(
                     i + 1,
                     c.primary_label(),
                     normalize_tag(&c.public_tag),
-                    contact_fingerprint(c),
+                    shown_fingerprint(c),
                     if c.pinned { " [pinned]" } else { "" }
                 );
             }
@@ -6647,9 +6737,36 @@ fn save_contact(
             .iter()
             .find(|c| !c.pub_hex.eq_ignore_ascii_case(&ed_hex) && c.petname.to_lowercase() == want)
         {
+            // Another key under a verified contact's name is a key change
+            // attempt ("I reinstalled, here is my new card"), as the terminal
+            // app's NAME-CLASH says: the verified key stays, nothing is saved.
+            if other.pinned {
+                eprintln!(
+                    "{C_PURPLE}KEY-CHANGE WARNING{C_RESET}: \"{}\" is a verified contact with \
+                     another key",
+                    sanitize_terminal_line(&other.petname)
+                );
+                eprintln!(
+                    "  old fp={}  {}",
+                    contact_fingerprint(other),
+                    sanitize_terminal_line(&other.address)
+                );
+                eprintln!(
+                    "  new fp={CODE_HIDDEN}  {}",
+                    sanitize_terminal_line(&address)
+                );
+                eprintln!(
+                    "{C_DIM}Raven kept the verified key. If they really have a new key, compare \
+                     security words with them in person or by phone, remove the old contact \
+                     (ash contact remove --address {}), then add the new key.{C_RESET}",
+                    sanitize_terminal_line(&other.address)
+                );
+                note_key_change_attempt(&other.pub_hex);
+                return Err("KEY_CHANGE_REFUSED_WITHOUT_REPIN".into());
+            }
             return Err(format!(
                 "petname \"{pet}\" is already used by another contact (fp={}) — choose a distinct petname",
-                contact_fingerprint(other)
+                shown_fingerprint(other)
             ));
         }
     }
@@ -6660,14 +6777,19 @@ fn save_contact(
         .as_ref()
         .map(|c| c.lan_dial.clone())
         .unwrap_or_default();
-    let dial = if !lan_dial.trim().is_empty() {
+    let prior_trusted = prior.as_ref().is_some_and(|c| c.lan_dial_trusted);
+    let (dial, dial_trusted) = if !lan_dial.trim().is_empty() {
         let d = lan_dial.trim();
         if !looks_like_lan_dial(d) {
             return Err("lan_dial must look like host:port (e.g. 192.168.1.20:7420)".into());
         }
-        d.to_string()
+        // A card naming the address saved already keeps how it was saved.
+        (
+            d.to_string(),
+            lan_typed || (prior_trusted && prior_dial == d),
+        )
     } else {
-        prior_dial
+        (prior_dial, prior_trusted)
     };
     let inet = new_inet.unwrap_or_else(|| {
         prior
@@ -6723,6 +6845,7 @@ fn save_contact(
         // verifying a friend added from an onion-only card wiped it, and
         // its sends never planned Tor). A card's binding is stored after.
         onion: prior.as_ref().map(|c| c.onion.clone()).unwrap_or_default(),
+        lan_dial_trusted: dial_trusted,
     };
     // A contact saved with this key already (its new card: a new LAN
     // address, say) is the same contact: the card replaces its saved routes,
@@ -6792,13 +6915,22 @@ fn save_contact(
             }
         );
     }
-    println!("{C_DIM}fingerprint{C_RESET} {fp}");
+    // The code once the key is verified only (no copy-back, §8 rule 1).
+    let verified = pin || prior_pinned;
+    println!(
+        "{C_DIM}fingerprint{C_RESET} {}",
+        if verified { fp.as_str() } else { CODE_HIDDEN }
+    );
     println!(
         "{C_DIM}pinned{C_RESET}      {}",
-        if pin || prior_pinned {
-            "yes (Tag+key locked locally)"
+        if verified {
+            "yes (Tag+key locked locally)".to_string()
         } else {
-            "no — not verified yet (compare the fingerprint with them by phone or in person, then add them again with --verify-fp)"
+            format!(
+                "no — not verified yet (compare security words with them by phone or in \
+                 person: raven contact verify {})",
+                if named { label.as_str() } else { "NAME" }
+            )
         }
     );
     let who = if named { label.as_str() } else { "them" };
@@ -6959,7 +7091,7 @@ fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
         } else {
             format!("{0}○ unpinned{1}", c.dim, c.reset)
         };
-        let fp = contact_fingerprint(ct);
+        let fp = shown_fingerprint(ct);
         let mut dial = if ct.lan_dial.is_empty() {
             String::new()
         } else {
@@ -7368,7 +7500,7 @@ fn cmd_contact_resolve(data_dir: &Path, tag: &str) -> Result<(), String> {
         if let Some(t) = c.tag_subtitle() {
             println!("{C_DIM}public_tag{C_RESET}  {t}");
         }
-        println!("{C_DIM}fingerprint{C_RESET} {}", contact_fingerprint(c));
+        println!("{C_DIM}fingerprint{C_RESET} {}", shown_fingerprint(c));
         println!(
             "{C_DIM}pinned{C_RESET}      {}",
             if c.pinned { "yes" } else { "no" }
@@ -7386,7 +7518,7 @@ fn cmd_contact_resolve(data_dir: &Path, tag: &str) -> Result<(), String> {
             i + 1,
             c.primary_label(),
             c.tag_subtitle().unwrap_or_default(),
-            contact_fingerprint(c),
+            shown_fingerprint(c),
             if c.pinned { " [pinned]" } else { "" }
         );
     }
@@ -7479,7 +7611,7 @@ fn cmd_contact_verify(
             "{C_DIM}address{C_RESET}     {}",
             sanitize_terminal_line(&c.address)
         );
-        println!("{C_DIM}fingerprint{C_RESET} {}", contact_fingerprint(c));
+        println!("{C_DIM}fingerprint{C_RESET} {}", shown_fingerprint(c));
         // Words only for a verified contact (section 8 of the spec).
         if let (true, Ok(ed)) = (c.pinned, parse_pub_hex(&c.pub_hex)) {
             println!("{C_DIM}words{C_RESET}       {}", words_text(&ed));
@@ -7808,10 +7940,7 @@ fn cmd_contact_remove(
         "{C_DIM}address{C_RESET}     {}",
         sanitize_terminal_line(&target.address)
     );
-    println!(
-        "{C_DIM}fingerprint{C_RESET} {}",
-        contact_fingerprint(&target)
-    );
+    println!("{C_DIM}fingerprint{C_RESET} {}", shown_fingerprint(&target));
     println!(
         "{C_DIM}pinned{C_RESET}      {}",
         if target.pinned { "yes" } else { "no" }
@@ -7860,6 +7989,16 @@ fn cmd_contact_remove(
                 sanitize_terminal_line(&e)
             );
         }
+        // And its sessions, secrets included (the roots and chains in the
+        // keystore), now rather than when they would expire (up to a day, a
+        // letter session's week): its traffic is refused anyway.
+        if let Err(e) = delete_sessions_for_removed_contact(data_dir, &ed) {
+            eprintln!(
+                "{C_DIM}note: could not delete the secure sessions with this contact \
+                 ({}){C_RESET}",
+                sanitize_terminal_line(&e)
+            );
+        }
         // And its capability floor (Phase 6b P6.29): a contact added again
         // starts a new high-water mark.
         if let Err(e) = raven_core::capability_floor::forget(data_dir, &ed) {
@@ -7900,6 +8039,24 @@ fn cmd_contact_remove(
     // freed disk blocks until the next data-key rotation (PP.10).
     let _ = raven_core::privacy::mark_rotation_due(data_dir);
     Ok(())
+}
+
+/// [`cmd_contact_remove`]'s part for the session store: every session with
+/// the removed contact `peer` goes with its protected state
+/// ([`raven_core::IndexedSessionStore::delete_sessions_with_peer`]), under
+/// the per-peer send lock raven-node's worker takes, so no send uses one
+/// meanwhile. No store: nothing is created. How many went.
+fn delete_sessions_for_removed_contact(data_dir: &Path, peer: &[u8; 32]) -> Result<usize, String> {
+    if !data_dir
+        .join(raven_core::INDEXED_SESSION_METADATA_FILE)
+        .is_file()
+    {
+        return Ok(0);
+    }
+    let _lock = pair_init_lab::acquire_send_lock(data_dir, peer)?;
+    raven_core::IndexedSessionStore::open(data_dir)
+        .and_then(|mut store| store.delete_sessions_with_peer(peer))
+        .map_err(|e| e.redacted_display())
 }
 
 /// [`cmd_contact_remove`]'s part for the long message horizon: every message
@@ -9979,6 +10136,8 @@ fn cmd_contact_set_routes(
         .ok_or("contact not found for the address update")?;
     if let Some(v) = &edit.lan {
         row.lan_dial = v.clone();
+        // Typed on this computer (`contact set-addr --lan`).
+        row.lan_dial_trusted = !v.is_empty();
     }
     if let Some(v) = &edit.internet {
         row.internet_dial = v.clone();
@@ -12936,7 +13095,7 @@ fn cmd_send_interactive(data_dir: &Path) {
             n = i + 1,
             label = ct.primary_label(),
             d = c.dim,
-            fp = contact_fingerprint(ct),
+            fp = shown_fingerprint(ct),
             r = c.reset,
             pinned = if ct.pinned { " [pinned]" } else { "" }
         );
@@ -12972,7 +13131,7 @@ fn cmd_send_interactive(data_dir: &Path) {
                     i + 1,
                     ct.primary_label(),
                     ct.tag_subtitle().unwrap_or_default(),
-                    contact_fingerprint(ct),
+                    shown_fingerprint(ct),
                     if ct.pinned { " [pinned]" } else { "" }
                 );
             }
@@ -14404,6 +14563,12 @@ fn arrival_suffix(via: Option<raven_core::arrivals::ArrivedVia>) -> String {
     })
 }
 
+/// Shown after a received message whose sender later sent different text
+/// under the same message id ([`raven_core::ChatHistoryEntry::id_conflict`]):
+/// the text shown is the first, which never changes.
+pub(crate) const ID_CONFLICT_NOTE: &str =
+    "[the sender later sent different text as this same message; this first text is kept]";
+
 /// Shown for a copy of a message already received: the contact re-sent it
 /// under a new session (session reset or the long horizon; lost-state design
 /// §13, Phase 5 P5.5).
@@ -14422,13 +14587,18 @@ enum InboxCopy {
     /// seen before, the store's inbound-seen row says): the note instead of
     /// the body.
     Again,
+    /// A later row with the id of a listed one from the same sender but
+    /// other text (ATSAM_ENDPOINT_TRANSACTION_V1 §3): the first text stands,
+    /// so [`ID_CONFLICT_NOTE`] shows instead of this body.
+    Conflict,
 }
 
 /// Each listed row's [`InboxCopy`], or `None` for a row folded into an
 /// earlier one. `rows` are `(sender, message id, body)` oldest first;
 /// `seen_before(i)` says row `i` is a later copy of a message taken before.
-/// Rows with the same id and a different body are not folded (an integrity
-/// conflict stays visible).
+/// A later row with the same sender and id and a different body is not
+/// folded: it is a [`InboxCopy::Conflict`] (the integrity conflict stays
+/// visible, its text does not replace the first).
 fn inbox_copy_marks(
     rows: &[(&[u8; 32], &[u8; 16], &[u8])],
     mut seen_before: impl FnMut(usize) -> bool,
@@ -14441,6 +14611,9 @@ fn inbox_copy_marks(
                     marks[first] = Some(InboxCopy::WithCopies);
                 }
                 marks.push(None);
+            }
+            None if rows[..index].iter().any(|e| e.0 == row.0 && e.1 == row.1) => {
+                marks.push(Some(InboxCopy::Conflict));
             }
             None if seen_before(index) => marks.push(Some(InboxCopy::Again)),
             None => marks.push(Some(InboxCopy::Only)),
@@ -14550,6 +14723,7 @@ fn format_inbox_row_copy(
         InboxCopy::Only => body(),
         InboxCopy::WithCopies => format!("{}  {C_DIM}{RECEIVED_AGAIN_NOTE}{C_RESET}", body()),
         InboxCopy::Again => format!("{C_DIM}{RECEIVED_AGAIN_NOTE}{C_RESET}"),
+        InboxCopy::Conflict => format!("{C_PURPLE}{ID_CONFLICT_NOTE}{C_RESET}"),
     };
     format!(
         "  {when}from {who}: {body}  {C_DIM}[{}]{C_RESET}",
@@ -15961,6 +16135,9 @@ pub fn run() {
                         std::process::exit(1);
                     }
                 };
+                // `--lan-dial` typed here (a card's `lan=` is not: it keeps
+                // the local-network rule, `Contact::lan_dial_trusted`).
+                let lan_typed = !lan_dial.trim().is_empty();
                 let (address, pub_hex, lan_dial, internet_dial) = match &card {
                     // Explicit route flags win over the card's hints.
                     Some(c) => (
@@ -16003,7 +16180,7 @@ pub fn run() {
                     None => {}
                 }
                 let p2p = card.as_ref().and_then(|c| c.p2p.clone());
-                if let Err(e) = add_contact_with_routes(
+                if let Err(e) = save_contact_from(
                     &data_dir,
                     &address,
                     &pub_hex,
@@ -16013,6 +16190,8 @@ pub fn run() {
                     &lan_dial,
                     &internet_dial,
                     p2p.as_ref(),
+                    true,
+                    lan_typed,
                 ) {
                     eprintln!("{}", sanitize_terminal_line(&e));
                     ext::flush_security_sink();
@@ -18292,6 +18471,32 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         dir
     }
 
+    /// Privacy pack PP.4: the process that creates a profile's identity
+    /// seals the profile at once (where the build seals), as the desktop
+    /// engine does: what it writes next (the prekey, contacts) is never
+    /// plain, not even until the next command.
+    #[test]
+    fn a_new_profile_is_sealed_by_the_process_that_creates_it() {
+        if !lab_hist_key() {
+            return;
+        }
+        use raven_core::at_rest::{MigratePolicy, Mode};
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path();
+        assert_eq!(raven_core::privacy::mode(dd), Mode::Plain);
+        let id = create_profile_identity(dd, MigratePolicy::Allow).unwrap();
+        assert_eq!(raven_core::privacy::mode(dd), Mode::Sealed);
+        raven_core::ensure_local_prekey(dd, &id).unwrap();
+        seed_book(dd);
+        let raw = std::fs::read(contacts_path(dd)).unwrap();
+        assert!(raven_core::at_rest::is_sealed(&raw));
+        assert!(!raw.windows(5).any(|w| w == b"Alice"));
+        // The same profile again: its identity, nothing else to do.
+        let again = create_profile_identity(dd, MigratePolicy::Allow).unwrap();
+        assert_eq!(again.public_key_bytes(), id.public_key_bytes());
+        assert_eq!(load_contacts(dd).unwrap().len(), 2);
+    }
+
     #[test]
     fn the_sealed_book_reads_and_writes_like_the_plain_one() {
         if !lab_hist_key() {
@@ -18664,6 +18869,73 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         );
     }
 
+    /// Another key under a verified contact's name (no tag: the tag rule
+    /// does not see it) is a key change attempt, as the terminal app's
+    /// NAME-CLASH says, not "choose another name": refused, nothing saved.
+    /// An unverified contact's name is only taken.
+    #[test]
+    fn a_new_key_under_a_verified_contacts_name_is_a_key_change() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_book(dir.path());
+        let mallory = ident(0x0e);
+        let add = |name: &str| {
+            add_contact(
+                dir.path(),
+                &mallory.address(),
+                &hex::encode(mallory.public_key_bytes()),
+                name,
+                "",
+                None,
+                "",
+            )
+        };
+        assert_eq!(
+            add("aLiCe").unwrap_err(),
+            "KEY_CHANGE_REFUSED_WITHOUT_REPIN"
+        );
+        let err = add("bob").unwrap_err();
+        assert!(err.contains("is already used by another contact"), "{err}");
+        assert_eq!(load_contacts(dir.path()).unwrap().len(), 2);
+    }
+
+    /// Blind entry (RAVEN_SECURITY_WORDS_V1 §8 rule 1): the terminal shows
+    /// an unverified contact's code nowhere (lists, pickers, a refused
+    /// check), so it cannot be copied back to "verify" a card. Once a check
+    /// matched, it shows.
+    #[test]
+    fn an_unverified_contacts_code_is_never_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = alice_key();
+        let (address, pub_hex) = (encode_address(&ed), hex::encode(ed));
+        add_contact(dir.path(), &address, &pub_hex, "Alice", "", None, "").unwrap();
+        let alice = || load_contacts(dir.path()).unwrap().remove(0);
+        assert_eq!(shown_fingerprint(&alice()), CODE_HIDDEN);
+        let err = add_contact(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "Alice",
+            "",
+            Some("AAAA-BBBB-CCCC"),
+            "",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("fingerprint mismatch: "), "{err}");
+        for part in VERIFY_FP.split('-') {
+            assert!(!err.contains(part), "{part}: {err}");
+        }
+        cmd_contact_verify(
+            dir.path(),
+            Some("Alice"),
+            None,
+            None,
+            None,
+            Some(ALICE_WORDS),
+        )
+        .unwrap();
+        assert_eq!(shown_fingerprint(&alice()), VERIFY_FP);
+    }
+
     #[test]
     fn invite_cannot_rebind_pinned_identity_to_new_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -18939,10 +19211,9 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "",
         )
         .unwrap_err();
-        assert!(
-            err.starts_with("fingerprint mismatch: got If4x-36FU-omFi"),
-            "{err}"
-        );
+        // The key's own code is never in the refusal (blind entry).
+        assert!(err.starts_with("fingerprint mismatch: "), "{err}");
+        assert!(!err.contains("If4x-36FU-omFi"), "{err}");
         assert!(err.contains(FINGERPRINT_CASE_HINT), "{err}");
         let err = add_contact(
             dir.path(),
@@ -19410,6 +19681,107 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert_eq!(run_blind_check(Some("K7Q4M"), &[ALICE_WORDS]), Ok(None));
     }
 
+    /// A card's `lan=` is saved as a card's (it keeps the local-network rule
+    /// even once the contact is verified); a LAN address typed here
+    /// (`--lan-dial`, `contact set-dial`) or one a delivery just used is
+    /// marked as this computer's own. Verifying keeps the mark as it was.
+    #[test]
+    fn a_cards_lan_address_is_saved_as_a_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let ed = alice_key();
+        let (address, pub_hex) = (encode_address(&ed), hex::encode(ed));
+        let trusted = || load_contacts(dir.path()).unwrap()[0].lan_dial_trusted;
+        add_contact_with_routes(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "Alice",
+            "",
+            None,
+            "203.0.113.7:7420",
+            "",
+            None,
+        )
+        .unwrap();
+        assert!(!trusted());
+        let raw = std::fs::read_to_string(dir.path().join("contacts.json")).unwrap();
+        assert!(!raw.contains("lan_dial_trusted"), "omitted while false");
+        let routes = raven_core::outbox::contact_routes(dir.path(), &ed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(routes.card_lan, ["203.0.113.7:7420"]);
+        // Verified: still a card's address.
+        cmd_contact_verify(
+            dir.path(),
+            Some("Alice"),
+            None,
+            None,
+            None,
+            Some(ALICE_WORDS),
+        )
+        .unwrap();
+        assert!(load_contacts(dir.path()).unwrap()[0].pinned);
+        assert!(!trusted());
+        let route = raven_core::OutboxRoute {
+            carrier: raven_core::OutboxCarrier::Lan,
+            dial: "203.0.113.7:7420".into(),
+        };
+        let routes = raven_core::outbox::contact_routes(dir.path(), &ed)
+            .unwrap()
+            .unwrap();
+        assert!(routes.pinned && !routes.localize_pinned(&route));
+        // Typed here: this computer's own.
+        cmd_contact_set_dial(dir.path(), None, Some("Alice"), None, "203.0.113.7:7420").unwrap();
+        assert!(trusted());
+        let routes = raven_core::outbox::contact_routes(dir.path(), &ed)
+            .unwrap()
+            .unwrap();
+        assert!(routes.card_lan.is_empty() && routes.localize_pinned(&route));
+        // A card naming the same address keeps the mark; another one does not.
+        add_contact_with_routes(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "",
+            "",
+            None,
+            "203.0.113.7:7420",
+            "",
+            None,
+        )
+        .unwrap();
+        assert!(trusted());
+        add_contact_with_routes(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "",
+            "",
+            None,
+            "198.51.100.4:7420",
+            "",
+            None,
+        )
+        .unwrap();
+        assert!(!trusted());
+        // `--lan-dial` typed with `contact add`.
+        save_contact_from(
+            dir.path(),
+            &address,
+            &pub_hex,
+            "",
+            "",
+            None,
+            "198.51.100.4:7420",
+            "",
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(trusted());
+    }
+
     #[test]
     fn contact_verify_check_pins_and_keeps_name_routes_and_tag() {
         let dir = tempfile::tempdir().unwrap();
@@ -19719,6 +20091,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         };
         let book = vec![row(&a, "Sam (Office)", "sam"), row(&b, "Sam (Home)", "sam")];
         assert_eq!(
@@ -19831,6 +20204,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         }];
         let mid = [0xabu8; 16];
         let forged =
@@ -19911,7 +20285,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             vec![
                 (10, InboxCopy::WithCopies),
                 (11, InboxCopy::Only),
-                (13, InboxCopy::Only),
+                // Other text under 0xA1 from 1: never shown as the message.
+                (13, InboxCopy::Conflict),
                 (14, InboxCopy::Again),
                 (16, InboxCopy::Only),
             ]
@@ -19947,6 +20322,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             preview: body.into(),
             body: body.into(),
             stored_at_ms,
+            id_conflict: false,
         }
     }
 
@@ -20087,6 +20463,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             preview: "hi".into(),
             body: "hi".into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 
@@ -20098,8 +20475,12 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert_eq!(delivery_suffix(&history_row("out", "failed")), " [failed]");
         assert_eq!(delivery_suffix(&history_row("out", "delivered")), "");
         assert_eq!(delivery_suffix(&history_row("out", "")), "");
-        // Inbound rows carry "received": never annotated.
+        // Inbound rows carry "received": never annotated, unless the sender
+        // tried to change one (its first text stays).
         assert_eq!(delivery_suffix(&history_row("in", "received")), "");
+        let mut changed = history_row("in", "received");
+        changed.id_conflict = true;
+        assert!(delivery_suffix(&changed).contains(ID_CONFLICT_NOTE));
         // The state is sanitised like any other terminal text.
         let hostile = delivery_suffix(&history_row("out", "failed\x1b[2J\nfake"));
         assert!(
@@ -20287,6 +20668,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         }
     }
 
@@ -22661,6 +23043,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         };
         let book = vec![mk("Alice", &a, false), mk("Bobby", &b, true)];
         let mid = [0xabu8; 16];
@@ -22748,6 +23131,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                     custodians: Vec::new(),
                     hide_ip: false,
                     onion: String::new(),
+                    lan_dial_trusted: false,
                 }
             })
             .collect()
@@ -28195,6 +28579,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                 custodians: Vec::new(),
                 hide_ip: false,
                 onion: String::new(),
+                lan_dial_trusted: false,
             }],
         )
         .unwrap();
@@ -28412,6 +28797,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             custodians: Vec::new(),
             hide_ip: false,
             onion: String::new(),
+            lan_dial_trusted: false,
         }
     }
 
@@ -28455,7 +28841,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         };
         assert_eq!(onion(d), (binding.to_text(), false));
         // Verified (as `contact verify` pins: a re-save with the code).
-        let code = contact_fingerprint(&load_contacts(d).unwrap()[0]);
+        let code = device_fingerprint_v1(&parse_pub_hex(&pub_hex).unwrap());
         save_contact(
             d,
             &address,

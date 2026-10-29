@@ -1425,8 +1425,7 @@ impl PrekeyLifecycleActor {
 
     fn store_state(&self, state: &ProtectedPrekeyState) -> Result<(), PrekeyLifecycleError> {
         validate_state(state)?;
-        let mut encoded =
-            serde_json::to_vec(state).map_err(|_| PrekeyLifecycleError::CorruptProtectedState)?;
+        let mut encoded = encode_state(state)?;
         if encoded.len() > MAX_PROTECTED_PREKEY_STATE_BYTES {
             encoded.zeroize();
             return Err(PrekeyLifecycleError::ResourceLimit);
@@ -1942,6 +1941,33 @@ fn hash_parts(parts: &[&[u8]]) -> [u8; 32] {
         hasher.update(part);
     }
     hasher.finalize().into()
+}
+
+/// The protected state as JSON, written into a buffer sized once (its
+/// exact length measured first without keeping any of it): a buffer that
+/// grew would leave copies of the signed-prekey, ML-KEM and one-time
+/// secrets in the freed blocks it outgrew, which nothing wipes. The caller
+/// wipes the result.
+fn encode_state(state: &ProtectedPrekeyState) -> Result<Vec<u8>, PrekeyLifecycleError> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, state)
+        .map_err(|_| PrekeyLifecycleError::CorruptProtectedState)?;
+    let mut encoded = Vec::with_capacity(count.0);
+    if serde_json::to_writer(&mut encoded, state).is_err() {
+        encoded.zeroize();
+        return Err(PrekeyLifecycleError::CorruptProtectedState);
+    }
+    Ok(encoded)
 }
 
 fn validate_state(state: &ProtectedPrekeyState) -> Result<(), PrekeyLifecycleError> {
@@ -3303,6 +3329,19 @@ mod tests {
                 .letter_shared_secret(&digest, &eph, fixture.created_at_ms),
             Err(PrekeyLifecycleError::UnknownPrekey)
         ));
+    }
+
+    /// The protected state holds the prekey secrets: its JSON is written
+    /// into a buffer sized once, so no outgrown block with a copy of them
+    /// is freed; the bytes are serde_json's own.
+    #[test]
+    fn protected_state_is_encoded_without_growing_the_buffer() {
+        let fixture = Fixture::new();
+        let state = fixture.actor.load_state().unwrap();
+        assert!(!state.generations.is_empty());
+        let encoded = encode_state(&state).unwrap();
+        assert_eq!(encoded.capacity(), encoded.len());
+        assert_eq!(encoded, serde_json::to_vec(&state).unwrap());
     }
 
     #[test]

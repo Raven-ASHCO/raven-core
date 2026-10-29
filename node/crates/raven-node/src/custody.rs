@@ -155,6 +155,18 @@ fn fetched_line(
     )
 }
 
+/// The notice for objects a keeper served under this node's tags that the
+/// contact a tag names did not sign: someone else left them there. They are
+/// released; the keeper could not tell, so it is not blamed (no strike).
+/// Counts and the keeper's short tag only.
+fn foreign_line(foreign: usize, custodian: &[u8; 32]) -> String {
+    format!(
+        "released {foreign} object(s) at contact {} that the contact they were left for did \
+         not sign (someone else left them there; the keeper is not blamed)",
+        crate::netutil::link_tag(custodian)
+    )
+}
+
 /// What showed a contact to this node ([`Shared::wake`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wake {
@@ -1516,6 +1528,12 @@ fn fetch_pass_with(
                     fetched_line(r, carrier.get(), &custodian)
                 );
             }
+            if r.foreign > 0 {
+                eprintln!(
+                    "raven-node custody: {}",
+                    foreign_line(r.foreign, &custodian)
+                );
+            }
         }
         if let Some(r) = &letters {
             let mut s = lock_of(shared);
@@ -1950,6 +1968,22 @@ mod tests {
     // Each test works on a `Shared` of its own: the process-wide one is
     // also moved by other modules' tests (a listener coming up kicks it),
     // and tests run in parallel (E-custody-harness-docs-10).
+
+    /// Objects someone else left under this node's tags: one notice with the
+    /// count and the keeper's short tag, which says the keeper is not
+    /// blamed (it could not tell).
+    #[test]
+    fn the_foreign_object_notice_blames_no_keeper() {
+        let keeper = [0x6C; 32];
+        let line = foreign_line(3, &keeper);
+        let tag = crate::netutil::link_tag(&keeper);
+        assert!(
+            line.starts_with("released 3 object(s) at contact "),
+            "{line}"
+        );
+        assert!(line.contains(&tag) && line.contains("not blamed"), "{line}");
+        assert!(!line.contains(&hex::encode(keeper)[..8]), "{line}");
+    }
 
     /// E2 r9 #14: the fetch line counts group copies apart from chat
     /// messages and names the keeper by its short tag only.

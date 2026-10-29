@@ -255,6 +255,7 @@ pub fn persist_lan_chat_history(
         body,
         // Stamped by `append_persisted` in a sealed profile (PP.9).
         stored_at_ms: None,
+        id_conflict: false,
     };
     ChatHistory::append_persisted(data_dir, entry).map_err(|e| e.to_string())
 }
@@ -2496,6 +2497,7 @@ fn handle_indexed_message(
     *clock = envelope_clock(&accepted, packed, now);
     if let Err(e) = &accepted {
         security_sense::store_refusal(e, via, *clock, &peer.cert.user_ed_pub);
+        note_message_id_conflict(data_dir, e, &sender_device, &message_id);
     }
     let accepted = match accepted {
         // Deferred before commit: nothing stored, no ACK, link stays open.
@@ -2603,6 +2605,27 @@ fn handle_indexed_message(
         return Ok(Vec::new());
     }
     Ok(vec![outbound.immutable_envelope_bytes])
+}
+
+/// ATSAM_ENDPOINT_TRANSACTION_V1 §3: the session store refused another
+/// object from `sender` under a message id it had used before
+/// ([`IndexedSessionStoreError::LogicalMessageConflict`]). The received row
+/// of that id keeps its body and is marked, so the conflict shows (best
+/// effort: the refusal stands either way).
+pub(crate) fn note_message_id_conflict(
+    data_dir: &Path,
+    error: &IndexedSessionStoreError,
+    sender: &[u8; 32],
+    message_id: &[u8; 16],
+) {
+    if matches!(error, IndexedSessionStoreError::LogicalMessageConflict) {
+        let _ = ChatHistory::note_inbound_copy_persisted(
+            data_dir,
+            &hex::encode(sender),
+            &hex::encode(message_id),
+            None,
+        );
+    }
 }
 
 /// When the packed envelope `packed` says it was made (its `created_at`;
@@ -9863,6 +9886,7 @@ mod tests {
 
     mod horizon_tests;
     mod letter_session_tests;
+    mod message_id_tests;
     mod session_renewal_tests;
     mod suite_policy_tests;
 }

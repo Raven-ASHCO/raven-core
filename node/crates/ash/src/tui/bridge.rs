@@ -25,6 +25,8 @@ use super::state_file::TuiPrivate;
 
 // Characters of a message body shown on a terminal before it is clipped.
 pub(super) use super::super::TTY_BODY_MAX_CHARS;
+// Shown under a friend's message whose id it later re-used with other text.
+pub(super) use super::super::ID_CONFLICT_NOTE;
 // Contacts as cli.rs stores them.
 pub(super) use super::super::{load_contacts, Contact};
 // Cards: the longest line `contact add --card` takes.
@@ -122,10 +124,11 @@ pub(super) fn load_identity(data_dir: &Path) -> IdentityLoad {
 /// profile created here picks its random LAN port too, Phase 6b P6.36,
 /// while that gate is live). The error is raven-core's redacted reason; a
 /// refusal to bind a new key over leftover state says `continuity`.
+/// A profile created here is sealed at once where this build seals, before
+/// the app writes anything else into it (cli.rs's `create_profile_identity`).
 pub(super) fn load_or_create_identity(data_dir: &Path) -> Result<Arc<Identity>, String> {
-    raven_core::load_or_create_profile_identity(data_dir)
-        .map(|(id, _backend)| Arc::new(id))
-        .map_err(|e| e.redacted_display())
+    super::super::create_profile_identity(data_dir, raven_core::at_rest::MigratePolicy::Auto)
+        .map(Arc::new)
 }
 
 /// `RAVEN_SERVICE_LAN_LISTEN` when set to anything (ext.rs): the listen
@@ -3236,6 +3239,7 @@ mod tests {
             preview: "hi".into(),
             body: "hi".into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 

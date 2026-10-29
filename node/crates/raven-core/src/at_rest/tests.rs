@@ -1329,6 +1329,7 @@ fn existing_writers_never_create_the_key_file() {
             preview: "hello".into(),
             body: "hello".into(),
             stored_at_ms: None,
+            id_conflict: false,
         },
     )
     .unwrap();

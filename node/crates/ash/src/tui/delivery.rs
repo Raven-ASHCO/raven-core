@@ -885,6 +885,7 @@ mod tests {
                 created_at_ms: 1,
                 delivery: "queued".into(),
                 body: body.into(),
+                id_conflict: false,
             },
             seen_at_start: false,
             touched: None,

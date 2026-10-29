@@ -43,6 +43,7 @@ fn write_row(dir: &Path, address: &str, mid: &str, direction: &str, at_ms: u64) 
             preview: format!("message {mid}"),
             body: format!("message {mid}"),
             stored_at_ms: None,
+            id_conflict: false,
         },
     )
     .expect("history row written");
