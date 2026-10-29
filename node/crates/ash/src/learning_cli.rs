@@ -499,12 +499,17 @@ pub(super) fn forget_in_file(
 }
 
 /// `forget_outbox_routes` (a contact removed, its addresses changed):
-/// forget what was learned about `peer`, best effort. Nothing to do (no IPC,
-/// no file read) while this build holds learning and there is no file.
+/// forget what was learned about `peer`, and what a running raven-node's
+/// sends found of its routes, best effort. With learning held and no file
+/// that is only the node's part (one IPC request, no file read).
 pub(super) fn forget_contact(data_dir: &Path, peer: &[u8; 32]) -> Result<(), String> {
-    if !raven_core::learning::learning_live() && !on_disk(data_dir) {
-        return Ok(());
-    }
+    // Asked of a running raven-node whether learning is on or not: the same
+    // request (IPC `LearningReset`) makes it forget what its sends found of
+    // this contact's routes, and a changed route is news a send must try
+    // (carrier matrix C26: with learning off, a relay set by hand was not
+    // dialled while the old one's failure was fresh, two minutes). With
+    // learning off the node answers LEARNING_HOLD after forgetting them,
+    // and there is no file to clear.
     forget_learned(
         data_dir,
         Some(peer),
