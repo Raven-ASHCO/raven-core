@@ -4100,33 +4100,7 @@ impl IndexedSessionStore {
                 tx.commit()?;
                 continue;
             }
-            let _ = tx.execute(
-                "DELETE FROM endpoint_outbox WHERE session_id = ?1",
-                params![session_id.as_slice()],
-            )?;
-            let _ = tx.execute(
-                "DELETE FROM endpoint_ack_receipts WHERE session_id = ?1",
-                params![session_id.as_slice()],
-            )?;
-            let _ = tx.execute(
-                "DELETE FROM endpoint_outstanding_messages WHERE session_id = ?1",
-                params![session_id.as_slice()],
-            )?;
-            let _ = tx.execute(
-                "DELETE FROM endpoint_ack_intents WHERE session_id = ?1",
-                params![session_id.as_slice()],
-            )?;
-            let _ = tx.execute(
-                "DELETE FROM endpoint_inbox WHERE session_id = ?1",
-                params![session_id.as_slice()],
-            )?;
-            // No foreign key: the user's inbox tombstones go before the
-            // receipts they stand for (PP.8).
-            deleted::delete_session_tombstones(&tx, &session_id)?;
-            let _ = tx.execute(
-                "DELETE FROM endpoint_receipts WHERE session_id = ?1",
-                params![session_id.as_slice()],
-            )?;
+            delete_session_endpoint_rows(&tx, &session_id)?;
             // Before the head (and its sidecar) goes: when it ended.
             horizon::note_session_end(&tx, &layout, &session_id)?;
             let _ = tx.execute(
@@ -4151,6 +4125,57 @@ impl IndexedSessionStore {
         // emptied (PP.2). A reader in the way makes it busy, and the next
         // prune pass checkpoints again: neither busy nor an error fails the
         // prune, whose deletes are committed.
+        let _ = crate::paths::checkpoint_truncate(&self.conn);
+        Ok(removed)
+    }
+
+    /// Every session with `peer_device` goes now (its contact was removed:
+    /// storage rule "real erase"), whatever its lifetime left: its protected
+    /// state (the session's root and chains) is deleted from the keystore,
+    /// with its head and endpoint rows, one session per transaction as the
+    /// prune does. No session-end record is written for it
+    /// ([`forget_session_end`] forgets the contact's). How many went.
+    pub fn delete_sessions_with_peer(
+        &mut self,
+        peer_device: &[u8; 32],
+    ) -> Result<usize, IndexedSessionStoreError> {
+        let (devices, device) = match self.layout.keyed() {
+            None => (
+                "initiator_device = ?1 OR responder_device = ?1",
+                peer_device.to_vec(),
+            ),
+            Some(sealer) => (
+                "kh_initiator_device = ?1 OR kh_responder_device = ?1",
+                sealer.device(peer_device).to_vec(),
+            ),
+        };
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = {
+            let mut statement = self.conn.prepare(&format!(
+                "SELECT record_key, session_id FROM indexed_session_heads WHERE {devices}"
+            ))?;
+            let mapped = statement.query_map(params![device], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            mapped.collect::<Result<_, _>>()?
+        };
+        let mut removed = 0usize;
+        for (record_key, session_id) in rows {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let _in_tx = crate::paths::HeldMark::transaction();
+            delete_session_endpoint_rows(&tx, &session_id)?;
+            let gone = tx.execute(
+                "DELETE FROM indexed_session_heads WHERE record_key = ?1 AND session_id = ?2",
+                params![record_key.as_slice(), session_id.as_slice()],
+            )?;
+            self.backend.delete(&hex::encode(&record_key))?;
+            tx.commit()?;
+            removed += gone;
+        }
+        deleted::delete_orphan_tombstones(&self.conn)?;
+        // What the deletes overwrote reaches the main file (PP.2), as after
+        // a prune; busy is no failure.
         let _ = crate::paths::checkpoint_truncate(&self.conn);
         Ok(removed)
     }
@@ -6265,6 +6290,35 @@ fn insert_pending_acceptance(
         &pending.message_id,
         pending.received_at_ms,
         inbound_seen_keep_until(pending.received_at_ms),
+    )?;
+    Ok(())
+}
+
+/// A session's endpoint rows (outbox, ACK receipts and intents, outstanding
+/// messages, inbox, its tombstones, receipts), in the caller's transaction,
+/// before its head goes (the prune, a removed contact).
+fn delete_session_endpoint_rows(
+    tx: &Transaction<'_>,
+    session_id: &[u8],
+) -> Result<(), IndexedSessionStoreError> {
+    for table in [
+        "endpoint_outbox",
+        "endpoint_ack_receipts",
+        "endpoint_outstanding_messages",
+        "endpoint_ack_intents",
+        "endpoint_inbox",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE session_id = ?1"),
+            params![session_id],
+        )?;
+    }
+    // No foreign key: the user's inbox tombstones go before the receipts
+    // they stand for (PP.8).
+    deleted::delete_session_tombstones(tx, session_id)?;
+    tx.execute(
+        "DELETE FROM endpoint_receipts WHERE session_id = ?1",
+        params![session_id],
     )?;
     Ok(())
 }
