@@ -5269,11 +5269,11 @@ mod tests {
         let people = std::slice::from_ref(&bob);
         let campus = BeaconIf {
             v4: Some((
-                Ipv4Addr::new(130, 237, 20, 20),
+                Ipv4Addr::new(11, 237, 20, 20),
                 24,
-                Some(Ipv4Addr::new(130, 237, 20, 255)),
+                Some(Ipv4Addr::new(11, 237, 20, 255)),
             )),
-            v4_prefixes: vec![(Ipv4Addr::new(130, 237, 20, 0), 24)],
+            v4_prefixes: vec![(Ipv4Addr::new(11, 237, 20, 0), 24)],
             ..v4_only(en0())
         };
         let mut rig = rig(people, vec![campus]);

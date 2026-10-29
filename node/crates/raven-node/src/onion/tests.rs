@@ -307,6 +307,12 @@ async fn side(dir: &Path, registry: &Path) -> Side {
             _ => {}
         }
     }
+    // Keep reading what the helper says next (its service state, pongs):
+    // with its stdout dropped, the helper's next event fails to write, it
+    // ends, and its connect port and its "descriptor" go with it, so a dial
+    // through it reads ONION_NOT_READY and a dial to it "no descriptor"
+    // (the lab onion tests failed so, now and then).
+    let draining = tokio::spawn(async move { while events.next_line().await.is_some() {} });
     Side {
         connect: connect.unwrap(),
         hs_id: hs_id.unwrap(),
@@ -315,6 +321,7 @@ async fn side(dir: &Path, registry: &Path) -> Side {
         _tasks: vec![
             AbortOnDrop(serving.abort_handle()),
             AbortOnDrop(helper.abort_handle()),
+            AbortOnDrop(draining.abort_handle()),
         ],
         _stdin: stdin,
     }
@@ -456,8 +463,13 @@ async fn two_profiles_exchange_messages_and_acks_over_the_onion_link() {
     *live_lock() = None;
 }
 
-/// The lab onion tests share this process's helper state ([`live_lock`]):
-/// one at a time.
+/// This process's onion state is shared: the helper state ([`live_lock`],
+/// which the lab onion tests set and a helper life ([`run_once`],
+/// [`supervise`]) changes on Ready and at its end) and the status
+/// ([`status`], which a helper life writes and some tests read back). Every
+/// test that sets or runs either takes this lock: one at a time, or one
+/// test's helper life clears the connect address or the status another is
+/// about to use.
 static LAB_ONION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Two verified friends, each with an onion side (forward listener and
@@ -710,6 +722,11 @@ enum Fake {
     /// Bootstrapped far enough that its onion service is publishing
     /// (Arti: bootstrapping), and answers pings.
     Publishing,
+    /// Ready (bootstrapped, a connect port) and its onion service launched
+    /// while Arti still says "bootstrapping" (field test round 9); answers
+    /// pings and self-checks. Its life outlasts the first self-check: a
+    /// helper that never says Ready is ended as stalled first.
+    ReadyPublishing,
 }
 
 async fn fake_helper(fake: Fake, input: tokio::io::DuplexStream, output: tokio::io::DuplexStream) {
@@ -729,8 +746,15 @@ async fn fake_helper(fake: Fake, input: tokio::io::DuplexStream, output: tokio::
             what: "Tor client not created: folder permissions".into(),
             local: true,
         }),
-        Fake::Publishing => {
+        Fake::Publishing | Fake::ReadyPublishing => {
             let hs_id = Identity::from_seed(&[0x36; 32]).public_key_bytes();
+            let ready = if matches!(fake, Fake::ReadyPublishing) {
+                say(Event::Ready {
+                    connect: "127.0.0.1:9".into(),
+                })
+            } else {
+                String::new()
+            };
             let onion = say(Event::Onion {
                 hs_id: hex::encode(hs_id),
             });
@@ -738,7 +762,7 @@ async fn fake_helper(fake: Fake, input: tokio::io::DuplexStream, output: tokio::
                 state: "bootstrapping".into(),
                 reason: None,
             });
-            format!("{onion}{service}")
+            format!("{ready}{onion}{service}")
         }
         Fake::StuckAnswering | Fake::StuckSilent => say(Event::Progress {
             pct: 15,
@@ -751,7 +775,9 @@ async fn fake_helper(fake: Fake, input: tokio::io::DuplexStream, output: tokio::
     }
     while let Some(line) = lines.next_line().await {
         let command = serde_json::from_str::<proto::Command>(&line);
-        if let (Fake::Publishing, Ok(proto::Command::SelfCheck { n })) = (fake, &command) {
+        if let (Fake::Publishing | Fake::ReadyPublishing, Ok(proto::Command::SelfCheck { n })) =
+            (fake, &command)
+        {
             // Our own service, reached as a friend would.
             let answer = say(Event::SelfCheck {
                 n: *n,
@@ -763,7 +789,7 @@ async fn fake_helper(fake: Fake, input: tokio::io::DuplexStream, output: tokio::
             }
         }
         if let (
-            Fake::StuckAnswering | Fake::NoRelay | Fake::Publishing,
+            Fake::StuckAnswering | Fake::NoRelay | Fake::Publishing | Fake::ReadyPublishing,
             Ok(proto::Command::Ping { n }),
         ) = (fake, command)
         {
@@ -800,6 +826,7 @@ fn fake_proc(fake: Fake) -> Proc {
 }
 
 async fn one_life(fake: Fake) -> (End, Blame, Duration, String) {
+    let _one_at_a_time = LAB_ONION.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let identity = Arc::new(Identity::from_seed(&[0x33; 32]));
     let config = proto::Config {
@@ -889,11 +916,29 @@ fn a_panic_on_stderr_is_recognised() {
     assert!(!says_panicked("bootstrap 45 %"));
 }
 
+/// Wait, in real time and without letting the paused clock run, until a
+/// helper life has launched its onion service (its binding saved on the
+/// blocking pool, the status published): a sleep here would let the clock
+/// jump past what the test measures while the binding is being written.
+async fn wait_launched() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !status_lock().as_ref().is_some_and(|s| s.published) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the binding was never saved"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 /// A friend's authenticated incoming Tor link proves our onion service
 /// reachable for `raven status` while Arti still says "bootstrapping"
 /// (field test round 8).
 #[tokio::test(start_paused = true)]
 async fn a_friends_tor_link_makes_status_say_reachable_before_arti_does() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    // Another test's helper life may have left the status published.
+    update_status(|s| *s = Status::default());
     let dir = tempfile::tempdir().unwrap();
     let identity = Arc::new(Identity::from_seed(&[0x35; 32]));
     let config = proto::Config {
@@ -916,6 +961,7 @@ async fn a_friends_tor_link_makes_status_say_reachable_before_arti_does() {
         )
         .await
     });
+    wait_launched().await;
     tokio::time::sleep(Duration::from_secs(5)).await;
     friend_reached_us();
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -926,9 +972,13 @@ async fn a_friends_tor_link_makes_status_say_reachable_before_arti_does() {
 /// Round 9: Arti said "degraded_unreachable" while friends could reach the
 /// service. A self-check measures it: after the first one (three minutes
 /// after the service was launched) the status says reachable although
-/// Arti still says "bootstrapping".
+/// Arti still says "bootstrapping". (The helper is Ready: one that never
+/// says Ready is ended as stalled two minutes after its start, before any
+/// self-check; the test passed only when the paused clock raced past the
+/// launch.)
 #[tokio::test(start_paused = true)]
 async fn a_self_check_that_reaches_the_service_makes_status_say_reachable() {
+    let _one_at_a_time = LAB_ONION.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let identity = Arc::new(Identity::from_seed(&[0x37; 32]));
     let config = proto::Config {
@@ -941,10 +991,12 @@ async fn a_self_check_that_reaches_the_service_makes_status_say_reachable() {
     };
     let data_dir = dir.path().to_path_buf();
     let links = FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed);
+    // Another test's helper life may have left the status published.
+    update_status(|s| *s = Status::default());
     let life = tokio::spawn(async move {
         let mut restarts = Restarts::default();
         run_once(
-            fake_proc(Fake::Publishing),
+            fake_proc(Fake::ReadyPublishing),
             &config,
             &mut restarts,
             &data_dir,
@@ -952,9 +1004,12 @@ async fn a_self_check_that_reaches_the_service_makes_status_say_reachable() {
         )
         .await
     });
+    wait_launched().await;
     tokio::time::sleep(watch::SELF_CHECK_FIRST + Duration::from_secs(5)).await;
     let status = status();
     life.abort();
+    // Its Ready set this process's "Tor is ready" flag: no later test sees it.
+    raven_core::onion_gate::set_onion_ready(false);
     // (Another test's friend link would prove it too: only count this one
     // when none came meanwhile.)
     if FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed) == links {
@@ -995,6 +1050,7 @@ impl Spawn for TokenRecorder {
 /// listener checks the current one.
 #[tokio::test(start_paused = true)]
 async fn every_helper_life_gets_a_fresh_token() {
+    let _one_at_a_time = LAB_ONION.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let identity = Arc::new(Identity::from_seed(&[0x38; 32]));
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
