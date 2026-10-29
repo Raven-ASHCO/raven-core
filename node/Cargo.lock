@@ -5510,7 +5510,7 @@ dependencies = [
  "spqr",
  "tempfile",
  "thiserror 2.0.20",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "x25519-dalek 2.0.1",
  "zbus",
  "zeroize",
@@ -5566,7 +5566,7 @@ dependencies = [
  "tor-rtcompat",
  "tracing",
  "windows",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "zbus",
  "zvariant",
 ]
