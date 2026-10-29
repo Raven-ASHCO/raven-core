@@ -1486,6 +1486,10 @@ fn an_early_rekey_waits_for_the_budget_and_needs_the_responses_gate() {
 /// send in.
 #[test]
 fn a_restored_older_protected_state_rotates_the_prekey_and_asks_every_live_peer() {
+    // The older copy is put back file by file: session secrets are the lab
+    // backend's files whatever the job's backend (a CI job that sets none
+    // keeps them in the Keychain, or in DPAPI files).
+    crate::indexed_session_store::test_use_lab_secret_files();
     let _gate = RenewGate::on();
     let Some(responses) = Responses::on() else {
         return;
