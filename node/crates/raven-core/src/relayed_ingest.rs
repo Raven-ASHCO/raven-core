@@ -395,7 +395,10 @@ fn accept_message(
         Err(e) if crate::app_channel::is_deferred(&e) => {
             return RelayedOutcome::Retry(RetryScope::Item, "APP_DEFERRED")
         }
-        Err(e) => return sensed(classify(&e, env, now_ms), event),
+        Err(e) => {
+            crate::lan_dispatch::note_message_id_conflict(data_dir, &e, &peer, &env.message_id);
+            return sensed(classify(&e, env, now_ms), event);
+        }
     };
     // The copy carried a group frame (the custody fetch line counts those
     // apart, E2 r9).

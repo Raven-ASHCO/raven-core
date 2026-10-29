@@ -1166,6 +1166,7 @@ fn a_resealed_copy_is_not_written_to_the_history_again() {
                     preview: "filler".into(),
                     body: "filler".into(),
                     stored_at_ms: None,
+                    id_conflict: false,
                 }
             };
             history.entries.extend((0..1_999).map(filler));

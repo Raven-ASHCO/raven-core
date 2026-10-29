@@ -1062,6 +1062,7 @@ fn rvnhist2_makes_the_snapshot_build_fail_closed_not_move_aside() {
             preview: String::new(),
             body: "rvnhist2".into(),
             stored_at_ms: None,
+            id_conflict: false,
         },
     )
     .unwrap();

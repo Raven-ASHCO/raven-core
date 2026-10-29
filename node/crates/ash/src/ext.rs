@@ -7161,6 +7161,16 @@ fn record_received_chat(
             "received",
             &row.plaintext,
         )?;
+    } else {
+        // Other text under the id marks the first copy's row, which keeps
+        // its body (ATSAM_ENDPOINT_TRANSACTION_V1 §3).
+        raven_core::ChatHistory::note_inbound_copy_persisted(
+            data_dir,
+            &hex::encode(peer),
+            &hex::encode(row.message_id),
+            Some(&String::from_utf8_lossy(&row.plaintext)),
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(again)
 }
@@ -12448,6 +12458,7 @@ mod send_outcome_tests {
             preview: String::new(),
             body: String::new(),
             stored_at_ms: None,
+            id_conflict: false,
         };
         let history = [
             row(1, "out", &bob, now - 2 * DAY, "expired"),
@@ -13071,6 +13082,7 @@ mod send_outcome_tests {
                 preview: "hi".into(),
                 body: "hi".into(),
                 stored_at_ms: None,
+                id_conflict: false,
             },
         )
         .unwrap();
@@ -13436,6 +13448,7 @@ mod send_outcome_tests {
                 preview: preview.into(),
                 body: body.into(),
                 stored_at_ms: None,
+                id_conflict: false,
             }
         };
         let history = ChatHistory {

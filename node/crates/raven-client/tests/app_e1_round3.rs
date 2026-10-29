@@ -46,6 +46,7 @@ fn write_out_row(dir: &Path, friend: &str, mid: &str, body: &str, delivery: &str
             preview: body.into(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         },
     )
     .expect("history row written");

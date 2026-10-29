@@ -76,6 +76,19 @@ pub struct ChatHistoryEntry {
     /// unseal` strips it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_at_ms: Option<u64>,
+    /// A received row only: the contact sent another, different message
+    /// under this row's message id (a copy with other text, or one the
+    /// session store refused as a conflict). The first body stays; readers
+    /// show that the sender tried to change it
+    /// (ATSAM_ENDPOINT_TRANSACTION_V1 §3). Written only when set, so a
+    /// history without a conflict is byte-identical to before; older builds
+    /// deny unknown fields and cannot read one that holds one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub id_conflict: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ChatHistoryEntry {
@@ -452,6 +465,60 @@ impl ChatHistory {
         let mut history = Self::load_unlocked(data_dir, protector)?;
         history.upsert(entry);
         history.save_unlocked(data_dir, protector)
+    }
+
+    /// A copy of the received message `message_id_hex` from `peer_pub_hex`
+    /// that is not written as a row of its own: a copy the session store
+    /// refused as a conflict (`body` `None`: another object under that id),
+    /// or a later copy under a new session that is not written again
+    /// (`body` its text). When the row holds a different body, it is marked
+    /// [`ChatHistoryEntry::id_conflict`]; its body never changes. Whether
+    /// the row is marked now. No row: nothing (`Ok(false)`).
+    pub fn note_inbound_copy_persisted(
+        data_dir: &Path,
+        peer_pub_hex: &str,
+        message_id_hex: &str,
+        body: Option<&str>,
+    ) -> Result<bool, ChatHistoryError> {
+        let protector = PlatformChatHistoryProtector::default();
+        prepare_history(data_dir, &protector, false);
+        let _lock = HistoryLock::acquire(data_dir)?;
+        let mut history = Self::load_unlocked(data_dir, &protector)?;
+        if !history.note_inbound_copy(peer_pub_hex, message_id_hex, body) {
+            return Ok(false);
+        }
+        history.save_unlocked(data_dir, &protector)?;
+        Ok(true)
+    }
+
+    /// [`Self::note_inbound_copy_persisted`] in memory: whether a row was
+    /// marked now.
+    pub fn note_inbound_copy(
+        &mut self,
+        peer_pub_hex: &str,
+        message_id_hex: &str,
+        body: Option<&str>,
+    ) -> bool {
+        let want_peer = peer_pub_hex.trim().to_lowercase();
+        let want_mid = truncate_sanitized(message_id_hex, MAX_MESSAGE_ID_CHARS);
+        let Some(entry) = self.entries.iter_mut().find(|e| {
+            !want_mid.is_empty()
+                && e.direction == "in"
+                && e.message_id_hex.eq_ignore_ascii_case(&want_mid)
+                && e.peer_pub_hex.eq_ignore_ascii_case(&want_peer)
+        }) else {
+            return false;
+        };
+        let differs = body.is_none_or(|b| {
+            let b = truncate_chars(b, MAX_BODY_CHARS);
+            !b.is_empty() && b != entry.body
+        });
+        if !differs || entry.id_conflict {
+            return false;
+        }
+        entry.id_conflict = true;
+        warn_id_conflict();
+        true
     }
 
     /// Upgrade delivery on an existing `(peer, direction, message_id)` row.
@@ -866,29 +933,35 @@ impl ChatHistory {
                 && e.direction == entry.direction
         }) {
             let existing = &mut self.entries[position];
-            // Session reset or the long horizon: a contact may re-send one
-            // logical message under a new session (same id). The first
-            // received body and the earliest stamp stay; a different body is
-            // an integrity conflict.
-            let inbound_reset_rule =
-                existing.direction == "in" && crate::horizon::receiver_dedup_live();
-            if inbound_reset_rule && !existing.body.is_empty() {
-                if !entry.body.is_empty() && entry.body != existing.body {
-                    eprintln!(
-                        "raven: chat history: a contact re-used a message id with different \
-                         text; the first one is kept"
-                    );
-                }
+            // A received message's first body is final, whatever re-seals
+            // (ATSAM_ENDPOINT_TRANSACTION_V1 §3): a copy under a new session
+            // (session reset, the long horizon) has the same body, and the
+            // earliest stamp stays. A different body under the same id is
+            // an integrity conflict: the row is marked, never rewritten.
+            let inbound = existing.direction == "in";
+            // A legacy row kept only the sanitised preview as its body: the
+            // exact body of the same message replaces it.
+            let legacy_preview_body = existing.body == existing.preview
+                && !entry.body.is_empty()
+                && existing.body == entry.preview
+                && existing.body != entry.body;
+            let mut conflict = entry.id_conflict;
+            if inbound && !existing.body.is_empty() && !legacy_preview_body {
+                conflict |= !entry.body.is_empty() && entry.body != existing.body;
             } else if !entry.body.is_empty() {
                 existing.body = entry.body;
                 existing.preview = entry.preview;
+            }
+            if inbound && conflict && !existing.id_conflict {
+                existing.id_conflict = true;
+                warn_id_conflict();
             }
             if !entry.delivery.is_empty() {
                 existing.delivery =
                     delivery_after(&existing.direction, &existing.delivery, &entry.delivery);
             }
-            if entry.created_at_ms > 0 {
-                existing.created_at_ms = if inbound_reset_rule && existing.created_at_ms > 0 {
+            if entry.created_at_ms > 0 && !(inbound && conflict) {
+                existing.created_at_ms = if inbound && existing.created_at_ms > 0 {
                     existing.created_at_ms.min(entry.created_at_ms)
                 } else {
                     entry.created_at_ms
@@ -1039,6 +1112,14 @@ impl ChatHistory {
         }
         Ok(())
     }
+}
+
+/// One log line per conflict marked: no peer, id or text in it.
+fn warn_id_conflict() {
+    eprintln!(
+        "raven: chat history: a contact sent different text under a message id it had used \
+         before; the first text is kept and the message is marked"
+    );
 }
 
 fn normalize_entry(entry: &mut ChatHistoryEntry) {
@@ -3836,6 +3917,7 @@ mod tests {
             preview: "confidential hello\nthere".into(),
             body: "confidential hello\nthere".into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 
@@ -4004,6 +4086,7 @@ mod tests {
             preview: body.chars().take(MAX_PREVIEW_CHARS).collect(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 
@@ -4508,6 +4591,7 @@ mod tests {
             preview: "hi".into(),
             body: "hi".into(),
             stored_at_ms: None,
+            id_conflict: false,
         };
         history.upsert(row.clone());
         row.delivery = "queued".into();
@@ -4566,6 +4650,7 @@ mod tests {
                 preview: body.chars().take(120).collect(),
                 body: body.into(),
                 stored_at_ms: None,
+                id_conflict: false,
             },
             &unavailable,
         )
@@ -4596,6 +4681,7 @@ mod tests {
                 preview: body.chars().take(120).collect(),
                 body: body.into(),
                 stored_at_ms: None,
+                id_conflict: false,
             },
             &history_ok,
         )
@@ -5009,6 +5095,7 @@ mod tests {
             preview: body.into(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 
@@ -5018,11 +5105,15 @@ mod tests {
         let mut history = ChatHistory::default();
         history.upsert(reset_entry("in", "first", 2_000));
         history.upsert(reset_entry("in", "first", 3_000));
-        history.upsert(reset_entry("in", "other text", 1_000));
+        history.upsert(reset_entry("in", "first", 1_000));
+        assert!(!history.entries[0].id_conflict);
+        // Other text under that id: a conflict, which moves no stamp.
+        history.upsert(reset_entry("in", "other text", 500));
         crate::session_reset::set_lab_session_reset_for_this_thread(None);
         assert_eq!(history.entries.len(), 1);
         assert_eq!(history.entries[0].body, "first");
         assert_eq!(history.entries[0].created_at_ms, 1_000);
+        assert!(history.entries[0].id_conflict);
     }
 
     #[test]
@@ -5033,15 +5124,16 @@ mod tests {
         history.upsert(reset_entry("out", "second", 3_000));
         assert_eq!(history.entries[0].body, "second");
         assert_eq!(history.entries[0].created_at_ms, 3_000);
-        // Gate off: the inbound rule is today's (last write wins). Off for
-        // this thread, whatever RAVEN_LAB_SESSION_RESET or RAVEN_LAB_HORIZON
-        // the suite runs with (either turns receiver dedup on).
+        // Gates off (whatever RAVEN_LAB_SESSION_RESET or RAVEN_LAB_HORIZON
+        // the suite runs with): a received body is still never replaced
+        // (ATSAM_ENDPOINT_TRANSACTION_V1 §3).
         let off = DedupSwitches::set(false, false);
         let mut history = ChatHistory::default();
         history.upsert(reset_entry("in", "first", 2_000));
         history.upsert(reset_entry("in", "second", 3_000));
         drop(off);
-        assert_eq!(history.entries[0].body, "second");
+        assert_eq!(history.entries[0].body, "first");
+        assert!(history.entries[0].id_conflict);
     }
 
     /// Sets this thread's session reset and horizon switches; both back to
@@ -5107,26 +5199,45 @@ mod tests {
         }
     }
 
-    /// With session reset and the horizon both closed the history is exactly
-    /// today's: every inbound write replaces body, preview and stamp (last
-    /// write wins), and the saved bytes equal those of a history written
-    /// once with the last values.
+    /// With session reset and the horizon both closed a received message's
+    /// first body still wins (ATSAM_ENDPOINT_TRANSACTION_V1 §3, whatever the
+    /// gates): other text under its id marks the row, which keeps body,
+    /// preview and stamp; a row without a conflict saves the same bytes as
+    /// before the mark existed.
     #[test]
-    fn history_byte_identical_with_both_gates_closed() {
+    fn history_first_body_wins_with_both_gates_closed() {
         let _switches = DedupSwitches::set(false, false);
         assert!(!crate::horizon::receiver_dedup_live());
         let mut history = ChatHistory::default();
         history.upsert(reset_entry("in", "first", 2_000));
+        let clean = serde_json::to_string(&history.entries).unwrap();
+        assert!(!clean.contains("id_conflict"), "{clean}");
         history.upsert(reset_entry("in", "other text", 3_000));
         history.upsert(reset_entry("in", "third", 1_000));
-        let mut expected = ChatHistory::default();
-        expected.upsert(reset_entry("in", "third", 1_000));
         assert_eq!(history.entries.len(), 1);
-        assert_eq!(history.entries[0].body, "third");
-        assert_eq!(history.entries[0].created_at_ms, 1_000);
-        assert_eq!(
-            serde_json::to_vec(&history.entries).unwrap(),
-            serde_json::to_vec(&expected.entries).unwrap()
+        assert_eq!(history.entries[0].body, "first");
+        assert_eq!(history.entries[0].preview, "first");
+        assert_eq!(history.entries[0].created_at_ms, 2_000);
+        assert!(history.entries[0].id_conflict);
+        let marked: ChatHistory =
+            serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
+        assert!(marked.entries[0].id_conflict);
+        // A copy the store refused, or one not written again.
+        let mut history = ChatHistory::default();
+        history.upsert(reset_entry("in", "first", 2_000));
+        let (peer, mid) = ("22".repeat(32), "11".repeat(16));
+        assert!(!history.note_inbound_copy(&peer, &mid, Some("first")));
+        assert!(!history.entries[0].id_conflict);
+        assert!(history.note_inbound_copy(&peer.to_uppercase(), &mid, Some("other")));
+        assert!(!history.note_inbound_copy(&peer, &mid, None), "marked once");
+        assert_eq!(history.entries[0].body, "first");
+        assert!(history.entries[0].id_conflict);
+        let mut history = ChatHistory::default();
+        history.upsert(reset_entry("out", "mine", 2_000));
+        assert!(
+            !history.note_inbound_copy(&peer, &mid, None),
+            "sent rows never"
         );
+        assert!(!history.note_inbound_copy(&peer, &"33".repeat(16), None));
     }
 }

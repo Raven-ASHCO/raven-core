@@ -155,6 +155,12 @@ Every gate stays as it was.
   `shared-vectors/rvn1/onion/noise_static_001.json` and Python reference
   `raven_protocol/onion_link.py`. The carrier was never on in a release
   build.
+- **ATSAM Endpoint Transaction V1.** [`ATSAM_ENDPOINT_TRANSACTION_V1.md`](ATSAM_ENDPOINT_TRANSACTION_V1.md)
+  §3: message ids are unique per sender device across sessions (an
+  inbound-seen row for every committed message; another object under a seen
+  id from a later session is refused while nothing re-seals), and the first
+  inbound body wins whatever the gates; a different body is a marked
+  conflict. No wire byte changes.
 
 ## Freeze record changes (2026-10-29, security review round 1)
 

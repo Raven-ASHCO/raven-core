@@ -3309,6 +3309,19 @@ impl IndexedSessionStore {
             if existing_digest != object_digest {
                 return Err(IndexedSessionStoreError::LogicalMessageConflict);
             }
+        } else if !crate::horizon::receiver_dedup_live()
+            && parked::seen(&tx, &self.layout, &remote_device, &env.message_id)?
+        {
+            // ATSAM_ENDPOINT_TRANSACTION_V1 §3: a message id is unique per
+            // sender device across sessions. This one was taken under
+            // another session of this contact (its inbound-seen row
+            // outlives that session), and nothing re-seals a message under
+            // a new session while session reset and the long horizon are
+            // shut: another object under that id is a conflict, never a
+            // second message. While either is live, a copy re-sealed under a
+            // new session is taken, and the chat history keeps its first
+            // body ([`crate::chat_history::ChatHistory::upsert`]).
+            return Err(IndexedSessionStoreError::LogicalMessageConflict);
         }
         // Phase 6b R2 (step P6.27): a session this node retired after an
         // early security re-key takes the contact's new objects for
@@ -6238,21 +6251,21 @@ fn insert_pending_acceptance(
     {
         return Err(IndexedSessionStoreError::CorruptEndpointState);
     }
-    // Receiver dedup (Phase 5, P5.5): the message id is seen from its
-    // receive time until the sender's horizon has surely passed, so a copy
-    // re-sealed under a new session is known as one after the first copy's
-    // inbox row and history entry are gone. Also when the journal is
-    // replayed (idempotent). Nothing is written while nothing re-seals.
-    if crate::horizon::receiver_dedup_live() {
-        parked::note_seen(
-            tx,
-            layout,
-            &pending.sender_device,
-            &pending.message_id,
-            pending.received_at_ms,
-            inbound_seen_keep_until(pending.received_at_ms),
-        )?;
-    }
+    // The message id is seen from its receive time until the sender's
+    // horizon has surely passed, whatever the gates (ATSAM_ENDPOINT_TRANSACTION_V1
+    // §3): another object under that id from this device under a later
+    // session is a conflict while nothing re-seals, and a copy re-sealed
+    // under a new session is known as one (receiver dedup, P5.5) after the
+    // first copy's inbox row and history entry are gone. Also when the
+    // journal is replayed (idempotent).
+    parked::note_seen(
+        tx,
+        layout,
+        &pending.sender_device,
+        &pending.message_id,
+        pending.received_at_ms,
+        inbound_seen_keep_until(pending.received_at_ms),
+    )?;
     Ok(())
 }
 

@@ -129,6 +129,7 @@ mod tests {
                 created_at_ms,
                 delivery: delivery.into(),
                 body: "hi".into(),
+                id_conflict: false,
             },
             seen_at_start: true,
             touched: None,

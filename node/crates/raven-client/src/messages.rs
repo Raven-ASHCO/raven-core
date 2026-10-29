@@ -2158,6 +2158,7 @@ mod tests {
             preview: body.into(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 

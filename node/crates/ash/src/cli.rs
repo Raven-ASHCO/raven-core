@@ -4149,6 +4149,9 @@ fn commit_invite_contact(
 /// both views so they cannot diverge.
 pub(crate) fn delivery_suffix(e: &raven_core::ChatHistoryEntry) -> String {
     if e.direction != "out" {
+        if e.id_conflict {
+            return format!(" {C_PURPLE}{ID_CONFLICT_NOTE}{C_RESET}");
+        }
         return String::new();
     }
     match e.delivery.as_str() {
@@ -14400,6 +14403,12 @@ fn arrival_suffix(via: Option<raven_core::arrivals::ArrivedVia>) -> String {
     })
 }
 
+/// Shown after a received message whose sender later sent different text
+/// under the same message id ([`raven_core::ChatHistoryEntry::id_conflict`]):
+/// the text shown is the first, which never changes.
+pub(crate) const ID_CONFLICT_NOTE: &str =
+    "[the sender later sent different text as this same message; this first text is kept]";
+
 /// Shown for a copy of a message already received: the contact re-sent it
 /// under a new session (session reset or the long horizon; lost-state design
 /// §13, Phase 5 P5.5).
@@ -14418,13 +14427,18 @@ enum InboxCopy {
     /// seen before, the store's inbound-seen row says): the note instead of
     /// the body.
     Again,
+    /// A later row with the id of a listed one from the same sender but
+    /// other text (ATSAM_ENDPOINT_TRANSACTION_V1 §3): the first text stands,
+    /// so [`ID_CONFLICT_NOTE`] shows instead of this body.
+    Conflict,
 }
 
 /// Each listed row's [`InboxCopy`], or `None` for a row folded into an
 /// earlier one. `rows` are `(sender, message id, body)` oldest first;
 /// `seen_before(i)` says row `i` is a later copy of a message taken before.
-/// Rows with the same id and a different body are not folded (an integrity
-/// conflict stays visible).
+/// A later row with the same sender and id and a different body is not
+/// folded: it is a [`InboxCopy::Conflict`] (the integrity conflict stays
+/// visible, its text does not replace the first).
 fn inbox_copy_marks(
     rows: &[(&[u8; 32], &[u8; 16], &[u8])],
     mut seen_before: impl FnMut(usize) -> bool,
@@ -14437,6 +14451,9 @@ fn inbox_copy_marks(
                     marks[first] = Some(InboxCopy::WithCopies);
                 }
                 marks.push(None);
+            }
+            None if rows[..index].iter().any(|e| e.0 == row.0 && e.1 == row.1) => {
+                marks.push(Some(InboxCopy::Conflict));
             }
             None if seen_before(index) => marks.push(Some(InboxCopy::Again)),
             None => marks.push(Some(InboxCopy::Only)),
@@ -14546,6 +14563,7 @@ fn format_inbox_row_copy(
         InboxCopy::Only => body(),
         InboxCopy::WithCopies => format!("{}  {C_DIM}{RECEIVED_AGAIN_NOTE}{C_RESET}", body()),
         InboxCopy::Again => format!("{C_DIM}{RECEIVED_AGAIN_NOTE}{C_RESET}"),
+        InboxCopy::Conflict => format!("{C_PURPLE}{ID_CONFLICT_NOTE}{C_RESET}"),
     };
     format!(
         "  {when}from {who}: {body}  {C_DIM}[{}]{C_RESET}",
@@ -19906,7 +19924,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             vec![
                 (10, InboxCopy::WithCopies),
                 (11, InboxCopy::Only),
-                (13, InboxCopy::Only),
+                // Other text under 0xA1 from 1: never shown as the message.
+                (13, InboxCopy::Conflict),
                 (14, InboxCopy::Again),
                 (16, InboxCopy::Only),
             ]
@@ -19942,6 +19961,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             preview: body.into(),
             body: body.into(),
             stored_at_ms,
+            id_conflict: false,
         }
     }
 
@@ -20082,6 +20102,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             preview: "hi".into(),
             body: "hi".into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 
@@ -20093,8 +20114,12 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert_eq!(delivery_suffix(&history_row("out", "failed")), " [failed]");
         assert_eq!(delivery_suffix(&history_row("out", "delivered")), "");
         assert_eq!(delivery_suffix(&history_row("out", "")), "");
-        // Inbound rows carry "received": never annotated.
+        // Inbound rows carry "received": never annotated, unless the sender
+        // tried to change one (its first text stays).
         assert_eq!(delivery_suffix(&history_row("in", "received")), "");
+        let mut changed = history_row("in", "received");
+        changed.id_conflict = true;
+        assert!(delivery_suffix(&changed).contains(ID_CONFLICT_NOTE));
         // The state is sanitised like any other terminal text.
         let hostile = delivery_suffix(&history_row("out", "failed\x1b[2J\nfake"));
         assert!(

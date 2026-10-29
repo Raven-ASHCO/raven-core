@@ -281,6 +281,10 @@ pub(super) struct RowView {
     /// `failed`, `expired`, `cancelled`, or empty.
     pub(super) delivery: String,
     pub(super) body: String,
+    /// The friend later sent different text under this message's id; the
+    /// body is the first text, which never changes
+    /// (`raven_core::ChatHistoryEntry::id_conflict`).
+    pub(super) id_conflict: bool,
 }
 
 /// Every friend's conversation, by key (`pub_hex`, lower case), each in the
@@ -781,6 +785,7 @@ impl Controller {
                     } else {
                         entry.body
                     },
+                    id_conflict: entry.id_conflict && entry.direction != "out",
                 });
         }
         Ok(conversations)
@@ -3485,6 +3490,7 @@ mod tests {
             preview: String::new(),
             body: body.into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 

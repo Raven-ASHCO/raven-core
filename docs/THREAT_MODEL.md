@@ -606,6 +606,17 @@ monotonic queue transitions, and bounded ratchet prototypes have negative
 tests. Relays no longer durably deduplicate on an attacker-chosen public
 message ID alone.
 
+**A contact re-using a message id** (a modified client): message ids are
+unique per sender device across sessions, and the first received text of a
+message is final whatever the gates
+([`ATSAM_ENDPOINT_TRANSACTION_V1.md`](../protocol/ATSAM_ENDPOINT_TRANSACTION_V1.md)
+§3). While nothing re-seals (this version), another object under an id the
+contact used in an earlier session is refused; with session reset or the
+long horizon live it is taken as a copy, and a different text marks the
+message ("the sender later sent different text as this same message") but
+never replaces it. The seen record lasts 8 days; after that the chat
+history's first-text rule still holds while the row is kept.
+
 **Remaining gate:** endpoint replay acceptance must be committed atomically
 with authenticated AEAD open, receive-ratchet/skipped-key state, inbox dedup,
 and ACK-outbox intent. The indexed protected Rust store advances ratchets

@@ -25,6 +25,8 @@ use super::state_file::TuiPrivate;
 
 // Characters of a message body shown on a terminal before it is clipped.
 pub(super) use super::super::TTY_BODY_MAX_CHARS;
+// Shown under a friend's message whose id it later re-used with other text.
+pub(super) use super::super::ID_CONFLICT_NOTE;
 // Contacts as cli.rs stores them.
 pub(super) use super::super::{load_contacts, Contact};
 // Cards: the longest line `contact add --card` takes.
@@ -3236,6 +3238,7 @@ mod tests {
             preview: "hi".into(),
             body: "hi".into(),
             stored_at_ms: None,
+            id_conflict: false,
         }
     }
 

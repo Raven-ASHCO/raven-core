@@ -92,6 +92,7 @@ fn inbound(peer: u8, index: usize, body: &str) -> ChatHistoryEntry {
         preview: String::new(),
         body: body.into(),
         stored_at_ms: None,
+        id_conflict: false,
     }
 }
 
