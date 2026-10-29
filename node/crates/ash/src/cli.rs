@@ -6715,6 +6715,33 @@ fn save_contact_from(
             .iter()
             .find(|c| !c.pub_hex.eq_ignore_ascii_case(&ed_hex) && c.petname.to_lowercase() == want)
         {
+            // Another key under a verified contact's name is a key change
+            // attempt ("I reinstalled, here is my new card"), as the terminal
+            // app's NAME-CLASH says: the verified key stays, nothing is saved.
+            if other.pinned {
+                eprintln!(
+                    "{C_PURPLE}KEY-CHANGE WARNING{C_RESET}: \"{}\" is a verified contact with \
+                     another key",
+                    sanitize_terminal_line(&other.petname)
+                );
+                eprintln!(
+                    "  old fp={}  {}",
+                    contact_fingerprint(other),
+                    sanitize_terminal_line(&other.address)
+                );
+                eprintln!(
+                    "  new fp={CODE_HIDDEN}  {}",
+                    sanitize_terminal_line(&address)
+                );
+                eprintln!(
+                    "{C_DIM}Raven kept the verified key. If they really have a new key, compare \
+                     security words with them in person or by phone, remove the old contact \
+                     (ash contact remove --address {}), then add the new key.{C_RESET}",
+                    sanitize_terminal_line(&other.address)
+                );
+                note_key_change_attempt(&other.pub_hex);
+                return Err("KEY_CHANGE_REFUSED_WITHOUT_REPIN".into());
+            }
             return Err(format!(
                 "petname \"{pet}\" is already used by another contact (fp={}) — choose a distinct petname",
                 shown_fingerprint(other)
@@ -18763,6 +18790,35 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             std::fs::read_to_string(dir.path().join("contacts.json")).unwrap(),
             "{not-json"
         );
+    }
+
+    /// Another key under a verified contact's name (no tag: the tag rule
+    /// does not see it) is a key change attempt, as the terminal app's
+    /// NAME-CLASH says, not "choose another name": refused, nothing saved.
+    /// An unverified contact's name is only taken.
+    #[test]
+    fn a_new_key_under_a_verified_contacts_name_is_a_key_change() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_book(dir.path());
+        let mallory = ident(0x0e);
+        let add = |name: &str| {
+            add_contact(
+                dir.path(),
+                &mallory.address(),
+                &hex::encode(mallory.public_key_bytes()),
+                name,
+                "",
+                None,
+                "",
+            )
+        };
+        assert_eq!(
+            add("aLiCe").unwrap_err(),
+            "KEY_CHANGE_REFUSED_WITHOUT_REPIN"
+        );
+        let err = add("bob").unwrap_err();
+        assert!(err.contains("is already used by another contact"), "{err}");
+        assert_eq!(load_contacts(dir.path()).unwrap().len(), 2);
     }
 
     /// Blind entry (RAVEN_SECURITY_WORDS_V1 §8 rule 1): the terminal shows
