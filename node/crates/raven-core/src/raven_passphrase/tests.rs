@@ -3,17 +3,24 @@
 //! cheap KDF parameters; an interruption between the markers; the rules
 //! for a new passphrase; and what each build and system offers.
 
+// The switch's helpers serve the macOS tests only (the switch runs on
+// macOS; see the marker note below).
+#[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::keystore_vault::{KdfBounds, KdfParams, KeyCache};
 
+#[cfg(target_os = "macos")]
 const PARAMS: KdfParams = KdfParams {
     m_kib: 8,
     t: 1,
     p: 1,
 };
+#[cfg(target_os = "macos")]
 const BOUNDS: KdfBounds = KdfBounds {
     min_m_kib: 8,
     max_m_kib: 1 << 20,
@@ -23,9 +30,11 @@ const BOUNDS: KdfBounds = KdfBounds {
     max_p: 4,
 };
 const FIRST: &[u8] = b"correct horse battery";
+#[cfg(target_os = "macos")]
 const SECOND: &[u8] = b"staple and more staples";
 
 /// A login keychain in memory: (service, account) to value.
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct MapKeychain {
     items: Mutex<BTreeMap<(String, String), Vec<u8>>>,
@@ -33,6 +42,7 @@ struct MapKeychain {
     refuse_deletes: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl MapKeychain {
     fn with(items: &[(&Item, &[u8])]) -> Self {
         let keychain = MapKeychain::default();
@@ -55,6 +65,7 @@ impl MapKeychain {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl LoginStore for MapKeychain {
     fn get(&self, item: &Item) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         Ok(self.holds(item).map(Zeroizing::new))
@@ -92,6 +103,7 @@ impl LoginStore for MapKeychain {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn vault(dir: &Path, passphrase: &[u8]) -> Vault {
     Vault::with_options(
         dir,
@@ -105,12 +117,14 @@ fn vault(dir: &Path, passphrase: &[u8]) -> Vault {
 /// A keychain profile of the identity `seed`: its marker and binding, and
 /// in the keychain its identity, history key, two conversations (one the
 /// session store never listed) and its prekey state.
+#[cfg(target_os = "macos")]
 struct Profile {
     dir: tempfile::TempDir,
     seed: [u8; 32],
     items: Vec<(Item, Vec<u8>)>,
 }
 
+#[cfg(target_os = "macos")]
 impl Profile {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();

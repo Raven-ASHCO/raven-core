@@ -844,6 +844,16 @@ LAB_SWITCHES = (
     # Phase 6b (P6.51): the lab friend that claims a newer notice than it
     # holds (C88), never a caller's value.
     'RAVEN_LAB_UPDATE_CLAIM_NEWER',
+    # Groups' lab unlock, never a caller's value (raven-client's groups
+    # tests set it in their own process).
+    'RAVEN_LAB_GROUPS',
+    # The Tor onion carrier's lab unlock, its loopback helper and that
+    # helper's faults, and the race's head start, never a caller's value; no
+    # scenario here reaches the real Tor network (carrier_matrix C95 sets
+    # them for its own profiles).
+    'RAVEN_LAB_TOR', 'RAVEN_LAB_TOR_LOOPBACK', 'RAVEN_LAB_TOR_HEAD_START_MS',
+    'RAVEN_LAB_TOR_LOOPBACK_STALL', 'RAVEN_LAB_TOR_LOOPBACK_OBSOLETE',
+    'RAVEN_LAB_TOR_LOOPBACK_DELAY_MS',
 )
 # The debug lab switches a caller's value may reach the nodes through: the
 # session-reset level (the caller's opt-in to the reset scenarios, RESET_ON)

@@ -61,11 +61,14 @@
 use raven_core::advisory::{Advisory, AdvisoryDraft};
 use raven_core::at_rest::Kind;
 use raven_core::release_bundle::{FileMode, Manifest, ManifestDraft, PackFile, Parts, THIS_TARGET};
-use raven_core::release_keys::test_keys::{key_set, signer, signers};
+#[cfg(unix)]
+use raven_core::release_keys::test_keys::signer;
+use raven_core::release_keys::test_keys::{key_set, signers};
 use raven_core::release_keys::SigBlock;
 use raven_core::release_sign::sha256;
 use raven_core::security_events::SecKind;
 use raven_core::tlog::{EntryType, LogEntry, Snapshot, SthDraft};
+#[cfg(unix)]
 use raven_core::update_state::{staged_file_name, STAGED_DIR, STAGED_MANIFEST, STAGED_SNAPSHOT};
 use raven_core::Identity;
 
@@ -77,6 +80,7 @@ const DAY_MS: u64 = 86_400_000;
 /// the ledger's writer).
 const UPDATE_WAIT: Duration = Duration::from_secs(60);
 /// How long a case watches that nothing is fetched before an approval.
+#[cfg(unix)]
 const NOTHING_WAIT: Duration = Duration::from_secs(4);
 const AUTO_APPROVE: (&str, &str) = ("RAVEN_LAB_UPDATE_AUTO_APPROVE", "1");
 

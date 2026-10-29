@@ -671,13 +671,14 @@ pub(crate) fn detect_managed() -> Option<Managed> {
 
 /// A passphrase-vault profile (Unix without a system keychain) with no
 /// passphrase file: raven-node, which has no terminal, can't unlock it.
+/// What the profile's files record decides (`has_passphrase`: its keystore
+/// marker or vault file), never the choice a new profile would get: a
+/// profile whose keys are elsewhere (the debug build's lab `locked-file`
+/// stores record no keystore) is never held back, and nothing is probed.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn vault_needs_passphrase_file(dir: &Path) -> bool {
     use raven_core::keystore_vault::{PASSPHRASE_FILE_ENV, SYSTEMD_CREDENTIAL_NAME};
-    if !matches!(
-        raven_core::keystore_select::uses_vault(dir, false),
-        Ok(true)
-    ) {
+    if !matches!(raven_core::keystore_select::has_passphrase(dir), Ok(true)) {
         return false;
     }
     if std::env::var_os(PASSPHRASE_FILE_ENV).is_some_and(|f| !f.is_empty()) {
