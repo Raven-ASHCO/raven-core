@@ -708,6 +708,10 @@ fn installer_enables_before_bootstrap() {
         .env("HOME", &home)
         .env("RAVEN_DATA_DIR", &data)
         .env("RAVEN_BIN_DIR", tmp.path().join("bin"))
+        // The Bluetooth helper app (installed by default since 2026-10)
+        // needs a real build and codesign: not here. The Tor helper is
+        // "installed" by the fake `install` like the other binaries.
+        .env("RAVEN_INSTALL_NEARBY_HELPER", "0")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -726,6 +730,12 @@ fn installer_enables_before_bootstrap() {
             format!("launchctl enable gui/{uid}/com.raven.raven-node"),
             format!("launchctl bootstrap gui/{uid} {}", plist.display()),
         ]
+    );
+    // 2026-10: the Tor onion carrier's helper goes next to raven-node.
+    assert!(
+        tmp.path().join("bin/raven-tor-helper").is_file(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
     );
     let env = LoginEnv::lab(
         Platform::MacOs,

@@ -25,20 +25,25 @@
 #   (at most 2, each ending in /p2p/<relay PeerId>) keeps a reservation on those relays;
 #   -P2pRelay relays for your verified contacts (and the PeerIds in relay_allow.json) with this
 #   profile's own relay key, never your PeerId: the friend relay on TCP and UDP 7427, the
-#   consent `raven relay offer on` saves (held while FRIEND_RELAY_PRODUCTION_ENABLED is false);
+#   consent `raven relay offer on` saves;
 #   -Upnp 1|0 saves the router port-mapping choice (`raven node upnp on|off`). Without -Upnp,
 #   an interactive install that turns -P2pListen on asks once (Enter = no); a non-interactive
 #   one never asks (stays unset).
 # -TaskName / -NoStart: CI hooks (register a uniquely named task without launching the daemon).
 # Re-running is the upgrade path: the running daemon is stopped before its binaries are
 # replaced and the task is re-registered with the current settings.
-# Bluetooth nearby (Phase 5, docs/NEARBY.md): no installer turns it on, and this one changes
-#   nothing for it: `raven nearby enable` does, in a build that has it (feature nearby-radio; held
-#   while NEARBY_PRODUCTION_ENABLED is false). The logon task runs raven-node in your user
-#   session, where its WinRT Bluetooth radio runs: keep it a logon task, not a Windows service
-#   (session 0 is not supported for nearby). Whether
-#   this PC can advertise (the peripheral role) shows in `raven nearby status`: "central only"
-#   means it reaches contacts that advertise for it, never the other way round.
+# The Tor onion carrier (switched on in release builds in 2026-10 after the three-machine field
+#   test; not independently reviewed): the installer builds with the cargo feature `tor` and
+#   installs raven-tor-helper.exe (Arti, the Tor client, in its own process) next to
+#   raven-node.exe. raven-node starts it and keeps an onion service, so friends can reach this PC
+#   from any network without a port forward; Tor relays are the only third party it talks to.
+#   -NoTor builds without it and removes an installed one (raven status then says "Tor: not built
+#   in this raven").
+# Bluetooth nearby (Phase 5, docs/NEARBY.md) is in release builds on macOS only: Windows has no
+#   release Bluetooth backend (its radio would use the adapter's fixed public address), so this
+#   installer builds none and nearby stays lab-only here (NEARBY_PRODUCTION_ENABLED is false on
+#   Windows). A debug lab build with feature nearby-radio has the WinRT backend: the logon task
+#   runs raven-node in your user session, where that radio runs (session 0 is not supported).
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a BOM-less file as ANSI, where the
 # UTF-8 bytes of an em dash contain a smart double quote and break the string literal.
 param(
@@ -69,7 +74,9 @@ param(
     [string]$Upnp = "",
     [string]$TaskName = "RavenNodeBridge",
     [switch]$SkipScheduledTask,
-    [switch]$NoStart
+    [switch]$NoStart,
+    # Build without the Tor onion carrier's helper (raven-tor-helper.exe) and remove an installed one.
+    [switch]$NoTor
 )
 
 $ErrorActionPreference = "Stop"
@@ -185,12 +192,18 @@ if ($Upnp -eq "1") {
 }
 
 $exe = Join-Path $BinDir "raven-node.exe"
+$torExe = Join-Path $BinDir "raven-tor-helper.exe"
 $running = @()
 # Render-only builds, stops and copies nothing: it asks the raven-node.exe already in -BinDir.
 if (-not $renderOnly) {
     Push-Location $Root
-    # --locked: build exactly the audited Cargo.lock.
-    cargo build --locked -p raven-node -p ash --release
+    # --locked: build exactly the audited Cargo.lock. `tor` adds raven-tor-helper.exe
+    # (raven-node itself never links Arti).
+    if ($NoTor) {
+        cargo build --locked -p raven-node -p ash --release
+    } else {
+        cargo build --locked -p raven-node -p ash --release --features raven-node/tor
+    }
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "cargo build failed" }
     Pop-Location
 
@@ -201,6 +214,11 @@ if (-not $renderOnly) {
     $running = @(Get-Process -Name "raven-node" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
     foreach ($proc in $running) {
         Write-Host "stopping running raven-node (pid $($proc.Id)) so its binary can be replaced"
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue
+    }
+    # Its Tor helper (a child process Windows does not stop with it), likewise path-filtered.
+    foreach ($proc in @(Get-Process -Name "raven-tor-helper" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $torExe })) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue
     }
@@ -221,10 +239,20 @@ function Install-Binary([string]$Src, [string]$Dst) {
 }
 
 if (-not $renderOnly) {
-    Install-Binary "$Root\target\release\raven-node.exe" $exe
-    Install-Binary "$Root\target\release\ash.exe" (Join-Path $BinDir "raven.exe")
+    $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$Root\target" }
+    Install-Binary "$target\release\raven-node.exe" $exe
+    Install-Binary "$target\release\ash.exe" (Join-Path $BinDir "raven.exe")
     # Optional product alias - never touches system ash
-    Install-Binary "$Root\target\release\ash.exe" (Join-Path $BinDir "ash.exe")
+    Install-Binary "$target\release\ash.exe" (Join-Path $BinDir "ash.exe")
+    # The Tor helper sits next to raven-node.exe, where raven-node looks for it.
+    if ($NoTor) {
+        if (Test-Path -LiteralPath $torExe) {
+            Remove-Item -LiteralPath $torExe -Force
+            Write-Host "removed $torExe (-NoTor)"
+        }
+    } else {
+        Install-Binary "$target\release\raven-tor-helper.exe" $torExe
+    }
 }
 
 # The LAN address follows the build (hold B12): the installed raven-node.exe prints auto once
@@ -386,7 +414,7 @@ if ($InternetListen) {
     Write-Host "To let contacts reach it, run in an ELEVATED PowerShell yourself (Private profile only, never Public):"
     Write-Host "  New-NetFirewallRule -DisplayName `"Raven node`" -Direction Inbound -Program `"$exe`" -Protocol TCP -LocalPort $inetPort -Profile Private"
     Write-Host "and forward TCP $inetPort on your router if this PC is behind NAT. Outbound needs no rule."
-    Write-Host "A build with Internet direct off (INTERNET_DIRECT_PRODUCTION_ENABLED=false) keeps the port closed and logs INTERNET_DIRECT_HOLD; check: raven.exe status (internet row)."
+    Write-Host "Check: raven.exe status (internet row)."
 } else {
     Write-Host "internet-listen=off (opt-in: re-run with -InternetListen 0.0.0.0:7422, or run 'raven node internet on' and restart the task)"
 }
@@ -396,7 +424,7 @@ if ($p2pListenOn) {
     Write-Host "  New-NetFirewallRule -DisplayName `"Raven node p2p`" -Direction Inbound -Program `"$exe`" -Protocol TCP -LocalPort $p2pPort -Profile Private"
     Write-Host "  New-NetFirewallRule -DisplayName `"Raven node p2p`" -Direction Inbound -Program `"$exe`" -Protocol UDP -LocalPort $p2pPort -Profile Private"
     Write-Host "and forward TCP+UDP $p2pPort on your router if this PC is behind NAT (or -Upnp 1); without that a relay (-P2pRelays) still lets contacts reach you. Outbound needs no rule."
-    Write-Host "A build with p2p off (P2P_PRODUCTION_ENABLED=false) never listens and logs P2P_HOLD; check: raven.exe status (p2p row)."
+    Write-Host "Check: raven.exe status (p2p row)."
 } elseif ($P2pListen) {
     Write-Host "p2p-listen=off (-P2pListen $P2pListen overrides 'raven node p2p on')"
 } else {
@@ -414,7 +442,6 @@ if ($P2pRelay) {
     Write-Host "  New-NetFirewallRule -DisplayName `"Raven friend relay`" -Direction Inbound -Program `"$exe`" -Protocol UDP -LocalPort 7427 -Profile Private"
     Write-Host "and forward TCP+UDP 7427 on your router if this PC is behind NAT."
     Write-Host "  The logon task runs only while you are logged in, so this PC is a poor always-on relay."
-    Write-Host "  A build with friend relays off (FRIEND_RELAY_PRODUCTION_ENABLED=false) does not relay and logs FRIEND_RELAY_HOLD."
 }
 if (($p2pRelayList.Count -gt 0) -and -not $p2pListenOn) {
     Write-Host "NOTE: -P2pRelays take effect only while p2p listen is on (-P2pListen 7423 or 'raven node p2p on')."
@@ -429,6 +456,14 @@ if ($upnpSaved -eq "on") {
 } elseif ($upnpSaved -eq "off") {
     Write-Host "upnp=off ('raven node upnp on' changes it; applied when the task restarts)"
 }
+if ($NoTor) {
+    Write-Host "tor=not installed (-NoTor); raven.exe status says `"Tor: not built in this raven`"."
+} else {
+    Write-Host "tor=$torExe, next to raven-node.exe. raven-node starts it and keeps an onion service, so friends"
+    Write-Host "  can reach this PC from any network without a port forward; Tor relays are the only third party it talks to."
+    Write-Host "  The first start can take a few minutes. Check: raven.exe status (Tor row)."
+}
+Write-Host "bluetooth-nearby=not in release builds on Windows (macOS only so far)"
 Write-Host "bin-dir=$BinDir (raven.exe / ash.exe)"
 $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 Write-Host "Named-pipe IPC: \\.\pipe\raven-node-$userSid (per-user pipe, current-user DACL; ash refuses a pipe served by another user) - see WINDOWS_SERVICE.md"

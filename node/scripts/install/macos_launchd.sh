@@ -36,20 +36,29 @@
 # relays; RAVEN_P2P_RELAY=1 relays for your verified contacts (and the PeerIds
 # in relay_allow.json) with this profile's own relay key, never your PeerId:
 # the friend relay on TCP and UDP 7427, the consent `raven relay offer on`
-# saves (held while FRIEND_RELAY_PRODUCTION_ENABLED is false);
+# saves;
 # RAVEN_UPNP=1|0 saves the router port-mapping choice (`raven node upnp on|off`).
 # With RAVEN_UPNP unset, an interactive install that turns p2p listen on asks
 # once (Enter = no); a non-interactive one never asks and leaves it unset (off).
 #
-# Bluetooth nearby (Phase 5, docs/NEARBY.md) is opt-in here, and no installer
-# turns it on: `raven nearby enable` does, in a build that has it (held while
-# NEARBY_PRODUCTION_ENABLED is false). On macOS the radio runs in a helper
-# app, RavenNearby.app, which holds no keys; raven-node is never re-signed for
-# it, so its code signature and Keychain access stay as they are:
-#   RAVEN_INSTALL_NEARBY_HELPER=1 bash node/scripts/install/macos_launchd.sh
-# builds raven-node with feature nearby-radio, builds RavenNearby.app
-# (node/scripts/build_nearby_helper_app.sh), signs it ad hoc and copies it to
-# ~/Library/Application Support/Raven/, where raven-node looks for it.
+# The release build carries the Tor onion carrier and Bluetooth nearby
+# (switched on in 2026-10 after the three-machine field test; not
+# independently reviewed). This installer builds raven-node with the cargo
+# features `tor` and `nearby-radio` and installs both helpers:
+# - raven-tor-helper (Arti, the Tor client, in its own process) next to
+#   raven-node in RAVEN_BIN_DIR. raven-node starts it and keeps an onion
+#   service so friends can reach this Mac from any network; Tor relays are
+#   the only third party it talks to. RAVEN_INSTALL_TOR_HELPER=0 builds
+#   without it and removes an installed one (raven status then says "Tor: not
+#   built in this raven").
+# - RavenNearby.app, the Bluetooth radio helper. Bluetooth stays off until
+#   `raven nearby enable` (verified contacts only). The radio runs in the
+#   helper app, which holds no keys; raven-node is never re-signed for it, so
+#   its code signature and Keychain access stay as they are. The installer
+#   builds RavenNearby.app (node/scripts/build_nearby_helper_app.sh), signs it
+#   ad hoc and copies it to ~/Library/Application Support/Raven/, where
+#   raven-node looks for it. RAVEN_INSTALL_NEARBY_HELPER=0 builds raven-node
+#   without the radio backend and installs no helper.
 # RAVEN_NEARBY_SIGN="Developer ID Application: ..." signs it with that
 # identity instead (hardened runtime); RAVEN_NEARBY_APP=<built RavenNearby.app>
 # copies that bundle instead of building one (RAVEN_NEARBY_SIGN=keep keeps its
@@ -148,13 +157,18 @@ case "$UPNP" in
 esac
 # The Bluetooth nearby helper (see the top): checked before anything is built
 # or created, like every other setting.
-NEARBY_HELPER="${RAVEN_INSTALL_NEARBY_HELPER:-0}"
+NEARBY_HELPER="${RAVEN_INSTALL_NEARBY_HELPER:-1}"
+TOR_HELPER="${RAVEN_INSTALL_TOR_HELPER:-1}"
 NEARBY_ONLY="${RAVEN_INSTALL_NEARBY_ONLY:-0}"
 NEARBY_APP="${RAVEN_NEARBY_APP:-}"
 NEARBY_SIGN="${RAVEN_NEARBY_SIGN:--}"
 case "$NEARBY_HELPER" in
   0|1) ;;
   *) echo "RAVEN_INSTALL_NEARBY_HELPER must be 1 (install RavenNearby.app, the Bluetooth nearby helper) or 0" >&2; exit 1 ;;
+esac
+case "$TOR_HELPER" in
+  0|1) ;;
+  *) echo "RAVEN_INSTALL_TOR_HELPER must be 1 (install raven-tor-helper, the Tor onion carrier's helper) or 0" >&2; exit 1 ;;
 esac
 case "$NEARBY_ONLY" in
   0|1) ;;
@@ -322,10 +336,10 @@ nearby_lines() {
   backend="$(printf '%s\n' "$status" | sed -n 's/^nearby_backend=//p' | head -n 1)"
   if [[ "$backend" == none ]]; then
     echo "  NOTE: ${BIN_DIR}/raven-node has no Bluetooth backend (built without feature nearby-radio), so it never starts the helper;"
-    echo "    re-run with RAVEN_INSTALL_NEARBY_HELPER=1 (without RAVEN_INSTALL_NEARBY_ONLY) to rebuild it with one."
+    echo "    re-run this installer without RAVEN_INSTALL_NEARBY_ONLY (and without RAVEN_INSTALL_NEARBY_HELPER=0) to rebuild it with one."
   fi
   if [[ "$gate" == held ]]; then
-    echo "  This build holds Bluetooth nearby (NEARBY_PRODUCTION_ENABLED=false): raven-node never starts the radio; raven nearby status says held."
+    echo "  This raven-node holds Bluetooth nearby (its build has it off): raven-node never starts the radio; raven nearby status says held."
   fi
   if [[ -e "$BIN_DIR/RavenNearby.app" ]]; then
     echo "  NOTE: ${BIN_DIR}/RavenNearby.app, next to raven-node, wins over the installed one; remove it to use this one."
@@ -396,17 +410,29 @@ p2p_plist_args() {
 }
 # Render-only builds and copies nothing: it asks the raven-node already in BIN_DIR.
 if [[ "$RENDER_ONLY" != 1 ]]; then
-  # --locked: build exactly the audited Cargo.lock. The nearby helper's
-  # raven-node carries the macOS radio backend (it spawns the helper; it
-  # never links CoreBluetooth itself).
+  # --locked: build exactly the audited Cargo.lock. `tor` adds the
+  # raven-tor-helper binary (raven-node itself never links Arti); the nearby
+  # helper's raven-node carries the macOS radio backend (it spawns the
+  # helper; it never links CoreBluetooth itself).
   build_features=()
+  if [[ "$TOR_HELPER" == 1 ]]; then
+    build_features+=(--features raven-node/tor)
+  fi
   if [[ "$NEARBY_HELPER" == 1 ]]; then
-    build_features=(--features raven-node/nearby-radio)
+    build_features+=(--features raven-node/nearby-radio)
   fi
   cargo build --locked -p raven-node -p ash --release --manifest-path "$ROOT/Cargo.toml" \
     ${build_features[@]+"${build_features[@]}"}
-  install -m 755 "$ROOT/target/release/raven-node" "$BIN_DIR/raven-node"
-  install -m 755 "$ROOT/target/release/ash" "$BIN_DIR/raven"
+  TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+  install -m 755 "$TARGET/release/raven-node" "$BIN_DIR/raven-node"
+  install -m 755 "$TARGET/release/ash" "$BIN_DIR/raven"
+  # The Tor helper sits next to raven-node, where raven-node looks for it.
+  if [[ "$TOR_HELPER" == 1 ]]; then
+    install -m 755 "$TARGET/release/raven-tor-helper" "$BIN_DIR/raven-tor-helper"
+  elif [[ -e "$BIN_DIR/raven-tor-helper" ]]; then
+    rm -f "$BIN_DIR/raven-tor-helper"
+    echo "removed ${BIN_DIR}/raven-tor-helper (RAVEN_INSTALL_TOR_HELPER=0)"
+  fi
   # Optional ash launcher only if safe (not overwriting /bin/ash)
   if [[ ! -e /bin/ash ]] || [[ "$(readlink -f "$BIN_DIR/ash" 2>/dev/null || true)" == "$BIN_DIR/raven" ]]; then
     ln -sfn "$BIN_DIR/raven" "$BIN_DIR/ash"
@@ -601,7 +627,7 @@ if [[ -n "$INTERNET_LISTEN" ]]; then
   echo "    sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add ${BIN_DIR}/raven-node"
   echo "    sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp ${BIN_DIR}/raven-node"
   echo "  (an unsigned rebuild may need this again) and forward the TCP port on your router if you are behind NAT."
-  echo "  A build with Internet direct off (INTERNET_DIRECT_PRODUCTION_ENABLED=false) keeps the port closed and logs INTERNET_DIRECT_HOLD; check: raven status (internet row)."
+  echo "  Check: raven status (internet row)."
 else
   echo "Internet listen: off (opt-in: re-run with RAVEN_INTERNET_LISTEN=0.0.0.0:7422, or 'raven node internet on' and restart the agent)"
 fi
@@ -612,7 +638,7 @@ if p2p_listen_requested; then
   echo "    sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp ${BIN_DIR}/raven-node"
   echo "  (an unsigned rebuild may need this again) and forward TCP+UDP ${P2P_PORT} on your router if you are behind NAT (or RAVEN_UPNP=1);"
   echo "  without that a relay (RAVEN_P2P_RELAYS) still lets contacts reach you."
-  echo "  A build with p2p off (P2P_PRODUCTION_ENABLED=false) never listens and logs P2P_HOLD; check: raven status (p2p row)."
+  echo "  Check: raven status (p2p row)."
 elif [[ -n "$P2P_LISTEN" ]]; then
   echo "p2p listen: off (RAVEN_P2P_LISTEN=${P2P_LISTEN} overrides 'raven node p2p on')"
 else
@@ -629,7 +655,6 @@ if [[ "$P2P_RELAY" == "1" ]]; then
   echo "    sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add ${BIN_DIR}/raven-node"
   echo "    sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp ${BIN_DIR}/raven-node"
   echo "  and forward TCP+UDP 7427 on your router if you are behind NAT."
-  echo "  A build with friend relays off (FRIEND_RELAY_PRODUCTION_ENABLED=false) does not relay and logs FRIEND_RELAY_HOLD."
 fi
 if [[ ${#P2P_RELAY_LIST[@]} -gt 0 ]] && ! p2p_listen_requested; then
   echo "NOTE: relays take effect only while p2p listen is on (RAVEN_P2P_LISTEN=7423 or 'raven node p2p on')."
@@ -642,6 +667,13 @@ case "$UPNP_SAVED" in
   on) echo "UPnP: on (raven-node asks the router to map TCP/UDP ${P2P_PORT:-of the p2p port, when one is open}; it logs only the mapped port and success or failure)" ;;
   off) echo "UPnP: off ('raven node upnp on' changes it; applied when the agent restarts)" ;;
 esac
+if [[ "$TOR_HELPER" == 1 ]]; then
+  echo "Tor: ${BIN_DIR}/raven-tor-helper, next to raven-node. raven-node starts it and keeps an onion service, so friends"
+  echo "  can reach this Mac from any network without a port forward; Tor relays are the only third party it talks to."
+  echo "  The first start can take a few minutes. Check: raven status (Tor row)."
+else
+  echo "Tor: not installed (RAVEN_INSTALL_TOR_HELPER=0); raven status says \"Tor: not built in this raven\"."
+fi
 if [[ "$NEARBY_HELPER" == 1 ]]; then
   nearby_lines
 fi

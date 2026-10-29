@@ -19,7 +19,8 @@
 # profile, plist or agent); a bundle whose signature does not verify under
 # RAVEN_NEARBY_SIGN=keep is refused and the installed one stays; invalid
 # settings stop the install before anything is created; render-only with
-# RAVEN_INSTALL_NEARBY_HELPER=1 installs no helper.
+# RAVEN_INSTALL_NEARBY_HELPER=1 installs no helper (the default since 2026-10:
+# a release install builds the radio backend and installs the helper).
 #
 # macOS only (elsewhere it says so and exits 0). Runs under /bin/bash 3.2,
 # the oldest bash the installers support: they run under the bash that runs
@@ -145,6 +146,8 @@ run_install RAVEN_INSTALL_NEARBY_ONLY=yes
 refused "RAVEN_INSTALL_NEARBY_ONLY=yes" "RAVEN_INSTALL_NEARBY_ONLY must be 1"
 run_install RAVEN_INSTALL_NEARBY_HELPER=on
 refused "RAVEN_INSTALL_NEARBY_HELPER=on" "RAVEN_INSTALL_NEARBY_HELPER must be 1"
+run_install RAVEN_INSTALL_TOR_HELPER=yes
+refused "RAVEN_INSTALL_TOR_HELPER=yes" "RAVEN_INSTALL_TOR_HELPER must be 1"
 run_install RAVEN_INSTALL_NEARBY_ONLY=1 RAVEN_NEARBY_APP="$T/nothing.app"
 refused "RAVEN_NEARBY_APP that is no bundle" "RAVEN_NEARBY_APP must name a built RavenNearby.app"
 run_install RAVEN_INSTALL_NEARBY_ONLY=1 RAVEN_NEARBY_SIGN=keep
@@ -180,7 +183,18 @@ else
     fail "helper-only install, backend $BACKEND: the output says there is none"
   fi
 fi
-says "helper-only install" "This build holds Bluetooth nearby (NEARBY_PRODUCTION_ENABLED=false)"
+# The gate follows `raven-node ble-status` too: since 2026-10 a release or
+# lab-free debug raven-node on macOS has nearby on, so the install says
+# nothing about a hold; one that has it off says so.
+GATE="$(env -i PATH=/usr/bin:/bin "$T/bin/raven-node" ble-status 2>/dev/null | sed -n 's/^nearby_gate=//p')"
+if [[ "$GATE" == held ]]; then
+  says "helper-only install, gate held" "This raven-node holds Bluetooth nearby"
+else
+  checks=$((checks + 1))
+  if grep -qF "holds Bluetooth nearby" "$T/out"; then
+    fail "helper-only install, gate $GATE: the output says nearby is held"
+  fi
+fi
 
 # A bundle whose signature does not verify is refused under keep, and the
 # installed one stays as it was.

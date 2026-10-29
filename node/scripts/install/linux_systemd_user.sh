@@ -40,7 +40,7 @@
 # relays; RAVEN_P2P_RELAY=1 relays for your verified contacts (and the PeerIds
 # in relay_allow.json) with this profile's own relay key, never your PeerId:
 # the friend relay on TCP and UDP 7427, the consent `raven relay offer on`
-# saves (held while FRIEND_RELAY_PRODUCTION_ENABLED is false);
+# saves;
 # RAVEN_UPNP=1|0 saves the router port-mapping choice (`raven node upnp on|off`).
 # With RAVEN_UPNP unset, an interactive install that turns p2p listen on asks
 # once (Enter = no); a non-interactive one never asks and leaves it unset (off).
@@ -63,10 +63,20 @@
 # LoadCredential=raven-keystore-passphrase:<path> instead (needs a systemd
 # whose user manager supports credentials).
 #
-# Bluetooth nearby (Phase 5, docs/NEARBY.md): no installer turns it on, and
-# this one changes nothing for it: `raven nearby enable` does, in a build that
-# has it (feature nearby-radio, glibc builds only; held while
-# NEARBY_PRODUCTION_ENABLED is false). The user unit reaches BlueZ over the
+# The Tor onion carrier (switched on in release builds in 2026-10 after the
+# three-machine field test; not independently reviewed): this installer builds
+# with the cargo feature `tor` and installs raven-tor-helper (Arti, the Tor
+# client, in its own process) next to raven-node. raven-node starts it and
+# keeps an onion service, so friends can reach this host from any network
+# without a port forward; Tor relays are the only third party it talks to.
+# RAVEN_INSTALL_TOR_HELPER=0 builds without it and removes an installed one
+# (raven status then says "Tor: not built in this raven").
+#
+# Bluetooth nearby (Phase 5, docs/NEARBY.md) is in release builds on macOS
+# only: Linux has no release Bluetooth backend, so this installer builds none
+# and nearby stays lab-only here (NEARBY_PRODUCTION_ENABLED is false on
+# Linux; a debug lab build with feature nearby-radio, glibc only, has the
+# BlueZ backend). For that lab build: the user unit reaches BlueZ over the
 # system bus as you: desktop distributions' org.bluez D-Bus policy allows the
 # logged-in user (verify on yours: `raven nearby status` says "not allowed"
 # when it does not; the fix is that policy, never root). Raven goes on the air
@@ -99,6 +109,11 @@ RENDER_ONLY="${RAVEN_INSTALL_RENDER_ONLY:-0}"
 case "$RENDER_ONLY" in
   0|1) ;;
   *) echo "RAVEN_INSTALL_RENDER_ONLY must be 1 (print the unit, install nothing) or 0" >&2; exit 1 ;;
+esac
+TOR_HELPER="${RAVEN_INSTALL_TOR_HELPER:-1}"
+case "$TOR_HELPER" in
+  0|1) ;;
+  *) echo "RAVEN_INSTALL_TOR_HELPER must be 1 (install raven-tor-helper, the Tor onion carrier's helper) or 0" >&2; exit 1 ;;
 esac
 # auto / auto:PORT / IP:PORT / [IPv6]:PORT / [IPv6%zone]:PORT characters only;
 # raven-node validates the rest. The address itself is resolved after the
@@ -296,10 +311,24 @@ keystore_unit_lines() {
 }
 # Render-only builds and copies nothing: it asks the raven-node already in BIN_DIR.
 if [[ "$RENDER_ONLY" != 1 ]]; then
-  # --locked: build exactly the audited Cargo.lock.
-  cargo build --locked -p raven-node -p ash --release --manifest-path "$ROOT/Cargo.toml"
-  install -m 755 "$ROOT/target/release/raven-node" "$BIN_DIR/raven-node"
-  install -m 755 "$ROOT/target/release/ash" "$BIN_DIR/raven"
+  # --locked: build exactly the audited Cargo.lock. `tor` adds the
+  # raven-tor-helper binary (raven-node itself never links Arti).
+  build_features=()
+  if [[ "$TOR_HELPER" == 1 ]]; then
+    build_features=(--features raven-node/tor)
+  fi
+  cargo build --locked -p raven-node -p ash --release --manifest-path "$ROOT/Cargo.toml" \
+    ${build_features[@]+"${build_features[@]}"}
+  TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+  install -m 755 "$TARGET/release/raven-node" "$BIN_DIR/raven-node"
+  install -m 755 "$TARGET/release/ash" "$BIN_DIR/raven"
+  # The Tor helper sits next to raven-node, where raven-node looks for it.
+  if [[ "$TOR_HELPER" == 1 ]]; then
+    install -m 755 "$TARGET/release/raven-tor-helper" "$BIN_DIR/raven-tor-helper"
+  elif [[ -e "$BIN_DIR/raven-tor-helper" ]]; then
+    rm -f "$BIN_DIR/raven-tor-helper"
+    echo "removed ${BIN_DIR}/raven-tor-helper (RAVEN_INSTALL_TOR_HELPER=0)"
+  fi
   # `ash` is also the BusyBox / Alpine shell, and ~/.local/bin usually precedes
   # /bin in PATH: only add the alias when no other `ash` exists.
   EXISTING_ASH="$(PATH="${PATH//$BIN_DIR:/}" command -v ash 2>/dev/null || true)"
@@ -505,7 +534,7 @@ if [[ -n "$INTERNET_LISTEN" ]]; then
   echo "Internet listen: ${INTERNET_LISTEN} (only your contacts get an answer; anyone can see that the port is open)"
   echo "  Allow it yourself if you want it reachable: ufw allow ${INTERNET_PORT}/tcp (or firewalld / nftables / your cloud security group),"
   echo "  and forward TCP ${INTERNET_PORT} on your router if this host is behind NAT."
-  echo "  A build with Internet direct off (INTERNET_DIRECT_PRODUCTION_ENABLED=false) keeps the port closed and logs INTERNET_DIRECT_HOLD; check: raven status (internet row)."
+  echo "  Check: raven status (internet row)."
 else
   echo "Internet listen: off (opt-in: re-run with RAVEN_INTERNET_LISTEN=0.0.0.0:7422, or 'raven node internet on' and restart the unit)"
 fi
@@ -513,7 +542,7 @@ if p2p_listen_requested; then
   echo "p2p listen: ${P2P_LISTEN} (libp2p TCP+UDP ${P2P_PORT}; only your contacts get a Raven link; anyone can see that the port is open)"
   echo "  Allow it yourself if you want it reachable: ufw allow ${P2P_PORT}/tcp; ufw allow ${P2P_PORT}/udp (or firewalld / nftables / your cloud security group),"
   echo "  and forward TCP+UDP ${P2P_PORT} on your router if this host is behind NAT (or RAVEN_UPNP=1); without that a relay (RAVEN_P2P_RELAYS) still lets contacts reach you."
-  echo "  A build with p2p off (P2P_PRODUCTION_ENABLED=false) never listens and logs P2P_HOLD; check: raven status (p2p row)."
+  echo "  Check: raven status (p2p row)."
 elif [[ -n "$P2P_LISTEN" ]]; then
   echo "p2p listen: off (RAVEN_P2P_LISTEN=${P2P_LISTEN} overrides 'raven node p2p on')"
 else
@@ -528,7 +557,6 @@ if [[ "$P2P_RELAY" == "1" ]]; then
   echo "  A saved 'raven relay offer off' wins over RAVEN_P2P_RELAY=1 ('raven relay offer on' to relay again); 'raven node hide-ip on' stops it too."
   echo "  Allow it yourself if you want it reachable: ufw allow 7427/tcp; ufw allow 7427/udp (or firewalld / nftables / your cloud security group),"
   echo "  and forward TCP+UDP 7427 on your router if this host is behind NAT."
-  echo "  A build with friend relays off (FRIEND_RELAY_PRODUCTION_ENABLED=false) does not relay and logs FRIEND_RELAY_HOLD."
 fi
 if [[ ${#P2P_RELAY_LIST[@]} -gt 0 ]] && ! p2p_listen_requested; then
   echo "NOTE: relays take effect only while p2p listen is on (RAVEN_P2P_LISTEN=7423 or 'raven node p2p on')."
@@ -541,4 +569,12 @@ case "$UPNP_SAVED" in
   on) echo "UPnP: on (raven-node asks the router to map TCP/UDP ${P2P_PORT:-of the p2p port, when one is open}; it logs only the mapped port and success or failure)" ;;
   off) echo "UPnP: off ('raven node upnp on' changes it; applied when the unit restarts)" ;;
 esac
+if [[ "$TOR_HELPER" == 1 ]]; then
+  echo "Tor: ${BIN_DIR}/raven-tor-helper, next to raven-node. raven-node starts it and keeps an onion service, so friends"
+  echo "  can reach this host from any network without a port forward; Tor relays are the only third party it talks to."
+  echo "  The first start can take a few minutes. Check: raven status (Tor row)."
+else
+  echo "Tor: not installed (RAVEN_INSTALL_TOR_HELPER=0); raven status says \"Tor: not built in this raven\"."
+fi
+echo "Bluetooth nearby: not in release builds on Linux (macOS only so far)."
 echo "export PATH=\"${BIN_DIR}:\$PATH\""
