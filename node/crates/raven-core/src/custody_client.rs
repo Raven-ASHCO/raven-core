@@ -327,6 +327,10 @@ pub struct FetchReport {
     pub accepted_group_copies: usize,
     pub accepted_acks: usize,
     pub refused: usize,
+    /// Of `refused`: objects under this node's tags that the contact the tag
+    /// names did not sign (someone else left them with the custodian).
+    /// Released; never the custodian's misbehaviour.
+    pub foreign: usize,
     pub retried: usize,
     pub released: usize,
     /// Peers to back off (`Retry(Peer)`), with why.
@@ -889,7 +893,12 @@ pub fn fetch_round_with(
                     report.accepted_acks += 1;
                     report.touched.push(*peer);
                 }
-                RelayedOutcome::Refused(_) => report.refused += 1,
+                RelayedOutcome::Refused(code) => {
+                    report.refused += 1;
+                    if *code == crate::relayed_ingest::FOREIGN_SIGNATURE {
+                        report.foreign += 1;
+                    }
+                }
                 RelayedOutcome::Retry(RetryScope::Item, _) => report.retried += 1,
                 RelayedOutcome::Retry(RetryScope::Peer, why) => {
                     report.retried += 1;

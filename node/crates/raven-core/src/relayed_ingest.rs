@@ -18,8 +18,14 @@ use crate::indexed_session_store::{
 };
 use crate::outbox::{contact_admission, ContactAdmission};
 use crate::owed_acks::{Origin, OwedAcks, OwedError};
-use crate::security_events::{classify_relayed, classify_store_error, SecKind, Via};
+use crate::security_events::{classify_store_error, SecKind, Via};
 use crate::store_object::StoreObject;
+
+/// The refusal of an object whose outer signature is not the contact's its
+/// tag names: someone else signed it and left it under the tag. Released;
+/// no security event, the keeper could not tell
+/// ([`crate::security_events::classify_relayed`]).
+pub const FOREIGN_SIGNATURE: &str = "OUTER_SIGNATURE_INVALID";
 
 /// Where a fetched object was filed: its sender, and the one session its tag
 /// names (from the recipient's own reverse tag map).
@@ -275,11 +281,15 @@ fn ingest_envelope_sensed(
         }
     }
     // 5. Cheap outer-signature pre-check before any protected load: junk
-    //    another depositor filed under a known tag ends here.
+    //    another depositor filed under a known tag ends here. Released, and
+    //    nobody is blamed: a keeper checks only that its depositor signed
+    //    what it left (it cannot know whose tag that is), so an honest keeper
+    //    serves such an object too (no `CustodianBadObject`; the fetch
+    //    round counts it, [`crate::custody_client::FetchReport::foreign`]).
     if !env.verify(&peer) {
-        let refused = RelayedOutcome::Refused("OUTER_SIGNATURE_INVALID");
-        *event = classify_relayed(&refused);
-        return refused;
+        // [`FOREIGN_SIGNATURE`], spelled out: the outcome table of the
+        // security events reads the literal codes here.
+        return RelayedOutcome::Refused("OUTER_SIGNATURE_INVALID");
     }
     let is_message = env.env_type == EnvType::Message as u8;
     // 6. Message only: room to owe its ACK (back-pressure otherwise).
@@ -826,10 +836,11 @@ mod tests {
             ingest_relayed_object(p.b.path(), &p.bob, &junk, &hint, now()),
             RelayedOutcome::Refused("OUTER_SIGNATURE_INVALID")
         );
-        // Phase 6b (S6, S7, S18): the event each refusal is. Junk before
-        // Alice's signature vouched for it is the custodian's; Alice's own
-        // signature over a changed AEAD tag is hers (the custodian could not
-        // have made it).
+        // Phase 6b (S6, S7, S18): the event each refusal is. Junk an honest
+        // custodian never serves (another tag) is the custodian's; an object
+        // someone else signed under the tag is nobody's (a custodian checks
+        // only that its depositor signed it); Alice's own signature over a
+        // changed AEAD tag is hers (the custodian could not have made it).
         let sensed = |object: &StoreObject, hint: &RelayHint| {
             ingest_relayed_object_sensed(p.b.path(), &p.bob, object, hint, now())
         };
@@ -842,10 +853,7 @@ mod tests {
         );
         assert_eq!(
             sensed(&junk, &hint),
-            (
-                RelayedOutcome::Refused("OUTER_SIGNATURE_INVALID"),
-                Some(SecKind::CustodianBadObject)
-            )
+            (RelayedOutcome::Refused("OUTER_SIGNATURE_INVALID"), None)
         );
         let mut env = Envelope::unpack(&p.seal("y")).unwrap();
         *env.message_ciphertext.last_mut().unwrap() ^= 1;

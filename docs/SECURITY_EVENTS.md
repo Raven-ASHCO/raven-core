@@ -31,7 +31,9 @@
 > ACK (on its link, on a dial's ACK, or fetched from a custodian), 25 and 31 from a contact's link
 > frames, 27 (a refused key change in the CLI or the terminal app's NAME-CLASH), 28 (a prekey the
 > pin refuses), 32 (a PairInit over the claim quota), 33 (the reset loop hold, once per hold),
-> 40-42 (a custodian's junk, unrequested items and objects served again after release), 43-44 and
+> 40-42 (a custodian's junk, unrequested items and objects served again after release; junk is
+> what an honest custodian never serves, malformed or under another tag: an object someone else
+> signed under one of this node's tags is released and blames nobody), 43-44 and
 > 48 (a custodian's refusals of a contact's requests; 48 also a forward of ours refused), 47 (a
 > bad letter: the custodian's when its signature fails, the sender's when it verified), 49 (a
 > failed nearby knock, against the pipe's radio source) and 60 (rollback found by the session
