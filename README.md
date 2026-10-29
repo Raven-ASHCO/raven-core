@@ -1,5 +1,8 @@
 # Raven core
 
+[![Raven B1 Always-On](https://github.com/Raven-ASHCO/raven-core/actions/workflows/raven-b1-always-on.yml/badge.svg)](https://github.com/Raven-ASHCO/raven-core/actions/workflows/raven-b1-always-on.yml)
+[![Raven Serverless Node](https://github.com/Raven-ASHCO/raven-core/actions/workflows/raven-serverless.yml/badge.svg)](https://github.com/Raven-ASHCO/raven-core/actions/workflows/raven-serverless.yml)
+
 Raven is a private messenger with no central server. Each person's identity is a key on their
 own computer; friends add each other by exchanging a card and checking each other's **security
 words** in person or on a call; messages are end-to-end encrypted and travel directly between
@@ -42,6 +45,35 @@ Website: https://raven-messager.com
   are no downloads yet.
 - Some documents and code comments refer to internal planning documents that are not part of
   this repository.
+
+## Evidence
+
+What backs the claims above, and what does not exist yet:
+
+- [docs/EVIDENCE.md](docs/EVIDENCE.md): what is tested and how (test counts per crate, shared test
+  vectors checked by Rust and a Python reference, 30 fuzz targets, CI), and a "not done yet" list.
+- [docs/FIELD_TEST_2026_10.md](docs/FIELD_TEST_2026_10.md): three computers on a home network and a
+  phone hotspot, debug builds with lab features on. What worked, what failed, what is open.
+- [docs/HOW_RAVEN_CONNECTS.md](docs/HOW_RAVEN_CONNECTS.md): finding someone with no directory, NAT,
+  an offline recipient, and checking a friend's identity, each with its status and limits.
+- [docs/SECURITY_REVIEW_SCOPE.md](docs/SECURITY_REVIEW_SCOPE.md): a package for an independent
+  security reviewer.
+- [docs/ROADMAP.md](docs/ROADMAP.md): each lab feature, its evidence so far, and what is still
+  needed before release builds get it; packaging.
+
+The CI badges above show the two workflows that run on every push; [EVIDENCE.md](docs/EVIDENCE.md)
+says what each checks.
+
+## How to help
+
+- **Review** the protocol and the code. [SECURITY_REVIEW_SCOPE.md](docs/SECURITY_REVIEW_SCOPE.md)
+  lists what to look at first.
+- **Run the field test** on your own computers and networks, and send a report with the
+  [field test template](.github/ISSUE_TEMPLATE/field_test_report.md). Never post addresses, network
+  names, cards or security words.
+- **Report bugs** in an issue ([bug template](.github/ISSUE_TEMPLATE/bug_report.md)).
+- **Security problems:** privately, never in a public issue: [SECURITY.md](SECURITY.md).
+- Code contributions: [CONTRIBUTING.md](CONTRIBUTING.md) has good places to start.
 
 ## Build
 
