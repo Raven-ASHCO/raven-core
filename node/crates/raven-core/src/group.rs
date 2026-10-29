@@ -17,9 +17,10 @@
 //!   [`run_pending`] (raven-node's outbox scan, the CLI, the engine) turns
 //!   them into parked copies.
 //!
-//! **Gate:** [`GROUPS_PRODUCTION_ENABLED`] stays false; a debug build opens
-//! it with the Lab Test A unlock plus `RAVEN_LAB_HORIZON=1` and
-//! `RAVEN_LAB_GROUPS=1`. Groups need the horizon (every copy is parked).
+//! **Gate:** [`GROUPS_PRODUCTION_ENABLED`] was switched on in release builds
+//! in 2026-10, after the three-machine field test (debug builds with the lab
+//! switches on); not independently reviewed. A debug build closes it with
+//! `RAVEN_LAB_GROUPS=0`. Groups need the horizon (every copy is parked).
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -39,44 +40,54 @@ mod tests;
 
 pub use store::{GroupsFile, Line, StoredMsg};
 
-/// Groups production gate. Stays false until the owner's GO.
-pub const GROUPS_PRODUCTION_ENABLED: bool = false;
+/// Groups production gate (up to [`MAX_GROUP_MEMBERS`], the creator the only
+/// admin). Switched on 2026-10 after the three-machine field test; not
+/// independently reviewed.
+pub const GROUPS_PRODUCTION_ENABLED: bool = true;
 // Every copy is parked with the horizon's park step.
 const _: () =
     assert!(!GROUPS_PRODUCTION_ENABLED || crate::horizon::LONG_HORIZON_PRODUCTION_ENABLED);
 
-/// The groups' debug lab switch (with `RAVEN_LAB_TEST_A=1` and
-/// [`crate::horizon::LAB_HORIZON`]).
+/// The groups' debug lab switch: "0" closes them
+/// ([`crate::pair_init::lab_gate`]).
 pub const LAB_GROUPS: &str = "RAVEN_LAB_GROUPS";
 
 thread_local! {
     static GROUPS_LAB: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-/// Groups are live: [`GROUPS_PRODUCTION_ENABLED`], or in a debug build this
-/// thread's override, else `RAVEN_LAB_GROUPS` with the Lab Test A unlock;
-/// always with the long message horizon live; unless a security notice
-/// holds groups (close-only).
+/// Groups are live: [`GROUPS_PRODUCTION_ENABLED`]; in a debug build this
+/// thread's override decides, else `RAVEN_LAB_GROUPS` ("0" closes them,
+/// [`crate::pair_init::lab_gate`]); always with the long message horizon
+/// live; unless a security notice holds groups (close-only).
 pub fn group_live_enabled() -> bool {
-    let lab = || {
-        let over = if cfg!(debug_assertions) {
-            GROUPS_LAB.with(Cell::get)
-        } else {
-            None
-        };
-        over.unwrap_or_else(|| crate::pair_init::lab_switch(LAB_GROUPS))
+    let over = if cfg!(debug_assertions) {
+        GROUPS_LAB.with(Cell::get)
+    } else {
+        None
     };
-    (GROUPS_PRODUCTION_ENABLED || lab())
+    over.unwrap_or_else(|| crate::pair_init::lab_gate(GROUPS_PRODUCTION_ENABLED, LAB_GROUPS))
         && crate::horizon::horizon_live_enabled()
         && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_GROUPS)
 }
 
-/// In-process tests switch `RAVEN_LAB_GROUPS` for the current thread only
-/// (with [`crate::horizon::set_lab_horizon_for_this_thread`]). Ignored in
-/// release builds.
+/// In-process tests switch groups on or off for the current thread only
+/// (with [`crate::horizon::set_lab_horizon_for_this_thread`]); `None` goes
+/// back to the const and the environment. Ignored in release builds.
 #[doc(hidden)]
 pub fn set_lab_groups_for_this_thread(on: Option<bool>) {
     GROUPS_LAB.with(|c| c.set(on));
+}
+
+/// This thread's override ([`set_lab_groups_for_this_thread`]), for test
+/// helpers that pin it only where a test did not; `None` in a release build.
+#[doc(hidden)]
+pub fn lab_groups_for_this_thread() -> Option<bool> {
+    if cfg!(debug_assertions) {
+        GROUPS_LAB.with(Cell::get)
+    } else {
+        None
+    }
 }
 
 pub const GROUP_FRAME_MAGIC: &str = "RVNGRP/1";

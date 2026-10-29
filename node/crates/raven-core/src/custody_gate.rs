@@ -1,26 +1,38 @@
 //! Friend custody gate (`docs/design/2026-10-friend-custody.md` §14).
 //!
 //! Independent of the global `PRODUCTION_ENABLED` tripwires and of the carrier
-//! gates. Both flags stay false until the owner signs the custody waiver; the
-//! lab unlock is debug `RAVEN_LAB_TEST_A=1` (WAN custody additionally needs
-//! `RAVEN_LAB_CUSTODY_WAN=1`). Both ends enforce the gate per link.
+//! gates. Both flags were switched on in release builds in 2026-10, after the
+//! three-machine field test (debug builds with the lab switches on); not
+//! independently reviewed. Keeping mail for friends and asking friends to
+//! keep yours stay the person's own consents (node_policy `custody`,
+//! `custody_use`). A debug build closes custody with `RAVEN_LAB_TEST_A=0`
+//! and WAN custody alone with `RAVEN_LAB_CUSTODY_WAN=0`. Both ends enforce
+//! the gate per link.
 //!
 //! Phase 5 multi-hop custody (RHW1 handoffs between two custodians, and the
 //! recipient's tag registration) has its own held gate on top,
-//! [`CUSTODY_HANDOFF_PRODUCTION_ENABLED`] (debug `RAVEN_LAB_CUSTODY_HANDOFF`
-//! with the Lab Test A unlock): [`handoff_live`] needs custody live first.
+//! [`CUSTODY_HANDOFF_PRODUCTION_ENABLED`] (still off; debug
+//! `RAVEN_LAB_CUSTODY_HANDOFF` with the Lab Test A unlock): [`handoff_live`]
+//! needs custody live first.
 
 use std::net::IpAddr;
 
 use crate::outbox::{CarrierGates, OutboxCarrier, OutboxRoute};
 
-/// Friend custody over LAN links from local-network sources.
-pub const FRIEND_CUSTODY_PRODUCTION_ENABLED: bool = false;
-/// Friend custody over Internet direct / p2p links and from any source.
-pub const FRIEND_CUSTODY_WAN_ENABLED: bool = false;
+/// Friend custody over LAN links from local-network sources. Switched on
+/// 2026-10 after the three-machine field test; not independently reviewed.
+pub const FRIEND_CUSTODY_PRODUCTION_ENABLED: bool = true;
+/// Friend custody over Internet direct / p2p / Tor links and from any
+/// source. Switched on 2026-10 after the three-machine field test; not
+/// independently reviewed.
+pub const FRIEND_CUSTODY_WAN_ENABLED: bool = true;
 const _: () = assert!(!FRIEND_CUSTODY_WAN_ENABLED || FRIEND_CUSTODY_PRODUCTION_ENABLED);
 // WAN custody rides libp2p (Phase 3 D5): never open it while p2p is held.
 const _: () = assert!(!FRIEND_CUSTODY_WAN_ENABLED || crate::p2p_gate::P2P_PRODUCTION_ENABLED);
+
+/// WAN custody's debug lab switch: with the Lab Test A unlock "1" opens it
+/// while its const is off; "0" closes it ([`crate::pair_init::lab_gate`]).
+pub const LAB_CUSTODY_WAN: &str = "RAVEN_LAB_CUSTODY_WAN";
 
 /// RRH1 `CUSTODY_OFFER` flag bits (RAVEN_ROUTE_HINTS_V1 §12). WAN: the
 /// sender serves RFC1 on Internet and p2p links too.
@@ -29,9 +41,12 @@ pub const OFFER_WAN: u8 = 0x01;
 /// reach class public or mapped).
 pub const OFFER_REACHABLE: u8 = 0x02;
 
-/// The refusal every custody entry point prints while the gate is closed.
-pub const CUSTODY_HOLD: &str = "CUSTODY_HOLD: friend custody is lab-only (debug \
-    RAVEN_LAB_TEST_A=1); FRIEND_CUSTODY_PRODUCTION_ENABLED=false";
+/// The refusal every custody entry point prints while the gate is closed:
+/// since the 2026-10 switch-on only a debug build closes it, or a security
+/// notice.
+pub const CUSTODY_HOLD: &str = "CUSTODY_HOLD: friend custody is closed in this process (a debug \
+    build with RAVEN_LAB_TEST_A=0, or a security notice); release builds have it on \
+    (FRIEND_CUSTODY_PRODUCTION_ENABLED=true)";
 
 /// Phase 5 multi-hop custody (RHW1 handoffs A -> F1 -> F2 -> B, tag
 /// registration): only together with friend custody, and it follows every
@@ -85,13 +100,6 @@ fn handoff_gate(custody_live: bool, production: bool, lab: impl FnOnce() -> bool
     custody_live && (production || lab())
 }
 
-fn env_flag(name: &str) -> bool {
-    matches!(
-        std::env::var(name).as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes")
-    )
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CustodyGates {
     pub live: bool,
@@ -118,10 +126,10 @@ impl CustodyGates {
                 return gates.held();
             }
         }
-        let lab = crate::pair_init::lab_test_a_enabled();
+        let live = crate::pair_init::test_a_gate(FRIEND_CUSTODY_PRODUCTION_ENABLED);
         Self {
-            live: FRIEND_CUSTODY_PRODUCTION_ENABLED || lab,
-            wan: FRIEND_CUSTODY_WAN_ENABLED || (lab && env_flag("RAVEN_LAB_CUSTODY_WAN")),
+            live,
+            wan: live && crate::pair_init::lab_gate(FRIEND_CUSTODY_WAN_ENABLED, LAB_CUSTODY_WAN),
         }
         .held()
     }
@@ -262,11 +270,13 @@ pub fn custody_route_allowed(g: CustodyGates, c: CarrierGates, route: &OutboxRou
 mod tests {
     use super::*;
 
+    /// 2026-10: friend custody (LAN and WAN) is on in release builds;
+    /// multi-hop custody and the generic PairInit tripwire stay off.
     #[test]
-    fn production_flags_stay_false() {
+    fn custody_flags_are_on_and_handoff_stays_off() {
         const {
-            assert!(!FRIEND_CUSTODY_PRODUCTION_ENABLED);
-            assert!(!FRIEND_CUSTODY_WAN_ENABLED);
+            assert!(FRIEND_CUSTODY_PRODUCTION_ENABLED);
+            assert!(FRIEND_CUSTODY_WAN_ENABLED);
             assert!(!crate::pair_init::PRODUCTION_ENABLED);
             // The WAN => P2P tripwire (Phase 3 P3.16) holds today's values.
             assert!(!FRIEND_CUSTODY_WAN_ENABLED || crate::p2p_gate::P2P_PRODUCTION_ENABLED);
@@ -462,35 +472,76 @@ mod tests {
         if !crate::route_hints::route_hints_live() {
             assert!(!custody_hints_live());
         }
-        if !crate::pair_init::lab_test_a_enabled() {
-            assert!(!custody_hints_live(), "lab-free: closed");
-        }
+        // This process: both gates as its build and environment set them.
+        let both = CustodyGates::current().live && crate::route_hints::route_hints_live();
+        assert_eq!(custody_hints_live(), both);
         // The per-thread test override, and back to the gates.
         set_custody_hints_for_this_thread(Some(true));
         assert!(custody_hints_live());
         set_custody_hints_for_this_thread(Some(false));
         assert!(!custody_hints_live());
         set_custody_hints_for_this_thread(None);
+        assert_eq!(custody_hints_live(), both);
+    }
+
+    /// The gates as the consts set them (2026-10: both on), unless a debug
+    /// build closes them: `RAVEN_LAB_TEST_A=0` both, `RAVEN_LAB_CUSTODY_WAN=0`
+    /// WAN custody alone. The generic PairInit tripwire stays shut without
+    /// the Lab Test A unlock.
+    #[test]
+    fn gates_follow_the_consts_and_the_debug_close_switches() {
+        let test_a = std::env::var(crate::pair_init::LAB_TEST_A).ok();
+        let wan_switch = std::env::var(LAB_CUSTODY_WAN).ok();
+        let debug = cfg!(debug_assertions);
+        let live = crate::pair_init::test_a_gate_value(
+            debug,
+            FRIEND_CUSTODY_PRODUCTION_ENABLED,
+            test_a.as_deref(),
+        );
+        let wan = live
+            && crate::pair_init::lab_gate_value(
+                debug,
+                FRIEND_CUSTODY_WAN_ENABLED,
+                crate::pair_init::lab_test_a_enabled(),
+                wan_switch.as_deref(),
+            );
+        assert_eq!(CustodyGates::current(), CustodyGates { live, wan });
+        if test_a.is_none() && wan_switch.is_none() {
+            // As in a release build.
+            assert_eq!(
+                CustodyGates::current(),
+                CustodyGates {
+                    live: true,
+                    wan: true
+                }
+            );
+        }
         if !crate::pair_init::lab_test_a_enabled() {
-            assert!(!custody_hints_live());
+            assert!(!crate::pair_init::live_enabled());
         }
+        // The close switches' rule: "0" closes in a debug build only.
+        assert!(!crate::pair_init::test_a_gate_value(true, true, Some("0")));
+        assert!(crate::pair_init::test_a_gate_value(false, true, Some("0")));
+        assert!(!crate::pair_init::lab_gate_value(
+            true,
+            true,
+            false,
+            Some("0")
+        ));
+        assert!(crate::pair_init::lab_gate_value(
+            false,
+            true,
+            true,
+            Some("0")
+        ));
     }
 
     #[test]
-    fn lab_free_gate_is_closed() {
-        if crate::pair_init::lab_test_a_enabled() {
-            return;
-        }
-        let g = CustodyGates::current();
-        assert!(!g.live && !g.wan);
-        assert!(!crate::pair_init::live_enabled());
-    }
-
-    #[test]
-    fn hold_text_names_the_flag_and_the_unlock() {
+    fn hold_text_names_the_flag_and_the_close_switch() {
         assert!(CUSTODY_HOLD.starts_with("CUSTODY_HOLD:"));
-        assert!(CUSTODY_HOLD.contains("FRIEND_CUSTODY_PRODUCTION_ENABLED=false"));
-        assert!(CUSTODY_HOLD.contains("RAVEN_LAB_TEST_A=1"));
+        assert!(CUSTODY_HOLD.contains("FRIEND_CUSTODY_PRODUCTION_ENABLED=true"));
+        assert!(CUSTODY_HOLD.contains("RAVEN_LAB_TEST_A=0"));
+        assert!(!CUSTODY_HOLD.contains("lab-only"));
     }
 
     #[test]

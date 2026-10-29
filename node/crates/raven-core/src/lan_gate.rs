@@ -24,10 +24,19 @@
 //! `RAVEN_LAB_LETTER`), sit with their constants in `horizon`, and its
 //! multi-hop custody gate,
 //! [`crate::custody_gate::CUSTODY_HANDOFF_PRODUCTION_ENABLED`] (debug
-//! `RAVEN_LAB_CUSTODY_HANDOFF`), in `custody_gate`; the tests here hold them
-//! false with the others. So does the Bluetooth nearby carrier's,
-//! [`crate::nearby_gate::NEARBY_PRODUCTION_ENABLED`] (debug
+//! `RAVEN_LAB_CUSTODY_HANDOFF`), in `custody_gate`. So does the Bluetooth
+//! nearby carrier's, [`crate::nearby_gate::NEARBY_PRODUCTION_ENABLED`] (debug
 //! `RAVEN_LAB_NEARBY`), in `nearby_gate`.
+//!
+//! The release set (2026-10): LAN direct, plus the features that passed the
+//! October 2026 three-machine field test (Internet direct, p2p and the friend
+//! relay, friend custody over LAN and the internet, the long horizon, route
+//! hints, port mapping, the NAT class, STUN discovery, serverless punching,
+//! the Tor onion carrier, groups, and Bluetooth nearby on macOS), switched
+//! on and not independently reviewed. A debug build closes each again with
+//! its switch set to "0" ([`crate::pair_init::lab_gate`],
+//! [`crate::pair_init::test_a_gate`], [`gate_switch`]). The tests here pin
+//! that set and hold every other gate false.
 //!
 //! The privacy pack adds no gate; its debug-only lab switches are named here
 //! ([`PRIVACY_LAB_SWITCHES`]) with the one rule a release build follows
@@ -200,8 +209,13 @@ fn gate_live(production: bool, var: &str) -> bool {
 }
 
 /// [`gate_live`] with the build passed in; `value` (the variable) is not
-/// called in a release build.
-fn gate_switch(debug: bool, production: bool, value: impl FnOnce() -> Option<String>) -> bool {
+/// called in a release build. Shared by the gates switched on in 2026-10
+/// whose switch needs no Lab Test A unlock (route hints, the friend relay).
+pub(crate) fn gate_switch(
+    debug: bool,
+    production: bool,
+    value: impl FnOnce() -> Option<String>,
+) -> bool {
     if !debug {
         return production;
     }
@@ -304,9 +318,41 @@ fn parse_sealer_fault(v: &str) -> Option<()> {
 mod tests {
     use super::*;
 
+    /// The release set, in one place (2026-10): LAN direct, plus exactly the
+    /// features that passed the October 2026 three-machine field test,
+    /// switched on and not independently reviewed; everything else held.
     #[test]
-    fn global_production_flags_stay_false() {
+    fn release_gates_are_the_field_tested_set() {
         const {
+            // On since the LAN slice.
+            assert!(LAN_DIRECT_PRODUCTION_ENABLED);
+            // Switched on 2026-10 (the field test's S15 switches and, for
+            // Bluetooth, S14's): Internet direct, p2p, the friend relay,
+            // friend custody over LAN and the internet, the long message
+            // horizon, route hints, port mapping and IPv6 pinholes, the NAT
+            // class, STUN discovery, serverless punching, the Tor onion
+            // carrier, groups, and Bluetooth nearby on macOS; and the app
+            // channel (RDAP over Raven), macOS included (owner decision Q6).
+            assert!(crate::INTERNET_DIRECT_PRODUCTION_ENABLED);
+            assert!(crate::P2P_PRODUCTION_ENABLED);
+            assert!(crate::FRIEND_RELAY_PRODUCTION_ENABLED);
+            assert!(crate::custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED);
+            assert!(crate::custody_gate::FRIEND_CUSTODY_WAN_ENABLED);
+            assert!(crate::horizon::LONG_HORIZON_PRODUCTION_ENABLED);
+            assert!(crate::route_hints::ROUTE_HINTS_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::PORT_MAP_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::V6_PINHOLE_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::NAT_CLASS_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::STUN_DISCOVERY_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::SERVERLESS_PUNCH_PRODUCTION_ENABLED);
+            assert!(crate::ONION_PRODUCTION_ENABLED);
+            assert!(crate::group::GROUPS_PRODUCTION_ENABLED);
+            assert!(crate::NEARBY_PRODUCTION_ENABLED == cfg!(target_os = "macos"));
+            assert!(crate::app_channel::APP_CHANNEL_PRODUCTION_ENABLED);
+            assert!(crate::app_channel::APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED);
+
+            // Held: the four generic PairInit tripwires (the legacy contact
+            // request), whatever the carriers do.
             assert!(!crate::pair_init::PRODUCTION_ENABLED);
             assert!(!crate::INDEXED_SESSION_STORE_PRODUCTION_ENABLED);
             assert!(!crate::PREKEY_LIFECYCLE_PRODUCTION_ENABLED);
@@ -316,15 +362,6 @@ mod tests {
             // Phase 3 item 4: no daemon-started renewal PairInit before the
             // Phase 3 LAN amendment's renewal section is signed.
             assert!(!crate::session_renewal::SESSION_RENEWAL_PRODUCTION_ENABLED);
-            assert!(!crate::route_hints::ROUTE_HINTS_PRODUCTION_ENABLED);
-            // Carrier, custody and app-channel holds (each also asserted in
-            // its own module): none flips without the owner's sign-off.
-            assert!(!crate::P2P_PRODUCTION_ENABLED);
-            assert!(!crate::FRIEND_RELAY_PRODUCTION_ENABLED);
-            assert!(!crate::INTERNET_DIRECT_PRODUCTION_ENABLED);
-            assert!(!crate::custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED);
-            assert!(!crate::custody_gate::FRIEND_CUSTODY_WAN_ENABLED);
-            assert!(!crate::app_channel::APP_CHANNEL_PRODUCTION_ENABLED);
             // The cutoff pack's two held gates (CP.16 moves exactly these two
             // into their own test when the owner-approved flip lands).
             assert!(!OFFLINE_LAN_PRODUCTION_ENABLED);
@@ -334,30 +371,15 @@ mod tests {
             // Phase 3 item 2: no LAN beacon before R2 revision 4, the crypto
             // review and the Swift vectors.
             assert!(!crate::lan_beacon::LAN_BEACON_PRODUCTION_ENABLED);
-            // Phase 5 (P5.3): no message outlives its 24 h envelope, and no
-            // sealed letter, before the horizon amendment and the letter
-            // waiver are signed.
-            assert!(!crate::horizon::LONG_HORIZON_PRODUCTION_ENABLED);
+            // Phase 5 (P5.3): no sealed letter before the letter waiver.
             assert!(!crate::horizon::ASYNC_LETTER_PRODUCTION_ENABLED);
-            // Phase 5 (P5.17): no multi-hop custody before the custody flip
-            // and its own waiver.
+            // Phase 5 (P5.17): no multi-hop custody before its own waiver.
             assert!(!crate::custody_gate::CUSTODY_HANDOFF_PRODUCTION_ENABLED);
-            // Phase 4 (P4.1): relays over WSS and through an HTTPS proxy,
-            // router port mapping, IPv6 pinholes, the NAT class and PeerId
-            // rotation.
+            // Phase 4 (P4.1): relays over WSS and through an HTTPS proxy, and
+            // PeerId rotation.
             assert!(!crate::wss_gate::WSS_PRODUCTION_ENABLED);
             assert!(!crate::wss_gate::WSS_PROXY_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::PORT_MAP_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::V6_PINHOLE_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::NAT_CLASS_PRODUCTION_ENABLED);
             assert!(!crate::portmap_gate::PEER_ROTATION_PRODUCTION_ENABLED);
-            // Auto-reach (docs/design/2026-10-auto-reach.md): no STUN query
-            // and no serverless punch outside a debug lab.
-            assert!(!crate::portmap_gate::STUN_DISCOVERY_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::SERVERLESS_PUNCH_PRODUCTION_ENABLED);
-            // Phase 5 (P5.25): no Bluetooth nearby carrier before the nearby
-            // waiver and the physical rows N1-N12.
-            assert!(!crate::NEARBY_PRODUCTION_ENABLED);
             // Phase 6a (P6.2): no learned order, wait or relay term before
             // the learning waiver.
             assert!(!crate::learning::LEARNING_PRODUCTION_ENABLED);
@@ -379,11 +401,62 @@ mod tests {
         }
     }
 
+    /// Runs in both builds: every switched-on gate is live as a release
+    /// build runs it (no `RAVEN_LAB_*` variable needed, the Lab Test A unlock
+    /// included), and every held one stays shut, unless this process's
+    /// environment says otherwise in a debug build. The release test job
+    /// sets every lab switch and reaches the first branch.
+    #[test]
+    fn switched_on_gates_are_live_without_any_lab_switch() {
+        let lab_free = !cfg!(debug_assertions)
+            || std::env::vars_os().all(|(k, _)| !k.to_string_lossy().starts_with("RAVEN_LAB_"));
+        if !lab_free {
+            return;
+        }
+        assert!(crate::internet_direct_live_enabled());
+        assert!(crate::p2p_live_enabled());
+        assert!(crate::p2p_gate::friend_relay_live_enabled());
+        assert!(crate::p2p_gate::relay_offers_live());
+        assert_eq!(
+            crate::custody_gate::CustodyGates::current(),
+            crate::custody_gate::CustodyGates {
+                live: true,
+                wan: true
+            }
+        );
+        assert!(crate::horizon::horizon_live_enabled());
+        assert!(crate::route_hints::route_hints_live());
+        assert!(crate::portmap_gate::port_map_live_enabled());
+        assert!(crate::portmap_gate::v6_pinhole_live_enabled());
+        assert!(crate::portmap_gate::nat_class_live_enabled());
+        assert!(crate::portmap_gate::stun_discovery_live_enabled());
+        assert!(crate::portmap_gate::serverless_punch_live_enabled());
+        assert!(crate::onion_live_enabled());
+        assert!(crate::group::group_live_enabled());
+        assert!(crate::app_channel::app_channel_live_enabled());
+        assert_eq!(
+            crate::nearby_live_enabled(),
+            cfg!(target_os = "macos"),
+            "Bluetooth nearby: macOS only"
+        );
+        // Held.
+        assert!(!crate::pair_init::live_enabled());
+        assert!(!crate::horizon::letter_live_enabled());
+        assert!(!crate::custody_gate::handoff_live());
+        assert!(!crate::wss_gate::wss_live_enabled());
+        assert!(!crate::portmap_gate::peer_rotation_live_enabled());
+        assert!(!crate::lan_beacon::lan_beacon_live());
+        assert!(!offline_lan_live());
+        assert!(!lan_noise_pin_live());
+        assert!(!lan_auto_live());
+        assert!(!crate::learning::learning_live());
+    }
+
     /// Phase 5 P5.3. Runs in both builds: the release test job sets
     /// `RAVEN_LAB_TEST_A=1`, `RAVEN_LAB_HORIZON=1` and `RAVEN_LAB_LETTER=1`,
-    /// and the horizon, the letters and receiver dedup stay closed (the
-    /// variables are never read); a debug build follows exactly the
-    /// variables.
+    /// and the horizon and receiver dedup stay at their consts (on since
+    /// 2026-10) and the letters closed (the variables are never read); a
+    /// debug build follows exactly the variables.
     #[test]
     fn horizon_and_letter_lab_switches_are_inert_without_debug_assertions() {
         use crate::horizon::{
@@ -418,7 +491,12 @@ mod tests {
                 std::env::var(name).ok().as_deref(),
             )
         };
-        let horizon = LONG_HORIZON_PRODUCTION_ENABLED || switch(LAB_HORIZON);
+        let horizon = crate::pair_init::lab_gate_value(
+            true,
+            LONG_HORIZON_PRODUCTION_ENABLED,
+            lab_test_a_enabled(),
+            std::env::var(LAB_HORIZON).ok().as_deref(),
+        );
         assert_eq!(horizon_live_enabled(), horizon);
         assert_eq!(
             letter_live_enabled(),
@@ -651,11 +729,14 @@ mod tests {
     }
 
     /// Runs in both builds: the release test job proves that the route-hints
-    /// lab switch is inert there (the variable is set and the gate stays
-    /// closed); a debug build follows exactly the variable.
+    /// lab switch is inert there (the variable is set to "1" and to "0" and
+    /// the gate stays at its const, on since 2026-10); a debug build follows
+    /// exactly the variable ("1" opens, "0" closes, else the const).
     #[test]
     fn route_hints_lab_switch_is_inert_without_debug_assertions() {
-        use crate::route_hints::{route_hints_live, route_hints_live_on};
+        use crate::route_hints::{
+            route_hints_live, route_hints_live_on, ROUTE_HINTS_PRODUCTION_ENABLED,
+        };
         for value in [None, Some(""), Some("0"), Some("1"), Some("true")] {
             let read = || value.map(str::to_owned);
             assert!(!crate::p2p_gate::lab_flag(false, read), "{value:?}");
@@ -664,22 +745,36 @@ mod tests {
                 value == Some("1"),
                 "{value:?}"
             );
+            assert_eq!(
+                gate_switch(false, ROUTE_HINTS_PRODUCTION_ENABLED, read),
+                ROUTE_HINTS_PRODUCTION_ENABLED
+            );
         }
         if !cfg!(debug_assertions) {
-            // Edition 2021: a plain call. No other test reads this variable.
-            std::env::set_var("RAVEN_LAB_ROUTE_HINTS", "1");
-            assert!(!route_hints_live());
-            for carrier in [
-                crate::OutboxCarrier::Lan,
-                crate::OutboxCarrier::Internet,
-                crate::OutboxCarrier::P2p,
-            ] {
-                assert!(!route_hints_live_on(carrier), "{carrier:?}");
+            for value in ["1", "0"] {
+                // Edition 2021: a plain call. No other test reads this variable.
+                std::env::set_var("RAVEN_LAB_ROUTE_HINTS", value);
+                assert_eq!(route_hints_live(), ROUTE_HINTS_PRODUCTION_ENABLED);
+                for carrier in [
+                    crate::OutboxCarrier::Lan,
+                    crate::OutboxCarrier::Internet,
+                    crate::OutboxCarrier::P2p,
+                ] {
+                    assert_eq!(
+                        route_hints_live_on(carrier),
+                        ROUTE_HINTS_PRODUCTION_ENABLED,
+                        "{carrier:?}"
+                    );
+                }
             }
+            std::env::set_var("RAVEN_LAB_ROUTE_HINTS", "1");
             return;
         }
         let set = std::env::var("RAVEN_LAB_ROUTE_HINTS").ok();
-        assert_eq!(route_hints_live(), set.as_deref() == Some("1"));
+        assert_eq!(
+            route_hints_live(),
+            gate_switch(true, ROUTE_HINTS_PRODUCTION_ENABLED, || set.clone())
+        );
     }
 
     /// Phase 6a P6.2. Runs in both builds: the release test job sets every

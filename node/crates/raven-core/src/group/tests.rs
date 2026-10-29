@@ -867,24 +867,56 @@ fn the_gate_needs_the_groups_switch_and_the_horizon() {
         crate::horizon::set_lab_horizon_for_this_thread(horizon);
         group_live_enabled()
     };
-    const { assert!(!GROUPS_PRODUCTION_ENABLED) };
-    assert!(!set(Some(true), Some(false)));
-    assert!(!set(Some(false), Some(true)));
-    assert_eq!(set(Some(true), Some(true)), cfg!(debug_assertions));
+    // 2026-10: both on in release builds, where the overrides are never
+    // read; a debug build's overrides close either.
+    const { assert!(GROUPS_PRODUCTION_ENABLED && crate::horizon::LONG_HORIZON_PRODUCTION_ENABLED) };
+    let release = !cfg!(debug_assertions);
+    assert_eq!(set(Some(true), Some(false)), release);
+    assert_eq!(set(Some(false), Some(true)), release);
+    assert!(set(Some(true), Some(true)));
     set(None, None);
 }
 
 /// CI sets every lab switch (`RAVEN_LAB_GROUPS`, `RAVEN_LAB_HORIZON`,
-/// `RAVEN_LAB_TEST_A`) and runs this in a release build: groups stay held.
+/// `RAVEN_LAB_TEST_A`) and runs this in a release build: groups stay on as
+/// the consts say (2026-10), whatever the switches and overrides say.
 #[test]
 fn the_lab_switch_is_inert_without_debug_assertions() {
     if cfg!(debug_assertions) {
+        // A debug build: the thread's override decides, else the const and
+        // `RAVEN_LAB_GROUPS` ("0" closes), with the horizon.
+        set_lab_groups_for_this_thread(Some(false));
+        assert!(!group_live_enabled());
+        crate::horizon::set_lab_horizon_for_this_thread(Some(true));
+        set_lab_groups_for_this_thread(Some(true));
+        assert!(group_live_enabled());
+        crate::horizon::set_lab_horizon_for_this_thread(Some(false));
+        assert!(!group_live_enabled(), "groups need the horizon");
+        crate::horizon::set_lab_horizon_for_this_thread(None);
+        set_lab_groups_for_this_thread(None);
+        let set = std::env::var(LAB_GROUPS).ok();
+        assert_eq!(
+            group_live_enabled(),
+            crate::pair_init::lab_gate_value(
+                true,
+                GROUPS_PRODUCTION_ENABLED,
+                crate::pair_init::lab_test_a_enabled(),
+                set.as_deref()
+            ) && crate::horizon::horizon_live_enabled()
+        );
         return;
     }
-    set_lab_groups_for_this_thread(Some(true));
-    assert!(!group_live_enabled());
+    // A release build (2026-10: groups and the horizon on): the overrides and
+    // the switch ("0" too) are never read.
+    const {
+        assert!(GROUPS_PRODUCTION_ENABLED);
+    }
+    std::env::set_var(LAB_GROUPS, "0");
+    set_lab_groups_for_this_thread(Some(false));
+    assert!(group_live_enabled());
     set_lab_groups_for_this_thread(None);
-    assert!(!group_live_enabled());
+    assert!(group_live_enabled());
+    std::env::set_var(LAB_GROUPS, "1");
 }
 
 // ------------------------------------------------------------------ disk

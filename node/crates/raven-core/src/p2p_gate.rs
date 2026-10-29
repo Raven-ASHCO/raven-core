@@ -1,57 +1,66 @@
-//! libp2p carrier (P3: direct TCP/QUIC, Circuit Relay v2, DCUtR) lab gate.
+//! libp2p carrier (P3: direct TCP/QUIC, Circuit Relay v2, DCUtR) gate.
 //!
 //! Independent of the four global `PRODUCTION_ENABLED` tripwires, of
 //! [`crate::LAN_DIRECT_PRODUCTION_ENABLED`], of
 //! [`crate::INTERNET_DIRECT_PRODUCTION_ENABLED`] and of the separate
-//! `raven-swarm` NAT experiment (`PRODUCTION_NAT_CONNECTIVITY_ENABLED`). Stays
-//! false until a founder GO after the relay and DCUtR physical rows (R7b, R8)
-//! and the waiver (docs/WAIVER_P2P_RELAY_DRAFT.md). With it off a release
-//! build never listens, dials, reserves or advertises libp2p. Not a WAN /
-//! multi-NAT claim.
+//! `raven-swarm` NAT experiment (`PRODUCTION_NAT_CONNECTIVITY_ENABLED`, still
+//! off). Switched on in release builds in 2026-10, after the three-machine
+//! field test (debug builds with the lab switches on); not independently
+//! reviewed. Listening stays opt-in (`raven node p2p on`). Not a claim that
+//! every NAT can be crossed.
 //!
 //! Phase 2 friend relays (any-network plan C6/C7) sit behind a gate of their
-//! own on top of this one, [`FRIEND_RELAY_PRODUCTION_ENABLED`], with their
-//! own debug switch: the Phase 1 lab unlock (`RAVEN_LAB_TEST_A=1`) alone
-//! never opens them, so the Phase 1 lab runs keep testing Phase 1.
+//! own on top of this one, [`FRIEND_RELAY_PRODUCTION_ENABLED`] (switched on
+//! with it; relaying for others still needs the person's own `raven relay
+//! offer on`), with their own debug switch: the Phase 1 lab unlock
+//! (`RAVEN_LAB_TEST_A=1`) alone never opens them, so the Phase 1 lab runs
+//! keep testing Phase 1. A debug build closes either again with its switch
+//! set to "0" (`RAVEN_LAB_TEST_A=0`, `RAVEN_LAB_FRIEND_RELAY=0`).
 
-/// Hard enable for the libp2p carrier and the relay role.
-/// Lab smoke uses debug `RAVEN_LAB_TEST_A=1` instead of flipping this.
-pub const P2P_PRODUCTION_ENABLED: bool = false;
+/// Hard enable for the libp2p carrier and the relay role. Switched on
+/// 2026-10 after the three-machine field test; not independently reviewed.
+/// A debug build closes it again with `RAVEN_LAB_TEST_A=0`
+/// ([`crate::pair_init::test_a_gate`]).
+pub const P2P_PRODUCTION_ENABLED: bool = true;
 
 /// The one refusal every p2p entry point (service host, relay, dial, IPC,
-/// `raven send --carrier p2p`) prints while the gate is closed.
-pub const P2P_HOLD: &str = "P2P_HOLD: the libp2p carrier (relay + hole punching) is lab-only \
-    (debug RAVEN_LAB_TEST_A=1); P2P_PRODUCTION_ENABLED=false; localhost ≠ WAN Proven";
+/// `raven send --carrier p2p`) prints while the gate is closed: since the
+/// 2026-10 switch-on only a debug build closes it, or a security notice.
+pub const P2P_HOLD: &str = "P2P_HOLD: the libp2p carrier (relay + hole punching) is closed in \
+    this process (a debug build with RAVEN_LAB_TEST_A=0 or RAVEN_LAB_NEARBY_ONLY=1, or a security \
+    notice); release builds have it on (P2P_PRODUCTION_ENABLED=true)";
 
-/// Live libp2p carrier: compile-time slice gate or debug lab, unless a
-/// security notice holds it (P6.45, close-only) or a debug lab run carries
-/// over nearby alone ([`crate::nearby_gate::nearby_only`]; the friend relay,
-/// port mapping, WSS and the NAT class sit on this gate and close with it).
+/// Live libp2p carrier: the slice gate (a debug build: the Lab Test A
+/// switch, [`crate::pair_init::test_a_gate`]), unless a security notice
+/// holds it (P6.45, close-only) or a debug lab run carries over nearby alone
+/// ([`crate::nearby_gate::nearby_only`]; the friend relay, port mapping,
+/// WSS and the NAT class sit on this gate and close with it).
 pub fn p2p_live_enabled() -> bool {
     crate::nearby_gate::unless_nearby_only(
-        (P2P_PRODUCTION_ENABLED || crate::pair_init::lab_test_a_enabled())
+        crate::pair_init::test_a_gate(P2P_PRODUCTION_ENABLED)
             && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_P2P),
     )
 }
 
 /// Phase 2 friend relays (any-network plan C6/C7): the relay role inside
 /// `raven-node service` with its own relay key, relay offers in route hints
-/// (RRH1) and automatic relay choice. Separate from P2P, so P2P can be
-/// flipped at Phase 1 exit while this stays held until the WAIVER_P2P_RELAY
-/// Phase 2 amendment is signed.
-pub const FRIEND_RELAY_PRODUCTION_ENABLED: bool = false;
+/// (RRH1) and automatic relay choice. Separate from P2P. Switched on 2026-10
+/// after the three-machine field test; not independently reviewed. Relaying
+/// for contacts stays the person's own consent (`raven relay offer on`).
+pub const FRIEND_RELAY_PRODUCTION_ENABLED: bool = true;
 
 /// The one refusal the friend relay's entry points (relaying for contacts,
 /// automatic relay choice) print while its gate is closed.
 pub const FRIEND_RELAY_HOLD: &str = "FRIEND_RELAY_HOLD: relaying for your contacts and \
-    automatic relay choice are lab-only (debug RAVEN_LAB_TEST_A=1 with RAVEN_LAB_FRIEND_RELAY=1); \
-    FRIEND_RELAY_PRODUCTION_ENABLED=false";
+    automatic relay choice are closed in this process (a debug build with RAVEN_LAB_FRIEND_RELAY=0 \
+    or RAVEN_LAB_TEST_A=0, or a security notice); release builds have them on \
+    (FRIEND_RELAY_PRODUCTION_ENABLED=true)";
 
-/// Live friend relays: the p2p carrier is live, and either the Phase 2 gate
-/// or the debug switch `RAVEN_LAB_FRIEND_RELAY=1`. Not `RAVEN_LAB_TEST_A`
-/// alone, so carrier_matrix C6 and C12-C16 and fault scenarios s35-s38 keep
-/// testing Phase 1. Release builds never read the switch. A security
-/// notice's hold closes it (P6.45).
+/// Live friend relays: the p2p carrier is live, and the Phase 2 gate (a
+/// debug build: `RAVEN_LAB_FRIEND_RELAY=1` opens it, `=0` closes it,
+/// [`crate::lan_gate::gate_switch`]). Not `RAVEN_LAB_TEST_A` alone. Release
+/// builds never read the switch. A security notice's hold closes it
+/// (P6.45).
 pub fn friend_relay_live_enabled() -> bool {
     friend_relay_gate(p2p_live_enabled(), || {
         std::env::var("RAVEN_LAB_FRIEND_RELAY").ok()
@@ -61,7 +70,12 @@ pub fn friend_relay_live_enabled() -> bool {
 /// [`friend_relay_live_enabled`] from its inputs: `lab` is read only while
 /// the p2p carrier is live, and only in a debug build.
 fn friend_relay_gate(p2p_live: bool, lab: impl FnOnce() -> Option<String>) -> bool {
-    p2p_live && (FRIEND_RELAY_PRODUCTION_ENABLED || lab_flag(cfg!(debug_assertions), lab))
+    p2p_live
+        && crate::lan_gate::gate_switch(
+            cfg!(debug_assertions),
+            FRIEND_RELAY_PRODUCTION_ENABLED,
+            lab,
+        )
 }
 
 /// Relay offers ride route hints (RRH1) and automatic relay choice reads
@@ -197,28 +211,32 @@ fn parse_lab_relay_select(v: &str) -> Option<(u64, u64, u64)> {
 mod tests {
     use super::*;
 
+    /// 2026-10: p2p and the friend relay are on in release builds; the
+    /// generic PairInit tripwires, letters, multi-hop custody, WSS and PeerId
+    /// rotation stay off (the whole set: `lan_gate`'s
+    /// `release_gates_are_the_field_tested_set`).
     #[test]
-    fn production_flag_stays_false() {
+    fn production_flags_are_on_and_the_rest_stays_off() {
         const {
-            assert!(!P2P_PRODUCTION_ENABLED);
-            assert!(!FRIEND_RELAY_PRODUCTION_ENABLED);
-            assert!(!crate::INTERNET_DIRECT_PRODUCTION_ENABLED);
+            assert!(P2P_PRODUCTION_ENABLED);
+            assert!(FRIEND_RELAY_PRODUCTION_ENABLED);
+            assert!(crate::INTERNET_DIRECT_PRODUCTION_ENABLED);
             assert!(!crate::pair_init::PRODUCTION_ENABLED);
             assert!(!crate::INDEXED_SESSION_STORE_PRODUCTION_ENABLED);
             assert!(!crate::PREKEY_LIFECYCLE_PRODUCTION_ENABLED);
             assert!(!crate::atsam_indexed_session::PRODUCTION_ENABLED);
-            assert!(!crate::horizon::LONG_HORIZON_PRODUCTION_ENABLED);
+            assert!(crate::horizon::LONG_HORIZON_PRODUCTION_ENABLED);
             assert!(!crate::horizon::ASYNC_LETTER_PRODUCTION_ENABLED);
             assert!(!crate::custody_gate::CUSTODY_HANDOFF_PRODUCTION_ENABLED);
             // Phase 4 (P4.1): every one of its gates sits on this one.
             assert!(!crate::wss_gate::WSS_PRODUCTION_ENABLED);
             assert!(!crate::wss_gate::WSS_PROXY_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::PORT_MAP_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::V6_PINHOLE_PRODUCTION_ENABLED);
-            assert!(!crate::portmap_gate::NAT_CLASS_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::PORT_MAP_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::V6_PINHOLE_PRODUCTION_ENABLED);
+            assert!(crate::portmap_gate::NAT_CLASS_PRODUCTION_ENABLED);
             assert!(!crate::portmap_gate::PEER_ROTATION_PRODUCTION_ENABLED);
-            // Phase 5 (P5.25): the Bluetooth nearby carrier.
-            assert!(!crate::NEARBY_PRODUCTION_ENABLED);
+            // Phase 5 (P5.25): the Bluetooth nearby carrier, macOS only.
+            assert!(crate::NEARBY_PRODUCTION_ENABLED == cfg!(target_os = "macos"));
         }
     }
 
@@ -247,15 +265,25 @@ mod tests {
         )));
     }
 
+    /// The p2p gate follows its const and the Lab Test A switch ("0"
+    /// closes it in a debug build); it never opens the generic tripwires,
+    /// which only the Lab Test A unlock opens.
     #[test]
     fn gate_does_not_open_generic_live_enabled() {
+        let test_a = std::env::var(crate::pair_init::LAB_TEST_A).ok();
+        let want = crate::pair_init::test_a_gate_value(
+            cfg!(debug_assertions),
+            P2P_PRODUCTION_ENABLED,
+            test_a.as_deref(),
+        ) && !crate::nearby_gate::nearby_only();
+        assert_eq!(p2p_live_enabled(), want);
+        if !want {
+            assert!(!friend_relay_live_enabled());
+            assert!(!relay_offers_live());
+        }
         if crate::pair_init::lab_test_a_enabled() {
             return;
         }
-        assert!(!p2p_live_enabled());
-        assert!(!friend_relay_live_enabled());
-        assert!(!relay_offers_live());
-        assert!(!crate::internet_direct_live_enabled());
         assert!(!crate::pair_init::live_enabled());
         assert!(!crate::indexed_session_store::live_enabled());
         assert!(!crate::prekey_lifecycle::live_enabled());
@@ -303,31 +331,41 @@ mod tests {
     }
 
     #[test]
-    fn hold_text_names_the_flag_and_the_lab_unlock() {
+    fn hold_text_names_the_flag_and_the_close_switch() {
         assert!(P2P_HOLD.starts_with("P2P_HOLD:"));
-        assert!(P2P_HOLD.contains("P2P_PRODUCTION_ENABLED=false"));
-        assert!(P2P_HOLD.contains("RAVEN_LAB_TEST_A=1"));
+        assert!(P2P_HOLD.contains("P2P_PRODUCTION_ENABLED=true"));
+        assert!(P2P_HOLD.contains("RAVEN_LAB_TEST_A=0"));
+        assert!(!P2P_HOLD.contains("lab-only"));
     }
 
     #[test]
-    fn friend_relay_hold_text_names_its_flag_and_both_lab_switches() {
+    fn friend_relay_hold_text_names_its_flag_and_both_close_switches() {
         assert!(FRIEND_RELAY_HOLD.starts_with("FRIEND_RELAY_HOLD:"));
-        assert!(FRIEND_RELAY_HOLD.contains("FRIEND_RELAY_PRODUCTION_ENABLED=false"));
-        assert!(FRIEND_RELAY_HOLD.contains("RAVEN_LAB_TEST_A=1"));
-        assert!(FRIEND_RELAY_HOLD.contains("RAVEN_LAB_FRIEND_RELAY=1"));
+        assert!(FRIEND_RELAY_HOLD.contains("FRIEND_RELAY_PRODUCTION_ENABLED=true"));
+        assert!(FRIEND_RELAY_HOLD.contains("RAVEN_LAB_TEST_A=0"));
+        assert!(FRIEND_RELAY_HOLD.contains("RAVEN_LAB_FRIEND_RELAY=0"));
+        assert!(!FRIEND_RELAY_HOLD.contains("lab-only"));
     }
 
-    /// Exactly "1" in a debug build, like every on/off lab switch.
-    fn switch_on(name: &str) -> bool {
-        cfg!(debug_assertions) && std::env::var(name).ok().as_deref() == Some("1")
+    /// [`friend_relay_live_enabled`]'s own gate in this process: the const
+    /// (on since 2026-10), and in a debug build `RAVEN_LAB_FRIEND_RELAY`
+    /// ("1" opens, "0" closes).
+    fn friend_switch() -> bool {
+        crate::lan_gate::gate_switch(
+            cfg!(debug_assertions),
+            FRIEND_RELAY_PRODUCTION_ENABLED,
+            || std::env::var("RAVEN_LAB_FRIEND_RELAY").ok(),
+        )
     }
 
-    /// The friend relay needs the p2p carrier and its own switch: the p2p
-    /// lab unlock (`RAVEN_LAB_TEST_A=1`) alone leaves it shut, and a shut
-    /// p2p gate never reads the switch. Runs in both builds (a release build
-    /// keeps it shut whatever the switch says).
+    /// The friend relay needs the p2p carrier and its own gate: on in
+    /// release builds since 2026-10 (relaying for others is still the
+    /// person's `raven relay offer on`), closed in a debug build by
+    /// `RAVEN_LAB_FRIEND_RELAY=0`; a shut p2p gate never reads the switch.
+    /// Runs in both builds (a release build follows the const whatever the
+    /// switch says).
     #[test]
-    fn friend_relay_gate_needs_p2p_and_its_own_lab_switch() {
+    fn friend_relay_gate_needs_p2p_and_its_own_gate() {
         for value in [
             None,
             Some(""),
@@ -337,20 +375,24 @@ mod tests {
             Some(" 1"),
         ] {
             let read = || value.map(str::to_owned);
-            assert_eq!(
-                friend_relay_gate(true, read),
-                cfg!(debug_assertions) && value == Some("1"),
-                "{value:?}"
-            );
+            let want = if cfg!(debug_assertions) {
+                match value {
+                    Some("1") => true,
+                    Some("0") => false,
+                    _ => FRIEND_RELAY_PRODUCTION_ENABLED,
+                }
+            } else {
+                FRIEND_RELAY_PRODUCTION_ENABLED
+            };
+            assert_eq!(friend_relay_gate(true, read), want, "{value:?}");
         }
         assert!(!friend_relay_gate(false, || panic!(
             "a shut p2p gate read the friend relay switch"
         )));
-        // This process: exactly what its environment says (shut in the
-        // Phase 1 lab runs, which set `RAVEN_LAB_TEST_A=1` only).
+        // This process: exactly what its build and environment say.
         assert_eq!(
             friend_relay_live_enabled(),
-            p2p_live_enabled() && switch_on("RAVEN_LAB_FRIEND_RELAY"),
+            p2p_live_enabled() && friend_switch(),
             "p2p={} RAVEN_LAB_FRIEND_RELAY={:?}",
             p2p_live_enabled(),
             std::env::var("RAVEN_LAB_FRIEND_RELAY").ok()
@@ -364,10 +406,14 @@ mod tests {
     #[test]
     fn relay_offers_live_needs_route_hints() {
         const {
-            assert!(!crate::route_hints::ROUTE_HINTS_PRODUCTION_ENABLED);
+            assert!(crate::route_hints::ROUTE_HINTS_PRODUCTION_ENABLED);
         }
-        let friend = p2p_live_enabled() && switch_on("RAVEN_LAB_FRIEND_RELAY");
-        let hints = switch_on("RAVEN_LAB_ROUTE_HINTS");
+        let friend = p2p_live_enabled() && friend_switch();
+        let hints = crate::lan_gate::gate_switch(
+            cfg!(debug_assertions),
+            crate::route_hints::ROUTE_HINTS_PRODUCTION_ENABLED,
+            || std::env::var("RAVEN_LAB_ROUTE_HINTS").ok(),
+        );
         assert_eq!(friend_relay_live_enabled(), friend);
         assert_eq!(crate::route_hints::route_hints_live(), hints);
         assert_eq!(

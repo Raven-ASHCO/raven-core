@@ -30,10 +30,13 @@
 //! [`crate::outbox::park_or_give_up_expired`] (P5.6), and the worker runs the
 //! step right after the session reset step of each attempt.
 //!
-//! **Gates:** both stay false until the owner signs the horizon amendment and
-//! the letter waiver. A debug build opens them per process with the Lab Test A
-//! unlock plus `RAVEN_LAB_HORIZON=1` and `RAVEN_LAB_LETTER=1`
-//! ([`crate::pair_init::lab_switch`]); a release build never reads either
+//! **Gates:** the horizon (5a) was switched on in release builds in 2026-10,
+//! after the three-machine field test (debug builds with the lab switches
+//! on); not independently reviewed. Sealed letters (5b) stay off until the
+//! owner signs the letter waiver. A debug build closes the horizon with
+//! `RAVEN_LAB_HORIZON=0` and opens letters with the Lab Test A unlock plus
+//! `RAVEN_LAB_LETTER=1` ([`crate::pair_init::lab_gate`],
+//! [`crate::pair_init::lab_switch`]); a release build never reads either
 //! variable.
 
 use std::cell::Cell;
@@ -62,7 +65,9 @@ use crate::session_reset::{
 };
 
 /// Phase 5a production gate (park and re-pair up to [`MESSAGE_HORIZON_MS`]).
-pub const LONG_HORIZON_PRODUCTION_ENABLED: bool = false;
+/// Switched on 2026-10 after the three-machine field test; not
+/// independently reviewed.
+pub const LONG_HORIZON_PRODUCTION_ENABLED: bool = true;
 /// Phase 5b production gate (sealed async PairInit letters, RAL1, over
 /// friend custody).
 pub const ASYNC_LETTER_PRODUCTION_ENABLED: bool = false;
@@ -73,7 +78,7 @@ const _: () = assert!(
             && crate::custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED)
 );
 
-/// The horizon's debug lab switch (with `RAVEN_LAB_TEST_A=1`).
+/// The horizon's debug lab switch: "0" closes it ([`crate::pair_init::lab_gate`]).
 pub const LAB_HORIZON: &str = "RAVEN_LAB_HORIZON";
 /// The letters' debug lab switch (with `RAVEN_LAB_TEST_A=1`); letters also
 /// need [`LAB_HORIZON`] and the friend custody gate.
@@ -93,12 +98,13 @@ fn lab_override(cell: &'static std::thread::LocalKey<Cell<Option<bool>>>) -> Opt
     }
 }
 
-/// 5a is live: [`LONG_HORIZON_PRODUCTION_ENABLED`], or in a debug build this
-/// thread's override, else `RAVEN_LAB_HORIZON` with the Lab Test A unlock;
-/// unless a security notice holds it (P6.45, close-only).
+/// 5a is live: [`LONG_HORIZON_PRODUCTION_ENABLED`]; in a debug build this
+/// thread's override decides, else `RAVEN_LAB_HORIZON` ("0" closes it,
+/// [`crate::pair_init::lab_gate`]); unless a security notice holds it
+/// (P6.45, close-only).
 pub fn horizon_live_enabled() -> bool {
-    (LONG_HORIZON_PRODUCTION_ENABLED
-        || lab_override(&HORIZON_LAB).unwrap_or_else(|| crate::pair_init::lab_switch(LAB_HORIZON)))
+    lab_override(&HORIZON_LAB)
+        .unwrap_or_else(|| crate::pair_init::lab_gate(LONG_HORIZON_PRODUCTION_ENABLED, LAB_HORIZON))
         && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_LONG_HORIZON)
 }
 
@@ -134,9 +140,10 @@ pub fn receiver_dedup_live() -> bool {
     session_reset_live_enabled() || horizon_live_enabled()
 }
 
-/// In-process tests switch `RAVEN_LAB_HORIZON` for the current thread only
-/// (the environment variable would leak into every other test of the
-/// binary), without the Lab Test A unlock. Ignored in release builds.
+/// In-process tests switch the horizon on or off for the current thread
+/// only (the environment variable would leak into every other test of the
+/// binary), without the Lab Test A unlock; `None` goes back to the const
+/// and the environment. Ignored in release builds.
 #[doc(hidden)]
 pub fn set_lab_horizon_for_this_thread(on: Option<bool>) {
     HORIZON_LAB.with(|cell| cell.set(on));
@@ -944,10 +951,11 @@ mod tests {
     use super::*;
     use crate::custody_gate::set_custody_gates_for_this_thread;
 
+    /// 2026-10: the horizon is on in release builds, letters stay off.
     #[test]
-    fn production_flags_stay_false() {
+    fn horizon_flag_is_on_and_letters_stay_off() {
         const {
-            assert!(!LONG_HORIZON_PRODUCTION_ENABLED);
+            assert!(LONG_HORIZON_PRODUCTION_ENABLED);
             assert!(!ASYNC_LETTER_PRODUCTION_ENABLED);
             assert!(MESSAGE_HORIZON_MS == 7 * 24 * 3_600_000);
         }
@@ -1013,20 +1021,46 @@ mod tests {
         set_custody_gates_for_this_thread(None);
     }
 
-    /// `RAVEN_LAB_HORIZON` and `RAVEN_LAB_LETTER` go through
-    /// [`crate::pair_init::lab_switch`]: without the Lab Test A unlock they
-    /// stay closed whatever they say.
+    /// 2026-10: the horizon is on in release builds and letters stay off.
+    /// `RAVEN_LAB_LETTER` goes through [`crate::pair_init::lab_switch`]:
+    /// without the Lab Test A unlock it stays closed whatever it says;
+    /// `RAVEN_LAB_HORIZON=0` closes the horizon in a debug build.
     #[test]
-    fn horizon_switch_without_lab_test_a_stays_closed() {
-        use crate::pair_init::{lab_switch_value, lab_test_a_enabled};
+    fn horizon_is_on_and_letters_need_lab_test_a() {
+        use crate::pair_init::{lab_gate_value, lab_switch_value, lab_test_a_enabled};
+        const {
+            assert!(LONG_HORIZON_PRODUCTION_ENABLED);
+            assert!(!ASYNC_LETTER_PRODUCTION_ENABLED);
+        }
         for v in ["1", "true", "TRUE", "yes"] {
             assert!(!lab_switch_value(true, false, Some(v)), "no TEST_A: {v}");
             assert!(lab_switch_value(true, true, Some(v)), "{v}");
         }
+        assert!(!lab_gate_value(
+            true,
+            LONG_HORIZON_PRODUCTION_ENABLED,
+            false,
+            Some("0")
+        ));
+        assert!(lab_gate_value(
+            false,
+            LONG_HORIZON_PRODUCTION_ENABLED,
+            false,
+            Some("0")
+        ));
         // No override on this thread: the live functions follow the
         // environment, as a node does.
+        let set = std::env::var(LAB_HORIZON).ok();
+        assert_eq!(
+            horizon_live_enabled(),
+            lab_gate_value(
+                cfg!(debug_assertions),
+                LONG_HORIZON_PRODUCTION_ENABLED,
+                lab_test_a_enabled(),
+                set.as_deref()
+            )
+        );
         if !lab_test_a_enabled() {
-            assert_eq!(horizon_live_enabled(), LONG_HORIZON_PRODUCTION_ENABLED);
             assert!(!letter_live_enabled() || ASYNC_LETTER_PRODUCTION_ENABLED);
         }
     }

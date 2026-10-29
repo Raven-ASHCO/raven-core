@@ -54,12 +54,14 @@ pub fn wss_proxy_live_enabled() -> bool {
 mod tests {
     use super::*;
 
+    /// WSS and its proxy stay off; the p2p carrier they sit on was switched
+    /// on in 2026-10.
     #[test]
     fn production_flags_stay_false() {
         const {
             assert!(!WSS_PRODUCTION_ENABLED);
             assert!(!WSS_PROXY_PRODUCTION_ENABLED);
-            assert!(!crate::P2P_PRODUCTION_ENABLED);
+            assert!(crate::P2P_PRODUCTION_ENABLED);
         }
     }
 

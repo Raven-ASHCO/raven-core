@@ -1,41 +1,43 @@
-//! Tor onion carrier (`protocol/RAVEN_ONION_CARRIER_V1.md`) lab gate.
+//! Tor onion carrier (`protocol/RAVEN_ONION_CARRIER_V1.md`) gate.
 //!
 //! Independent of the LAN, Internet direct, p2p, nearby and custody gates.
-//! Stays false until the owner signs a Tor carrier waiver after the field
-//! test and an external review (design `docs/design/2026-10-tor-fallback.md`
-//! §9, OD-T5). With it off a node starts no Tor helper, publishes no onion
-//! service, dials nothing over Tor, prints no `onion=` card field, sends no
-//! RRH1 ONION entry and plans exactly what it planned before the carrier
-//! existed.
+//! Switched on in release builds in 2026-10, after the three-machine field
+//! test (debug builds with the lab switches on: messages over Tor between a
+//! phone hotspot and a home network, every direction); not independently
+//! reviewed (design `docs/design/2026-10-tor-fallback.md` §9, OD-T5, asked
+//! for a waiver and an external review first: neither exists yet). Tor relays
+//! are the only third party it talks to; Tor is only a carrier (the Raven
+//! link inside is end-to-end as on every other carrier). A node runs the Tor
+//! helper only when one sits next to raven-node (a build with the `tor`
+//! feature); otherwise it says "Tor: not built in this raven".
 //!
-//! The debug unlock is its own switch, `RAVEN_LAB_TOR=1`, read through
-//! [`crate::pair_init::lab_switch`] and so only with the Lab Test A unlock
-//! (`RAVEN_LAB_TEST_A=1`): that one alone never opens Tor, so every other
-//! carrier's lab run keeps testing what it tested, and none of them touches
-//! the Tor network by accident.
+//! A debug build closes it again with `RAVEN_LAB_TOR=0`
+//! ([`crate::pair_init::lab_gate`]): every lab run and test that must not
+//! touch the Tor network sets that, so none of them touches it by accident.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Hard enable for the Tor onion carrier. Lab runs use the debug switch
-/// [`LAB_TOR`] instead of flipping this.
-pub const ONION_PRODUCTION_ENABLED: bool = false;
+/// Hard enable for the Tor onion carrier. Switched on 2026-10 after the
+/// three-machine field test; not independently reviewed.
+pub const ONION_PRODUCTION_ENABLED: bool = true;
 
-/// The Tor onion carrier's debug lab switch (with `RAVEN_LAB_TEST_A=1`).
+/// The Tor onion carrier's debug lab switch: "0" closes it.
 pub const LAB_TOR: &str = "RAVEN_LAB_TOR";
 
 /// The one refusal every onion entry point (the service task, an onion dial,
-/// `raven status`) prints while the gate is closed.
-pub const ONION_HOLD: &str = "ONION_HOLD: the Tor onion carrier is lab-only \
-    (debug RAVEN_LAB_TEST_A=1 with RAVEN_LAB_TOR=1); ONION_PRODUCTION_ENABLED=false";
+/// `raven status`) prints while the gate is closed: since the 2026-10
+/// switch-on only a debug build closes it, or a security notice.
+pub const ONION_HOLD: &str = "ONION_HOLD: the Tor onion carrier is closed in this process (a \
+    debug build with RAVEN_LAB_TOR=0 or RAVEN_LAB_NEARBY_ONLY=1, or a security notice); release \
+    builds have it on (ONION_PRODUCTION_ENABLED=true)";
 
-/// Live Tor onion carrier: the production const, or in a debug build
-/// `RAVEN_LAB_TOR` with the Lab Test A unlock (a release build reads neither
-/// variable); unless a security notice holds `feature/onion` (close-only) or
-/// a debug lab run carries over Bluetooth nearby alone
-/// ([`crate::nearby_gate::nearby_only`]).
+/// Live Tor onion carrier: the production const (a debug build: `RAVEN_LAB_TOR=0`
+/// closes it; a release build reads no variable); unless a security notice
+/// holds `feature/onion` (close-only) or a debug lab run carries over
+/// Bluetooth nearby alone ([`crate::nearby_gate::nearby_only`]).
 pub fn onion_live_enabled() -> bool {
     crate::nearby_gate::unless_nearby_only(
-        (ONION_PRODUCTION_ENABLED || crate::pair_init::lab_switch(LAB_TOR))
+        crate::pair_init::lab_gate(ONION_PRODUCTION_ENABLED, LAB_TOR)
             && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_ONION),
     )
 }
@@ -66,28 +68,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_flag_stays_false() {
+    fn production_flag_is_on() {
         const {
-            assert!(!ONION_PRODUCTION_ENABLED);
+            assert!(ONION_PRODUCTION_ENABLED);
         }
     }
 
+    /// The gate follows its const and `RAVEN_LAB_TOR` in this process: on
+    /// as in a release build unless the switch says "0" (the test harnesses
+    /// set it, so no test touches the Tor network); the Lab Test A unlock
+    /// alone changes nothing.
     #[test]
-    fn lab_test_a_alone_never_opens_tor() {
-        // RAVEN_LAB_TOR is never set by the test harness: the gate reads
-        // closed whatever Lab Test A says.
-        if std::env::var(LAB_TOR).is_ok() {
-            return;
+    fn the_gate_follows_the_const_and_the_close_switch() {
+        let set = std::env::var(LAB_TOR).ok();
+        let want = crate::pair_init::lab_gate_value(
+            cfg!(debug_assertions),
+            ONION_PRODUCTION_ENABLED,
+            crate::pair_init::lab_test_a_enabled(),
+            set.as_deref(),
+        ) && !crate::nearby_gate::nearby_only();
+        assert_eq!(onion_live_enabled(), want);
+        if !want {
+            assert!(!onion_usable_now());
         }
-        assert!(!onion_live_enabled());
-        assert!(!onion_usable_now());
+        assert!(!crate::pair_init::lab_gate_value(
+            true,
+            true,
+            true,
+            Some("0")
+        ));
+        assert!(crate::pair_init::lab_gate_value(
+            false,
+            true,
+            true,
+            Some("0")
+        ));
     }
 
     #[test]
-    fn hold_names_the_flag_and_both_switches() {
+    fn hold_names_the_flag_and_the_close_switch() {
         assert!(ONION_HOLD.starts_with("ONION_HOLD:"));
-        assert!(ONION_HOLD.contains("ONION_PRODUCTION_ENABLED=false"));
-        assert!(ONION_HOLD.contains("RAVEN_LAB_TEST_A=1"));
-        assert!(ONION_HOLD.contains(LAB_TOR));
+        assert!(ONION_HOLD.contains("ONION_PRODUCTION_ENABLED=true"));
+        assert!(ONION_HOLD.contains("RAVEN_LAB_TOR=0"));
+        assert!(!ONION_HOLD.contains("lab-only"));
     }
 }

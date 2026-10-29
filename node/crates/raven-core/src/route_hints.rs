@@ -18,10 +18,10 @@
 //! ([`decode`] is the structural check, §5.1), the RELAY_OFFER record codec
 //! ([`decode_offer`], §11), the custody entries' tag ([`custodian_tag`],
 //! §12) and the receiver's semantic rules ([`validate`], §5.2 and §11.3).
-//! Everything is behind [`route_hints_live`] (off in production;
-//! `RAVEN_LAB_ROUTE_HINTS=1` unlocks it in debug builds) and the carrier's own
-//! gate ([`route_hints_live_on`]); relay offers also need the friend relay
-//! gate ([`crate::relay_offers_live`]).
+//! Everything is behind [`route_hints_live`] (on in release builds since
+//! 2026-10; `RAVEN_LAB_ROUTE_HINTS=0` closes it in a debug build) and the
+//! carrier's own gate ([`route_hints_live_on`]); relay offers also need the
+//! friend relay gate ([`crate::relay_offers_live`]).
 
 use std::net::IpAddr;
 use std::sync::OnceLock;
@@ -41,9 +41,11 @@ pub use relay_offer::{
     RELAY_OFFER_MAX_LEN, RELAY_OFFER_VERSION,
 };
 
-/// Production gate for route hints on every link (LAN, Internet, p2p): one
-/// const, flipped only after the Phase 2 waiver amendments are signed.
-pub const ROUTE_HINTS_PRODUCTION_ENABLED: bool = false;
+/// Production gate for route hints on every link (LAN, Internet, p2p, Tor,
+/// nearby): one const. Switched on 2026-10 after the three-machine field
+/// test; not independently reviewed. Addresses still travel only inside
+/// these encrypted, authenticated links between verified friends.
+pub const ROUTE_HINTS_PRODUCTION_ENABLED: bool = true;
 
 /// The sender's generation state in the data dir (raven-node's
 /// `hints::GEN_STATE_FILE`, its only writer): per-contact digests, the
@@ -51,15 +53,16 @@ pub const ROUTE_HINTS_PRODUCTION_ENABLED: bool = false;
 /// sealed profile (privacy pack PP.5); named here so the migration knows it.
 pub const ROUTE_HINTS_STATE_FILE: &str = "route_hints_state.json";
 
-/// Route hints on: the production gate, or debug `RAVEN_LAB_ROUTE_HINTS=1`
-/// (independent of `RAVEN_LAB_TEST_A`; release builds never read it),
-/// unless a security notice holds them or marks `rrh1/1` BROKEN (P6.45).
+/// Route hints on: the production gate (a debug build: `RAVEN_LAB_ROUTE_HINTS=1`
+/// opens it, `=0` closes it, independent of `RAVEN_LAB_TEST_A`; release
+/// builds never read it), unless a security notice holds them or marks
+/// `rrh1/1` BROKEN (P6.45).
 pub fn route_hints_live() -> bool {
-    (ROUTE_HINTS_PRODUCTION_ENABLED
-        || crate::p2p_gate::lab_flag(cfg!(debug_assertions), || {
-            std::env::var("RAVEN_LAB_ROUTE_HINTS").ok()
-        }))
-        && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_ROUTE_HINTS)
+    crate::lan_gate::gate_switch(
+        cfg!(debug_assertions),
+        ROUTE_HINTS_PRODUCTION_ENABLED,
+        || std::env::var("RAVEN_LAB_ROUTE_HINTS").ok(),
+    ) && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_ROUTE_HINTS)
 }
 
 /// RRH1 on this carrier: the hints gate AND the carrier's own gate.
@@ -1924,11 +1927,22 @@ mod tests {
         frame
     }
 
+    /// 2026-10: route hints are on in release builds; a debug build closes
+    /// them with `RAVEN_LAB_ROUTE_HINTS=0`, and then no carrier carries them.
     #[test]
-    fn production_flag_stays_false() {
+    fn production_flag_is_on_and_a_closed_gate_closes_every_carrier() {
         const {
-            assert!(!ROUTE_HINTS_PRODUCTION_ENABLED);
+            assert!(ROUTE_HINTS_PRODUCTION_ENABLED);
         }
+        let set = std::env::var("RAVEN_LAB_ROUTE_HINTS").ok();
+        assert_eq!(
+            route_hints_live(),
+            crate::lan_gate::gate_switch(
+                cfg!(debug_assertions),
+                ROUTE_HINTS_PRODUCTION_ENABLED,
+                || set.clone()
+            )
+        );
         if !route_hints_live() {
             for carrier in [
                 OutboxCarrier::Lan,

@@ -13,12 +13,23 @@ use crate::indexed_session_store::{
     InboundPolicy, IndexedSessionRecordKey, IndexedSessionStore, IndexedSessionStoreError,
 };
 
-/// App channel production gate. Stays false until the owner's GO.
-pub const APP_CHANNEL_PRODUCTION_ENABLED: bool = false;
-/// Owner decision on daemon-owned-secrets Q6: UID-only IPC for RDAP on macOS
-/// (the app ops return content and use the identity key without a Keychain
-/// dialog). Until then the channel stays closed on macOS outside the lab.
-pub const APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED: bool = false;
+/// App channel production gate: RDAP, Raven's companion for software
+/// agents, sends its tasks and answers through the Raven node. Switched on
+/// in release builds in 2026-10 (the owner's GO, with the features that
+/// passed the three-machine field test; RDAP over Raven proven on loopback
+/// over LAN and the Tor onion carrier); not independently reviewed. Only
+/// verified contacts, over the same carriers and sessions as messages. A
+/// debug build closes it with `RAVEN_LAB_TEST_A=0`.
+pub const APP_CHANNEL_PRODUCTION_ENABLED: bool = true;
+/// Owner decision on daemon-owned-secrets Q6 (2026-10-29: accepted): the app
+/// channel's IPC is UID-only on macOS too, as on Windows and Linux. The
+/// residual: any process of the same macOS user can use the app channel, so
+/// it can read the RDAP task and answer content the channel carries and send
+/// RDAP tasks as this identity, without a Keychain dialog. Ordinary Raven
+/// messages are not exposed through it. A stronger check of the peer
+/// process (its code-signing identity, daemon-owned-secrets §4.4) is future
+/// work. Recorded in docs/THREAT_MODEL.md.
+pub const APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED: bool = true;
 
 #[cfg(test)]
 thread_local! {
@@ -41,11 +52,13 @@ fn lab_unlocked() -> bool {
 }
 
 /// Live app channel: the production gate (on macOS only with the Q6
-/// decision), or the debug lab unlock `RAVEN_LAB_TEST_A=1`, unless a
-/// security notice holds it (P6.45, close-only).
+/// decision, accepted 2026-10-29), or the debug lab unlock
+/// `RAVEN_LAB_TEST_A=1`; a debug build closes it with `RAVEN_LAB_TEST_A=0`
+/// ([`crate::pair_init::test_a_gate`]); unless a security notice holds it
+/// (P6.45, close-only).
 pub fn app_channel_live_enabled() -> bool {
     let platform_ok = !cfg!(target_os = "macos") || APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED;
-    ((APP_CHANNEL_PRODUCTION_ENABLED && platform_ok) || lab_unlocked())
+    (crate::pair_init::test_a_gate(APP_CHANNEL_PRODUCTION_ENABLED && platform_ok) || lab_unlocked())
         && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_APP_CHANNEL)
 }
 
@@ -709,14 +722,24 @@ mod tests {
         assert_eq!(rec.last_error_code, "STORE");
     }
 
+    /// 2026-10: the app channel is on in release builds, on macOS too
+    /// (owner decision Q6, UID-only IPC accepted); a debug build closes it
+    /// with `RAVEN_LAB_TEST_A=0`.
     #[test]
-    fn production_flags_stay_false() {
+    fn production_flags_are_on() {
         const {
-            assert!(!APP_CHANNEL_PRODUCTION_ENABLED);
-            assert!(!APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED);
+            assert!(APP_CHANNEL_PRODUCTION_ENABLED);
+            assert!(APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED);
         }
-        if !crate::pair_init::lab_test_a_enabled() {
-            assert!(!app_channel_live_enabled());
+        let test_a = std::env::var(crate::pair_init::LAB_TEST_A).ok();
+        let want = crate::pair_init::test_a_gate_value(
+            cfg!(debug_assertions),
+            APP_CHANNEL_PRODUCTION_ENABLED,
+            test_a.as_deref(),
+        );
+        assert_eq!(app_channel_live_enabled(), want);
+        if !cfg!(debug_assertions) {
+            assert!(app_channel_live_enabled(), "release");
         }
     }
 

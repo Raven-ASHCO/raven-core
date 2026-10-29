@@ -1,38 +1,49 @@
 //! Bluetooth LE nearby carrier (RNL1, `protocol/RAVEN_NEARBY_LINK_V1.md`)
-//! lab gate.
+//! gate.
 //!
-//! Independent of the LAN, Internet direct, p2p and custody gates. Stays
-//! false until the owner signs a nearby waiver after the physical rows
-//! N1-N12 (owner decision O5-13). With it off a release build never
-//! advertises, scans, knocks or dials over Bluetooth, and plans exactly what
-//! it planned before the carrier existed.
+//! Independent of the LAN, Internet direct, p2p and custody gates. Switched
+//! on in release builds for macOS only in 2026-10, after the three-machine
+//! field test (a Bluetooth chain between two Macs, both ways); not
+//! independently reviewed, and the physical rows N1-N12 are not all signed
+//! (owner decision O5-13 asked for them first). Windows and Linux have no
+//! release Bluetooth backend: there it stays lab-only, and a release build
+//! never advertises, scans, knocks or dials over Bluetooth. On macOS the
+//! radio runs only after `raven nearby enable` (verified contacts only), in
+//! a build with the `nearby-radio` feature and the RavenNearby.app helper.
 //!
-//! The debug unlock is its own switch, `RAVEN_LAB_NEARBY=1` (owner decision
-//! O5-13), read through [`crate::pair_init::lab_switch`] and so only with the
-//! Lab Test A unlock (`RAVEN_LAB_TEST_A=1`): every lab harness already sets
-//! that one, and it alone never opens nearby, so the other carriers' lab runs
-//! keep testing what they tested.
+//! The debug switch is `RAVEN_LAB_NEARBY` ([`crate::pair_init::lab_gate`]):
+//! "0" closes the gate; on Windows and Linux "1" opens it with the Lab Test
+//! A unlock (`RAVEN_LAB_TEST_A=1`), which alone never opens nearby.
 
-/// Hard enable for the nearby carrier. Lab runs use the debug switch
-/// [`LAB_NEARBY`] instead of flipping this.
-pub const NEARBY_PRODUCTION_ENABLED: bool = false;
+/// Hard enable for the nearby carrier: on in release builds for macOS
+/// (switched on 2026-10 after the three-machine field test; not
+/// independently reviewed), off on Windows and Linux, which have no release
+/// Bluetooth backend.
+pub const NEARBY_PRODUCTION_ENABLED: bool = cfg!(target_os = "macos");
 
-/// The nearby carrier's debug lab switch (with `RAVEN_LAB_TEST_A=1`).
+/// The nearby carrier's debug lab switch: "0" closes it; on Windows and
+/// Linux "1" opens it with `RAVEN_LAB_TEST_A=1`.
 pub const LAB_NEARBY: &str = "RAVEN_LAB_NEARBY";
 
 /// The one refusal every nearby entry point (the service task, a nearby
 /// dial, IPC, `raven nearby`, `raven send --carrier nearby`) prints while
-/// the gate is closed.
-pub const NEARBY_HOLD: &str = "NEARBY_HOLD: the Bluetooth nearby carrier is lab-only \
-    (debug RAVEN_LAB_TEST_A=1 with RAVEN_LAB_NEARBY=1); NEARBY_PRODUCTION_ENABLED=false; \
-    no physical rows signed";
+/// the gate is closed: on macOS only a debug build closes it (or a security
+/// notice); on Windows and Linux release builds have no Bluetooth nearby.
+pub const NEARBY_HOLD: &str = if NEARBY_PRODUCTION_ENABLED {
+    "NEARBY_HOLD: the Bluetooth nearby carrier is closed in this process (a debug build with \
+     RAVEN_LAB_NEARBY=0, or a security notice); release builds on macOS have it on \
+     (NEARBY_PRODUCTION_ENABLED=true)"
+} else {
+    "NEARBY_HOLD: Bluetooth nearby is in release builds on macOS only; on this system it is \
+     lab-only (debug RAVEN_LAB_TEST_A=1 with RAVEN_LAB_NEARBY=1); NEARBY_PRODUCTION_ENABLED=false"
+};
 
-/// Live nearby carrier: the production const, or in a debug build
-/// `RAVEN_LAB_NEARBY` with the Lab Test A unlock (a release build reads
-/// neither variable); unless a security notice holds it or marks `rnl1/1`
-/// BROKEN (P6.45, close-only).
+/// Live nearby carrier: the production const (a debug build: `RAVEN_LAB_NEARBY=0`
+/// closes it; on Windows and Linux `RAVEN_LAB_NEARBY=1` with the Lab Test A
+/// unlock opens it; a release build reads neither variable); unless a
+/// security notice holds it or marks `rnl1/1` BROKEN (P6.45, close-only).
 pub fn nearby_live_enabled() -> bool {
-    (NEARBY_PRODUCTION_ENABLED || crate::pair_init::lab_switch(LAB_NEARBY))
+    crate::pair_init::lab_gate(NEARBY_PRODUCTION_ENABLED, LAB_NEARBY)
         && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_NEARBY)
 }
 
@@ -159,20 +170,23 @@ pub fn nearby_dial_unavailable() -> String {
 mod tests {
     use super::*;
 
+    /// 2026-10: on in release builds for macOS only; the generic PairInit
+    /// tripwire stays off.
     #[test]
-    fn production_flag_stays_false() {
+    fn production_flag_is_on_for_macos_only() {
         const {
-            assert!(!NEARBY_PRODUCTION_ENABLED);
+            assert!(NEARBY_PRODUCTION_ENABLED == cfg!(target_os = "macos"));
             assert!(!crate::pair_init::PRODUCTION_ENABLED);
         }
     }
 
-    /// The Lab Test A unlock alone never opens nearby; the switch alone
-    /// does not either. Runs in both builds: a release build follows the
-    /// const alone, whatever the environment says.
+    /// The Lab Test A unlock alone never opens nearby where it is held; the
+    /// switch alone does not either; "0" closes it in a debug build. Runs in
+    /// both builds: a release build follows the const alone, whatever the
+    /// environment says.
     #[test]
     fn lab_test_a_alone_does_not_open_nearby() {
-        use crate::pair_init::{lab_switch_value, lab_test_a_enabled};
+        use crate::pair_init::{lab_gate_value, lab_switch_value, lab_test_a_enabled};
         for v in ["1", "true", "TRUE", "yes"] {
             assert!(!lab_switch_value(true, false, Some(v)), "no TEST_A: {v}");
             assert!(lab_switch_value(true, true, Some(v)), "{v}");
@@ -181,19 +195,22 @@ mod tests {
         for v in [None, Some(""), Some("0"), Some(" 1"), Some("on")] {
             assert!(!lab_switch_value(true, true, v), "{v:?}");
         }
-        // This process: exactly what its environment says.
-        let switch = cfg!(debug_assertions)
-            && lab_test_a_enabled()
-            && matches!(
-                std::env::var(LAB_NEARBY).ok().as_deref(),
-                Some("1" | "true" | "TRUE" | "yes")
-            );
-        assert_eq!(nearby_live_enabled(), NEARBY_PRODUCTION_ENABLED || switch);
-        if std::env::var(LAB_NEARBY).is_err() {
-            assert!(!nearby_live_enabled(), "RAVEN_LAB_NEARBY unset");
+        assert!(!lab_gate_value(true, true, true, Some("0")));
+        assert!(!lab_gate_value(true, false, true, None), "the unlock alone");
+        // This process: exactly what its build and environment say.
+        let set = std::env::var(LAB_NEARBY).ok();
+        let want = lab_gate_value(
+            cfg!(debug_assertions),
+            NEARBY_PRODUCTION_ENABLED,
+            lab_test_a_enabled(),
+            set.as_deref(),
+        );
+        assert_eq!(nearby_live_enabled(), want);
+        if set.is_none() {
+            assert_eq!(nearby_live_enabled(), NEARBY_PRODUCTION_ENABLED, "unset");
         }
         if !cfg!(debug_assertions) {
-            assert!(!nearby_live_enabled(), "release build");
+            assert_eq!(nearby_live_enabled(), NEARBY_PRODUCTION_ENABLED, "release");
         }
     }
 
@@ -262,12 +279,22 @@ mod tests {
         assert_eq!(nearby_dial_unavailable(), NEARBY_HOLD);
     }
 
+    /// macOS: the hold names the const (on) and the close switch; Windows
+    /// and Linux: it says release builds have nearby on macOS only, and
+    /// names the lab unlock.
     #[test]
-    fn hold_text_names_the_flag_and_the_lab_unlock() {
+    fn hold_text_names_the_flag_and_the_switch() {
         assert!(NEARBY_HOLD.starts_with("NEARBY_HOLD:"));
-        assert!(NEARBY_HOLD.contains("NEARBY_PRODUCTION_ENABLED=false"));
-        assert!(NEARBY_HOLD.contains("RAVEN_LAB_TEST_A=1"));
-        assert!(NEARBY_HOLD.contains("RAVEN_LAB_NEARBY=1"));
         assert!(NEARBY_HOLD.contains(LAB_NEARBY));
+        if cfg!(target_os = "macos") {
+            assert!(NEARBY_HOLD.contains("NEARBY_PRODUCTION_ENABLED=true"));
+            assert!(NEARBY_HOLD.contains("RAVEN_LAB_NEARBY=0"));
+            assert!(!NEARBY_HOLD.contains("lab-only"));
+        } else {
+            assert!(NEARBY_HOLD.contains("NEARBY_PRODUCTION_ENABLED=false"));
+            assert!(NEARBY_HOLD.contains("macOS only"));
+            assert!(NEARBY_HOLD.contains("RAVEN_LAB_TEST_A=1"));
+            assert!(NEARBY_HOLD.contains("RAVEN_LAB_NEARBY=1"));
+        }
     }
 }

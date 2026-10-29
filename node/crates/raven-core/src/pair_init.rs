@@ -52,6 +52,59 @@ pub(crate) fn lab_switch_value(debug: bool, test_a: bool, v: Option<&str>) -> bo
     debug && test_a && matches!(v, Some("1" | "true" | "TRUE" | "yes"))
 }
 
+/// The Lab Test A unlock's variable.
+pub const LAB_TEST_A: &str = "RAVEN_LAB_TEST_A";
+
+/// A per-feature gate whose const may be on in release builds (2026-10: the
+/// features switched on after the three-machine field test). A release build
+/// follows `production` alone and reads no variable. A debug build reads the
+/// gate's lab switch `name`: exactly "0" closes the gate (so the gate-closed
+/// paths, and a harness that needs the build from before the switch-on, stay
+/// testable), a word [`lab_switch`] accepts opens it with the Lab Test A
+/// unlock (a gate whose const is still false), anything else leaves the
+/// const.
+pub fn lab_gate(production: bool, name: &str) -> bool {
+    if !cfg!(debug_assertions) {
+        return production;
+    }
+    let value = std::env::var(name).ok();
+    lab_gate_value(true, production, lab_test_a_enabled(), value.as_deref())
+}
+
+/// [`lab_gate`] from its inputs.
+pub(crate) fn lab_gate_value(debug: bool, production: bool, test_a: bool, v: Option<&str>) -> bool {
+    if !debug {
+        return production;
+    }
+    v != Some("0") && (production || lab_switch_value(true, test_a, v))
+}
+
+/// The three gates the Lab Test A unlock itself opens (Internet direct, the
+/// p2p carrier and friend custody), each with its const `production`. A
+/// release build follows the const alone and reads no variable. A debug
+/// build: `RAVEN_LAB_TEST_A=0` closes the gate (the build from before the
+/// 2026-10 switch-on: LAN direct only), the unlock opens it, anything else
+/// leaves the const.
+pub fn test_a_gate(production: bool) -> bool {
+    if !cfg!(debug_assertions) {
+        return production;
+    }
+    let value = std::env::var(LAB_TEST_A).ok();
+    test_a_gate_value(true, production, value.as_deref())
+}
+
+/// [`test_a_gate`] from its inputs.
+pub(crate) fn test_a_gate_value(debug: bool, production: bool, v: Option<&str>) -> bool {
+    if !debug {
+        return production;
+    }
+    match v {
+        Some("0") => false,
+        Some("1" | "true" | "TRUE" | "yes") => true,
+        _ => production,
+    }
+}
+
 /// Generic PairInit live tripwire. LAN-direct must not flip this — it leaks
 /// into contact-request and other non-LAN CLIs. LAN send uses
 /// [`crate::lan_direct_live_enabled`] at the callsite instead.
@@ -701,6 +754,107 @@ mod tests {
             lab_switch(SWITCH),
             lab_switch_value(true, lab_test_a_enabled(), set.as_deref())
         );
+    }
+
+    /// 2026-10 switch-on: a release build follows the const alone; a debug
+    /// build closes the gate on exactly "0", opens a gate whose const is off
+    /// with the Lab Test A unlock and a switch word, and keeps the const for
+    /// anything else.
+    #[test]
+    fn lab_gate_value_table() {
+        let values = [
+            None,
+            Some(""),
+            Some("0"),
+            Some(" 0"),
+            Some("1"),
+            Some("true"),
+            Some("yes"),
+            Some("off"),
+        ];
+        for production in [false, true] {
+            for test_a in [false, true] {
+                for v in values {
+                    assert_eq!(
+                        lab_gate_value(false, production, test_a, v),
+                        production,
+                        "release: {production} {test_a} {v:?}"
+                    );
+                    let debug = match v {
+                        Some("0") => false,
+                        Some("1" | "true" | "yes") if test_a => true,
+                        _ => production,
+                    };
+                    assert_eq!(
+                        lab_gate_value(true, production, test_a, v),
+                        debug,
+                        "debug: {production} {test_a} {v:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Lab Test A unlock's own gates: "0" closes, the unlock's words
+    /// open, anything else is the const; a release build reads nothing.
+    #[test]
+    fn test_a_gate_value_table() {
+        for production in [false, true] {
+            for v in [
+                None,
+                Some(""),
+                Some("0"),
+                Some("1"),
+                Some("true"),
+                Some("TRUE"),
+                Some("yes"),
+                Some("no"),
+                Some(" 0"),
+            ] {
+                assert_eq!(test_a_gate_value(false, production, v), production);
+                let debug = match v {
+                    Some("0") => false,
+                    Some("1" | "true" | "TRUE" | "yes") => true,
+                    _ => production,
+                };
+                assert_eq!(test_a_gate_value(true, production, v), debug, "{v:?}");
+            }
+        }
+    }
+
+    /// Runs in both builds: the release test job sets each switch to "0"
+    /// and to "1" and both gates stay at their const (neither variable is
+    /// read); a debug build follows exactly the variables.
+    #[test]
+    fn lab_gate_and_test_a_gate_are_inert_without_debug_assertions() {
+        // Not a RAVEN_LAB_* name (see above).
+        const SWITCH: &str = "RAVEN_TEST_SWITCHED_ON_GATE";
+        if !cfg!(debug_assertions) {
+            for value in ["0", "1"] {
+                // Edition 2021: plain calls. No release test needs these
+                // unset (the release job sets RAVEN_LAB_TEST_A=1 itself).
+                std::env::set_var(SWITCH, value);
+                std::env::set_var(LAB_TEST_A, value);
+                for production in [false, true] {
+                    assert_eq!(lab_gate(production, SWITCH), production);
+                    assert_eq!(test_a_gate(production), production);
+                }
+            }
+            std::env::set_var(LAB_TEST_A, "1");
+            return;
+        }
+        let set = std::env::var(SWITCH).ok();
+        let test_a = std::env::var(LAB_TEST_A).ok();
+        for production in [false, true] {
+            assert_eq!(
+                lab_gate(production, SWITCH),
+                lab_gate_value(true, production, lab_test_a_enabled(), set.as_deref())
+            );
+            assert_eq!(
+                test_a_gate(production),
+                test_a_gate_value(true, production, test_a.as_deref())
+            );
+        }
     }
 
     #[test]
