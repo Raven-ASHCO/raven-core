@@ -989,6 +989,8 @@ impl Profile {
             "RAVEN_LAB_TOR_LOOPBACK_STALL",
             "RAVEN_LAB_TOR_LOOPBACK_OBSOLETE",
             "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS",
+            // Groups' lab unlock; no case sets it.
+            "RAVEN_LAB_GROUPS",
         ] {
             cmd.env_remove(k);
         }
