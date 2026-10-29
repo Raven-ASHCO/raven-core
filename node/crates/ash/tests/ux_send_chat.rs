@@ -101,14 +101,18 @@ fn ash_at(bin: &Path, dir: &Path) -> Command {
     }
     // The long message horizon and the letters held, whatever switches the
     // suite runs with: with them a send nothing can take is parked instead of
-    // refused or given up (Phase 5a, P5.8). `with_horizon` and the tests that
-    // set RAVEN_LAB_HORIZON themselves turn it on for one command.
-    for switch in [
-        raven_core::horizon::LAB_HORIZON,
-        raven_core::horizon::LAB_LETTER,
-    ] {
-        c.env_remove(switch);
-    }
+    // refused or given up (Phase 5a, P5.8). The horizon is on in release
+    // builds since 2026-10, so it is closed here (a debug build's "0"):
+    // these tests pin the words of a send without it. `with_horizon` and the
+    // tests that set RAVEN_LAB_HORIZON themselves turn it on for one command.
+    c.env(raven_core::horizon::LAB_HORIZON, "0");
+    c.env_remove(raven_core::horizon::LAB_LETTER);
+    // Release builds have the Tor onion carrier and STUN discovery on since
+    // 2026-10; no test here reaches the Tor network or asks a public STUN
+    // server, so a raven-node these tests start has both closed (a debug
+    // build's "0").
+    c.env("RAVEN_LAB_TOR", "0")
+        .env("RAVEN_LAB_STUN_DISCOVERY", "0");
     // Every process of a test runs on one clock: a lab clock file reaches ash
     // and its service only when this test process runs on it too (the lab
     // unlock set for the whole suite), never through a lab unlock that a test
@@ -997,7 +1001,7 @@ impl Net {
         let mut c = ash(self.a.path());
         c.args(["send", "--contact", "@bob", "--carrier", "p2p"])
             .env("RAVEN_LAB_TEST_A", "1")
-            .env_remove("RAVEN_LAB_ROUTE_HINTS");
+            .env("RAVEN_LAB_ROUTE_HINTS", "0");
         run(c, format!("{message}\n").as_bytes())
     }
 
@@ -1520,7 +1524,7 @@ fn with_horizon(mut c: Command) -> Command {
     c.env("RAVEN_LAB_TEST_A", "1")
         .env("RAVEN_LAB_HORIZON", "1")
         .env_remove("RAVEN_LAB_LETTER")
-        .env_remove("RAVEN_LAB_ROUTE_HINTS");
+        .env("RAVEN_LAB_ROUTE_HINTS", "0");
     c
 }
 
@@ -2090,7 +2094,7 @@ fn learned_rrh1_port_is_tried_and_saved() {
 
     let mut off = ash(net.a.path());
     off.args(["send", "--contact", "@bob"])
-        .env_remove("RAVEN_LAB_ROUTE_HINTS");
+        .env("RAVEN_LAB_ROUTE_HINTS", "0");
     let o = run(off, b"switch off\n");
     assert_eq!(code(&o), 1, "{}", text(&o.stderr));
     let dials = net.take_dials();

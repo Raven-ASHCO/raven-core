@@ -447,6 +447,14 @@ pub(super) fn app(size: (u16, u16)) -> App {
 
 /// [`app`] in `look`.
 pub(super) fn app_in(look: Look, size: (u16, u16)) -> App {
+    // Groups are on in release builds since 2026-10; their screens have
+    // tests of their own (ui/groups, screens) that switch them on for their
+    // thread. Every other screen's test sees them off on its thread (a debug
+    // build's `RAVEN_LAB_GROUPS=0`), so its rows stay those of the screen it
+    // is about.
+    if raven_core::group::lab_groups_for_this_thread().is_none() {
+        raven_core::group::set_lab_groups_for_this_thread(Some(false));
+    }
     let mut app = App::new(look, size, Instant::now(), TEST_WALL_MS);
     // The same rows on every system; a test asks for the macOS or Windows
     // copy itself.
@@ -455,8 +463,33 @@ pub(super) fn app_in(look: Look, size: (u16, u16)) -> App {
     app
 }
 
-/// What a release build lets on: the local network, and nothing else.
+/// What a release build lets on (2026-10): the local network, Internet
+/// direct, peer-to-peer and friends who carry messages; Bluetooth nearby on
+/// macOS only.
 pub(super) fn release_gates() -> GatesView {
+    let on = bridge::Gate {
+        production: true,
+        live: true,
+    };
+    let nearby = cfg!(target_os = "macos");
+    GatesView::of(
+        bridge::Gates {
+            lan: on,
+            internet: on,
+            p2p: on,
+            custody: on,
+            nearby: bridge::Gate {
+                production: nearby,
+                live: nearby,
+            },
+        },
+        false,
+    )
+}
+
+/// What a build held everything but the local network on (a release build
+/// before 2026-10, or a debug build with `RAVEN_LAB_TEST_A=0`).
+pub(super) fn lan_only_gates() -> GatesView {
     let closed = bridge::Gate {
         production: false,
         live: false,
@@ -520,7 +553,10 @@ pub(super) fn session(receive: Receive) -> Session {
         },
         listen: ListenOverride::None,
         over_ssh: false,
-        gates: release_gates(),
+        // The local network alone: the screens' rows these tests pin do not
+        // depend on the other ways; NET's release rows have their own test
+        // (`net_in_a_release_build`, [`release_gates`]).
+        gates: lan_only_gates(),
         look_env: LookEnv::default(),
         locked: false,
     }

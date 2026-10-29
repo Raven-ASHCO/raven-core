@@ -2822,6 +2822,9 @@ mod tests {
             "3 friends - all quiet                          activity .....................:..",
             "? Help  Esc Friends  Enter Send  Ctrl+J New line  Tab Messages  PgUp/PgDn Scroll",
         ];
+        // Groups (on in release builds since 2026-10) have their own homes
+        // in ui/groups: off on this thread here.
+        raven_core::group::set_lab_groups_for_this_thread(Some(false));
         for (glyphs, expected) in [(Glyphs::fancy(), fancy), (Glyphs::ascii(), ascii)] {
             let mut app = App::new(
                 Look {

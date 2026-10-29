@@ -995,11 +995,24 @@ impl Profile {
         cmd.env("RAVEN_LAB_AT_REST", "1")
             .env("RAVEN_LAB_ERASE_ROOT", &self.root)
             .env("RAVEN_P2P_PROXY", "off");
+        // Release builds have these on since 2026-10. Here they stay closed
+        // (a debug build's "0") unless a case opens them, as before the
+        // switch-on: no case reaches the real Tor network or asks a public
+        // STUN server, and each case's route hints, horizon, groups and
+        // friend relay are the ones it asks for.
+        cmd.env("RAVEN_LAB_TOR", "0")
+            .env("RAVEN_LAB_STUN_DISCOVERY", "0")
+            .env("RAVEN_LAB_HORIZON", "0")
+            .env("RAVEN_LAB_GROUPS", "0");
         if self.lab_internet {
             cmd.env("RAVEN_LAB_TEST_A", "1");
         }
-        if self.route_hints {
-            cmd.env("RAVEN_LAB_ROUTE_HINTS", "1");
+        cmd.env(
+            "RAVEN_LAB_ROUTE_HINTS",
+            if self.route_hints { "1" } else { "0" },
+        );
+        if !self.friend_relays {
+            cmd.env("RAVEN_LAB_FRIEND_RELAY", "0");
         }
         if let Some(on) = self.noise_pin {
             cmd.env("RAVEN_LAB_NOISE_PIN", if on { "1" } else { "0" });
@@ -1752,8 +1765,8 @@ fn phase4_switches_and_proxy_settings_reach_no_process() {
         "RAVEN_LAB_PEER_EPOCH_S",
         "RAVEN_LAB_PORTMAP_GATEWAY",
         "RAVEN_LAB_PORTMAP_LIFETIME",
-        // Auto-reach's, as in Profile::env.
-        "RAVEN_LAB_STUN_DISCOVERY",
+        // Auto-reach's, as in Profile::env (STUN discovery is closed there
+        // instead: below).
         "RAVEN_LAB_SERVERLESS_PUNCH",
         "RAVEN_LAB_STUN_SERVERS",
         "RAVEN_LAB_STUN_REFRESH_S",
@@ -1783,6 +1796,14 @@ fn phase4_switches_and_proxy_settings_reach_no_process() {
             assert_eq!(get(k), Some(None), "{what} keeps {k}");
         }
         assert_eq!(get("RAVEN_P2P_PROXY"), Some(Some("off")), "{what}");
+        // STUN discovery (on in release builds since 2026-10): a profile's
+        // processes run with it closed, so no case asks a public server.
+        let stun = if what == "profile" {
+            Some(Some("0"))
+        } else {
+            Some(None)
+        };
+        assert_eq!(get("RAVEN_LAB_STUN_DISCOVERY"), stun, "{what}");
     }
 }
 

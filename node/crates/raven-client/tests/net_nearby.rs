@@ -68,6 +68,10 @@ fn nearby_over_the_fake_ether() {
     common::lab_env();
     std::env::set_var("RAVEN_LAB_TEST_A", "1");
     std::env::set_var("RAVEN_LAB_NEARBY", "1");
+    // Route hints (on in release builds since 2026-10) would teach each node
+    // the other's live LAN address again: closed here, so once the saved LAN
+    // addresses go dead only the ether is left.
+    std::env::set_var("RAVEN_LAB_ROUTE_HINTS", "0");
     let ether = Ether::start();
     std::env::set_var("RAVEN_LAB_NEARBY_ETHER", &ether.addr);
     let a = Peer::new("Near A");
@@ -86,8 +90,11 @@ fn nearby_over_the_fake_ether() {
     for (x, y) in [(&a, &b), (&b, &a)] {
         x.set_lan(y, &format!("127.0.0.1:{}", free_port()));
     }
+    // A lab way where release builds hold it (Windows and Linux); on
+    // macOS release builds have it since 2026-10.
+    let lab = !raven_core::NEARBY_PRODUCTION_ENABLED;
     let off = a.carrier("nearby");
-    assert_eq!(off["lab"], true, "{off}");
+    assert_eq!(off["lab"], lab, "{off}");
     assert_eq!(off["setting"], false, "{off}");
     for p in [&a, &b] {
         let set = p.ok("network.set", json!({"nearby": true}));
@@ -112,7 +119,7 @@ fn nearby_over_the_fake_ether() {
         assert_eq!(net["nearby"]["radio"], "powered_on", "{}: {net}", p.name);
         assert_eq!(net["nearby"]["state"], "live", "{net}");
         let nearby = carrier_of(&net, "nearby");
-        assert_eq!(nearby["state"], "lab", "{nearby}");
+        assert_eq!(nearby["state"], if lab { "lab" } else { "on" }, "{nearby}");
         assert_eq!(nearby["running"], true, "{nearby}");
     }
     let m = a.send_until(

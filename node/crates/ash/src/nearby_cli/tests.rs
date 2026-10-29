@@ -158,7 +158,9 @@ fn nearby_rows_for_held_off_unauthorized_public_and_central_only() {
     );
     assert_eq!(
         rows(&NearbyView::Held { saved: Some(true) }),
-        ["state: held in this build: Bluetooth nearby is not released yet (your choice is kept)"]
+        [format!(
+            "state: held in this build: {HELD_WHY} (your choice is kept)"
+        )]
     );
     let mut off = info("off", &[], "unknown");
     off.enabled = false;
@@ -294,7 +296,7 @@ fn a_radio_that_did_not_start_names_the_real_fix() {
 fn doctor_lines_key_the_state_and_name_the_fix() {
     assert_eq!(
         doctor_lines(&NearbyView::Held { saved: None }),
-        ["bluetooth_nearby: held (NEARBY_PRODUCTION_ENABLED=false)"]
+        [format!("bluetooth_nearby: held ({HELD_DOCTOR})")]
     );
     assert_eq!(
         doctor_lines(&NearbyView::NotRunning { saved: Some(true) }),

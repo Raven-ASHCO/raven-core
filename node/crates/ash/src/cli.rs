@@ -445,19 +445,20 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         chat: bool,
         /// How to reach the contact: `auto` (default: their saved LAN address
-        /// first, then their Internet address, then p2p), `lan`, `internet` or
-        /// `p2p` (libp2p: direct, then through a relay, hole punching where the
-        /// NATs allow). Internet direct and p2p need their production flags (or
-        /// the debug lab unlock) and a verified contact; with --peer, `auto`
-        /// means LAN. A message that has to wait is retried by raven-node
-        /// within the same choice: `auto` may later use any carrier its flags
-        /// allow, `lan` (and --peer) keeps it on the LAN. `nearby`: over
-        /// Bluetooth only (verified contacts in radio range; `auto` tries it
-        /// last once `raven nearby enable` is on and this build has it).
+        /// first, then their Internet address, then p2p, raced against Tor),
+        /// `lan`, `internet` or `p2p` (libp2p: direct, then through a relay,
+        /// hole punching where the NATs allow). Internet direct, p2p and Tor
+        /// need a verified contact; with --peer, `auto` means LAN. A message
+        /// that has to wait is retried by raven-node within the same choice:
+        /// `auto` may later use any carrier, `lan` (and --peer) keeps it on the
+        /// LAN. `onion`: over Tor only (a verified contact whose card or route
+        /// hints gave its onion address). `nearby`: over Bluetooth only
+        /// (verified contacts in radio range; `auto` tries it last once `raven
+        /// nearby enable` is on and this build has it: macOS).
         #[arg(
             long,
             default_value = "auto",
-            value_name = "auto|lan|internet|p2p|nearby"
+            value_name = "auto|lan|internet|p2p|onion|nearby"
         )]
         carrier: String,
     },
@@ -640,7 +641,7 @@ enum Commands {
         cmd: ContactCommands,
     },
     /// Group chats: one message to several friends, sealed for each of them
-    /// (held in this build unless it says otherwise).
+    /// (up to 16 members; the creator is the only admin).
     ///
     ///   raven group create "Book club" --member bea --member @cy
     ///
@@ -675,7 +676,8 @@ enum Commands {
         all: bool,
     },
     /// Bluetooth nearby: your verified contacts in radio range, with no
-    /// network at all (held in this build unless it says otherwise).
+    /// network at all (release builds: macOS only; off until `raven nearby
+    /// enable`).
     ///
     ///   raven nearby enable           (once; says what it shows nearby)
     ///
@@ -1181,8 +1183,10 @@ enum LabCommands {
         #[arg(long)]
         rso1_b64: String,
     },
-    /// App channel (lab): hand an agent payload to raven-node for a contact.
-    /// Debug builds with `RAVEN_LAB_TEST_A=1` only (APP_CHANNEL_HOLD otherwise).
+    /// App channel: hand an agent payload to raven-node for a contact (RDAP
+    /// does this itself). The channel is on in release builds since 2026-10
+    /// (APP_CHANNEL_HOLD while it is closed); the lab type `test/1` needs a
+    /// debug build with `RAVEN_LAB_TEST_A=1`.
     AppSubmit {
         /// The contact: @tag, petname or address.
         #[arg(long)]
@@ -2677,8 +2681,8 @@ fn card_v2_wss_note(wss: usize, hints_live: bool) -> String {
         "a raven-card/3 (`raven whoami --card` without --compat, --inet or --lan) and your route \
          hints"
     } else {
-        "a raven-card/3 and route hints, which this build does not send yet \
-         (ROUTE_HINTS_PRODUCTION_ENABLED=false)"
+        "a raven-card/3 and route hints, which this raven does not send while route hints are \
+         off"
     };
     format!(
         "note: this raven-card/2 names {wss} relay address(es) over WebSocket/TLS by their plain \
@@ -12769,7 +12773,7 @@ fn cmd_node_internet(data_dir: &Path, listen: Option<&str>) -> Result<(), String
             if !raven_core::internet_direct_live_enabled() {
                 println!(
                     "{C_PURPLE}note{C_RESET}: Internet direct is not enabled in this build \
-                     (INTERNET_DIRECT_PRODUCTION_ENABLED=false): raven-node keeps the port \
+                     (INTERNET_DIRECT_HOLD): raven-node keeps the port \
                      closed until it is."
                 );
             }
@@ -12810,7 +12814,7 @@ fn internet_reach_row(
         }
         Ok(IpcResponse::Status { .. }) if !internet_live => format!(
             "NO \u{2014} configured ({configured}) but Internet direct is not enabled in this \
-             build (INTERNET_DIRECT_PRODUCTION_ENABLED=false)"
+             build (INTERNET_DIRECT_HOLD)"
         ),
         Ok(IpcResponse::Status { .. }) => format!(
             "NO \u{2014} configured ({configured}) but the listener is down (busy port, or \
@@ -14592,11 +14596,12 @@ fn parse_send_carrier(s: &str) -> Result<CarrierChoice, String> {
         "internet" => Ok(CarrierChoice::Internet),
         "p2p" => Ok(CarrierChoice::P2p),
         "nearby" => Ok(CarrierChoice::Nearby),
-        // Lab: refused with ONION_HOLD before anything is dialled unless the
-        // onion gate is open (a debug build with the Tor lab switch).
+        // Refused with ONION_HOLD before anything is dialled while the onion
+        // gate is closed (on in release builds since 2026-10; a debug build
+        // closes it with RAVEN_LAB_TOR=0).
         "onion" | "tor" => Ok(CarrierChoice::Onion),
         other => Err(format!(
-            "unknown --carrier {} (auto | lan | internet | p2p | nearby | onion (lab))",
+            "unknown --carrier {} (auto | lan | internet | p2p | onion | nearby)",
             sanitize_terminal_line(other)
         )),
     }
@@ -17844,7 +17849,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         );
         let err = parse_send_carrier("ble").unwrap_err();
         assert!(
-            err.contains("auto | lan | internet | p2p | nearby"),
+            err.contains("auto | lan | internet | p2p | onion | nearby"),
             "{err}"
         );
     }
@@ -26860,10 +26865,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             off.starts_with("note: this raven-card/2 names 1 relay address"),
             "{off}"
         );
-        assert!(
-            off.contains("ROUTE_HINTS_PRODUCTION_ENABLED=false"),
-            "{off}"
-        );
+        assert!(off.contains("while route hints are off"), "{off}");
         assert!(card_v2_wss_note(2, true)
             .contains("raven-card/3 (`raven whoami --card` without --compat"));
 
@@ -27035,7 +27037,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         };
         assert_eq!(
             p2p_cli::route_hints_row(&status(Some(hints.clone()))).as_deref(),
-            Some("on (lab) \u{b7} told 3 contacts \u{b7} learned from 2")
+            // Route hints are on in release builds since 2026-10: no "(lab)".
+            Some("on \u{b7} told 3 contacts \u{b7} learned from 2")
         );
         assert_eq!(
             doctor_route_hints_line(&status(Some(hints.clone()))).as_deref(),
@@ -27048,7 +27051,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         };
         assert_eq!(
             p2p_cli::route_hints_row(&status(Some(one.clone()))).as_deref(),
-            Some("on (lab) \u{b7} told 1 contact \u{b7} learned from 2")
+            Some("on \u{b7} told 1 contact \u{b7} learned from 2")
         );
         assert_eq!(
             doctor_route_hints_line(&status(Some(one))).as_deref(),
@@ -28756,7 +28759,10 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "{off}"
         );
         let held = internet_reach_row(&status(&["ipc"]), "0.0.0.0:7422", false);
-        assert!(held.starts_with("NO") && held.contains("INTERNET_DIRECT_PRODUCTION_ENABLED"));
+        assert!(
+            held.starts_with("NO") && held.contains("INTERNET_DIRECT_HOLD"),
+            "{held}"
+        );
         let down = internet_reach_row(&status(&["ipc"]), "0.0.0.0:7422", true);
         assert!(down.starts_with("NO") && down.contains("restart"), "{down}");
         for row in [&up, &off, &held, &down] {

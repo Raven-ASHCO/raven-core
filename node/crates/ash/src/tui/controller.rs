@@ -3653,7 +3653,11 @@ mod tests {
     #[test]
     fn the_store_worker_reads_the_horizons_and_a_draw_never_does() {
         // The reads are counted on this thread: the App's update and every
-        // draw run here, and so does the store job below.
+        // draw run here, and so does the store job below. The long horizon
+        // is on in release builds since 2026-10 (then a first message waits
+        // too: `bridge`'s horizon tests); here it is off on this thread, so
+        // the never-paired words are the ones read and drawn.
+        raven_core::horizon::set_lab_horizon_for_this_thread(Some(false));
         let (_dir, controller) = profile();
         let friends = vec![testkit::reachable(1), testkit::reachable(2)];
         let peers: Vec<String> = friends.iter().map(|f| f.pub_hex.clone()).collect();
@@ -3710,6 +3714,7 @@ mod tests {
         assert!(screen.contains("needs you and"), "{screen}");
         assert!(!screen.contains("meet first"), "{screen}");
         assert_eq!(bridge::horizon_reads(), reads + 2);
+        raven_core::horizon::set_lab_horizon_for_this_thread(None);
     }
 
     /// Privacy pack PP.21: the App's privacy jobs, through the store worker

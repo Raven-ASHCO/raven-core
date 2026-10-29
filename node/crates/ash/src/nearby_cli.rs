@@ -303,7 +303,7 @@ pub(super) fn status_rows(view: &NearbyView) -> Vec<(&'static str, String)> {
         NearbyView::Held { saved: None } => Vec::new(),
         NearbyView::Held { saved: Some(_) } => vec![(
             STATE_LABEL,
-            "held in this build: Bluetooth nearby is not released yet (your choice is kept)".into(),
+            format!("held in this build: {HELD_WHY} (your choice is kept)"),
         )],
         NearbyView::NodeHeld { .. } => vec![(
             STATE_LABEL,
@@ -364,9 +364,7 @@ pub(super) fn doctor_lines(view: &NearbyView) -> Vec<String> {
         None => "unset",
     };
     match view {
-        NearbyView::Held { .. } => {
-            vec!["bluetooth_nearby: held (NEARBY_PRODUCTION_ENABLED=false)".into()]
-        }
+        NearbyView::Held { .. } => vec![format!("bluetooth_nearby: held ({HELD_DOCTOR})")],
         NearbyView::NodeHeld { saved } => vec![format!(
             "bluetooth_nearby: node=held_or_old enabled={}",
             saved_word(saved)
@@ -791,12 +789,27 @@ fn background_status(data_dir: &Path) -> Vec<String> {
         }
     )];
     if !raven_core::nearby_live_enabled() {
-        lines.push(
-            "held in this build: Bluetooth nearby is not released yet (your choice is kept)".into(),
-        );
+        lines.push(format!(
+            "held in this build: {HELD_WHY} (your choice is kept)"
+        ));
     }
     lines
 }
+
+/// Why Bluetooth nearby is held here (2026-10): release builds have it on
+/// macOS only; on macOS only a debug build closes it (`RAVEN_LAB_NEARBY=0`).
+pub(super) const HELD_WHY: &str = if raven_core::NEARBY_PRODUCTION_ENABLED {
+    "Bluetooth nearby is closed in this process (RAVEN_LAB_NEARBY=0)"
+} else {
+    "Bluetooth nearby is in release builds on macOS only"
+};
+
+/// [`HELD_WHY`] as `raven doctor` names it.
+pub(super) const HELD_DOCTOR: &str = if raven_core::NEARBY_PRODUCTION_ENABLED {
+    "RAVEN_LAB_NEARBY=0"
+} else {
+    "NEARBY_PRODUCTION_ENABLED=false: macOS only"
+};
 
 /// `raven nearby background-mail …`: print, or exit with the refusal's code.
 pub(super) fn cmd_background_mail(data_dir: &Path, arg: BackgroundArg) {
@@ -844,11 +857,9 @@ fn nearby_status(data_dir: &Path) -> Vec<String> {
         ));
     }
     match &view {
-        NearbyView::Held { .. } => lines.push(
-            "held in this build: Bluetooth nearby is not released yet \
-             (NEARBY_PRODUCTION_ENABLED=false). To add a friend use `raven contact add`."
-                .into(),
-        ),
+        NearbyView::Held { .. } => lines.push(format!(
+            "held in this build: {HELD_WHY}. To add a friend use `raven contact add`."
+        )),
         _ => lines.extend(rows_text(&view)),
     }
     lines

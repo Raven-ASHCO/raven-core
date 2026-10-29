@@ -466,7 +466,7 @@ pub(super) fn cmd_node_p2p_asking(
     if !raven_core::p2p_live_enabled() {
         println!(
             "{C_PURPLE}note{C_RESET}: the p2p carrier is not enabled in this build \
-             (P2P_PRODUCTION_ENABLED=false): raven-node keeps it off until it is."
+             (P2P_HOLD): raven-node keeps it off until it is."
         );
     }
     Ok(())
@@ -979,7 +979,7 @@ fn node_proxy_daemon(daemon: &Result<IpcResponse, String>) -> String {
     }
     let source = sanitize_terminal_line(&info.proxy_source);
     let now = if info.held {
-        "the p2p carrier is not enabled in this build (P2P_PRODUCTION_ENABLED=false)".to_string()
+        "the p2p carrier is not enabled in this build (P2P_HOLD)".to_string()
     } else if !info.up {
         "the libp2p host is not up, so it dials no relay now".to_string()
     } else {
@@ -1086,7 +1086,7 @@ fn relay_auto_text(on: bool) -> &'static str {
 /// `raven node p2p on`).
 fn friend_relay_held_note(what: &str) -> String {
     format!(
-        "note: {what} is not enabled in this build (FRIEND_RELAY_PRODUCTION_ENABLED=false): \
+        "note: {what} is not enabled in this build (FRIEND_RELAY_HOLD): \
          raven-node keeps it off until it is."
     )
 }
@@ -1569,7 +1569,7 @@ pub(super) fn p2p_reach_row(
         } else if info.held {
             format!(
                 "NO \u{2014} configured ({setting}, from {source}{}) but the p2p carrier is not \
-                 enabled in this build (P2P_PRODUCTION_ENABLED=false)",
+                 enabled in this build (P2P_HOLD)",
                 retired_note(info, false)
             )
         } else {
@@ -1587,7 +1587,7 @@ pub(super) fn p2p_reach_row(
         }
         Ok(IpcResponse::Status { .. }) if !p2p_live => format!(
             "NO \u{2014} configured ({configured}) but the p2p carrier is not enabled in this \
-             build (P2P_PRODUCTION_ENABLED=false)"
+             build (P2P_HOLD)"
         ),
         Ok(IpcResponse::Status { .. }) => format!(
             "NO \u{2014} configured ({configured}) but the libp2p host is not up (busy port, or \
@@ -1971,7 +1971,7 @@ pub(super) fn relaying_row(info: &P2pStatusInfo, no_route: bool) -> Option<Strin
         "failed" => format!(
             "NOT running \u{2014} port {port} could not be opened (another program?); retrying"
         ),
-        "held" => "held: relaying is lab-only in this build".to_string(),
+        "held" => "held: relaying is off in this build".to_string(),
         "off" => match fr.consent.as_str() {
             "no" => format!("no (you said no; `{OFFER_CMD}` to change)"),
             "unset"
@@ -4294,10 +4294,7 @@ fn friend_state_text(fr: &FriendRelayInfo) -> String {
             "NOT running \u{2014} port {} could not be opened (another program?); retrying",
             fr.port
         ),
-        "held" => {
-            "held: relaying is lab-only in this build (FRIEND_RELAY_PRODUCTION_ENABLED=false)"
-                .to_string()
-        }
+        "held" => "held: relaying is off in this build (FRIEND_RELAY_HOLD)".to_string(),
         "hidden" => "stopped: you hide your IP from every contact, and the relay would show it \
                      to them (`raven node hide-ip off` to relay again)"
             .to_string(),
@@ -4584,11 +4581,9 @@ impl CardSource {
     ) -> Result<Self, String> {
         let fr = friend_relay_of(daemon);
         if fr.is_some_and(|f| f.state == "held") {
-            return Err(
-                "relaying is lab-only in this build (FRIEND_RELAY_PRODUCTION_ENABLED=false): \
+            return Err("relaying is off in this build (FRIEND_RELAY_HOLD): \
                  there is no relay to give out"
-                    .into(),
-            );
+                .into());
         }
         if fr.is_some_and(|f| f.state == "hidden") {
             return Err(
@@ -5355,9 +5350,7 @@ mod tests {
         );
         assert!(lines[0].contains("ipv6_pinhole=on"), "{lines:?}");
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("V6_PINHOLE_PRODUCTION_ENABLED=false")),
+            lines.iter().any(|l| l.contains("V6_PINHOLE_HOLD:")),
             "{lines:?}"
         );
         assert!(
@@ -5615,9 +5608,7 @@ mod tests {
         };
         assert!(p2p_reach_row(&status(Some(down)), "7423", true).starts_with("NO"));
         assert!(p2p_reach_row(&status(None), "", true).starts_with("off"));
-        assert!(
-            p2p_reach_row(&status(None), "7423", false).contains("P2P_PRODUCTION_ENABLED=false")
-        );
+        assert!(p2p_reach_row(&status(None), "7423", false).contains("P2P_HOLD"));
         assert!(p2p_reach_row(&status(None), "7423", true).contains("not up"));
         assert_eq!(
             upnp_row(&status(Some(up.clone())), Some(true)),
@@ -7592,9 +7583,7 @@ mod tests {
         let lines = node_stun_with(dir.path(), None, false, &none).unwrap();
         assert_eq!(lines[0], "stun: on");
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("STUN_DISCOVERY_PRODUCTION_ENABLED=false")),
+            lines.iter().any(|l| l.contains("STUN_DISCOVERY_HOLD:")),
             "{lines:?}"
         );
         let fresh = tmp();
@@ -7835,9 +7824,7 @@ mod tests {
         });
         let row = p2p_reach_row(&held, "", true);
         assert!(
-            row.starts_with("NO")
-                && row.contains("from --p2p-listen")
-                && row.contains("P2P_PRODUCTION"),
+            row.starts_with("NO") && row.contains("from --p2p-listen") && row.contains("P2P_HOLD"),
             "{row}"
         );
         let starting = service(|i| {
@@ -8807,7 +8794,7 @@ mod tests {
                     i.up = false;
                     i.held = true;
                 }),
-                "P2P_PRODUCTION_ENABLED=false",
+                "P2P_HOLD",
             ),
             (status(None), "p2p is off, so it dials no relay"),
             (Err("garbled".into()), "does not answer"),
@@ -9775,7 +9762,7 @@ mod tests {
         if !raven_core::friend_relay_live_enabled() {
             want.push(
                 "note: relaying for your contacts is not enabled in this build \
-                 (FRIEND_RELAY_PRODUCTION_ENABLED=false): raven-node keeps it off until it is."
+                 (FRIEND_RELAY_HOLD): raven-node keeps it off until it is."
                     .to_string(),
             );
         }
@@ -10083,7 +10070,7 @@ mod tests {
             assert_eq!(
                 lines[1],
                 "note: automatic relay choice is not enabled in this build \
-                 (FRIEND_RELAY_PRODUCTION_ENABLED=false): raven-node keeps it off until it is."
+                 (FRIEND_RELAY_HOLD): raven-node keeps it off until it is."
             );
         }
         assert_eq!(try_load_policy(dir.path()).unwrap().relay_auto, Some(true));
@@ -10352,7 +10339,7 @@ mod tests {
         assert!(card(&node("held"), Some(true))
             .err()
             .unwrap()
-            .contains("lab-only"));
+            .contains("relaying is off in this build"));
         assert!(card(&node("hidden"), Some(true))
             .err()
             .unwrap()
@@ -10530,7 +10517,7 @@ mod tests {
         );
         assert_eq!(
             row(fr("held", "yes", "", 0), "public"),
-            some("held: relaying is lab-only in this build")
+            some("held: relaying is off in this build")
         );
         assert_eq!(
             row(fr("starting", "yes", "", 0), "public"),
@@ -10748,8 +10735,7 @@ mod tests {
             ),
             [(
                 "state".to_string(),
-                "held: relaying is lab-only in this build (FRIEND_RELAY_PRODUCTION_ENABLED=false)"
-                    .to_string()
+                "held: relaying is off in this build (FRIEND_RELAY_HOLD)".to_string()
             )]
         );
         // The allow and deny lists, PeerId by PeerId.

@@ -143,8 +143,17 @@ fn p2p_through_a_local_relay() {
         return;
     }
     common::lab_env();
+    // The lab unlock for the relay-only harness value (the p2p gate itself
+    // is on in release builds since 2026-10).
     std::env::set_var("RAVEN_LAB_TEST_A", "1");
     std::env::set_var("RAVEN_LAB_P2P_RELAY_ONLY", "1");
+    // As before the 2026-10 switch-on: no route hints (the cards stay
+    // raven-card/2 with via=) and no STUN query to a public server from the
+    // p2p hosts here (a debug build's "0" closes each).
+    std::env::set_var("RAVEN_LAB_ROUTE_HINTS", "0");
+    std::env::set_var("RAVEN_LAB_STUN_DISCOVERY", "0");
+    let lab = !raven_core::P2P_PRODUCTION_ENABLED;
+    let lab_state = if lab { "lab" } else { "on" };
     let root = common::short_dir();
     let relay = Relay::start(root.path());
     let a = Peer::new("P2p A");
@@ -155,7 +164,7 @@ fn p2p_through_a_local_relay() {
         let p2p = p.carrier("p2p");
         assert_eq!(
             (p2p["state"].as_str(), p2p["lab"].as_bool()),
-            (Some("off"), Some(true))
+            (Some("off"), Some(lab))
         );
         let set = p.ok(
             "network.set",
@@ -205,7 +214,7 @@ fn p2p_through_a_local_relay() {
     let p2p_route = &routes["routes"][0];
     assert_eq!(p2p_route["kind"], "p2p", "{routes}");
     assert_eq!(p2p_route["via"][0], relay.via.as_str(), "{routes}");
-    assert_eq!(p2p_route["state"], "lab", "{routes}");
+    assert_eq!(p2p_route["state"], lab_state, "{routes}");
 
     let m = a.send_until(
         &b,
@@ -218,10 +227,10 @@ fn p2p_through_a_local_relay() {
     assert_eq!(m["path"], "p2p \u{00B7} relayed", "{m}");
     assert!(b.wait_incoming(&a, "over the relay", Duration::from_secs(20)));
 
-    // A's view: p2p on for testing and up, the relay in use.
+    // A's view: p2p on and up, the relay in use.
     let net = a.ok("network.status", json!({}));
     let p2p = carrier_of(&net, "p2p");
-    assert_eq!(p2p["state"], "lab", "{p2p}");
+    assert_eq!(p2p["state"], lab_state, "{p2p}");
     assert_eq!(p2p["running"], true, "{p2p}");
     let relays = net["relays"].as_array().unwrap();
     assert_eq!(relays.len(), 1, "{net}");

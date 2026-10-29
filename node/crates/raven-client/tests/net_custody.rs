@@ -2,7 +2,8 @@
 //! of scripts/lan_fault_matrix.py: B is offline, A's message is left with C
 //! (a friend both verified and listed for each other), A goes offline too,
 //! and B collects it from C once B starts. Lab switches for this test binary
-//! only: `RAVEN_LAB_TEST_A=1` (the custody gate), `RAVEN_LAB_CUSTODY_AFTER_MS=0`
+//! only: `RAVEN_LAB_TEST_A=1` (its harness values need it; the custody gate
+//! itself is on in release builds since 2026-10), `RAVEN_LAB_CUSTODY_AFTER_MS=0`
 //! (leave a copy at once) and `RAVEN_LAB_CUSTODY_FETCH_MS=1000` (collect every
 //! second). Every node listens on 127.0.0.1, any free port.
 //!
@@ -36,9 +37,11 @@ fn a_friend_holds_the_message_until_the_recipient_starts() {
         x.befriend(y, None);
     }
 
-    // C carries for friends: the consent first, then the yes.
+    // C carries for friends: the consent first, then the yes. A lab way
+    // only in a build that holds custody (before 2026-10).
+    let lab = !raven_core::custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED;
     let custody = c.carrier("custody");
-    assert_eq!(custody["lab"], true, "{custody}");
+    assert_eq!(custody["lab"], lab, "{custody}");
     let net = c.ok("network.status", json!({}));
     assert!(
         net["texts"]["carry_for_friends"]
@@ -177,5 +180,5 @@ fn a_friend_holds_the_message_until_the_recipient_starts() {
         b.service_log()
     );
     let custody = carrier_of(&b.ok("network.status", json!({})), "custody");
-    assert_eq!(custody["lab"], true, "{custody}");
+    assert_eq!(custody["lab"], lab, "{custody}");
 }

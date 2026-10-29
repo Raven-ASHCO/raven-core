@@ -279,6 +279,10 @@ fn name_of(id: &str) -> &'static str {
 
 /// The plain sentence for a way held in this build.
 const PREVIEW_REASON: &str = "Not in this version of Raven yet.";
+/// Bluetooth nearby on Windows and Linux: release builds have it on macOS
+/// only (2026-10).
+const NEARBY_MACOS_ONLY_REASON: &str =
+    "Not in this version of Raven on this computer: Bluetooth nearby is on macOS only so far.";
 /// The plain sentence for a way on only through a lab switch.
 const LAB_REASON: &str = "On for testing only: a developer build's lab switch turned it on.";
 /// The plain sentence for a way the running raven-node uses while the saved
@@ -424,6 +428,8 @@ fn way(id: &'static str, facts: &NetFacts) -> Value {
             "not_on_this_os",
             "This computer can't use Bluetooth nearby (no Bluetooth LE support for it).",
         )
+    } else if !g.live && id == "nearby" && !raven_core::NEARBY_PRODUCTION_ENABLED {
+        ("preview", NEARBY_MACOS_ONLY_REASON)
     } else if !g.live {
         ("preview", PREVIEW_REASON)
     } else if runs_unsaved {
@@ -2026,22 +2032,31 @@ mod tests {
             assert!(!name_of(id).is_empty(), "{id}");
             let g = gate(id);
             assert!(g.constant.ends_with("_PRODUCTION_ENABLED"), "{id}");
-            // A way off by default has a lab switch; only LAN direct is
-            // released (no switch needed).
+            // Every way but LAN direct has a debug switch: a held one's
+            // opens it, a switched-on one's (2026-10) closes it with "0".
             assert_eq!(g.switches.is_empty(), *id == "lan", "{id}");
         }
         assert!(gate("lan").production, "LAN direct is the released way");
     }
 
+    /// The released ways (2026-10): LAN direct and the field-tested set,
+    /// Bluetooth nearby on macOS only; every other way and every protection
+    /// stays held (the owner's gate rule).
     #[test]
-    fn no_other_gate_is_released() {
+    fn only_the_field_tested_ways_are_released() {
+        let released = [
+            "lan",
+            "internet",
+            "port_mapping",
+            "p2p",
+            "friend_relay",
+            "custody",
+            "route_hints",
+            "tor",
+        ];
         for id in CARRIERS.iter().chain(PROTECTIONS.iter()) {
-            if *id != "lan" {
-                assert!(
-                    !gate(id).production,
-                    "{id} must stay held (owner's gate rule)"
-                );
-            }
+            let want = released.contains(id) || (*id == "nearby" && cfg!(target_os = "macos"));
+            assert_eq!(gate(id).production, want, "{id}");
         }
     }
 
@@ -2281,7 +2296,7 @@ mod tests {
         };
         let g = gate("tor");
         assert_eq!(g.constant, "ONION_PRODUCTION_ENABLED");
-        assert!(!g.production, "Tor stays held (owner's gate rule)");
+        assert!(g.production, "Tor is on in release builds since 2026-10");
         let dir = std::env::temp_dir().join("raven-client-tor-view-test-missing");
         let blocked = facts(Some(
             "Tor: blocked on this network (bridges needed; retrying in 2 min)",

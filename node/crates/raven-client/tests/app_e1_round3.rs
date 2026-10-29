@@ -16,6 +16,17 @@ use raven_core::chat_history::{ChatHistory, ChatHistoryEntry};
 use raven_core::outbox::QueueReach;
 use serde_json::{json, Value};
 
+/// The long message horizon closed for this test binary (a debug build's
+/// `RAVEN_LAB_HORIZON=0`): release builds have it on since 2026-10, and then
+/// a message to an away friend waits up to 7 days, first or not (raven-client
+/// `network::tests::away_tells_a_first_message_from_an_ended_connection`,
+/// ash's bridge tests).
+/// These E1 checks pin the words and states without it.
+fn horizon_closed() {
+    common::lab_env();
+    std::env::set_var("RAVEN_LAB_HORIZON", "0");
+}
+
 fn key_hex(dir: &Path, address: &str) -> String {
     ash_engine::engine::contact_views(dir)
         .expect("contacts")
@@ -73,6 +84,7 @@ fn texts(list: &[Value]) -> Vec<String> {
 /// delivered, with Send again (which replaces it for good) and Delete.
 #[test]
 fn a_message_that_was_not_sent_stays_after_a_restart() {
+    horizon_closed();
     if common::raven_node().is_none() {
         eprintln!("skipped: raven-node is not built (run `cargo build` in node/)");
         return;
@@ -188,6 +200,7 @@ fn deliveries_keep_their_way_and_late_time_after_a_restart() {
 /// you both online; `meet_first` stays set for an app that knows only it).
 #[test]
 fn routes_say_where_the_friend_is_reached_now() {
+    horizon_closed();
     let a = Peer::new("a");
     let b = Peer::new("b");
     a.befriend(&b, None);
@@ -234,6 +247,7 @@ fn routes_say_where_the_friend_is_reached_now() {
 /// was set up a message can wait, and after it ended it is meet first.
 #[test]
 fn routes_tell_a_first_message_from_an_ended_connection() {
+    horizon_closed();
     if common::raven_node().is_none() {
         eprintln!("skipped: raven-node is not built (run `cargo build` in node/)");
         return;

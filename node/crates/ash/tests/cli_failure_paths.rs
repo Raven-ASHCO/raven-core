@@ -31,7 +31,11 @@ fn ash(dir: &Path) -> Command {
         .env_remove("ASH_LAN_DIAL")
         // A service a run starts by itself receives on 127.0.0.1 only, never
         // on the LAN port another raven-node on this machine may hold.
-        .env("RAVEN_SERVICE_LAN_LISTEN", "127.0.0.1:0");
+        .env("RAVEN_SERVICE_LAN_LISTEN", "127.0.0.1:0")
+        // Release builds have Tor and STUN discovery on since 2026-10; no
+        // run here reaches the Tor network or a public STUN server.
+        .env("RAVEN_LAB_TOR", "0")
+        .env("RAVEN_LAB_STUN_DISCOVERY", "0");
     // Plain profiles, whatever privacy switches the suite runs with (the
     // tests read the profile's files themselves); a test that wants a lab
     // login item or an erase root sets it after this.
@@ -830,17 +834,23 @@ mod first_install {
             "{}",
             text(&o.stdout)
         );
-        for lab in [false, true] {
+        // Held (the debug switch's "0"), opened by the lab switches, and as
+        // the build sets it (since 2026-10 on in macOS release builds, held on
+        // Windows and Linux): an open gate still needs the identity first.
+        for (closed, lab) in [(true, false), (false, true), (false, false)] {
             let mut c = ash(dir.path());
             if lab {
                 c.env("RAVEN_LAB_TEST_A", "1").env("RAVEN_LAB_NEARBY", "1");
+            } else if closed {
+                c.env("RAVEN_LAB_NEARBY", "0");
             } else {
                 c.env_remove("RAVEN_LAB_NEARBY");
             }
             c.args(["nearby", "enable"]);
             let o = run(c, "");
             assert_eq!(code(&o), 1, "{}", text(&o.stdout));
-            let want = if lab { "ash init" } else { "NEARBY_HOLD" };
+            let open = lab || (!closed && raven_core::NEARBY_PRODUCTION_ENABLED);
+            let want = if open { "ash init" } else { "NEARBY_HOLD" };
             assert!(text(&o.stderr).contains(want), "{}", text(&o.stderr));
         }
         // The identity lock the check takes is allow-listed (as for the

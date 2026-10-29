@@ -1,6 +1,8 @@
-//! Groups with the gate closed (no lab switch in this process, as in a
-//! release build): `groups.list` says `available: false` and every other
-//! `groups.*` op is NOT_AVAILABLE_YET, with nothing read or written.
+//! Groups with the gate closed: release builds have groups since 2026-10,
+//! so here a debug build's `RAVEN_LAB_GROUPS=0` closes them for this test
+//! binary (as a build that holds them): `groups.list` says `available:
+//! false` and every other `groups.*` op is NOT_AVAILABLE_YET, with nothing
+//! read or written.
 
 mod common;
 
@@ -10,8 +12,13 @@ use serde_json::json;
 use common::{err, ok, short_dir};
 
 #[test]
-fn groups_are_not_available_without_the_lab_switches() {
+fn groups_are_not_available_while_their_gate_is_closed() {
+    if !cfg!(debug_assertions) {
+        eprintln!("skipped: a release engine reads no lab switch");
+        return;
+    }
     common::lab_env();
+    std::env::set_var("RAVEN_LAB_GROUPS", "0");
     let dir = short_dir();
     let path = dir.path().join("p");
     let client = Client::with_data_dir(&path);

@@ -3307,13 +3307,19 @@ fn lan_default(auto_live: bool, port: Option<u16>) -> String {
 }
 
 /// `raven-node ble-status`'s nearby lines (they replace the retired
-/// CoreBluetooth experiment's): the gate (`held` until the owner signs the
-/// nearby waiver, `lab` in a debug lab run), the backend this build would use
-/// (with `nearby-radio`: `bluez` on glibc Linux, `winrt` on Windows, `apple`
-/// on macOS; else `none`) and that no radio was opened here.
-fn ble_status_lines(gate_live: bool, backend: &str) -> Vec<String> {
+/// CoreBluetooth experiment's): the gate (`on` where release builds have it,
+/// macOS since 2026-10; `lab` when only a debug lab switch opened it; `held`
+/// while it is closed), the backend this build would use (with
+/// `nearby-radio`: `bluez` on glibc Linux, `winrt` on Windows, `apple` on
+/// macOS; else `none`) and that no radio was opened here.
+fn ble_status_lines(gate_live: bool, production: bool, backend: &str) -> Vec<String> {
+    let gate = match (gate_live, production) {
+        (true, true) => "on",
+        (true, false) => "lab",
+        (false, _) => "held",
+    };
     vec![
-        format!("nearby_gate={}", if gate_live { "lab" } else { "held" }),
+        format!("nearby_gate={gate}"),
         format!("nearby_backend={backend}"),
         "nearby_radio=not_opened".to_owned(),
         "nearby_hint=the running service reports the radio, roles, address privacy and \
@@ -5906,6 +5912,7 @@ async fn main() {
             // roles, address privacy and counts (`raven status`).
             for line in ble_status_lines(
                 raven_core::nearby_live_enabled(),
+                raven_core::NEARBY_PRODUCTION_ENABLED,
                 nearby::radio::backend_name(),
             ) {
                 println!("{line}");
@@ -6019,15 +6026,21 @@ mod lifecycle_tests {
     /// opened no radio (the retired CoreBluetooth lines are gone).
     #[test]
     fn ble_status_names_the_gate_and_the_backend() {
+        for production in [false, true] {
+            assert_eq!(
+                ble_status_lines(false, production, "none")[..3],
+                [
+                    "nearby_gate=held",
+                    "nearby_backend=none",
+                    "nearby_radio=not_opened"
+                ]
+            );
+        }
         assert_eq!(
-            ble_status_lines(false, "none")[..3],
-            [
-                "nearby_gate=held",
-                "nearby_backend=none",
-                "nearby_radio=not_opened"
-            ]
+            ble_status_lines(true, false, "ether_hub")[0],
+            "nearby_gate=lab"
         );
-        assert_eq!(ble_status_lines(true, "ether_hub")[0], "nearby_gate=lab");
+        assert_eq!(ble_status_lines(true, true, "apple")[0], "nearby_gate=on");
     }
 
     /// P5.26: `raven-node nearby-ether` (the lab Bluetooth ether hub) exists

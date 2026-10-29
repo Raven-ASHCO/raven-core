@@ -2897,6 +2897,9 @@ mod tests {
 
     #[test]
     fn the_file_watch_reports_changes_and_new_service_log_lines() {
+        // Groups (on in release builds since 2026-10) add their own file:
+        // off on this thread here; the groups' watch has its own test below.
+        raven_core::group::set_lab_groups_for_this_thread(Some(false));
         let dir = testkit::short_dir();
         let mut files = FileWatch::default();
         // First look: every file, missing or not.

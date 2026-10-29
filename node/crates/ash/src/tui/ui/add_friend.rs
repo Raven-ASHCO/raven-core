@@ -761,10 +761,16 @@ fn route_rows(friend: &FriendPreview, look: &Look, width: u16) -> Vec<Line<'stat
                 .map(|row| Line::raw(format!("{pad}{row}"))),
         );
     }
-    if friend.lan.is_empty() {
+    if friend.lan.is_empty() && lan_only_build() {
         lines.extend(rows(LAN_ONLY_HERE, width));
     }
     lines
+}
+
+/// This build reaches friends over the local network alone (Internet direct
+/// and p2p both held, as before 2026-10).
+fn lan_only_build() -> bool {
+    controller::INTERNET_PREVIEW && controller::P2P_PREVIEW
 }
 
 /// NAME-CLASH: the verified friend's name was typed for another key. It
@@ -1647,19 +1653,28 @@ mod tests {
         let shown = screen(&app);
         assert!(shown.contains("No network address included. You can add one later."));
         assert!(shown.contains("Raven address: rvn1"), "{shown}");
-        // Only an Internet address: Preview, and not usable here.
+        // Only an Internet address: usable in a release build (2026-10:
+        // Internet direct is on), so nothing says local network only.
         let id = raven_core::identity::Identity::from_seed(&[BOB; 32]);
         let card = bridge::format_card_with(&id, "203.0.113.9:7420", "", None).expect("a card");
         let app = af2(Vec::new(), &card, "");
         let shown = screen(&app);
-        assert!(
-            shown.contains(
-                "Can be reached at: 203.0.113.9:7420 (internet, Preview, not in this release) \
-                 This invite has no local-network address, and this version of Raven can only \
-                 use the local network."
-            ),
-            "{shown}"
-        );
+        if lan_only_build() {
+            assert!(
+                shown.contains(
+                    "Can be reached at: 203.0.113.9:7420 (internet, Preview, not in this release) \
+                     This invite has no local-network address, and this version of Raven can only \
+                     use the local network."
+                ),
+                "{shown}"
+            );
+        } else {
+            assert!(
+                shown.contains("Can be reached at: 203.0.113.9:7420 (internet) What do"),
+                "{shown}"
+            );
+            assert!(!shown.contains("can only use the local network"), "{shown}");
+        }
         assert_no_code(&testkit::render(&app, 80, 24));
     }
 

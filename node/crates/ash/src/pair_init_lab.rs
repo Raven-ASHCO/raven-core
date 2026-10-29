@@ -182,12 +182,13 @@ const OUTBOX_KICK_TIMEOUT: Duration = Duration::from_secs(2);
 /// (`LearningPlan`, Phase 6a); past it, today's order.
 const LEARNING_PLAN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Refusal for the lab-only Internet carrier. Shared with ext.rs, which refuses
-/// with it before it would start a daemon.
+/// Refusal while the Internet carrier is closed (on in release builds since
+/// 2026-10; a debug build closes it with `RAVEN_LAB_TEST_A=0`). Shared with
+/// ext.rs, which refuses with it before it would start a daemon.
 pub const INTERNET_DIRECT_HOLD: &str =
-    "INTERNET_DIRECT_HOLD: indexed InternetTransport is lab-only \
-     (debug RAVEN_LAB_TEST_A=1); INTERNET_DIRECT_PRODUCTION_ENABLED=false; \
-     localhost ≠ WAN Proven";
+    "INTERNET_DIRECT_HOLD: Internet direct is closed in this process (a debug build with \
+     RAVEN_LAB_TEST_A=0 or RAVEN_LAB_NEARBY_ONLY=1, or a security notice); release builds have \
+     it on (INTERNET_DIRECT_PRODUCTION_ENABLED=true)";
 
 /// Carrier for one indexed send. `Internet` and `P2p` are lab-only (not WAN
 /// Proven).
@@ -5488,8 +5489,9 @@ mod revocation_and_offline_tests {
     #[test]
     fn internet_hold_message_is_the_shared_gate_text() {
         assert!(INTERNET_DIRECT_HOLD.starts_with("INTERNET_DIRECT_HOLD:"));
-        assert!(INTERNET_DIRECT_HOLD.contains("RAVEN_LAB_TEST_A=1"));
-        assert!(INTERNET_DIRECT_HOLD.contains("localhost ≠ WAN Proven"));
+        assert!(INTERNET_DIRECT_HOLD.contains("RAVEN_LAB_TEST_A=0"));
+        assert!(INTERNET_DIRECT_HOLD.contains("INTERNET_DIRECT_PRODUCTION_ENABLED=true"));
+        assert!(!INTERNET_DIRECT_HOLD.contains("lab-only"));
     }
 }
 
@@ -6356,9 +6358,12 @@ mod send_path_tests {
     /// status` reads the store. A message queued while the contact could not
     /// be reached is still "queued" past its deadline (the route evidence
     /// outlives the live record), so it "will not be sent", never "may have
-    /// arrived"; once a carrier wrote it, it may have.
+    /// arrived"; once a carrier wrote it, it may have. The long horizon
+    /// (on in release builds since 2026-10, when a message waits 7 days
+    /// instead) is off on this thread, so the deadline is the envelope's.
     #[test]
     fn a_message_queued_while_unreachable_never_reads_as_sent_past_its_deadline() {
+        raven_core::horizon::set_lab_horizon_for_this_thread(Some(false));
         let rig = Rig::new(0x9d);
         rig.send("hello").unwrap();
         rig.set_mode(DOWN);
@@ -6388,6 +6393,7 @@ mod send_path_tests {
             line(expired).as_deref(),
             Some("Waiting messages: none (1 was sent but not confirmed in time and may have arrived).")
         );
+        raven_core::horizon::set_lab_horizon_for_this_thread(None);
     }
 
     #[test]

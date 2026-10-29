@@ -92,9 +92,9 @@ const FRAME_LENGTH: &str = raven_core::security_events::INTERNET_FRAME_LENGTH;
 /// A nearby link whose Noise key is not the contact its pipe was knocked
 /// for ([`serve_inbound_on`]'s `expected_peer`).
 pub(crate) const NEARBY_KEY_MISMATCH: &str = "nearby link key differs from the knocked contact";
-pub(crate) const HOLD: &str = "INTERNET_DIRECT_HOLD: indexed InternetTransport is lab-only \
-    (debug RAVEN_LAB_TEST_A=1); INTERNET_DIRECT_PRODUCTION_ENABLED=false; \
-    localhost ≠ WAN Proven";
+pub(crate) const HOLD: &str = "INTERNET_DIRECT_HOLD: Internet direct is closed in this process \
+    (a debug build with RAVEN_LAB_TEST_A=0 or RAVEN_LAB_NEARBY_ONLY=1, or a security notice); \
+    release builds have it on (INTERNET_DIRECT_PRODUCTION_ENABLED=true)";
 
 /// One flavour of the Raven Noise link. Everything but the prologue, the
 /// carrier (contact gate, outbox labels) and the gate is shared.

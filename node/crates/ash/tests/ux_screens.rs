@@ -45,6 +45,12 @@ fn ash(dir: &Path) -> Command {
         .env_remove("RAVEN_PEER")
         .env_remove("ASH_LAN_DIAL")
         .env("RAVEN_SERVICE_LAN_LISTEN", "127.0.0.1:0");
+    // Release builds have the Tor onion carrier and STUN discovery on since
+    // 2026-10; no test here reaches the Tor network or asks a public STUN
+    // server, so a raven-node these tests start has both closed (a debug
+    // build's "0").
+    c.env("RAVEN_LAB_TOR", "0")
+        .env("RAVEN_LAB_STUN_DISCOVERY", "0");
     c
 }
 
@@ -416,7 +422,7 @@ fn send_help_says_the_text_comes_from_stdin_and_shows_the_example() {
     // How to reach the contact is a user choice now (transports P1, P3;
     // Bluetooth nearby, P5.28): shown.
     assert!(
-        help.contains("--carrier <auto|lan|internet|p2p|nearby>"),
+        help.contains("--carrier <auto|lan|internet|p2p|onion|nearby>"),
         "{help}"
     );
     // The old developer-only wording and the unusable options are gone from view.
@@ -925,12 +931,28 @@ fn ash_nearby_lab(dir: &Path) -> Command {
     c
 }
 
-/// `ash` as a build that holds nearby (the lab switch unset).
+/// `ash` as a build that holds nearby: since 2026-10 release builds have
+/// it on macOS only, so here its debug switch closes it (`0`), on every
+/// system.
 fn ash_nearby_held(dir: &Path) -> Command {
     let mut c = ash(dir);
-    c.env_remove("RAVEN_LAB_NEARBY");
+    c.env("RAVEN_LAB_NEARBY", "0");
     c
 }
+
+/// Why nearby is held (ash's `nearby_cli::HELD_WHY`): release builds have it
+/// on macOS only; on macOS only the debug switch closes it.
+const HELD_WHY: &str = if cfg!(target_os = "macos") {
+    "Bluetooth nearby is closed in this process (RAVEN_LAB_NEARBY=0)"
+} else {
+    "Bluetooth nearby is in release builds on macOS only"
+};
+/// The same in `raven doctor`.
+const HELD_DOCTOR: &str = if cfg!(target_os = "macos") {
+    "RAVEN_LAB_NEARBY=0"
+} else {
+    "NEARBY_PRODUCTION_ENABLED=false: macOS only"
+};
 
 fn nearby_info(radio: &str, roles: &[&str], address: &str) -> NearbyStatusInfo {
     NearbyStatusInfo {
@@ -967,7 +989,7 @@ fn status_and_doctor_show_the_nearby_rows() {
         &["doctor"],
     );
     assert!(
-        doctor.contains("\n  bluetooth_nearby: held (NEARBY_PRODUCTION_ENABLED=false)\n"),
+        doctor.contains(&format!("\n  bluetooth_nearby: held ({HELD_DOCTOR})\n")),
         "{doctor}"
     );
     assert!(!doctor.contains("bluetooth: skipped"), "{doctor}");
@@ -982,8 +1004,7 @@ fn status_and_doctor_show_the_nearby_rows() {
     assert_eq!(
         section(&status, "BLUETOOTH NEARBY"),
         [format!(
-            "  {:<14}held in this build: Bluetooth nearby is not released yet (your choice is \
-             kept)",
+            "  {:<14}held in this build: {HELD_WHY} (your choice is kept)",
             "state"
         )],
         "{status}"
@@ -1809,7 +1830,7 @@ fn whoami_card_is_v3_only_with_route_hints_and_compat_prints_todays_card() {
         if hints {
             c.env("RAVEN_LAB_ROUTE_HINTS", "1");
         } else {
-            c.env_remove("RAVEN_LAB_ROUTE_HINTS");
+            c.env("RAVEN_LAB_ROUTE_HINTS", "0");
         }
         let o = run(c, "");
         assert_eq!(code(&o), 0, "{}", text(&o.stderr));
@@ -1872,7 +1893,7 @@ fn hide_ip_commands_say_what_they_do_and_status_shows_the_row() {
     add_bob(dir.path(), "Bob");
     let status = || {
         let mut c = ash(dir.path());
-        c.arg("status").env_remove("RAVEN_LAB_ROUTE_HINTS");
+        c.arg("status").env("RAVEN_LAB_ROUTE_HINTS", "0");
         text(&run(c, "").stdout)
     };
     assert!(!status().contains("hide my IP"));
@@ -2174,7 +2195,7 @@ fn with_node(dir: &Path, fake: Fake, args: &[&str]) -> String {
 /// thread).
 fn with_node_no_custody(dir: &Path, fake: Fake, args: &[&str]) -> String {
     let mut c = ash(dir);
-    c.env_remove("RAVEN_LAB_ROUTE_HINTS");
+    c.env("RAVEN_LAB_ROUTE_HINTS", "0");
     with_node_cmd(dir, fake, c, args)
 }
 

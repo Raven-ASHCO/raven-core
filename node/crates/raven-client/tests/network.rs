@@ -1,7 +1,7 @@
 //! The network ops on a debug engine with no lab switch (desktop/api/API.md,
 //! NETWORK_PARITY.md): LAN direct between two profiles through the engine
-//! API, the help-friends flags the CLI reads, and every held way shown as
-//! `preview` and refused.
+//! API, the help-friends flags the CLI reads, the released ways (2026-10)
+//! and every held way shown as `preview` and refused.
 //!
 //! Needs the raven-node and raven that `cargo build` puts next to the test
 //! binaries' folder; without them the tests say so and pass.
@@ -61,7 +61,8 @@ fn lan_direct_between_two_profiles() {
     assert!(net["port"].as_u64().is_some_and(|p| p > 0), "{net}");
     assert_eq!(net["lab_switches"], json!([]), "{net}");
 
-    // A's routes for B: the saved LAN address, and nearby (verified) held.
+    // A's routes for B: the saved LAN address, and nearby (verified): held
+    // except on macOS, where release builds have it (off until enabled).
     let routes = a.ok("contacts.routes", json!({"address": b.address()}));
     assert_eq!(routes["verified"], true, "{routes}");
     let kinds: Vec<&str> = routes["routes"]
@@ -73,7 +74,12 @@ fn lan_direct_between_two_profiles() {
     assert_eq!(kinds, ["lan", "nearby"], "{routes}");
     assert_eq!(routes["routes"][0]["value"], b_listen.as_str());
     assert_eq!(routes["routes"][0]["state"], "on");
-    assert_eq!(routes["routes"][1]["state"], "preview");
+    let nearby_state = if cfg!(target_os = "macos") {
+        "off"
+    } else {
+        "preview"
+    };
+    assert_eq!(routes["routes"][1]["state"], nearby_state, "{routes}");
     assert_eq!(routes["hide_ip"], false);
     // Friends carry mail for verified contacts: a class is given.
     assert!(
@@ -201,10 +207,12 @@ fn help_flags_change_the_policy_the_cli_reads() {
     assert_eq!(p.err("network.set", json!({"store": "yes"})), "BAD_REQUEST");
 }
 
-/// Without a lab switch a debug engine holds what a release holds: every
-/// way but LAN direct is `preview`, turning one on is NOT_AVAILABLE_YET and
-/// changes nothing, turning one off is fine; the Phase 6 views say they are
-/// not in this version.
+/// Without a lab switch a debug engine holds what a release holds: since
+/// 2026-10 the field-tested ways are released (off until the person turns
+/// one on, or on by themselves), Bluetooth nearby on macOS only; every other
+/// way is `preview`, turning one on is NOT_AVAILABLE_YET and changes
+/// nothing, turning one off is fine; the Phase 6 views say they are not in
+/// this version.
 #[test]
 fn held_ways_are_preview_and_refused_without_a_lab_switch() {
     if !binaries_ready() {
@@ -212,45 +220,53 @@ fn held_ways_are_preview_and_refused_without_a_lab_switch() {
     }
     let p = Peer::new("Held");
     let net = p.ok("network.status", json!({}));
+    let released = [
+        "lan",
+        "internet",
+        "port_mapping",
+        "p2p",
+        "friend_relay",
+        "custody",
+        "route_hints",
+        "tor",
+    ];
     for c in net["carriers"]
         .as_array()
         .unwrap()
         .iter()
         .chain(net["protections"].as_array().unwrap())
     {
-        let want = match c["id"].as_str().unwrap() {
-            "lan" => "on",
-            "nearby"
-                if cfg!(not(any(
-                    target_os = "macos",
-                    windows,
-                    all(target_os = "linux", target_env = "gnu")
-                ))) =>
-            {
-                "not_on_this_os"
-            }
-            _ => "preview",
-        };
-        assert_eq!(c["state"], want, "{c}");
+        let id = c["id"].as_str().unwrap();
+        let nearby_here = cfg!(any(
+            target_os = "macos",
+            windows,
+            all(target_os = "linux", target_env = "gnu")
+        ));
+        if id == "nearby" && !nearby_here {
+            assert_eq!(c["state"], "not_on_this_os", "{c}");
+        } else if released.contains(&id) || (id == "nearby" && cfg!(target_os = "macos")) {
+            assert_ne!(c["state"], "preview", "{c}");
+            assert_ne!(c["state"], "lab", "{c}");
+        } else {
+            assert_eq!(c["state"], "preview", "{c}");
+        }
         assert_eq!(c["lab"], false, "{c}");
     }
+    assert_eq!(carrier_of(&net, "lan")["state"], "on", "{net}");
     let node = p.ok("node.status", json!({}));
     assert_eq!(node["lab"], json!([]), "{node}");
     assert_eq!(node["lab_switches"], json!([]), "{node}");
     let before = std::fs::read(p.path.join("node_policy.json")).ok();
-    for on in [
-        json!({"internet": true, "internet_listen": "127.0.0.1:9"}),
-        json!({"p2p": true}),
-        json!({"port_mapping": true}),
+    let mut held = vec![
         json!({"proxy": "auto"}),
-        json!({"nearby": true}),
-        json!({"carry_for_friends": true, "agreed": true}),
-        json!({"friends_carry_mine": true, "agreed": true}),
         json!({"handoff": true, "agreed": true}),
-        json!({"relay_for_friends": true}),
         // One held way among allowed ones: nothing at all is changed.
-        json!({"bridge": false, "p2p": true}),
-    ] {
+        json!({"bridge": false, "handoff": true, "agreed": true}),
+    ];
+    if !cfg!(target_os = "macos") {
+        held.push(json!({"nearby": true}));
+    }
+    for on in held {
         assert_eq!(
             p.err("network.set", on.clone()),
             "NOT_AVAILABLE_YET",
@@ -262,6 +278,10 @@ fn held_ways_are_preview_and_refused_without_a_lab_switch() {
         before,
         "a refusal changed node_policy.json"
     );
+    // A released way turns on as the CLI turns it on (node_policy.json).
+    p.ok("network.set", json!({"p2p": true}));
+    let policy = raven_core::node_policy::try_load_policy(&p.path).unwrap();
+    assert!(!policy.p2p_listen.trim().is_empty(), "{policy:?}");
     // Turning a held way off is no change of carrier: allowed.
     let off = p.ok("network.set", json!({"p2p": false, "proxy": "off"}));
     assert_eq!(off["changes"].as_array().unwrap().len(), 2, "{off}");

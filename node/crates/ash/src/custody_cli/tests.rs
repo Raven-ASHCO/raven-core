@@ -390,7 +390,7 @@ fn custody_status_rows_counts_only() {
     assert!(rows
         .last()
         .unwrap()
-        .starts_with("note: friend mailboxes are lab-only"));
+        .starts_with("note: friend mailboxes are off in this build"));
     for row in &rows {
         for c in [&carol, &dan] {
             assert!(
@@ -991,8 +991,7 @@ fn doctor_coverage_classes_from_contacts_announcements_and_parks() {
         [
             "offline_delivery: verified_contacts=6 direct=2 mutual_friend=1 two_friends=1 \
              none=2 (raven contact show NAME says which way)",
-            "  Raven keeps it until you're both online (2 contacts): for up to a day after you \
-             were last connected",
+            "  Raven keeps it until you're both online (2 contacts): for up to 7 days",
             "  a mail friend you share (1 contact): the friend holds a sealed copy until it \
              expires, up to a day (7 days as a letter)",
             "  two friends in a row (1 contact): up to a day",
@@ -1249,6 +1248,16 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
         ]
     );
     let gina = show("@gina", &[key(&w.gina)]).unwrap();
+    // The long horizon is on (release builds since 2026-10): 7 days.
+    assert_eq!(
+        gina.last().unwrap(),
+        "  offline delivery (Raven keeps it until you're both online): for up to 7 days"
+    );
+    // With it off on this thread (a debug build's RAVEN_LAB_HORIZON=0): until
+    // the secure connection ends.
+    raven_core::horizon::set_lab_horizon_for_this_thread(Some(false));
+    let gina = show("@gina", &[key(&w.gina)]).unwrap();
+    raven_core::horizon::set_lab_horizon_for_this_thread(None);
     assert_eq!(
         gina.last().unwrap(),
         "  offline delivery (Raven keeps it until you're both online): for up to a day after \
@@ -1266,7 +1275,7 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
     let dan = show("@dan", &[]).unwrap();
     assert_eq!(
         dan[2],
-        "  mail friends Dan told you about: not in this build (friend mailboxes are lab-only)"
+        "  mail friends Dan told you about: not in this build (friend mailboxes are off)"
     );
     assert_eq!(
         dan[4],

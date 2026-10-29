@@ -3452,9 +3452,10 @@ mod tests {
             let full = snapshot_for(dd, &lan(Role::Listener)).unwrap();
             if !cfg!(debug_assertions) {
                 // A release build ignores the per-thread gate override (CI
-                // runs `hints::` in release with every lab switch set): the
-                // custody gate holds, so no offer.
-                assert_eq!(full.custody_offer, None);
+                // runs `hints::` in release with every lab switch set):
+                // since 2026-10 friend custody (WAN too) and route hints are
+                // on there, so the offer goes out.
+                assert!(full.custody_offer.is_some());
                 return;
             }
             assert_eq!(full.custody_offer, Some(0), "no WAN, not reachable");
@@ -3841,8 +3842,8 @@ mod tests {
         assert_eq!(take_announced(), [(None, down.generation)]);
     }
 
-    /// The friend relay switch (with route hints, relay offers are live
-    /// only under `RAVEN_LAB_FRIEND_RELAY=1` in a debug build): off, no
+    /// The friend relay gate off (since 2026-10 only a debug build's
+    /// `RAVEN_LAB_FRIEND_RELAY=0` closes it; a link reads it): no
     /// RELAY_OFFER is sent, neither digest sees the relay, and none is kept.
     #[test]
     fn no_offer_with_the_friend_relay_switch_off() {
@@ -3882,9 +3883,15 @@ mod tests {
             (ctl.snap_ctx().offers_live, ctl.apply_ctx().offers_live),
             (live, live)
         );
-        if std::env::var("RAVEN_LAB_FRIEND_RELAY").as_deref() != Ok("1") {
+        // This process: on as in a release build, unless its environment
+        // closes the friend relay or route hints (or p2p) in a debug build.
+        if std::env::var("RAVEN_LAB_FRIEND_RELAY").as_deref() == Ok("0") {
             assert!(!live);
         }
+        assert_eq!(
+            live,
+            raven_core::p2p_gate::friend_relay_live_enabled() && route_hints::route_hints_live()
+        );
         // A receiver with the switch off keeps none (the cache is gated by
         // the route-hints switch, so this part needs it).
         if !route_hints::route_hints_live() {

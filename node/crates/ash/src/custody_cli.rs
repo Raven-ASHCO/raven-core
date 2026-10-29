@@ -354,10 +354,11 @@ fn local_key(data_dir: &Path) -> [u8; 32] {
         .unwrap_or([0; 32])
 }
 
-/// While learned custody is held in this build.
+/// While learned custody is held in this process (since 2026-10 only a
+/// debug build closes it).
 fn mailbox_held_note() -> String {
     format!(
-        "note: friend mailboxes are lab-only in this build ({CUSTODY_HOLD}; they also need route \
+        "note: friend mailboxes are off in this build ({CUSTODY_HOLD}; they also need route \
          hints): raven-node keeps them off until they are enabled."
     )
 }
@@ -981,9 +982,10 @@ impl Coverage {
 pub(super) const OFFLINE_NEXT_STEP: &str = "ask a friend you both trust to hold mail (raven node \
     custody on), or pin an always-on friend node as custodian";
 
-/// The same while friend custody is held in this build.
-pub(super) const OFFLINE_HELD_STEP: &str = "friends cannot hold mail in this build yet (friend \
-    custody is lab-only)";
+/// The same while friend custody is held (since 2026-10 only a debug build
+/// closes it).
+pub(super) const OFFLINE_HELD_STEP: &str = "friends cannot hold mail in this build (friend \
+    custody is off)";
 
 /// A last delivery at most this old (seconds) makes a contact `direct`.
 pub(super) const DIRECT_WITHIN_S: u64 = 24 * 3600;
@@ -1325,7 +1327,7 @@ pub(super) fn contact_show_lines(
         }
         text
     } else {
-        "not in this build (friend mailboxes are lab-only)".to_string()
+        "not in this build (friend mailboxes are off)".to_string()
     };
     lines.push(format!("  mail friends {name} told you about: {told}"));
     let listed = listed_custodians(data_dir, &peer, local).unwrap_or_default();

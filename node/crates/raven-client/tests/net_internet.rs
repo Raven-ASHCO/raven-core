@@ -1,8 +1,8 @@
-//! (b) Internet direct over 127.0.0.1 through the engine API, with the lab
-//! switch a debug build needs (`RAVEN_LAB_TEST_A=1`, set for this test
-//! binary only): `network.set {internet}` saves what `raven node internet
-//! on` saves, the raven-node the engine starts inherits the switch and opens
-//! the listener, and a friend with only an Internet route gets the message.
+//! (b) Internet direct over 127.0.0.1 through the engine API, as a release
+//! build has it since 2026-10 (no lab switch; before that a debug build
+//! needed `RAVEN_LAB_TEST_A=1`): `network.set {internet}` saves what `raven
+//! node internet on` saves, the raven-node the engine starts opens the
+//! listener, and a friend with only an Internet route gets the message.
 //!
 //! Needs the raven-node and raven that `cargo build` puts next to the test
 //! binaries' folder; without them the test says so and passes.
@@ -15,41 +15,48 @@ use common::net::{binaries_ready, carrier_of, free_port, Peer};
 use serde_json::json;
 
 #[test]
-fn internet_direct_over_loopback_with_the_lab_switch() {
+fn internet_direct_over_loopback_as_released() {
     if !binaries_ready() {
         return;
     }
     if !cfg!(debug_assertions) {
-        eprintln!("skipped: a release engine reads no lab switch (tests/net_gates.rs)");
+        eprintln!("skipped: a release engine takes only the keychain stores (tests/net_gates.rs)");
         return;
     }
     common::lab_env();
-    std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    // Held builds (before 2026-10) showed it as a lab way under the switch.
+    let lab = !raven_core::INTERNET_DIRECT_PRODUCTION_ENABLED;
+    if lab {
+        std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    }
+    let lab_state = if lab { "lab" } else { "on" };
     let a = Peer::new("Inet A");
     let b = Peer::new("Inet B");
     // Internet direct only between verified friends (owner decision).
     a.befriend(&b, None);
     b.befriend(&a, None);
 
-    // The debug engine shows the way as on for testing, and says why.
+    // Off until turned on; a lab way only in a held build.
     let before = b.carrier("internet");
     assert_eq!(before["state"], "off", "{before}");
-    assert_eq!(before["lab"], true, "{before}");
+    assert_eq!(before["lab"], lab, "{before}");
     let node = b.ok("node.status", json!({}));
-    assert!(
+    assert_eq!(
         node["lab"]
             .as_array()
             .unwrap()
             .iter()
             .any(|w| w == "internet"),
+        lab,
         "{node}"
     );
-    assert!(
+    assert_eq!(
         node["lab_switches"]
             .as_array()
             .unwrap()
             .iter()
             .any(|s| s == "RAVEN_LAB_TEST_A"),
+        lab,
         "{node}"
     );
 
@@ -69,8 +76,8 @@ fn internet_direct_over_loopback_with_the_lab_switch() {
     let policy = raven_core::node_policy::try_load_policy(&b.path).unwrap();
     assert_eq!(policy.internet_listen, listen);
 
-    // B's raven-node (started by the engine) inherited the switch: it
-    // opens the Internet listener and says so in its Status.
+    // B's raven-node (started by the engine) opens the Internet listener
+    // and says so in its Status.
     b.start();
     let mut net = serde_json::Value::Null;
     let up = (0..50).any(|_| {
@@ -87,7 +94,7 @@ fn internet_direct_over_loopback_with_the_lab_switch() {
         b.service_log()
     );
     let inet = carrier_of(&net, "internet");
-    assert_eq!(inet["state"], "lab", "{inet}");
+    assert_eq!(inet["state"], lab_state, "{inet}");
     assert_eq!(inet["setting"], true, "{inet}");
     assert!(
         net["listening"]
@@ -110,7 +117,10 @@ fn internet_direct_over_loopback_with_the_lab_switch() {
         .map(|r| r["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["internet", "nearby"], "{routes}");
-    assert_eq!(routes["routes"]["routes"][0]["state"], "lab", "{routes}");
+    assert_eq!(
+        routes["routes"]["routes"][0]["state"], lab_state,
+        "{routes}"
+    );
     assert!(routes["contact"]["lan"].is_null(), "{routes}");
 
     let m = a.send_until(

@@ -113,7 +113,7 @@ const TOR: &str = "Tor";
 const WIFI_ON: &str = "On. Works without the internet.";
 const HOTSPOT_ON: &str = "Works. One of you makes it, the other joins (press G).";
 const IN_PERSON_ON: &str =
-    "Works. Messages wait here until you meet, up to a day after you were last connected.";
+    "Works. Messages wait here until you meet, up to 7 days after you wrote them.";
 const ON: &str = "On.";
 const OFF: &str = "Off.";
 /// Bluetooth, while the background program reports no nearby engine, or
@@ -1030,12 +1030,23 @@ mod tests {
 
     #[test]
     fn net_in_a_release_build() {
-        let mut app = started_here((80, 24), testkit::session(Receive::On));
+        let release = || Session {
+            gates: testkit::release_gates(),
+            ..testkit::session(Receive::On)
+        };
+        let mut app = started_here((80, 24), release());
         let cmds = open_net(&mut app);
         assert!(cmds.contains(&Cmd::Node(NodeJob::LanAddresses)), "{cmds:?}");
         assert!(matches!(app.screen(), Screen::Network(_)));
-        // The ways by what people do: the local network ones work, the
-        // others are never on, and nothing offers to turn one on.
+        // The ways by what people do (2026-10): the local network ones,
+        // friends who carry messages and the internet work; Bluetooth on
+        // macOS says what the background program does, elsewhere it is not
+        // in this version; nothing offers to turn one on.
+        let bluetooth = if cfg!(target_os = "macos") {
+            "│ Bluetooth - Off: Raven's background program doesn't run it.                  │"
+        } else {
+            "│ Bluetooth - Not in this version.                                             │"
+        };
         testkit::assert_rows(
             &testkit::render(&app, 80, 24),
             &[
@@ -1049,11 +1060,11 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
-                "│ Bluetooth - Not in this version.                                             │",
-                "│ A friend carries messages - Not in this version.                             │",
-                "│ Over the internet - Not in this version.                                     │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
+                bluetooth,
+                "│ A friend carries messages - On.                                              │",
+                "│ Over the internet - On.                                                      │",
                 "│ Raven's background program uses: Local network.                              │",
                 "│                                                                              │",
                 "│ About this Raven                                                             │",
@@ -1066,7 +1077,7 @@ mod tests {
             ],
         );
         // Before the address answers, and when it can't be told.
-        let mut asking = started_here((80, 24), testkit::session(Receive::On));
+        let mut asking = started_here((80, 24), release());
         testkit::press(&mut asking, KeyCode::Char('n'));
         assert_eq!(
             row(&asking, 18),
@@ -1167,8 +1178,8 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
                 "│ Bluetooth - Lab only. Needs Raven's background program.                      │",
                 "│ A friend carries messages - Lab only                                         │",
                 "│ Over the internet - Lab only                                                 │",
@@ -1238,8 +1249,8 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
                 "│ Bluetooth - Not in this version.                                             │",
                 "│ A friend carries messages - Not in this version.                             │",
                 "│ Over the internet - Not in this version.                                     │",
@@ -1378,8 +1389,8 @@ mod tests {
             "│ Ways to reach friends                                                        │",
             "│ This Wi-Fi or cable - On. Works without the internet.                        │",
             "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-            "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-            "│   after you were last connected.                                             │",
+            "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+            "│   after you wrote them.                                                      │",
             "│ Bluetooth - Not in this version.                                             │",
         ];
         // Before its command line is read: no note and no advice yet, and
@@ -1549,7 +1560,7 @@ mod tests {
                 "R A V E N          ~ Receiving on this computer only  ? Help",
                 "┌ Network and status ──────────────────────────────────────┐",
                 "│ Meeting in person - Works. Messages wait here until you  │",
-                "│   meet, up to a day after you were last connected.       │",
+                "│   meet, up to 7 days after you wrote them.               │",
                 "│ Bluetooth - Not in this version.                         │",
                 "│ A friend carries messages - Not in this version.         │",
                 "│ Over the internet - Not in this version.                 │",
@@ -1987,8 +1998,8 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
                 "│ Bluetooth - Not in this version.                                             │",
                 "│ A friend carries messages - Not in this version.                             │",
                 "│ Over the internet - Not in this version.                                     │",
@@ -2162,8 +2173,8 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
                 "│ Bluetooth - Not in this version.                                             │",
                 "│ A friend carries messages - Not in this version.                             │",
                 "│ Over the internet - Not in this version.                                     │",
@@ -2342,30 +2353,48 @@ mod tests {
         let look = testkit::simple_mono();
         let (plain, dim, bold) = (Style::default(), look.theme.secondary, look.theme.warn);
         let said = |text: &str, style| (text.to_owned(), style);
-        // A release: the local network's ways work, the rest are not in
-        // this version (dim).
-        assert_eq!(
-            ways_said(&testkit::release_gates()),
-            [
-                said(
-                    "This Wi-Fi or cable - On. Works without the internet.",
-                    plain
-                ),
-                said(
-                    "A laptop's hotspot - Works. One of you makes it, the other joins \
-                     (press G).",
-                    plain
-                ),
-                said(
-                    "Meeting in person - Works. Messages wait here until you meet, up to a \
-                     day after you were last connected.",
-                    plain
-                ),
-                said("Bluetooth - Not in this version.", dim),
-                said("A friend carries messages - Not in this version.", dim),
-                said("Over the internet - Not in this version.", dim),
-            ]
-        );
+        // A release (2026-10): the local network's ways, friends who carry
+        // messages and the internet work; Bluetooth on macOS only (its
+        // words are the background program's state), not in this version
+        // elsewhere (dim).
+        let local = [
+            said(
+                "This Wi-Fi or cable - On. Works without the internet.",
+                plain,
+            ),
+            said(
+                "A laptop's hotspot - Works. One of you makes it, the other joins \
+                 (press G).",
+                plain,
+            ),
+            said(
+                "Meeting in person - Works. Messages wait here until you meet, up to 7 \
+                 days after you wrote them.",
+                plain,
+            ),
+        ];
+        let bluetooth = if cfg!(target_os = "macos") {
+            said("Bluetooth - Off.", plain)
+        } else {
+            said("Bluetooth - Not in this version.", dim)
+        };
+        let mut release = local.to_vec();
+        release.extend([
+            bluetooth,
+            said("A friend carries messages - On.", plain),
+            said("Over the internet - On.", plain),
+        ]);
+        assert_eq!(ways_said(&testkit::release_gates()), release);
+        // A build that holds everything but the local network (a release
+        // before 2026-10, or a debug build with RAVEN_LAB_TEST_A=0): the
+        // rest are not in this version (dim).
+        let mut lan_only = local.to_vec();
+        lan_only.extend([
+            said("Bluetooth - Not in this version.", dim),
+            said("A friend carries messages - Not in this version.", dim),
+            said("Over the internet - Not in this version.", dim),
+        ]);
+        assert_eq!(ways_said(&testkit::lan_only_gates()), lan_only);
         // A lab set: held ways the lab switch has on read 'Lab only' (bold),
         // never on; Bluetooth with the background program's state, as `raven
         // status` says it (E1).
@@ -2450,7 +2479,7 @@ mod tests {
                 "│ A laptop's hotspot · Works. One of you makes it, the     │",
                 "│   other joins (press G).                                 │",
                 "│ Meeting in person · Works. Messages wait here until you  │",
-                "│   meet, up to a day after you were last connected.       │",
+                "│   meet, up to 7 days after you wrote them.               │",
                 "│ Bluetooth · Not in this version.                         │",
                 "│ A friend carries messages · Not in this version.         │",
                 "│ Over the internet · Not in this version.                 │",
@@ -2488,7 +2517,7 @@ mod tests {
                 "│ A laptop's hotspot - Works. One of you makes it, the     │",
                 "│   other joins (press G).                                 │",
                 "│ Meeting in person - Works. Messages wait here until you  │",
-                "│   meet, up to a day after you were last connected.       │",
+                "│   meet, up to 7 days after you wrote them.               │",
                 "│ Bluetooth - Not in this version.                         │",
                 "│ A friend carries messages - Not in this version.         │",
                 "│ Over the internet - Not in this version.                 │",
@@ -2526,7 +2555,7 @@ mod tests {
                 "| A laptop's hotspot - Works. One of you makes it, the     |",
                 "|   other joins (press G).                                 |",
                 "| Meeting in person - Works. Messages wait here until you  |",
-                "|   meet, up to a day after you were last connected.       |",
+                "|   meet, up to 7 days after you wrote them.               |",
                 "| Bluetooth - Not in this version.                         |",
                 "| A friend carries messages - Not in this version.         |",
                 "| Over the internet - Not in this version.                 |",
@@ -2614,8 +2643,8 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
                 "│ Bluetooth - Not in this version.                                             │",
                 "│ A friend carries messages - Not in this version.                             │",
                 "│ Over the internet - Not in this version.                                     │",
@@ -2719,8 +2748,8 @@ mod tests {
                 "│ Ways to reach friends                                                        │",
                 "│ This Wi-Fi or cable - On. Works without the internet.                        │",
                 "│ A laptop's hotspot - Works. One of you makes it, the other joins (press G).  │",
-                "│ Meeting in person - Works. Messages wait here until you meet, up to a day    │",
-                "│   after you were last connected.                                             │",
+                "│ Meeting in person - Works. Messages wait here until you meet, up to 7 days   │",
+                "│   after you wrote them.                                                      │",
                 "│ Bluetooth - Not in this version.                                             │",
                 "│ A friend carries messages - Not in this version.                             │",
                 "│ Over the internet - Not in this version.                                     │",
