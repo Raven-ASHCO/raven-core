@@ -802,7 +802,18 @@ fn encode_entries(entries: &Entries) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     if entries.len() > MAX_ENTRIES {
         return Err(VaultError::TooLarge("too many vault entries"));
     }
-    let mut out = Zeroizing::new(Vec::new());
+    // The exact size first: a buffer that grew would leave copies of the
+    // secrets in the freed blocks it outgrew, which nothing wipes.
+    let mut size = 4usize;
+    for (name, value) in entries {
+        size = size
+            .saturating_add(2 + name.len() + 4)
+            .saturating_add(value.len());
+    }
+    if size > MAX_PLAINTEXT_BYTES {
+        return Err(VaultError::TooLarge("vault contents"));
+    }
+    let mut out = Zeroizing::new(Vec::with_capacity(size));
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (name, value) in entries {
         validate_name(name)?;
@@ -1596,6 +1607,19 @@ mod tests {
             Err(VaultError::UnsafeParams(_))
         ));
         assert!(!other.path().join(VAULT_FILE_NAME).exists());
+    }
+
+    /// The encoded entries hold the secrets: written into a buffer sized
+    /// once, so no outgrown block with a copy of them is ever freed.
+    #[test]
+    fn entries_are_encoded_without_growing_the_buffer() {
+        let mut entries = Entries::new();
+        for (name, len) in [("seed", 32), ("k_hist", 32), ("prekey", 1_200), ("x", 7)] {
+            entries.insert(name.into(), Zeroizing::new(vec![0x5A; len]));
+        }
+        let encoded = encode_entries(&entries).unwrap();
+        assert_eq!(encoded.capacity(), encoded.len());
+        assert_eq!(decode_entries(&encoded).unwrap().len(), 4);
     }
 
     #[test]
