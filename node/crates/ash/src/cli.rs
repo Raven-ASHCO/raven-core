@@ -2199,11 +2199,29 @@ fn save_contacts(data_dir: &Path, contacts: &[Contact]) -> Result<(), String> {
 /// The profile's identity, created when it has none (`init`, the first
 /// run): a profile created here picks its random LAN port too (Phase 6b
 /// P6.36, while that gate is live).
+/// [`raven_core::load_or_create_profile_identity`]; a profile whose
+/// identity this call created is sealed at once where this build seals
+/// (privacy pack PP.4, [`at_rest_notices`] under `policy`), as the desktop
+/// engine does, so what this process writes next (its prekey, the device
+/// secret, contacts, routes) is never written plain. Before, only the next
+/// process sealed them. The error is raven-core's redacted reason.
+fn create_profile_identity(
+    data_dir: &Path,
+    policy: raven_core::at_rest::MigratePolicy,
+) -> Result<Identity, String> {
+    let fresh = !raven_core::identity_store::identity_recorded(data_dir).unwrap_or(true);
+    let (id, _) =
+        raven_core::load_or_create_profile_identity(data_dir).map_err(|e| e.redacted_display())?;
+    if fresh {
+        let _ = at_rest_notices(data_dir, policy, false);
+    }
+    Ok(id)
+}
+
 fn ensure_identity(data_dir: &Path) -> Identity {
-    match raven_core::load_or_create_profile_identity(data_dir) {
-        Ok((id, _)) => id,
-        Err(e) => {
-            let raw = e.redacted_display();
+    match create_profile_identity(data_dir, raven_core::at_rest::MigratePolicy::Auto) {
+        Ok(id) => id,
+        Err(raw) => {
             eprintln!("secure identity store: {raw}");
             if raw.contains("continuity violation") {
                 let c = c();
@@ -18418,6 +18436,32 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         .unwrap();
         assert_eq!(report.outcome, raven_core::privacy::MigrateOutcome::Sealed);
         dir
+    }
+
+    /// Privacy pack PP.4: the process that creates a profile's identity
+    /// seals the profile at once (where the build seals), as the desktop
+    /// engine does: what it writes next (the prekey, contacts) is never
+    /// plain, not even until the next command.
+    #[test]
+    fn a_new_profile_is_sealed_by_the_process_that_creates_it() {
+        if !lab_hist_key() {
+            return;
+        }
+        use raven_core::at_rest::{MigratePolicy, Mode};
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path();
+        assert_eq!(raven_core::privacy::mode(dd), Mode::Plain);
+        let id = create_profile_identity(dd, MigratePolicy::Allow).unwrap();
+        assert_eq!(raven_core::privacy::mode(dd), Mode::Sealed);
+        raven_core::ensure_local_prekey(dd, &id).unwrap();
+        seed_book(dd);
+        let raw = std::fs::read(contacts_path(dd)).unwrap();
+        assert!(raven_core::at_rest::is_sealed(&raw));
+        assert!(!raw.windows(5).any(|w| w == b"Alice"));
+        // The same profile again: its identity, nothing else to do.
+        let again = create_profile_identity(dd, MigratePolicy::Allow).unwrap();
+        assert_eq!(again.public_key_bytes(), id.public_key_bytes());
+        assert_eq!(load_contacts(dd).unwrap().len(), 2);
     }
 
     #[test]
