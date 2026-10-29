@@ -316,10 +316,13 @@ fn decide(data_dir: &Path, c: &Checked) -> AppResult<Decision> {
 }
 
 /// The contact's device and its dialable routes (§4.5: under today's LAN
-/// rule the device key is the identity key), in dial order. Planned by the
-/// worker's own resolver ([`crate::outbox::peer_plan`]): the on-link filter,
-/// the route memory (read, never taught), connected first, learned routes
-/// and hide-IP are the worker's.
+/// rule the device key is the identity key), in dial order. Planned as a
+/// worker attempt plans a send ([`crate::outbox::send_plan`]): the on-link
+/// filter, the route memory (read, never taught), connected first, learned
+/// routes and hide-IP are the worker's, and the contact's Tor onion route
+/// comes last while the Tor helper is ready, so a first session with a
+/// friend reachable only over Tor can be set up ([`probe`] races it against
+/// the direct routes, as `raven send` does).
 fn resolve(
     ctx: &AttemptCtx,
     identity: &[u8; 32],
@@ -339,7 +342,7 @@ fn resolve(
         }
     };
     let device = *identity;
-    let routes = crate::outbox::peer_plan(ctx, &device, book, now)
+    let routes = crate::outbox::send_plan(ctx, &device, book, now)
         .auto_dial(&device, ctx.connected, &mut |r, pinned| {
             localize_lan_route(r, pinned, LOCALIZE_RESOLVE_TIMEOUT)
         })
@@ -511,19 +514,149 @@ fn probe_failure(misses: &[Miss], walked_all: bool) -> (&'static str, String) {
     }
 }
 
+/// A probe dial's raw answer: the replies, or the dial error.
+type DialAnswer = Result<Vec<Vec<u8>>, String>;
+
+/// The onion side's answer as read so far: `None` not read yet, `Some(None)`
+/// no dial (cancelled, no room or no thread), `Some(Some(_))` its answer.
+type TorAnswer = Option<Option<DialAnswer>>;
+
+/// One frame-less probe dial's answer: the offer naming `device`, or why
+/// not ([`Miss`] and a code). `target_refused`: a p2p route's own PeerId
+/// turned this dial away ([`miss_for`]).
+fn probe_answer(
+    device: &[u8; 32],
+    dial: &OutboxRoute,
+    answer: DialAnswer,
+    target_refused: impl FnOnce() -> bool,
+) -> Result<LanBundle, (Miss, &'static str)> {
+    match answer.map(|replies| {
+        replies
+            .iter()
+            .find_map(|f| raven_core::parse_peer_offer(f).ok())
+    }) {
+        Ok(Some(bundle))
+            if bundle.cert.user_ed_pub == *device || bundle.cert.device_ed_pub == *device =>
+        {
+            Ok(bundle)
+        }
+        Ok(Some(_)) => Err((Miss::ForeignKey, code::WRONG_IDENTITY)),
+        // The peer answered without an offer.
+        Ok(None) => Err((Miss::Other, code::DIAL_FAILED)),
+        Err(e) => Err(match miss_for(dial, &e, target_refused()) {
+            miss @ (Miss::NotAccepted | Miss::Refused) => (miss, code::LINK_NOT_ACCEPTED),
+            miss => (miss, dial_error_code(&e)),
+        }),
+    }
+}
+
+/// The Tor side of a probe ([`probe`]): one frame-less dial of the onion
+/// route on its own thread, after the direct routes' head start, as the
+/// worker's race runs it (design 2026-10-tor-fallback §3.4). It never
+/// starts once a direct route offered ([`OnionProbe::cancel`]), and starts
+/// at once when every direct route failed ([`OnionProbe::go`]). Its dial
+/// has Tor's deadline, cut to what is left of [`APP_PROBE_BUDGET`].
+struct OnionProbe {
+    /// 0: waiting out the head start; 1: go now; 2: cancelled.
+    state: Arc<std::sync::atomic::AtomicU8>,
+    answer: std::sync::mpsc::Receiver<Option<DialAnswer>>,
+}
+
+impl OnionProbe {
+    fn start(
+        ctx: &AttemptCtx,
+        device: &[u8; 32],
+        route: &OutboxRoute,
+        started: Instant,
+        head_start: Duration,
+    ) -> Self {
+        use std::sync::atomic::Ordering;
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let (tx, answer) = std::sync::mpsc::channel();
+        let (dialer, data_dir) = (Arc::clone(&ctx.dialer), ctx.data_dir.clone());
+        let (expected, route, gate) = (hex::encode(device), route.clone(), Arc::clone(&state));
+        let spawned = std::thread::Builder::new()
+            .name("app-onion-probe".into())
+            .spawn(move || {
+                let begin = Instant::now();
+                while gate.load(Ordering::SeqCst) == 0 && begin.elapsed() < head_start {
+                    std::thread::sleep(Duration::from_millis(25).min(head_start));
+                }
+                let left = APP_PROBE_BUDGET.saturating_sub(started.elapsed());
+                if gate.load(Ordering::SeqCst) == 2 || left < APP_PROBE_MIN {
+                    let _ = tx.send(None);
+                    return;
+                }
+                let deadline = left.min(raven_core::onion::ONION_DIAL_DEADLINE);
+                let _ = tx.send(Some(dialer.dial_within(
+                    &data_dir,
+                    &route,
+                    &expected,
+                    &[],
+                    deadline,
+                )));
+            });
+        if spawned.is_err() {
+            // No thread: the walk goes on without Tor (reported skipped).
+            state.store(2, Ordering::SeqCst);
+        }
+        Self { state, answer }
+    }
+
+    /// The direct side offered: the onion dial never starts.
+    fn cancel(&self) {
+        let _ = self.state.compare_exchange(
+            0,
+            2,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    /// Every direct route failed: the onion dial does not wait out its head
+    /// start.
+    fn go(&self) {
+        let _ = self.state.compare_exchange(
+            0,
+            1,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    /// Its answer if it has one now (`None`: still dialling, or never
+    /// started).
+    fn ready(&self) -> TorAnswer {
+        self.answer.try_recv().ok()
+    }
+
+    /// Its answer, waiting at most until [`APP_PROBE_BUDGET`] (and a little
+    /// slack) is spent; `None`: no dial, or none in time.
+    fn wait(&self, started: Instant) -> Option<DialAnswer> {
+        let left = APP_PROBE_BUDGET
+            .saturating_sub(started.elapsed())
+            .saturating_add(Duration::from_secs(1));
+        self.answer.recv_timeout(left).ok().flatten()
+    }
+}
+
 /// The probe (§8.2): a frame-less dial of every route in the given order (the
 /// resolver's: a connected p2p route first, then the remembered one, then plan
 /// order), each within [`probe_deadline`] from `started`; a route the budget
-/// cannot cover is skipped. The first offer naming `device` wins: its bundle
-/// and that route's dial form. An offer from another key fails that route
-/// only. `refused` tells whether a p2p route's own PeerId turned the dial that
+/// cannot cover is skipped. The contact's Tor onion route (planned last) is
+/// raced against the others as `raven send` races it ([`OnionProbe`]: after
+/// the head start, at once when every other route failed, never once one
+/// offered). The first offer naming `device` wins: its bundle and that
+/// route's dial form. An offer from another key fails that route only.
+/// `refused` tells whether a p2p route's own PeerId turned the dial that
 /// started at the given time away ([`crate::p2p::target_refused_since`]).
-/// When every route turned this node away and a p2p route's refusal is part
-/// of that ([`Miss::Refused`]), that route is dialled again after
+/// When every direct route turned this node away and a p2p route's refusal
+/// is part of that ([`Miss::Refused`]), that route is dialled again after
 /// [`APP_REFUSAL_RECHECK`], within the same budget: only a second refusal
-/// makes it the contact's verdict (`LINK_NOT_ACCEPTED`, not retried), and an
-/// offer then wins. One log line per walk, codes only. Spends no pairing
-/// budget and never teaches the route memory.
+/// makes it the contact's verdict (`LINK_NOT_ACCEPTED`, not retried, and
+/// only when the onion route agreed or there is none), and an offer then
+/// wins. One log line per walk, codes only. Spends no pairing budget and
+/// never teaches the route memory.
 fn probe(
     ctx: &AttemptCtx,
     device: &[u8; 32],
@@ -532,39 +665,66 @@ fn probe(
     refused: fn(&OutboxRoute, Instant) -> bool,
 ) -> AppResult<(LanBundle, OutboxRoute)> {
     let expected = hex::encode(device);
-    // One frame-less dial: the offer naming `device`, or why not (a code).
+    // One frame-less dial of a direct route: the offer naming `device`, or
+    // why not (a code).
     let dial_once = |dial: &OutboxRoute, deadline: Duration| {
         let since = Instant::now();
         let answer = ctx
             .dialer
-            .dial_within(&ctx.data_dir, dial, &expected, &[], deadline)
-            .map(|replies| {
-                replies
-                    .iter()
-                    .find_map(|f| raven_core::parse_peer_offer(f).ok())
-            });
-        match answer {
-            Ok(Some(bundle))
-                if bundle.cert.user_ed_pub == *device || bundle.cert.device_ed_pub == *device =>
-            {
-                Ok(bundle)
-            }
-            Ok(Some(_)) => Err((Miss::ForeignKey, code::WRONG_IDENTITY)),
-            // The peer answered without an offer.
-            Ok(None) => Err((Miss::Other, code::DIAL_FAILED)),
-            Err(e) => Err(match miss_for(dial, &e, refused(dial, since)) {
-                miss @ (Miss::NotAccepted | Miss::Refused) => (miss, code::LINK_NOT_ACCEPTED),
-                miss => (miss, dial_error_code(&e)),
-            }),
-        }
+            .dial_within(&ctx.data_dir, dial, &expected, &[], deadline);
+        probe_answer(device, dial, answer, || refused(dial, since))
     };
+    let onion = routes
+        .iter()
+        .find(|(_, d)| d.carrier == OutboxCarrier::Onion)
+        .map(|(_, d)| d.clone());
+    let direct: Vec<&RoutePair> = routes
+        .iter()
+        .filter(|(_, d)| d.carrier != OutboxCarrier::Onion)
+        .collect();
+    let tor = onion.as_ref().map(|route| {
+        let head_start = if direct.is_empty() {
+            Duration::ZERO
+        } else {
+            (ctx.onion_head_start)()
+        };
+        OnionProbe::start(ctx, device, route, started, head_start)
+    });
     let mut misses = Vec::new();
     let mut walked_all = true;
     let mut log = Vec::new();
     let mut offered = None;
-    for (i, (_, dial)) in routes.iter().enumerate() {
+    // The onion side's answer, once read.
+    let mut tor_answer: TorAnswer = None;
+    // Tor's answer, when it is an offer naming `device`, wins while nothing
+    // direct has; any other answer waits for the end of the walk.
+    let take_tor = |tor_answer: &TorAnswer,
+                    offered: &mut Option<(LanBundle, OutboxRoute)>,
+                    log: &mut Vec<String>| {
+        let (Some(route), Some(Some(Ok(replies)))) = (onion.as_ref(), tor_answer.as_ref()) else {
+            return;
+        };
+        if offered.is_some() {
+            return;
+        }
+        if let Ok(bundle) = probe_answer(device, route, Ok(replies.clone()), || false) {
+            log.push("onion offer".to_string());
+            *offered = Some((bundle, route.clone()));
+        }
+    };
+    for (i, (_, dial)) in direct.iter().enumerate() {
+        // Tor may have offered while the last route was dialled.
+        if let Some(t) = tor.as_ref() {
+            if tor_answer.is_none() {
+                tor_answer = t.ready();
+            }
+        }
+        take_tor(&tor_answer, &mut offered, &mut log);
+        if offered.is_some() {
+            break;
+        }
         let label = dial.carrier.label();
-        let Some(deadline) = probe_deadline(started.elapsed(), i + 1 == routes.len()) else {
+        let Some(deadline) = probe_deadline(started.elapsed(), i + 1 == direct.len()) else {
             walked_all = false;
             log.push(format!("{label} skipped"));
             continue;
@@ -573,6 +733,9 @@ fn probe(
             Ok(bundle) => {
                 log.push(format!("{label} offer"));
                 offered = Some((bundle, dial.clone()));
+                if let Some(t) = tor.as_ref() {
+                    t.cancel();
+                }
                 break;
             }
             Err((miss, why)) => {
@@ -581,9 +744,15 @@ fn probe(
             }
         }
     }
-    // Every route turned this node away, a p2p route's PeerId among them:
-    // dial each such route again. Here every route was dialled once and
-    // none offered, so `misses[k]` is `routes[k]`'s.
+    // Every direct route failed (or there is none): Tor goes at once.
+    if offered.is_none() {
+        if let Some(t) = tor.as_ref() {
+            t.go();
+        }
+    }
+    // Every direct route turned this node away, a p2p route's PeerId among
+    // them: dial each such route again. Here every direct route was dialled
+    // once and none offered, so `misses[k]` is `direct[k]`'s.
     let refusing = |m: &Miss| matches!(m, Miss::NotAccepted | Miss::Refused);
     if offered.is_none()
         && walked_all
@@ -595,9 +764,18 @@ fn probe(
         if room {
             std::thread::sleep(APP_REFUSAL_RECHECK);
         }
-        for (k, (_, dial)) in routes.iter().enumerate() {
+        for (k, (_, dial)) in direct.iter().enumerate() {
             if misses.get(k) != Some(&Miss::Refused) {
                 continue;
+            }
+            if let Some(t) = tor.as_ref() {
+                if tor_answer.is_none() {
+                    tor_answer = t.ready();
+                }
+            }
+            take_tor(&tor_answer, &mut offered, &mut log);
+            if offered.is_some() {
+                break;
             }
             let label = dial.carrier.label();
             let Some(deadline) = probe_deadline(started.elapsed(), true).filter(|_| room) else {
@@ -618,6 +796,29 @@ fn probe(
                     };
                 }
             }
+        }
+    }
+    // Nothing direct offered: Tor's answer, within the budget.
+    if let (Some(t), Some(route), None) = (tor.as_ref(), onion.as_ref(), offered.as_ref()) {
+        let answer = match tor_answer.take() {
+            Some(read) => read,
+            None => t.wait(started),
+        };
+        match answer {
+            None => {
+                walked_all = false;
+                log.push("onion skipped".to_string());
+            }
+            Some(answer) => match probe_answer(device, route, answer, || false) {
+                Ok(bundle) => {
+                    log.push("onion offer".to_string());
+                    offered = Some((bundle, route.clone()));
+                }
+                Err((miss, why)) => {
+                    log.push(format!("onion {why}"));
+                    misses.push(miss);
+                }
+            },
         }
     }
     // A local request: no limiter. Codes only (no address, PeerId or name).
@@ -1828,6 +2029,113 @@ mod tests {
         false
     }
 
+    /// Bob's Tor onion route (the dial form of a card's `onion=`).
+    fn onion_route() -> OutboxRoute {
+        let hs_id = Identity::from_seed(&[0x3c; 32]).public_key_bytes();
+        OutboxRoute {
+            carrier: OutboxCarrier::Onion,
+            dial: raven_core::onion::dial_for(&hs_id),
+        }
+    }
+
+    /// 2026-10 (RDAP over Raven): AppSubmit plans what a send plans, the
+    /// contact's Tor onion route last while the Tor helper is ready, so a
+    /// first session with a friend reachable only over Tor can be set up;
+    /// with the helper not ready, no onion route.
+    #[test]
+    fn resolve_plans_the_onion_route_last_like_a_send() {
+        let node = Node::new(0x63);
+        let bob = Identity::from_seed(&[0x64; 32]);
+        assert_eq!(bob.public_key_bytes(), node.bob);
+        let hs_id = Identity::from_seed(&[0x3c; 32]).public_key_bytes();
+        let binding =
+            raven_core::onion::OnionBinding::sign(&bob, hs_id, raven_core::onion::now_s());
+        let row = serde_json::json!([{
+            "pub_hex": hex::encode(node.bob),
+            "pinned": true,
+            "lan_dial": SAVED,
+            "onion": binding.to_text(),
+        }]);
+        std::fs::write(
+            node.dir().join("contacts.json"),
+            serde_json::to_vec(&row).unwrap(),
+        )
+        .unwrap();
+        let ready = AttemptCtx {
+            onion_live: rig::on,
+            onion_available: rig::on,
+            ..node.ctx()
+        };
+        let routes = node.resolved(&ready);
+        assert_eq!(routes.last(), Some(&onion_route()), "{routes:?}");
+        assert!(
+            routes.iter().any(|r| r.carrier == OutboxCarrier::Lan),
+            "{routes:?}"
+        );
+        let not_ready = AttemptCtx {
+            onion_live: rig::on,
+            ..node.ctx()
+        };
+        let routes = node.resolved(&not_ready);
+        assert!(
+            routes.iter().all(|r| r.carrier != OutboxCarrier::Onion),
+            "{routes:?}"
+        );
+    }
+
+    /// A friend reachable only over Tor: its onion route is the only one,
+    /// dialled at once (no head start to wait out), and it offers.
+    #[test]
+    fn the_probe_dials_a_tor_only_friend_at_once() {
+        let Some(peers) = Peers::new(0x83) else {
+            return;
+        };
+        let onion = onion_route();
+        let started = Instant::now();
+        let (out, dialled) = peers.walk(&[(onion.clone(), rig::UP)], &peers.bob, never_refused);
+        assert_eq!(out.unwrap(), onion);
+        assert_eq!(dialled, [onion]);
+        assert!(started.elapsed() < Duration::from_secs(1), "no head start");
+    }
+
+    /// Every direct route is dead: Tor goes at once (it does not wait out
+    /// its head start) and its offer wins, as in `raven send`'s race.
+    #[test]
+    fn the_probe_reaches_a_friend_over_tor_when_every_direct_route_is_dead() {
+        let Some(peers) = Peers::new(0x85) else {
+            return;
+        };
+        let (lan, inet, onion) = (rig::lan(SAVED), rig::inet(INET), onion_route());
+        let routes = [
+            (lan.clone(), rig::DOWN),
+            (inet.clone(), rig::DOWN),
+            (onion.clone(), rig::UP),
+        ];
+        let (out, dialled) = peers.walk(&routes, &peers.bob, never_refused);
+        assert_eq!(out.unwrap(), onion);
+        for route in [&lan, &inet, &onion] {
+            assert!(dialled.contains(route), "{dialled:?}");
+        }
+        assert_eq!(dialled.len(), 3, "{dialled:?}");
+    }
+
+    /// A direct route that offers wins the race: the onion dial never
+    /// starts (the head start ends with the direct offer).
+    #[test]
+    fn the_probe_never_dials_tor_once_a_direct_route_offered() {
+        let Some(peers) = Peers::new(0x87) else {
+            return;
+        };
+        let (lan, onion) = (rig::lan(SAVED), onion_route());
+        let routes = [(lan.clone(), rig::UP), (onion.clone(), rig::UP)];
+        let (out, _) = peers.walk(&routes, &peers.bob, never_refused);
+        assert_eq!(out.unwrap(), lan);
+        // Past the head start: Tor was never dialled.
+        std::thread::sleep(crate::onion::head_start() + Duration::from_millis(300));
+        let dialled: Vec<OutboxRoute> = peers.log().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(dialled, [lan], "{dialled:?}");
+    }
+
     thread_local! {
         /// [`refused_once`]: the FakeNet, and the mode its p2p route takes
         /// after the one refusal.
@@ -2069,10 +2377,12 @@ mod tests {
         }
     }
 
-    /// Submit tests run the gated op: the lab unlock (RAVEN_LAB_TEST_A=1).
+    /// Submit tests send the lab content type `test/1`: they run with the
+    /// lab unlock (RAVEN_LAB_TEST_A=1, debug; the app channel itself is on
+    /// in release builds since 2026-10).
     fn submit_peers(seed: u8) -> Option<Peers> {
-        if !app_channel_live_enabled() {
-            eprintln!("skipped: the app channel is held (RAVEN_LAB_TEST_A=1, debug)");
+        if !app_channel_live_enabled() || !lab() {
+            eprintln!("skipped: test/1 needs the lab unlock (RAVEN_LAB_TEST_A=1, debug)");
             return None;
         }
         Peers::new(seed)

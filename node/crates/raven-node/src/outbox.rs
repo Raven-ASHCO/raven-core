@@ -2776,9 +2776,10 @@ pub(crate) struct AttemptCtx {
     pub(crate) onion_live: fn() -> bool,
     /// Whether a worker attempt plans a contact's onion route (the worker's
     /// [`crate::onion::available`]: the Tor helper is ready), read at every
-    /// attempt's plan. Only the worker's attempts (and the session renewer,
-    /// [`attempt_plan`]) plan it: AppSubmit, the route-hints announcer and
-    /// learning's prober never do (design 2026-10-tor-fallback §3.6).
+    /// attempt's plan. Only dials that carry something plan it: the worker's
+    /// attempts ([`attempt_plan`]) and AppSubmit ([`send_plan`]); the
+    /// route-hints announcer and learning's prober never do (design
+    /// 2026-10-tor-fallback §3.6).
     pub(crate) onion_available: fn() -> bool,
     /// The direct paths' head start in the Tor race (the worker's
     /// [`crate::onion::head_start`]).
@@ -3268,6 +3269,20 @@ fn attempt_plan(
         );
     }
     plan
+}
+
+/// [`peer_plan`] with the contact's Tor onion route planned last, as a
+/// worker attempt plans it ([`attempt_plan`], without asking the LAN beacon):
+/// for a dial that carries something besides the worker's, AppSubmit (an app
+/// payload), so a first session with a friend reachable only over Tor can be
+/// set up (design 2026-10-tor-fallback §3.6).
+pub(crate) fn send_plan(
+    ctx: &AttemptCtx,
+    peer: &[u8; 32],
+    admitted: ContactRoutes,
+    wall: u64,
+) -> PeerPlan {
+    attempt_plan(ctx, peer, admitted, wall, false)
 }
 
 /// [`peer_plan`] with the LAN beacon's finds (`found`): with any usable one
