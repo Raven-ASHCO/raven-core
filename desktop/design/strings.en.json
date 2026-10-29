@@ -16,7 +16,7 @@
 
   "welcome.title": "Welcome to Raven",
   "welcome.body1": "Raven sends messages straight from this computer to your friends' computers. There is no server, no account and no phone number.",
-  "welcome.body2": "In this version, you and your friend must be on the same network (the same Wi-Fi or office network).",
+  "welcome.body2": "Your friend can be on the same Wi-Fi or on any other network. Between different networks, Raven goes through the Tor network: slower, but it works from most places.",
   "welcome.step1": "Choose the name Raven shows only on this computer",
   "welcome.step2": "Allow Raven on your local network",
   "welcome.step3": "See your security words",
@@ -198,6 +198,7 @@
   "add.paste.body": "Paste your friend's invite or card:",
   "add.paste.summary": "Invite for {short}, with a network address",
   "add.paste.summaryNoAddress": "Invite for {short}, without a network address",
+  "add.paste.ignoredRoutes": "Raven left out the internet addresses in this card: nothing proves they are your friend's, so Raven never uses them. Once you are connected (over Tor or the same network), your friend's addresses reach you inside your encrypted link.",
   "add.paste.change": "Change",
   "add.name.title": "What do you want to call them?",
   "add.name.note": "This name is only on this computer.",
@@ -379,7 +380,7 @@
 
   "network.nearby.title": "Bluetooth nearby",
   "network.nearby.state.held": "Not in this version of Raven yet.",
-  "network.nearby.state.nodeHeld": "Raven's background program doesn't run Bluetooth nearby (an older or a release build).",
+  "network.nearby.state.nodeHeld": "Raven's background program doesn't run Bluetooth nearby (an older build, or one without Bluetooth support).",
   "network.nearby.state.notRunning": "Raven's background program isn't running.",
   "network.nearby.state.live": "Raven's background program runs Bluetooth nearby.",
   "network.nearby.saved": "Saved setting: {value}",
