@@ -18,18 +18,20 @@ The scripts: [`linux_relay.sh`](../node/scripts/install/linux_relay.sh),
 `raven-relay` command they install
 ([`raven-relay.sh`](../node/scripts/install/raven-relay.sh)).
 
-## 0. Status: held
+## 0. Status
 
-**P2P is held.** `P2P_PRODUCTION_ENABLED=false`, and a relay is part of P2P. A
-production build of `raven-node relay` refuses to start (`P2P_HOLD`), and the
-kit refuses to install it (exit 3). Until the Phase 2 amendment of
-[`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md) is signed and the gate
-is flipped, the kit installs **lab builds only**: a debug build with the lab
-unlock, chosen with `RAVEN_RELAY_LAB=1` (`-Lab` on Windows). A lab build is for
-tests, not for real use, and the installers say so. Relays on TCP 443, the
-installers and the Windows logon task are all part of that amendment.
+**P2P is on in release builds since October 2026.** `P2P_PRODUCTION_ENABLED`
+is `true` (switched on after the three-machine field test, not independently
+reviewed; the unsigned [`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md)
+and its Phase 2 amendment, which covers relays on TCP 443, the installers and
+the Windows logon task, were not signed first), and a relay is part of P2P. So
+the kit installs **release builds**. It still refuses a build that holds p2p
+(exit 3): such a `raven-node relay` refuses to start (`P2P_HOLD`).
+`RAVEN_RELAY_LAB=1` (`-Lab` on Windows) installs a debug build with the lab
+unlock instead. A lab build is for tests, not for real use, and the installers
+say so.
 
-**WSS on 443 is held too.** The kit installs a raw libp2p listener on TCP 443.
+**WSS on 443 is still held.** The kit installs a raw libp2p listener on TCP 443.
 A relay that also answers as HTTPS on that port (`raven-node relay --wss 443`,
 for networks that let only web traffic or an HTTPS proxy out) needs
 `WSS_PRODUCTION_ENABLED`, which waits for
@@ -63,7 +65,7 @@ What it learns (the same table as the waiver, section 14):
 
 | The relay learns | It does not learn |
 |---|---|
-| Both PeerIds and IP addresses of every circuit, when it opens, how long it lasts and how many bytes pass; who keeps a reservation; with `--autonat-server`, the addresses it is asked to probe | Raven IDs (unless you also hold your friends' cards, which map a PeerId to a Raven ID), message text, PairInit, RLB1 offers, route tags, message IDs |
+| Both PeerIds and IP addresses of every circuit, when it opens, how long it lasts and how many bytes pass; who keeps a reservation; with `--autonat-server`, the addresses it is asked to probe | Raven IDs (though you know which friend each PeerId you allowed belongs to, section 6; a lab card maps a PeerId to a Raven ID), message text, PairInit, RLB1 offers, route tags, message IDs |
 
 ## 2. Pick a box
 
@@ -96,13 +98,14 @@ puts you behind carrier NAT: no port forward can reach your box. Use a VPS.
 3. Install. A build needs about 2 GB of RAM and takes a while on a Pi; with
    less, add swap, or build on another machine for aarch64 and point
    `RAVEN_RELAY_PREBUILT=<folder with raven-node and raven>` at the result.
-   Your public IP (or a dynamic-DNS name for it) goes into the card:
+   Your public IP (or a dynamic-DNS name for it) goes into the relay's `via=`
+   lines (`raven-relay card`, section 7):
 
    ```bash
    RAVEN_RELAY_HOST=<your public IP or dynamic-DNS name> bash node/scripts/install/linux_relay.sh
    ```
 
-   (Until the gate flips: add `RAVEN_RELAY_LAB=1`; section 0.)
+   (A debug lab build instead: add `RAVEN_RELAY_LAB=1`; section 0.)
 4. On the router, forward **TCP and UDP 7423** and **TCP 443** to the Pi. If
    the router's public 443 is free but a program on the Pi holds port 443,
    forward the router's 443 to the Pi's port 7443 instead and install with
@@ -169,13 +172,23 @@ The relay serves a circuit only when **both** ends are on its allow-list. So
 allow every friend who is reached through the relay **and** every friend who
 sends through it.
 
-1. Each friend sends you their card: `raven whoami --card`.
-2. For each card: `sudo raven-relay allow --card '<card>'` (macOS and Windows:
-   no sudo). It prints the card's fingerprint; compare it with that friend in
-   person or by voice. On a terminal it asks once before allowing.
-3. Several at once: put one card per line in a file and run
-   `sudo raven-relay allow --cards FILE` (all or nothing: one bad line allows
-   nobody). Each fingerprint is printed to compare.
+1. Each friend sends you their network ID (PeerId): the one line
+   `raven whoami --peer-id` prints. Get it from the friend directly (in
+   person, by voice, or in a message you trust): nothing signs a PeerId, and
+   one changed on its way would let someone else use your relay in your
+   friend's place.
+2. For each friend: `sudo raven-relay allow <PeerId>` (macOS and Windows: no
+   sudo), with `--label <name>` if you want your own note in `raven-relay
+   status`. `raven-relay` passes its `allow` arguments on to `raven relay
+   allow`.
+3. `--card '<card>'` and `--cards FILE` (one card per line, all or nothing:
+   one bad line allows nobody) read only lab cards now, from a debug build
+   with the lab unlock (`RAVEN_LAB_TEST_A=1`). A card from a release build
+   carries no PeerId, and `raven-relay allow --card` then says `that card
+   names no PeerId (a card carries no network ID in this raven): ask your
+   friend for the line raven whoami --peer-id prints and allow that PeerId`.
+   For a lab card it prints the card's fingerprint to compare with that
+   friend, and on a terminal it asks once before allowing.
 4. To stop: `sudo raven-relay deny <PeerId>`. A running relay drops them
    within seconds.
 
@@ -200,7 +213,8 @@ sudo raven-relay allow --schedule 'raven-relay-schedule/1 ...'   # the whole lin
 Each PeerId is allowed until a week after its epoch ends (`raven-relay status`
 shows `[for N more day(s)]` or `[expired]`), expired entries are dropped when
 the next schedule is added, and pasting the same line twice changes nothing. A
-friend you allowed by hand (`--card`) stays allowed without an end. Ask for a
+friend you allowed by hand (a PeerId, or a lab card with `--card`) stays
+allowed without an end. Ask for a
 new line about every 6 months: until you add it, the relay refuses their new
 PeerId at the next epoch, and when none of their relays accepts it their node
 goes back to the previous one (`postponed`) and tries again later. Give the
@@ -219,17 +233,21 @@ cannot read a file in your home.
    router or nftables maps to 7443.
 2. Each friend runs that line once, then restarts their node
    (`raven relay use` saves the relay like `raven node p2p on --relay ...`).
-3. Each friend sends their new card (`raven whoami --card`, it now names your
-   relay) to you **and** to their contacts, and adds their contacts' new cards.
+3. Nobody sends a new card: a card names no relay. Each friend's verified
+   contacts learn your relay from that friend's route hints, inside their
+   encrypted link, once they are connected (over Tor or the local network).
+   Each friend sends you their network ID (`raven whoami --peer-id`), as
+   `raven relay use` reminds them.
 4. You allow every one of them (section 6).
 5. Each friend checks `raven status`: the relay row says the reservation is
    held.
 
 Why TCP 7423 and TCP 443: the two addresses of one relay are one reservation
 with a fallback. On a network that lets only HTTPS out, the reservation moves
-to the 443 address. A `raven-card/2` carries at most 2 `via=` lines, so the
-pair fills it; a `raven-card/3` carries up to 4 addresses of at most 2 relays,
-which leaves room for a second relay's pair.
+to the 443 address. `raven relay use` takes at most 2 lines, so the pair fills
+it; route hints carry up to 4 addresses of at most 2 relays, which leaves room
+for a second relay's pair. (A lab card: a `raven-card/2` carries at most 2
+`via=` lines, a `raven-card/3` up to 4 addresses of at most 2 relays.)
 
 ## 8. Firewall notes
 
@@ -362,9 +380,9 @@ over a line.
 
 | Observer | Learns | Does not learn |
 |---|---|---|
-| The relay (you, and whoever controls the box) | Both PeerIds and IPs of every circuit, its timing, duration and bytes; who reserves; with `--autonat-server`, the addresses it is asked to probe | Raven IDs (unless it also holds the cards), message text, PairInit, RLB1, route tags, message IDs |
-| A relay operator who also holds friends' cards | The friend graph at PeerId level | Message contents |
-| Friends who use the relay | Its PeerId and its public address (in every card that names it) | Your Raven ID: the relay key is not yours |
+| The relay (you, and whoever controls the box) | Both PeerIds and IPs of every circuit, its timing, duration and bytes; who reserves; with `--autonat-server`, the addresses it is asked to probe | Raven IDs (unless it also holds lab cards), message text, PairInit, RLB1, route tags, message IDs |
+| A relay operator who knows whose PeerId is whose (you allowed each friend's PeerId, or hold their lab cards) | The friend graph: who talks to whom | Message contents |
+| Friends who use the relay, and their verified contacts | Its PeerId and its public address (in the `raven relay use` line, and in the route hints of friends who use it) | Your Raven ID: the relay key is not yours |
 | Anyone who connects to the relay's ports | That a libp2p relay listens there, and its PeerId | Anything else: it is refused before any relay protocol runs |
 | The VPS provider or ISP | IPs, ports, timing and volume of the relay's traffic | Contents |
 
@@ -372,7 +390,8 @@ The residuals of [`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md)
 section 4 apply: a relay can refuse, delay or drop circuits (it cannot read or
 forge Raven traffic); a member can tell when other members are online; the
 listening ports are visible to the whole Internet and a flood can keep friends
-out; and a relay that also holds cards maps PeerIds to Raven IDs.
+out; and an operator who knows whose PeerId is whose (from the allow-list, or
+from lab cards) maps circuits to people.
 
 The owner-run rows for the kit (a Pi with a port forward, a VPS, a 443-only
 network, a Windows logon task) are in

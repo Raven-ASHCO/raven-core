@@ -20,9 +20,14 @@ not independently reviewed): Internet direct, peer-to-peer with hole punching an
 friends, router port mapping, route hints, finding this computer's public address with STUN
 (Cloudflare and Google only), the Tor onion carrier (below), friends keeping sealed mail for each
 other, messages that keep trying for up to 7 days, groups of up to 16, and the app channel for
-RDAP; Bluetooth nearby on macOS only. `windows_service.ps1` builds with the cargo feature `tor` and puts `raven-tor-helper.exe` next to `raven-node.exe` (`-NoTor` leaves it out). Windows has no release Bluetooth backend. Listening for Internet direct and peer-to-peer, router port mapping,
+RDAP (it takes app payloads from verified contacts only, of registered types, within size limits,
+at most 30 a minute per sender and type and 120 in all:
+[`RAVEN_APP_PAYLOAD_V1.md`](../protocol/RAVEN_APP_PAYLOAD_V1.md) §3.1); Bluetooth nearby on macOS only. `windows_service.ps1` builds with the cargo feature `tor` and puts `raven-tor-helper.exe` next to `raven-node.exe` (`-NoTor` leaves it out). Windows has no release Bluetooth backend. Listening for Internet direct and peer-to-peer, router port mapping,
 relaying for friends, keeping mail for friends, using friends as mailboxes and Bluetooth each stay
-off until you turn them on. Paragraphs below that still name a `*_PRODUCTION_ENABLED = false`
+off until you turn them on, so across networks two friends reach each other over Tor until they
+turn a listener on; once they are connected, route hints carry their other addresses (a card
+carries only the onion address, and a LAN one if its owner adds it). Paragraphs below that
+still name a `*_PRODUCTION_ENABLED = false`
 gate describe features that stay held, or say so.
 
 Task Scheduler / service helper: `scripts/install/windows_service.ps1`
@@ -116,10 +121,17 @@ mail only from friends you have not verified), `CUSTODIAN_NOT_OFFERING` (the
 friend the contact named does not offer to hold mail for you, or not over the
 internet).
 
-**Internet direct is opt-in too (off by default).** It lets contacts who have
-your Internet address (`raven whoami --card --inet <public-ip-or-name>:7422`)
-reach this computer over TCP port **7422** (7421 is mock BLE's, 7423 is
-reserved for libp2p). Only your contacts get an answer: anyone else completes
+**Internet direct is opt-in too (off by default).** It lets your verified
+contacts reach this computer over TCP port **7422** (7421 is mock BLE's, 7423
+is reserved for libp2p). A card carries no Internet address: `raven whoami
+--card --inet` is refused, except in a debug build with the lab unlock
+(`RAVEN_LAB_TEST_A=1`). While p2p runs too (below), raven-node tells each
+verified contact this address inside your encrypted link once you are
+connected over Tor or the local network: the public IP that STUN found, with
+this port (route hints; not while you hide your IP from them or turned STUN
+off). Otherwise tell them the address yourself, and they type it (`raven
+contact set-addr --internet HOST:PORT`). Only your contacts get an answer:
+anyone else completes
 the Noise handshake and is disconnected before this node names itself, but a
 scanner still learns that something listens on that port. Release builds have
 Internet direct since October 2026 (`INTERNET_DIRECT_PRODUCTION_ENABLED = true`); the
@@ -148,8 +160,13 @@ New-NetFirewallRule -DisplayName "Raven node" -Direction Inbound `
 
 Forward TCP 7422 on your router if the PC is behind NAT. The logon task runs only
 while you are signed in, so a Windows PC is reachable only then. Contacts:
-`raven contact add --card "<their card line>"`, `raven contact set-addr --petname <name>
---internet HOST:PORT`, then `raven send --contact <name>` (LAN address first,
+`raven contact add --card "<their card line>"` saves their key, their signed
+onion address and a card's `lan=` address; it takes no `inet=`, `p2p=` or
+`via=` from a card; when a card holds them, one line on stderr says so (`note: Raven ignored
+this card's inet=, p2p= and via=: ...`). Their Internet address reaches you in
+their route hints once you are connected, or you type it: `--internet-dial
+HOST:PORT` on `raven contact add`, or `raven contact set-addr --petname <name>
+--internet HOST:PORT`. Then `raven send --contact <name>` (LAN address first,
 then Internet; `--carrier lan|internet` forces one). Internet delivery is for
 verified contacts only. A contact whose fingerprint you have not confirmed
 (`--verify-fp` when adding) is reached over the LAN carrier only, and only when
@@ -158,7 +175,9 @@ private (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10) or
 unique-local IPv6 (fc00::/7); a public or CGNAT (100.64/10) address is refused
 and nothing is dialled. Your Internet listener treats an unverified contact like
 a stranger, and so does your LAN listener when it connects from outside those
-ranges.
+ranges. A card's `lan=` address is dialled only at such a local-network
+address, even for a verified contact; a LAN address you type on this computer
+(`--lan-dial`, `contact set-dial`) may lie anywhere.
 
 **Toolchain:** install Rust with [rustup](https://rustup.rs) (current stable);
 older compilers fail at dependency resolution (rustc 1.83.0: the locked graph
@@ -174,7 +193,9 @@ and puts `raven-tor-helper.exe` (Arti, the Tor client, in its own process) next 
 raven-node starts it and keeps an onion service, so a friend can reach this computer from any
 network with no port forward and no address typed. Tor relays are the only third party it
 talks to; Tor is only a pipe, and the Raven link inside it is end-to-end as on every other
-path. Your card carries your onion address (signed by your key), never an IP address. Raven
+path. Your card carries your onion address (signed by your key) and no IP address unless you
+add a LAN one yourself (`--lan`), so the first link between two friends on different networks
+goes over Tor; route hints then carry their other addresses inside it. Raven
 races the direct paths against Tor and uses whichever connects first; over Tor a message took
 about 8 to 27 seconds in the field test.
 
@@ -297,8 +318,8 @@ kept in memory only and never shows an address. While the service runs, the row
 shows the service's own setting and where it came from (`--p2p-listen`,
 `RAVEN_P2P_LISTEN` or `node_policy.json`), so a setting the installer passed as
 a flag shows up too; the installer also saves what `-P2pListen` sets with `raven
-node p2p on`, so `raven status` and `raven whoami --card` agree with the service
-while it is stopped. If another program already holds the port, the service does
+node p2p on`, so `raven status` agrees with the service while it is stopped (a
+release card carries no p2p route). If another program already holds the port, the service does
 not share it: it logs `p2p failed: listen port 7423/tcp is already in use by
 another program (another raven-node?); it is not opened and is retried`, keeps
 the rest of the host running, `p2p_listen` says `(none open yet: its port is
@@ -349,9 +370,9 @@ raven.exe relay use via=/ip4/203.0.113.7/tcp/7423/p2p/12D3KooW... via=/ip4/203.0
 raven.exe node p2p on --listen 7423 --relay /ip4/203.0.113.7/tcp/7423/p2p/12D3KooW...
 raven.exe node p2p on --listen 7423 --relay '@carol'
 Stop-ScheduledTask -TaskName RavenNodeBridge; Start-ScheduledTask -TaskName RavenNodeBridge
-# your card names your relays: give it to your contact, and add theirs
-raven.exe whoami --card
-raven.exe contact add --card "<their card line>"
+# your network ID, for the relay's operator (they run: raven-relay allow <PeerId>);
+# your verified contacts learn your relays inside your encrypted links once connected
+raven.exe whoami --peer-id
 raven.exe send --contact bob                  # auto: LAN, Internet direct, then p2p
 raven.exe send --contact bob --carrier p2p    # p2p only
 ```
@@ -360,9 +381,11 @@ raven.exe send --contact bob --carrier p2p    # p2p only
   (with or without `via=`, at most 2: its TCP 7423 and TCP 443 lines). They are
   one relay with a fallback: on a network that lets only HTTPS out, the
   reservation moves to the 443 address. It saves them like `raven node p2p on
-  --relay` and turns p2p on (port 7423) when it was off; restart the task,
-  send your new card to your contacts, and ask the relay's operator to allow
-  you (`raven-relay allow --card`).
+  --relay` and turns p2p on (port 7423) when it was off; restart the task
+  and give the relay's operator your network ID (`raven whoami --peer-id`):
+  they allow it (`raven-relay allow <PeerId>`). Your verified contacts learn
+  this relay inside your encrypted links once you are connected; no card
+  carries it.
 
 
 - `--relay` on `raven node p2p on` names a relay this node keeps a reservation
@@ -379,21 +402,23 @@ raven.exe send --contact bob --carrier p2p    # p2p only
   reservation attempt, and every address it resolves to is tried in turn; a
   name that does not resolve yet is retried. The `p2p` row counts every
   configured relay (`reservations <active>/<configured>`).
-- Cards: once p2p is configured, `raven whoami --card` prints a `raven-card/2`
-  line with `p2p=<your PeerId>` and one `via=<relay multiaddr>` per `--via` (at
-  most 2); `--inet` and `--lan` work as before. Without p2p it prints the old
-  `raven-card/1` line. With route hints on it prints `raven-card/3` instead:
-  your PeerId and up to 4 addresses of at most 2 home relays (`relay=`), and no
-  address of yours (with `--inet`, `--lan` or a direct address it stays /1 or
-  /2). Your contacts learn your addresses later, inside the link. Older ravens
-  refuse a /3 card ("update raven"): `raven whoami --card --compat` prints the
-  /1 or /2 line for them. `raven contact add --card` reads all three. Without
-  `--via`, the card names the relays the running service uses (while it is
-  stopped, those in `node_policy.json`). The card size limit fits the longest
-  valid card (two relays, the longest addresses); `raven whoami --card` refuses
-  to print a longer one. `raven contact set-addr --petname <name> --p2p <PeerId> --via
-  <MULTIADDR>` edits the p2p route (repeat `--via` for a second relay) and
-  `--clear p2p` removes it.
+- Cards: a card carries no PeerId, relay or Internet address (no key signs
+  them, so anyone who handles a card could change them unseen). `raven whoami
+  --card` prints a `raven-card/1` line: your key, your signed onion address
+  (`onion=`, once Tor is up) and a LAN address only if you add one (`--lan`).
+  It refuses `--inet` and `--via`, and `raven node p2p on` adds nothing to it;
+  `--compat` leaves `onion=` out, for a raven too old to read it. Your verified
+  contacts learn your PeerId and relays from your route hints once you are
+  connected (over Tor or the local network). `raven whoami --peer-id` prints
+  your PeerId, one line, for a relay's operator. `raven contact add --card`
+  reads `raven-card/1`, `/2` and `/3` but takes no PeerId, relay or Internet
+  address from them. A debug build with the lab unlock (`RAVEN_LAB_TEST_A=1`)
+  still writes and reads the old fields (`p2p=` and `via=` in a
+  `raven-card/2`; `p2p=`, `p2pn=` and `relay=` in a `raven-card/3`) for the lab
+  harnesses: [`RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md)
+  §9 and §9.1. `raven contact set-addr --petname <name> --p2p <PeerId> --via
+  <MULTIADDR>` edits the p2p route by hand (repeat `--via` for a second relay)
+  and `--clear p2p` removes it.
 - Order: `--carrier auto` tries LAN, then Internet direct, then p2p: a direct
   libp2p connection first, then through the relay, and on a relayed connection
   libp2p then tries the hole-punching upgrade (DCUtR). Hole punching usually
@@ -401,9 +426,9 @@ raven.exe send --contact bob --carrier p2p    # p2p only
   common on mobile networks and phone hotspots); the messages then keep going
   through the relay.
 - Route hints: once a link is up, each side tells the other, inside the
-  authenticated link, how to reach it now: its relays, its confirmed public
-  addresses and its LAN port (a verified contact gets all of it; an
-  unverified contact on your network gets the LAN port only). It tells a
+  authenticated link, how to reach it now: its PeerId, its relays, its
+  confirmed public addresses and its LAN port (a verified contact gets all of
+  it; an unverified contact on your network gets the LAN port only). It tells a
   contact again only when that changed, or after 30 minutes on a link the two
   open anyway; no link is opened just for that unless something changed. So when a
   contact moves to another relay, port or network, you reach it without a new
@@ -413,7 +438,10 @@ raven.exe send --contact bob --carrier p2p    # p2p only
   you learned it (friends who meet weekly find each other again on the same
   network); `raven contact remove` and a new p2p route (`raven contact
   set-addr --p2p`, `--via` or `--clear p2p`) forget it; a new LAN or Internet
-  address, or the contact's new card added again, does not.
+  address, or the contact's new card added again, does not. Besides what you
+  type yourself (`raven contact set-addr`), route hints are the only way a
+  contact's PeerId, relays and Internet addresses reach you: a card carries
+  none.
 - Automatic relay choice: when a verified contact offers relaying, raven-node
   may reserve on that relay by itself, up to 2 relays in all, the relays you
   set by hand first and always. It keeps a relay while it works and replaces
@@ -439,17 +467,19 @@ raven.exe send --contact bob --carrier p2p    # p2p only
   confirmed is never dialled over p2p, and your node answers it like a
   stranger.
 - Peer gate: below the Raven link, your node's libp2p host admits only the
-  `p2p=` PeerIds of your verified, unblocked contacts, your relays, the relays
-  your contacts' `via=` lines name (it dials them, they cannot dial it) and,
-  with the relay role, the PeerIds on your allow-list. Anyone else gets one
-  libp2p handshake (it learns your PeerId, which your card already shows) and
-  a closed connection: no protocol list, no address, no hole punching, no
-  Raven link. Exchange cards both ways: a contact whose card you hold without
-  `p2p=` is refused too. `raven status` shows a `p2p_gate` row (verified
-  contacts, relays and the connections refused; counts only), and a send that
-  a contact's node (on a direct connection) or relay turned away says what to
-  do (send your card again, or ask the relay's operator to `raven relay allow`
-  you). A contact's node that refuses a circuit through a relay reads as
+  PeerIds of your verified, unblocked contacts (learned from their route hints,
+  or saved with `raven contact set-addr --p2p`), your relays, the relays your
+  contacts' route hints name (it dials them, they cannot dial it) and, with
+  the relay role, the PeerIds on your allow-list. Anyone else gets one libp2p
+  handshake (it learns your PeerId) and a closed connection: no protocol list,
+  no address, no hole punching, no Raven link. A verified contact whose PeerId
+  your node has not learned yet is refused too: your first link with them goes
+  over Tor or the local network, and its route hints bring the PeerId. `raven
+  status` shows a `p2p_gate` row (verified contacts, relays and the connections
+  refused; counts only), and a send that a contact's node (on a direct
+  connection) or relay turned away says what to do (for a relay: ask its
+  operator to `raven relay allow` you). A contact's node that refuses a
+  circuit through a relay reads as
   offline: the relay's answer cannot tell the two apart. Hole punching
   offers and dials public (globally routable) addresses only, never a LAN,
   loopback or carrier-NAT one.
@@ -582,8 +612,8 @@ handshake. A missing allow-list means nobody may, and so does an unreadable or
 corrupt one (it fails closed).
 
 ```powershell
-raven.exe relay allow '@alice'        # the PeerId (p2p=) from Alice's card
-raven.exe relay allow 12D3KooW...     # or the PeerId itself
+raven.exe relay allow '@alice'        # a contact whose PeerId Raven learned from them
+raven.exe relay allow 12D3KooW...     # or the PeerId itself (their `raven whoami --peer-id`)
 raven.exe relay deny '@alice'
 raven.exe relay status                # counts: reservations, circuits, refusals
 raven.exe relay card --host 203.0.113.7   # via=/ip4/203.0.113.7/tcp/7423/p2p/<relay PeerId>
@@ -593,8 +623,14 @@ raven.exe relay card --data-dir "$env:LOCALAPPDATA\RavenRelay" --host 203.0.113.
 ```
 
 Without `--data-dir`, `raven relay` works on your profile's own
-`relay_allow.json` and deny list (relaying for your contacts); `raven relay
-allow` also takes `--card CARD`, and `--cards FILE` for several at once.
+`relay_allow.json` and deny list (relaying for your contacts). `'@alice'` works
+once Raven learned that contact's PeerId from them (after you are connected);
+until then it asks for the PeerId they read out (`raven whoami --peer-id`).
+Take a PeerId from the friend directly (in person, by voice, or in a message
+you trust): nothing signs it. `raven relay allow` also takes `--card CARD`,
+and `--cards FILE` for several at once, but only a lab card names a PeerId;
+with a release card it says `that card names no PeerId (a card carries no
+network ID in this raven)` and asks for the `raven whoami --peer-id` line.
 `raven relay card` prints the relay's `via=` lines, TCP on its main port, its
 TCP 443 line when it listens there, and QUIC, from the addresses the relay
 names for itself (`--public-host`, `--external`), else its listen addresses
@@ -740,9 +776,10 @@ false. Some networks (offices, hotels, schools) let only HTTPS out, often only
 through a proxy. Raven then reaches its relays over WSS: libp2p inside a
 WebSocket inside TLS on TCP 443. Use a relay that listens with `--wss 443` and
 give `raven relay use` (or `raven node p2p on --relay`) its `/tls/ws` line, for
-example `/dns4/relay.example.org/tcp/443/tls/ws/p2p/<relay PeerId>`. A
-`raven-card/3` carries that line (and the relay's raw line); a `raven-card/2`
-carries only the raw line. Only relay dials use WSS or a proxy: contacts are
+example `/dns4/relay.example.org/tcp/443/tls/ws/p2p/<relay PeerId>`. A lab
+`raven-card/3` carries that line (and the relay's raw line), a lab
+`raven-card/2` only the raw line; a release card names no relay (your route
+hints tell your contacts your relays). Only relay dials use WSS or a proxy: contacts are
 reached through those relays, and raw libp2p is never sent through a proxy.
 
 raven-node finds the proxy itself, in this order: `--p2p-proxy` on `raven-node
@@ -794,9 +831,9 @@ route hints. So rotation waits until every verified contact with a p2p route
 runs a raven that can follow (the `p2p_rotation` row says `waiting: N contacts
 cannot follow a rotating network ID yet`), then announces the coming PeerIds for
 at least half an epoch (`starting`), then changes at each epoch boundary (`on`;
-a few seconds of re-homing each time). Your cards then carry `p2pn=` (the next
-PeerId) right after `p2p=`. A contact that was offline for that whole
-announcing period, silent for more than six epochs, or holding a card older
+a few seconds of re-homing each time). Your lab cards then carry `p2pn=` (the
+next PeerId) right after `p2p=` (a release card carries neither). A contact
+that was offline for that whole announcing period, silent for more than six epochs, or holding a card older
 than two epochs cannot reach you over p2p until it hears from you another way
 (LAN, Internet direct) or gets a new card.
 
@@ -816,13 +853,14 @@ link an old and a new PeerId; contacts see every PeerId by design.
 
 | A relay learns | A relay does not learn |
 |---|---|
-| Both PeerIds and IP addresses of every circuit, when it opens, how long it lasts and how many bytes pass; who keeps a reservation on it; with `--autonat-server`, the addresses it is asked to probe | Raven IDs (unless it also holds cards, which map a PeerId to a Raven ID), message text, PairInit, RLB1 offers, route tags, message IDs: all are inside libp2p Noise and, inside that, the Raven Noise link `raven/p2p-link/v1` |
+| Both PeerIds and IP addresses of every circuit, when it opens, how long it lasts and how many bytes pass; who keeps a reservation on it; with `--autonat-server`, the addresses it is asked to probe | Raven IDs (though its operator knows which friend each PeerId it admits belongs to, and a lab card maps a PeerId to a Raven ID), message text, PairInit, RLB1 offers, route tags, message IDs: all are inside libp2p Noise and, inside that, the Raven Noise link `raven/p2p-link/v1` |
 
-A relay that also holds your friends' cards learns who talks to whom, at the
-PeerId level. Your PeerId is stable (unless you turned PeerId rotation on,
-above), so it links you across relays and
-networks; a stable public IPv6 listen address in a card is a stable location
-identifier. Anyone who connects to an open port 7423 learns that node's PeerId
+A relay whose operator knows whose PeerId is whose (they allowed each
+friend's PeerId, or hold lab cards) learns who talks to whom. Your PeerId is
+stable (unless you turned PeerId rotation on, above), so it links you across
+relays and networks; a stable public IPv6 listen address, which your route
+hints tell your verified contacts, is a stable location identifier. Anyone
+who connects to an open port 7423 learns that node's PeerId
 (libp2p names itself in its handshake), but no Raven identity: the Raven link
 answers your verified contacts only. libp2p's Identify exchange sends only
 addresses confirmed as public (relay circuits, an address AutoNAT found
@@ -830,8 +868,8 @@ reachable, a UPnP mapping), never a node's LAN or loopback listen addresses.
 
 Relaying for your contacts adds: the contacts who use your relay learn this
 computer's IP address (it is in the offer their route hints carry); the
-relay's PeerId is its own key's, not yours, but the cards and route hints of
-those contacts carry its address to their own contacts; and inside your circle
+relay's PeerId is its own key's, not yours, but the route hints of those
+contacts carry its address to their own contacts; and inside your circle
 a member can tell whether another member is online. Route hints are not
 signed, so they prove nothing to anyone else, but a contact can keep what it
 was told.

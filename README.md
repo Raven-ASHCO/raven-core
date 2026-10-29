@@ -30,9 +30,10 @@ Website: https://raven-messager.com
 
 ## Status: early, not independently reviewed, nothing to download yet
 
-- **Pre-release.** No independent security review has happened yet. Read the
-  [security errata](protocol/SECURITY_ERRATA_RVN1_2026-08-13.md) and the
-  [threat model](docs/THREAT_MODEL.md) before relying on anything here.
+- **Pre-release (version 0.1.0).** No independent security review has happened yet. An internal
+  review in October 2026 found problems that this version fixes; it is no substitute for an
+  independent one. Read the [security errata](protocol/SECURITY_ERRATA_RVN1_2026-08-13.md) and
+  the [threat model](docs/THREAT_MODEL.md) before relying on anything here.
 - **What release builds have.** Direct messaging between two computers on the same local
   network, and, since October 2026, the features that passed the
   [three-machine field test](docs/FIELD_TEST_2026_10.md) (switched on after that test, **not
@@ -50,8 +51,10 @@ Website: https://raven-messager.com
   - **Bluetooth nearby** between Macs, with no network at all. **macOS only:** Windows and
     Linux release builds have no Bluetooth backend.
   - **The app channel** for RDAP, Raven's companion for software agents: agent tasks and answers
-    travel through the Raven node to verified contacts, over the same carriers. On macOS any
-    program running as the same user can use it without a Keychain dialog (an accepted residual:
+    travel through the Raven node between verified contacts, over the same carriers. A node takes
+    them only from a verified contact, only of the two RDAP types, within size and rate limits
+    ([RAVEN_APP_PAYLOAD_V1](protocol/RAVEN_APP_PAYLOAD_V1.md) §3.1). On macOS any program running
+    as the same user can use it without a Keychain dialog (an accepted residual:
     [threat model](docs/THREAT_MODEL.md) §3.16).
 - **What the field test showed, and what it did not.** Three computers, one person, debug builds
   with these features switched on: a phone hotspot and a home network reached each other 10 / 10
@@ -66,12 +69,16 @@ Website: https://raven-messager.com
   on`, `raven node p2p on`), router port mapping (`raven node upnp on`), relaying for friends
   (`raven relay offer on`), keeping mail for friends and asking friends to keep yours, and
   Bluetooth (`raven nearby enable`, and its background mail) each stay off until you turn them
-  on. `raven node stun off` stops the STUN query.
+  on. `raven node stun off` stops the STUN query. So with the defaults, two friends on different
+  networks reach each other over Tor; once one of them turns a listener on, their encrypted link
+  tells the other how to reach it directly.
 - **No Raven server.** Raven runs no server. The only third parties are the Tor relays (for the
   onion carrier) and the two STUN servers, which answer a bare "what is my address" query. A
-  contact card carries your key and your onion address; it carries an IP address only if you put
-  one in yourself (`--inet`, `--lan`, or a relay you set up). The addresses Raven finds travel
-  only inside encrypted links between verified friends.
+  contact card carries your key, your onion address (signed by your key) and, only if you add one
+  yourself, a local-network address (`--lan`). Release builds never put an Internet address, a
+  network ID (PeerId) or a relay into a card, and ignore them in a card they read: nothing signs
+  them, so they could steer a connection to someone else. The addresses Raven finds travel only
+  inside encrypted links between verified friends.
 - **Lab features.** Everything else (sealed letters, mail passed on between two friends, relays
   over WebSocket on port 443 and web proxies, rotating network IDs,
   the LAN beacon, learning connectivity, lock while running, security notices, updates passed on
@@ -163,7 +170,9 @@ cargo check --locked --workspace --exclude raven-fb-ffi
 A debug build with no `RAVEN_LAB_*` variable behaves like a release build. A switched-on feature
 can be closed again in a debug build with its switch set to `0` (for example `RAVEN_LAB_TOR=0`
 keeps a test node off the Tor network, `RAVEN_LAB_TEST_A=0` closes Internet direct, p2p and
-friends keeping mail); a release build reads none of them.
+friends keeping mail); a release build reads none of them. The lab unlock `RAVEN_LAB_TEST_A=1`
+(debug builds only) also lets cards carry and read Internet and p2p routes again, for the lab
+test harnesses.
 
 `raven-fb-ffi` (a lab-only binding) also needs `protoc` (Protocol Buffers compiler) to build.
 The Python reference: `cd protocol/reference && python3 -m pip install -r requirements.txt &&

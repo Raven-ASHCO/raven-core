@@ -11,6 +11,14 @@ their "Still needed" column below (independent review, signed release records, m
 rows): those rows stay here as the list of what is still missing for them. In a debug build a
 `RAVEN_LAB_*` switch set to `0` closes such a feature again.
 
+Version 0.1.0 (the first version with these features on) also carries the fixes of an internal
+review held in October 2026, and two changes made before release: a contact card no longer
+carries or gives an Internet address, a PeerId or a relay (nothing signs them; addresses travel
+only inside encrypted links between verified friends, [RAVEN_ROUTE_HINTS_V1](../protocol/RAVEN_ROUTE_HINTS_V1.md)
+§9.1), and the app channel takes payloads only from verified contacts, of registered types,
+within size and rate limits ([RAVEN_APP_PAYLOAD_V1](../protocol/RAVEN_APP_PAYLOAD_V1.md) §3.1).
+An internal review is not an independent one.
+
 Release builds had one thing before that: direct messages between two computers on the same local
 network. Everything else is a **lab feature**: compiled in, tested in CI, and held off by a constant
 in the code (`*_PRODUCTION_ENABLED = false`) that a release build cannot change. In a debug build a
@@ -52,7 +60,7 @@ tests in `node/crates/raven-node/tests/carrier_matrix.rs` ([EVIDENCE.md](EVIDENC
 | **Listen on every network** `LAN_AUTO_LISTEN_PRODUCTION_ENABLED` | Listen on every interface, IPv4 and IPv6, and let in local sources only | carrier matrix C27-C30; fault matrix | the signed LAN amendment ([draft](WAIVER_LAN_DIRECT_PHASE3_AMENDMENT_DRAFT.md)) and its real rows |
 | **LAN beacon** `LAN_BEACON_PRODUCTION_ENABLED` | Find a friend's address on the same network without typing it. [Spec](../protocol/RAVEN_LAN_BEACON_V1.md) | vectors (Rust and Python), the `lan_beacon_datagram` fuzz target, fault scenarios; on in the field test's desktop-app rounds | the same amendment; a privacy capture on real networks |
 | **Cable-only networks and Noise key pinning** `OFFLINE_LAN_…`, `LAN_NOISE_PIN_PRODUCTION_ENABLED` | Count a cable with only link-local addresses as a network; pin each contact's Noise key and stop a dial before identifying itself when another key answers | fault scenarios; the gates are tied together in the code | its own amendment ([draft](WAIVER_LAN_DIRECT_CUTOFF_AMENDMENT_DRAFT.md)) after its review and fixes |
-| **Route hints** `ROUTE_HINTS_PRODUCTION_ENABLED` | Friends tell each other their current routes inside encrypted links, so cards need no address. [Spec](../protocol/RAVEN_ROUTE_HINTS_V1.md) | vectors (Rust and Python), two fuzz targets; field test: on throughout; a chatter bug (two messages a second) found and fixed | its amendment ([draft](WAIVER_LAN_DIRECT_ROUTE_HINTS_AMENDMENT_DRAFT.md)) |
+| **Route hints** `ROUTE_HINTS_PRODUCTION_ENABLED` | Friends tell each other their current routes inside encrypted links, so cards need no address (release cards carry none, §9.1). [Spec](../protocol/RAVEN_ROUTE_HINTS_V1.md) | vectors (Rust and Python), two fuzz targets; field test: on throughout; a chatter bug (two messages a second) found and fixed | its amendment ([draft](WAIVER_LAN_DIRECT_ROUTE_HINTS_AMENDMENT_DRAFT.md)) |
 | **Session renewal** `SESSION_RENEWAL_PRODUCTION_ENABLED` | Renew a friend's session while you are together, so later messages can wait almost a day | fault scenarios | the LAN amendment above |
 | **Learning connectivity** `LEARNING_PRODUCTION_ENABLED` | Try first the route that worked before for that friend on that network; only reorders what is already allowed | a simulator acceptance gate in CI | its real rows and release record ([draft](WAIVER_LEARNING_DRAFT.md)) |
 | **Bluetooth nearby** `NEARBY_PRODUCTION_ENABLED` | Messages between laptops with no network at all, verified contacts only. [Spec](../protocol/RAVEN_NEARBY_LINK_V1.md), [guide](NEARBY.md) | fake-radio tests in CI, vectors, the `rnp1_frame` fuzz target, BlueZ on emulated controllers (advisory); field test: a Bluetooth chain 10 / 10 both ways between two Macs | hardware rows for every operating-system pair (range, throughput, background behaviour, privacy capture); Windows has a partial backend and was not used for Bluetooth in the field test; a signed record ([draft](WAIVER_NEARBY_DRAFT.md)) |
@@ -72,7 +80,7 @@ tests in `node/crates/raven-node/tests/carrier_matrix.rs` ([EVIDENCE.md](EVIDENC
 | Feature and gate | What it does | Evidence so far | Still needed |
 |---|---|---|---|
 | **Groups** `GROUPS_PRODUCTION_ENABLED` | Small groups as pairwise sealed copies, with an admin-signed member list. [Spec](../protocol/RAVEN_GROUP_V1.md) | unit tests, a shared vector; field test: all group checks passed, including a member who was away | the long message horizon first; a fuzz target and Python parity for group frames; review; a release record (none drafted yet) |
-| **App channel** `APP_CHANNEL_PRODUCTION_ENABLED` | Lets a local app send its own payloads over Raven sessions | CI tests with the lab unlock, the `app_frame` fuzz target | a release record |
+| **App channel** `APP_CHANNEL_PRODUCTION_ENABLED` | Lets a local app (RDAP) send its own payloads over Raven sessions, between verified contacts. [Spec](../protocol/RAVEN_APP_PAYLOAD_V1.md) | CI tests (with the lab unlock for the lab type only), tests of the receiver guard (who, what, how big, how often), the `app_frame` fuzz target; RDAP over Raven on loopback over LAN and Tor | a real row between two computers; a stronger check of the calling program on macOS (today UID-only, the owner's decision Q6); a release record |
 
 ## Security and privacy features
 

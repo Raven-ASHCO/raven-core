@@ -11,7 +11,10 @@ groups, Bluetooth nearby, the long message horizon) was **switched off in releas
 time; after this test those features were switched on in release builds (Bluetooth nearby on
 macOS only), without an independent review (see [ROADMAP.md](ROADMAP.md)). Three computers and one person running the test is a small
 sample. This is evidence that the design can work on real networks, not proof that it works
-everywhere.
+everywhere. Version 0.1.0 also differs from the builds tested here in ways this test did not cover:
+contact cards carry no Internet address, PeerId or relay (friends learn them inside encrypted
+links), the app channel takes payloads only from verified contacts within size and rate limits,
+and the fixes of an internal review are in.
 
 ## Setup
 

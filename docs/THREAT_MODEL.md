@@ -380,9 +380,13 @@ key, and a wrong key ends the link). Two ways to be that listener:
   a LAN address typed on this computer (`--lan-dial`, `contact set-dial`) or
   learned from the contact's own authenticated link may lie beyond the local
   network; a LAN address saved before this rule counts as a card's until it
-  is typed again or learned. A card's Internet route (`inet=`) has no such
-  limit and is the remaining card exposure once Internet direct is live;
-  signed card routes are the planned fix.
+  is typed again or learned. Release builds (October 2026) neither write
+  nor read a card's Internet, p2p or relay fields (`inet=`, `p2p=`,
+  `via=`, `p2pn=`, `relay=`): a reader leaves them out and says so, so an
+  unsigned address in a card never steers a dial; a verified friend's
+  addresses arrive only in route hints, inside an authenticated, encrypted
+  link ([RAVEN_ROUTE_HINTS_V1](../protocol/RAVEN_ROUTE_HINTS_V1.md) §9.1).
+  Debug builds keep the old fields under the lab unlock only.
 
 **Phase 6b (built, gated off; not in this version):**
 
@@ -913,6 +917,17 @@ signs for it). Ordinary Raven messages and chat history are not exposed
 through it, and it reaches only verified contacts. A stronger check of the
 calling process (its code-signing identity, daemon-owned-secrets §4.4) is
 future work. Accepted as a documented residual, not independently reviewed.
+
+**What the app channel takes from the network.** A node takes an app payload
+only from a verified, unblocked contact, only of a registered type
+(`a2a-request/1`, `a2a-response/1`), within the size limits (49,024-byte
+body) and the rate windows (30 new payloads a minute per sender and type,
+120 in total), and only while its app inbox has room; anything else is
+deferred, never committed ([`RAVEN_APP_PAYLOAD_V1.md`](../protocol/RAVEN_APP_PAYLOAD_V1.md)
+§3.1). The sending node refuses to send app payloads to, or sign
+delegations for, a contact who is not verified. A verified contact can
+still send tasks up to those limits; what an agent does with a task is
+RDAP's decision.
 
 ### 3.17 Traffic analyst
 
