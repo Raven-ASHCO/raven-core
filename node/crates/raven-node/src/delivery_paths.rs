@@ -786,6 +786,7 @@ pub(crate) fn network_changed() {
     with_reasons(Reasons::network_changed);
     with_here(Here::network_changed);
     with_fails(RouteFails::clear);
+    with_tor_reached(TorReached::clear);
 }
 
 // ── Failed routes (E2 r9 #2) ───────────────────────────────────────────────
@@ -897,16 +898,24 @@ pub(crate) fn route_failed(contact: &[u8; 32], carrier: OutboxCarrier, dial: &st
 
 /// A send's dial to `contact` at `dial` over `carrier` answered: that
 /// route's failure is news no more (E2 r40: a Tor answer cleared the LAN's
-/// too, so the next send dialled the LAN again).
+/// too, so the next send dialled the LAN again); a Tor answer is Tor
+/// reaching the friend ([`tor_tried_lately`]).
 pub(crate) fn route_answered(contact: &[u8; 32], carrier: OutboxCarrier, dial: &str) {
     with_fails(|f| f.answered_on(contact, carrier, Some(dial)));
+    if carrier == OutboxCarrier::Onion {
+        with_tor_reached(|r| r.reached(*contact, Instant::now()));
+    }
 }
 
 /// A link with `contact` over `carrier` worked (in either direction): every
 /// failed route of `contact` on that carrier is news no more (E2 r40: any
-/// Tor link to the friend clears Tor's mark).
+/// Tor link to the friend clears Tor's mark), and a Tor one is remembered
+/// as Tor reaching the friend ([`tor_tried_lately`]).
 pub(crate) fn carrier_worked(contact: &[u8; 32], carrier: OutboxCarrier) {
     with_fails(|f| f.answered_on(contact, carrier, None));
+    if carrier == OutboxCarrier::Onion {
+        with_tor_reached(|r| r.reached(*contact, Instant::now()));
+    }
 }
 
 /// Our own Tor self-check reached our onion service: Tor works here, so no
@@ -962,15 +971,58 @@ pub(crate) fn onion_dial_started(contact: &[u8; 32]) -> OnionDialMark {
     OnionDialMark(*contact)
 }
 
-/// Whether Tor is busy with `contact` without having reached it: a Tor
-/// dial to it runs now, or its Tor route failed within
-/// [`ROUTE_FAIL_FRESH`] (E2 r40: a send then need not wait for Tor again
-/// while the outbox carries a message to it, Tor first).
+/// Whether Tor is busy with `contact` without having reached it: its Tor
+/// route failed within [`ROUTE_FAIL_FRESH`] (a Tor link that worked since
+/// cleared that), or a Tor dial to it runs now while no Tor link with it
+/// worked within [`ROUTE_FAIL_FRESH`] (E2 r40: a send then need not wait for
+/// Tor again while the outbox carries a message to it, Tor first).
+///
+/// A running dial alone is no sign that Tor cannot reach the friend: the
+/// outbox, a keeper's check or the friend's own messages keep Tor dials to
+/// a friend Tor reaches every few seconds (field test E3: three sends right
+/// after seven delivered over Tor, while the friend was writing to us, were
+/// queued at once without a dial).
 pub(crate) fn tor_tried_lately(contact: &[u8; 32]) -> bool {
-    with_onion_dials(|d| d.contains_key(contact))
-        || failed_routes(contact)
-            .iter()
-            .any(|f| f.carrier == OutboxCarrier::Onion.label())
+    let failed = failed_routes(contact)
+        .iter()
+        .any(|f| f.carrier == OutboxCarrier::Onion.label());
+    failed
+        || (with_onion_dials(|d| d.contains_key(contact))
+            && !with_tor_reached(|r| r.within(contact, Instant::now(), ROUTE_FAIL_FRESH)))
+}
+
+/// When a Tor link with each contact last worked (a delivery over Tor, a
+/// message that came over Tor): in memory, bounded like the failed routes,
+/// cleared when the network changes.
+#[derive(Default)]
+struct TorReached {
+    by: HashMap<[u8; 32], Instant>,
+}
+
+impl TorReached {
+    fn reached(&mut self, contact: [u8; 32], at: Instant) {
+        insert_bounded(&mut self.by, contact, at, |at| *at);
+    }
+
+    /// A Tor link with `contact` worked within `span` of `now`.
+    fn within(&self, contact: &[u8; 32], now: Instant, span: Duration) -> bool {
+        self.by
+            .get(contact)
+            .is_some_and(|at| now.saturating_duration_since(*at) <= span)
+    }
+
+    fn clear(&mut self) {
+        self.by.clear();
+    }
+}
+
+static TOR_REACHED: Mutex<Option<TorReached>> = Mutex::new(None);
+
+fn with_tor_reached<T>(f: impl FnOnce(&mut TorReached) -> T) -> T {
+    f(TOR_REACHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(TorReached::default))
 }
 
 /// `raven learning reset` (IPC `LearningReset`): what a send knows of failed
@@ -1867,6 +1919,52 @@ mod failed_route_tests {
         std::thread::sleep(Duration::from_millis(5));
         record(own, p2p);
         assert!(failure_is_news(&own, p2p));
+    }
+
+    /// Field test E3 r1: seven sends over Tor were delivered, then three
+    /// more were queued at once, without a dial, while the friend was
+    /// writing to us: a Tor dial to the friend ran (the outbox's, a keeper's
+    /// check) and counted as "Tor busy without reaching it". A running dial
+    /// says nothing while Tor reached the friend lately; it still does when
+    /// Tor did not, and a newer failure always does.
+    #[test]
+    fn a_running_tor_dial_is_not_busy_while_tor_reached_the_friend_lately() {
+        let (tor, lan) = (OutboxCarrier::Onion, OutboxCarrier::Lan);
+        // Reached by our own delivery over Tor.
+        let friend = [0xF6; 32];
+        carrier_worked(&friend, tor);
+        let running = onion_dial_started(&friend);
+        assert!(!tor_tried_lately(&friend), "Tor reached it just now");
+        // A newer Tor failure: busy again, dial or not.
+        route_failed(&friend, tor, "onion:f6", "ONION_UNREACHABLE");
+        assert!(tor_tried_lately(&friend));
+        drop(running);
+        assert!(tor_tried_lately(&friend));
+        // A message that came over Tor (arrivals.rs) clears it again.
+        carrier_worked(&friend, tor);
+        assert!(!tor_tried_lately(&friend));
+        // Reached by a send's dial that Tor answered (no message yet).
+        let answered = [0xF7; 32];
+        let running = onion_dial_started(&answered);
+        assert!(tor_tried_lately(&answered), "never reached: busy");
+        route_answered(&answered, tor, "onion:f7");
+        assert!(!tor_tried_lately(&answered));
+        drop(running);
+        // Another carrier working says nothing about Tor.
+        let other = [0xF8; 32];
+        carrier_worked(&other, lan);
+        let running = onion_dial_started(&other);
+        assert!(tor_tried_lately(&other));
+        drop(running);
+        // Reached long ago: a running dial counts again.
+        let mut reached = TorReached::default();
+        let now = Instant::now();
+        reached.reached(friend, now - ROUTE_FAIL_FRESH - Duration::from_secs(1));
+        assert!(!reached.within(&friend, now, ROUTE_FAIL_FRESH));
+        reached.reached(friend, now);
+        assert!(reached.within(&friend, now, ROUTE_FAIL_FRESH));
+        reached.clear();
+        assert!(!reached.within(&friend, now, ROUTE_FAIL_FRESH));
     }
 
     #[test]

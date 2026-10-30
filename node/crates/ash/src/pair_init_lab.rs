@@ -1478,6 +1478,21 @@ fn every_route_failed(
     Some((errors, oldest))
 }
 
+/// Why a send queued without dialling ([`every_route_failed`]), in one
+/// line: Tor left to raven-node's outbox, which is already trying it for
+/// an earlier message ([`TOR_BUSY`]: nothing failed), or every way failed
+/// `age_s` seconds ago.
+fn not_dialled_line(who: &str, recent: &[Option<(String, u64)>], age_s: u64) -> String {
+    if recent.iter().flatten().any(|(e, _)| e == TOR_BUSY) {
+        format!(
+            "Raven is already trying to reach {who} over Tor with an earlier message; this one \
+             waits with it"
+        )
+    } else {
+        format!("every way to {who} failed {age_s} s ago; not tried again now")
+    }
+}
+
 /// The routes a send leaves out of its race because they failed lately
 /// (E2 r38 K4: "only re-probe the routes that have not failed lately"):
 /// (route index, the error its probe reports, said as not tried again).
@@ -1689,8 +1704,8 @@ pub fn run_pair_init_and_send_routes(
     if let Some((errors, age_s)) = skip {
         if !ctx.chat {
             eprintln!(
-                "{C_DIM}every way to {} failed {age_s} s ago; not tried again now{C_RESET}",
-                ctx.display_name()
+                "{C_DIM}{}{C_RESET}",
+                not_dialled_line(&ctx.display_name(), &recent, age_s)
             );
         }
         probe_errors = errors;
@@ -4507,6 +4522,18 @@ mod tests {
         assert!(
             skipped[2].1.ends_with("Tor (not tried again now)"),
             "{skipped:?}"
+        );
+        // What the send says when it queues without a dial (field test E3:
+        // "failed 0 s ago" while nothing had failed): Tor left to the
+        // outbox's earlier message, or every way failed that long ago.
+        assert_eq!(
+            not_dialled_line("Bob", &running, 0),
+            "Raven is already trying to reach Bob over Tor with an earlier message; this one \
+             waits with it"
+        );
+        assert_eq!(
+            not_dialled_line("Bob", &busy, 20),
+            "every way to Bob failed 20 s ago; not tried again now"
         );
         // Not busy: Tor is probed whatever failed.
         let idle = recent_failures_with(&routes, &away[..2], false, Some(30), &plan, here);

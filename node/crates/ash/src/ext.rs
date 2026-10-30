@@ -2014,8 +2014,19 @@ fn cause_sentence(cause: Cause, ctx: &SendCtx, raw: &str, first_contact: bool) -
             ctx.who()
         );
     }
+    // Tor not dialled by this send: raven-node's outbox is already trying
+    // it for an earlier message and has not reached the friend yet (field
+    // test E3: "couldn't be reached" while nothing had been tried).
+    if raw.contains(super::pair_init_lab::TOR_BUSY) {
+        return format!(
+            "Raven is already trying to reach {} over Tor with an earlier message, and Tor \
+             hasn't reached {} yet",
+            ctx.who(),
+            ctx.who()
+        );
+    }
     // E2 r40 (A): Tor was the only way and it did not answer within the
-    // send's wait (or raven-node's outbox is still trying it).
+    // send's wait.
     if tor_only_no_answer(raw) {
         return format!("{} couldn't be reached over Tor right now", ctx.who());
     }
@@ -2716,10 +2727,7 @@ fn ways_tried(raw: &str) -> Vec<&'static str> {
 fn tor_only_no_answer(raw: &str) -> bool {
     let ways = ways_tried(raw);
     let tor_alone = ways == ["over Tor"] || (ways.is_empty() && raw.contains("ONION_UNREACHABLE"));
-    tor_alone
-        && (raw.contains("ONION_UNREACHABLE")
-            || raw.contains(super::pair_init_lab::TOR_BUSY)
-            || raw.contains("the probe was cut short"))
+    tor_alone && (raw.contains("ONION_UNREACHABLE") || raw.contains("the probe was cut short"))
 }
 
 /// "a", "a and b", "a, b and c".
@@ -4231,6 +4239,9 @@ impl SendCtx {
     /// (`--carrier internet`: `carrier=internet_dial` is asserted by its smoke
     /// script); everyone else, `--carrier auto` included, sees this on request.
     /// `path=` (how the link travelled, when known) comes last, after `peer=`.
+    /// A Tor delivery names no address (never an onion address): no `peer=`
+    /// then (field test E3: an empty `peer=` read like missing data), and its
+    /// path is Tor.
     fn delivery_detail_line(
         &self,
         carrier: &str,
@@ -4239,12 +4250,20 @@ impl SendCtx {
         verbose: bool,
     ) -> Option<String> {
         (verbose || (self.show_carrier && carrier == "internet_dial")).then(|| {
+            let peer = sanitize_terminal_line(&self.dial);
+            let peer = if peer.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" peer={peer}")
+            };
+            let path = match path {
+                Some(p) => format!(" path={}", p.label()),
+                None if carrier == OutboxCarrier::Onion.label() => " path=tor".to_string(),
+                None => String::new(),
+            };
             format!(
-                "{C_DIM}message {}… via carrier={carrier} peer={}{}{C_RESET}",
+                "{C_DIM}message {}… via carrier={carrier}{peer}{path}{C_RESET}",
                 hex::encode(&mid[..4]),
-                sanitize_terminal_line(&self.dial),
-                path.map(|p| format!(" path={}", p.label()))
-                    .unwrap_or_default()
             )
         })
     }
@@ -13247,6 +13266,17 @@ mod send_outcome_tests {
             ctx.delivery_detail_line("p2p_dial", Some(DeliveryPath::Direct), &mid, false),
             None
         );
+        // Tor names no address (field test E3: "peer=" stood empty): no
+        // peer field, and the path is Tor.
+        let tor = SendCtx {
+            dial: String::new(),
+            ..bob()
+        };
+        let line = plain(
+            &tor.delivery_detail_line("onion_dial", None, &mid, true)
+                .unwrap(),
+        );
+        assert_eq!(line, "message abababab… via carrier=onion_dial path=tor");
     }
 
     /// The dim `path:` line: how a delivery travelled, in words, and neither
@@ -13944,7 +13974,6 @@ mod send_outcome_tests {
         };
         for raw in [
             "onion_dial Tor: no answer within 25s (the probe was cut short; nothing was sent)",
-            super::super::pair_init_lab::TOR_BUSY,
             "ipc ONION_UNREACHABLE: ONION_UNREACHABLE: the contact's onion service did not \
              answer over Tor",
         ] {
@@ -13962,6 +13991,40 @@ mod send_outcome_tests {
                 "192.168",
                 "onion:",
             ] {
+                assert!(!words.contains(never), "{never}: {text}");
+            }
+        }
+    }
+
+    /// Field test E3: a send that left Tor to raven-node's outbox (it is
+    /// already trying Tor for an earlier message and has not reached the
+    /// friend yet) dialled nothing over Tor: it says so, alone or after
+    /// other ways that did not answer, never "couldn't be reached".
+    #[test]
+    fn a_send_that_left_tor_to_the_outbox_says_so() {
+        let ctx = SendCtx {
+            dial: String::new(),
+            ..bob()
+        };
+        let busy = super::super::pair_init_lab::TOR_BUSY;
+        for raw in [
+            busy.to_string(),
+            format!("onion_dial Tor: {busy}"),
+            format!(
+                "p2p_dial /p2p/12D3KooWExample: ipc P2P_DIAL: P2P_NOT_RUNNING: the libp2p \
+                 host of this raven-node is not running; onion_dial Tor: {busy}"
+            ),
+        ] {
+            let text = queued_text(&ctx, &raw, "\"hi\"", &background());
+            let words = text.split("(technical:").next().unwrap();
+            assert!(
+                words.contains(
+                    "because Raven is already trying to reach Bob over Tor with an earlier \
+                     message, and Tor hasn't reached Bob yet."
+                ),
+                "{text}"
+            );
+            for never in ["couldn't be reached", "no answer", "onion:", "192.168"] {
                 assert!(!words.contains(never), "{never}: {text}");
             }
         }
