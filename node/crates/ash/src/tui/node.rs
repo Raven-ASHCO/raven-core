@@ -25,6 +25,7 @@
 //! service` would create one itself), and none is stopped that the app may
 //! not stop: a login service, or on Windows a process this app did not start.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -34,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use raven_core::arrivals::ArrivedVia;
 use raven_core::ipc::{IpcRequest, IpcResponse, OutboxItem, IPC_VERSION, MAX_OUTBOX_LIST};
 
 use super::bridge::{
@@ -288,6 +290,47 @@ pub(super) fn outbox_request(peer: Option<String>) -> IpcRequest {
 }
 
 /// The items of an OutboxList answer; None for any other answer or error.
+/// How messages came and went, as the running raven-node remembers since
+/// it started (IPC `Arrivals`): by message id (hex, lower case). The chat
+/// shows it beside each message (field test E3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Paths {
+    /// Messages received.
+    pub(super) received: HashMap<String, ArrivedVia>,
+    /// Messages of yours a receipt confirmed.
+    pub(super) delivered: HashMap<String, ArrivedVia>,
+}
+
+/// The poller's `Arrivals` request.
+pub(super) fn arrivals_request() -> IpcRequest {
+    IpcRequest::Arrivals { v: IPC_VERSION }
+}
+
+/// [`Paths`] from an `Arrivals` answer; None from an older raven-node or
+/// none. A way this app doesn't know is left out.
+pub(super) fn paths_of(answer: Result<IpcResponse, String>) -> Option<Paths> {
+    let Ok(IpcResponse::Arrivals {
+        rows, delivered, ..
+    }) = answer
+    else {
+        return None;
+    };
+    let by_id = |rows: Vec<raven_core::ipc::ArrivalRow>| {
+        rows.into_iter()
+            .filter_map(|r| {
+                Some((
+                    r.message_id_hex.to_ascii_lowercase(),
+                    ArrivedVia::parse(&r.via)?,
+                ))
+            })
+            .collect()
+    };
+    Some(Paths {
+        received: by_id(rows),
+        delivered: by_id(delivered),
+    })
+}
+
 pub(super) fn outbox_items(answer: Result<IpcResponse, String>) -> Option<Vec<OutboxItem>> {
     match answer {
         Ok(IpcResponse::OutboxListResult { items, .. }) => Some(items),

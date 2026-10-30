@@ -1501,6 +1501,9 @@ pub(super) enum PollUpdate {
         pid: u32,
         folder: node::NodeFolder,
     },
+    /// How messages came and went, as raven-node remembers (asked when the
+    /// chat history changed).
+    Paths(node::Paths),
 }
 
 /// The files the poller watches.
@@ -1773,7 +1776,24 @@ fn poll(data_dir: &Path, words: &Receiver<PollCtl>, tx: &Sender<Msg>) {
         for task in c.due(Instant::now()) {
             let mut updates = Vec::new();
             match task {
-                PollTask::Files => updates = files.look(data_dir),
+                PollTask::Files => {
+                    updates = files.look(data_dir);
+                    // The history changed: how its new messages came or
+                    // went (field test E3: the chat showed it for a few of
+                    // yours only).
+                    let history = updates.iter().any(|update| {
+                        matches!(
+                            update,
+                            PollUpdate::File {
+                                watched: Watched::History,
+                                ..
+                            }
+                        )
+                    });
+                    if let Some(paths) = history.then(|| lanes.paths(data_dir)).flatten() {
+                        updates.push(PollUpdate::Paths(paths));
+                    }
+                }
                 PollTask::Status => {
                     let (probe, friends_here) = lanes.status(data_dir);
                     let seen = if probe.timed_out {
@@ -1971,6 +1991,7 @@ impl NetWatch {
 struct Lanes {
     status: Lane,
     outbox: Lane,
+    paths: Lane,
 }
 
 impl Lanes {
@@ -1989,6 +2010,10 @@ impl Lanes {
 
     fn outbox(&self, data_dir: &Path, peer: Option<String>) -> Option<Vec<OutboxItem>> {
         ask(&self.outbox, data_dir, node::outbox_request(peer)).and_then(node::outbox_items)
+    }
+
+    fn paths(&self, data_dir: &Path) -> Option<node::Paths> {
+        ask(&self.paths, data_dir, node::arrivals_request()).and_then(node::paths_of)
     }
 }
 
@@ -3242,7 +3267,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_poller_asks_only_status_and_outbox_list_never_a_kick() {
+    fn the_poller_asks_only_status_outbox_list_and_arrivals_never_a_kick() {
         let dir = testkit::short_dir();
         let fake = testkit::FakeNode::start(
             dir.path(),
@@ -3272,11 +3297,15 @@ mod tests {
         poller.stop();
         let ops = fake.ops();
         assert!(!ops.iter().any(|op| op == "outbox_kick"), "{ops:?}");
+        // Arrivals (how messages came and went, field test E3) only when
+        // the chat history changed: here at the first look.
         assert!(
-            ops.iter().all(|op| op == "status" || op == "outbox_list"),
+            ops.iter()
+                .all(|op| op == "status" || op == "outbox_list" || op == "arrivals"),
             "{ops:?}"
         );
         let count = |name: &str| ops.iter().filter(|op| *op == name).count();
+        assert!(count("arrivals") <= 1, "{ops:?}");
         assert!(count("status") >= 3, "{ops:?}");
         // At once, then at +1 s and +3 s for Bob (and every 5 s).
         assert!(count("outbox_list") >= 3, "{ops:?}");

@@ -1190,6 +1190,7 @@ mod tests {
                         age_s: 3,
                     },
                 ],
+                delivered: Vec::new(),
             })
         });
         assert_eq!(rows.len(), 1);

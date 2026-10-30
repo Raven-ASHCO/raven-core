@@ -128,6 +128,15 @@ pub(super) fn path_tag(look: &Look, route: &Route) -> Span<'static> {
     Span::styled(route.words(), look.theme.path(path_kind(route)))
 }
 
+/// How a message came or went as raven-node says it ('via Tor', 'LAN
+/// direct', 'from a keeper'), in its path's colour.
+pub(super) fn arrived_tag(look: &Look, via: raven_core::arrivals::ArrivedVia) -> Span<'static> {
+    match Route::of_arrived(via) {
+        Some(route) => path_tag(look, &route),
+        None => Span::styled(via.phrase(), look.theme.path(PathKind::Friend)),
+    }
+}
+
 /// Delivered typing itself once its receipt came (`since`: when this app saw
 /// it; None when it was so already): the label types itself a character
 /// every 45 ms ([`theme::DELIVERED_CHAR`]) for 'Delivered', with the sent

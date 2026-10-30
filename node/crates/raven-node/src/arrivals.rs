@@ -60,18 +60,24 @@ fn log_handover(to: &[u8; 32], n: usize) {
 }
 
 /// IPC `Arrivals`: how the messages received since raven-node started came,
-/// newest last (message id, carrier token, age).
+/// and how our own ones a receipt confirmed went, newest last (message id,
+/// carrier token, age).
 pub(crate) fn ipc_rows(v: u16) -> IpcResponse {
     let now = raven_core::clock::now_ms();
+    let row = |message_id: [u8; 16], via: ArrivedVia, at_ms: u64| ArrivalRow {
+        message_id_hex: hex::encode(message_id),
+        via: via.token().into(),
+        age_s: Duration::from_millis(now.saturating_sub(at_ms)).as_secs(),
+    };
     IpcResponse::Arrivals {
         v,
         rows: raven_core::arrivals::recent()
             .into_iter()
-            .map(|a| ArrivalRow {
-                message_id_hex: hex::encode(a.message_id),
-                via: a.via.token().into(),
-                age_s: Duration::from_millis(now.saturating_sub(a.at_ms)).as_secs(),
-            })
+            .map(|a| row(a.message_id, a.via, a.at_ms))
+            .collect(),
+        delivered: crate::delivery_paths::delivered_messages()
+            .into_iter()
+            .map(|(id, via, at_ms)| row(id, via, at_ms))
             .collect(),
     }
 }

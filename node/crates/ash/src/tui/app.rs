@@ -179,6 +179,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::style::Style;
 use ratatui::text::Span;
+use raven_core::arrivals::ArrivedVia;
 use raven_core::ipc::OutboxItem;
 
 #[cfg(test)]
@@ -199,8 +200,8 @@ use super::errors::{self, IdentityProblem, NodeStartProblem, Plain};
 use super::keys_fa;
 use super::live::{self, Event, Live};
 use super::node::{
-    BindFailure, Ensured, GatesView, LoginItemKnown, Managed, NodeFolder, NodeState, NodeView,
-    Probe, Program, StopOutcome, StopPlan, Stopped, Vault,
+    self, BindFailure, Ensured, GatesView, LoginItemKnown, Managed, NodeFolder, NodeState,
+    NodeView, Probe, Program, StopOutcome, StopPlan, Stopped, Vault,
 };
 use super::read_marks::{self, ReadMark, ReadMarks};
 use super::state_file::{
@@ -1520,6 +1521,14 @@ impl Bubble<'_> {
         match self {
             Bubble::Row(row) => row.view.created_at_ms,
             Bubble::Pending(send) => send.sent_ms,
+        }
+    }
+
+    /// Its message id (hex), once known.
+    pub(super) fn mid(&self) -> Option<&str> {
+        match self {
+            Bubble::Row(row) if !row.view.id.is_empty() => Some(&row.view.id),
+            _ => None,
         }
     }
 
@@ -3220,6 +3229,9 @@ pub(super) struct App {
     send_queue: VecDeque<Option<u64>>,
     /// raven-node's outbox items by message id (lower case), as last listed.
     outbox: HashMap<String, OutboxItem>,
+    /// How messages came and went, by message id (lower case), as
+    /// raven-node said this session (it remembers since it started).
+    paths: node::Paths,
     /// Message ids seen written once: listed as sent, or cancelled with a
     /// note that the friend may have it.
     written: HashSet<String>,
@@ -3379,6 +3391,7 @@ impl App {
             next_send: 1,
             send_queue: VecDeque::new(),
             outbox: HashMap::new(),
+            paths: node::Paths::default(),
             written: HashSet::new(),
             tick_seen: HashMap::new(),
             ticks_stale: false,
@@ -3855,6 +3868,18 @@ impl App {
 
     /// Where a message of yours stands; None for the friend's, and for an
     /// old row of yours with no state to show.
+    /// How the message `mid` (hex) came, when raven-node said it this
+    /// session.
+    pub(super) fn received_path(&self, mid: &str) -> Option<ArrivedVia> {
+        self.paths.received.get(&mid.to_ascii_lowercase()).copied()
+    }
+
+    /// How a message of yours went, by id, when raven-node said it this
+    /// session (it delivered it, or your send did through it).
+    pub(super) fn delivered_path(&self, mid: &str) -> Option<ArrivedVia> {
+        self.paths.delivered.get(&mid.to_ascii_lowercase()).copied()
+    }
+
     pub(super) fn tick_view<'a>(&'a self, bubble: Bubble<'a>) -> Option<TickView<'a>> {
         if !bubble.outgoing() {
             return None;
@@ -4864,6 +4889,14 @@ impl App {
                 self.dirty = true;
             }
             PollUpdate::NodeFolder { pid, folder } => self.node.folder = Some((pid, folder)),
+            PollUpdate::Paths(paths) => {
+                let before = (self.paths.received.len(), self.paths.delivered.len());
+                self.paths.received.extend(paths.received);
+                self.paths.delivered.extend(paths.delivered);
+                if before != (self.paths.received.len(), self.paths.delivered.len()) {
+                    self.dirty = true;
+                }
+            }
             PollUpdate::ServiceLog(log) => {
                 // Why a node that runs isn't receiving, when its Status
                 // doesn't say (an older node).

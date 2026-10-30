@@ -334,8 +334,9 @@ pub struct ReachRoute {
     pub dial: String,
 }
 
-/// One received message in [`IpcResponse::Arrivals`]: its id (hex), how it
-/// came ([`crate::arrivals::ArrivedVia::token`]) and how long ago.
+/// One received message in [`IpcResponse::Arrivals`] (or one of ours a
+/// receipt confirmed, in its `delivered`): its id (hex), how it came or
+/// went ([`crate::arrivals::ArrivedVia::token`]) and how long ago.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ArrivalRow {
@@ -1845,6 +1846,12 @@ pub enum IpcResponse {
     Arrivals {
         v: u16,
         rows: Vec<ArrivalRow>,
+        /// Our own messages a receipt confirmed since raven-node started,
+        /// and how each went (field test E3: the chat showed the path of
+        /// some of your messages only), oldest first. Absent from older
+        /// daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        delivered: Vec<ArrivalRow>,
     },
     /// `ContactReach`'s answer.
     ContactReach {

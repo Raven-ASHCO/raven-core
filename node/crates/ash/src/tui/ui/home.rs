@@ -71,7 +71,7 @@ use super::controller::{Conversations, Horizons, RowView, SendResult};
 use super::delivery::{self, Tick};
 use super::groups;
 #[cfg(test)]
-use super::node::Probe;
+use super::node::{Paths, Probe};
 use super::presence::{self, Presence};
 #[cfg(test)]
 use super::render as render_frame;
@@ -1565,13 +1565,15 @@ pub(super) fn day_rule_at(
     (!same).then(|| widgets::day_line(app.look(), &day, width))
 }
 
-/// One message: its header row ('<name> · 5 min ago', or 'You · just now'
-/// with the delivery mark and label; the '>' marker first when `marked`),
-/// then its body, indented and wrapped. A body clipped at the terminal limit
-/// ends in the marker and the hint, unless Enter showed it whole. When it
-/// `continued` the sender's run, the sender and age aren't said again: a
-/// friend's message is its body alone, one of yours keeps its delivery
-/// mark and label (unless it is the chosen one: then all of its header).
+/// One message: its header row ('<name> · 5 min ago · via Tor', or 'You ·
+/// just now' with the delivery mark, label and path; the '>' marker first
+/// when `marked`), then its body, indented and wrapped. A body clipped at
+/// the terminal limit ends in the marker and the hint, unless Enter showed
+/// it whole. When it `continued` the sender's run, the sender isn't said
+/// again: the header is indented and says when (and how a friend's came),
+/// one of yours with its delivery mark and label (unless it is the chosen
+/// one: then all of its header). Field test E3: a friend's messages in a
+/// run showed no time and no path at all.
 fn message_lines(
     app: &App,
     friend: &ContactView,
@@ -1599,13 +1601,30 @@ fn message_lines(
     } else {
         t.title
     };
-    if !continued {
+    let age = bridge::short_age(app.now_ms(), bubble.created_at_ms());
+    if continued {
+        if !age.is_empty() {
+            head.push(Span::raw(" ".repeat(usize::from(BODY_INDENT))));
+            head.push(Span::styled(age, t.secondary));
+        }
+    } else {
         head.push(Span::styled(who, who_style));
-        let age = bridge::short_age(app.now_ms(), bubble.created_at_ms());
         if !age.is_empty() {
             head.push(Span::styled(g.inline_separator, t.secondary));
             head.push(Span::styled(age, t.secondary));
         }
+    }
+    // How a friend's message came, when raven-node said it.
+    if let Some(via) = (!bubble.outgoing())
+        .then(|| bubble.mid().and_then(|mid| app.received_path(mid)))
+        .flatten()
+    {
+        if head.is_empty() {
+            head.push(Span::raw(" ".repeat(usize::from(BODY_INDENT))));
+        } else {
+            head.push(Span::styled(g.inline_separator, t.secondary));
+        }
+        head.push(widgets::arrived_tag(look, via));
     }
     let mut lines = Vec::new();
     let mut label_rows = Vec::new();
@@ -1616,12 +1635,16 @@ fn message_lines(
         waiting = matches!(tick_mark(app, &view), TickMark::Waiting);
         // After the label: the path it went by, or what the outbox says of
         // a waiting one (Calm); shown once Delivered has typed itself.
-        let after = tick_after(look, &view);
+        let after = tick_after(app, &view);
         let after_cells = after
             .as_ref()
             .map_or(0, |span| cells(g.inline_separator) + span.width());
         let after = after.filter(|_| shown == label);
-        head.push(Span::raw("  "));
+        if !head.is_empty() || !continued {
+            head.push(Span::raw("  "));
+        } else {
+            head.push(Span::raw(" ".repeat(usize::from(BODY_INDENT))));
+        }
         head.push(mark);
         let head_width = Line::from(head.clone()).width();
         if head_width + 1 + cells(&label) + after_cells <= usize::from(width) {
@@ -1694,18 +1717,27 @@ fn tick_mark(app: &App, view: &TickView) -> TickMark {
 }
 
 /// What follows a tick's label (Calm): for Delivered the path it went by
-/// when this app knows it (its own send's, or raven-node's outbox's), in
-/// its path's colour; for a message raven-node keeps trying, that friends
-/// hold a sealed copy, or that the last try found nobody. Nothing else is
-/// guessed: a delivery from before this session says no path.
-fn tick_after(look: &Look, view: &TickView) -> Option<Span<'static>> {
+/// when this app knows it (its own send's, raven-node's outbox's, or how
+/// raven-node says it went: field test E3, messages `raven send` delivered
+/// showed none), in its path's colour; for a message raven-node keeps
+/// trying, that friends hold a sealed copy, or that the last try found
+/// nobody. Nothing else is guessed: a delivery raven-node no longer
+/// remembers (from before it started) says no path.
+fn tick_after(app: &App, view: &TickView) -> Option<Span<'static>> {
+    let look = app.look();
     match &view.tick {
         Tick::Delivered => {
             let route = view
                 .pending
                 .and_then(|send| send.route.clone())
-                .or_else(|| view.outbox.and_then(live::Route::of_outbox))?;
-            Some(widgets::path_tag(look, &route))
+                .or_else(|| view.outbox.and_then(live::Route::of_outbox));
+            match route {
+                Some(route) => Some(widgets::path_tag(look, &route)),
+                None => view
+                    .mid
+                    .and_then(|mid| app.delivered_path(mid))
+                    .map(|via| widgets::arrived_tag(look, via)),
+            }
         }
         Tick::Waiting(_) => {
             let item = view.outbox?;
@@ -3581,7 +3613,7 @@ mod tests {
                 &[
                     "You - just now  | Connecting...",
                     "  first",
-                    "  ~ Waiting to send",
+                    "  just now  ~ Waiting to send",
                 ],
             ),
             ("sending", &["You - just now  | Sending..."]),
@@ -4316,6 +4348,63 @@ mod tests {
         }
     }
 
+    /// Field test E3: a friend's messages showed no path and, in a run, no
+    /// time; yours showed a path only when this app's own send or the
+    /// outbox delivered them (not `raven send`'s). Each message now says
+    /// when it came, and how, as raven-node says it; nothing is guessed
+    /// for one it does not know.
+    #[test]
+    fn every_message_says_when_and_how_it_came_or_went() {
+        use raven_core::arrivals::ArrivedVia;
+        let rows = [
+            (1, testkit::row(1, false, "", 20, "Are we still on?")),
+            (1, testkit::row(2, false, "", 18, "For Saturday, I mean.")),
+            (1, testkit::row(3, true, "delivered", 17, "Yes!")),
+            (
+                1,
+                testkit::row(4, true, "delivered", 16, "I'll bring the map."),
+            ),
+            (1, testkit::row(5, false, "", 11, "Great.")),
+        ];
+        let mut app = home((100, 30), three(), &rows);
+        let id = |n: u32| format!("{n:032x}");
+        let paths = Paths {
+            received: [(id(1), ArrivedVia::Tor), (id(2), ArrivedVia::Keeper)]
+                .into_iter()
+                .collect(),
+            delivered: [(id(3), ArrivedVia::Tor), (id(4), ArrivedVia::Lan)]
+                .into_iter()
+                .collect(),
+        };
+        testkit::send(&mut app, Msg::Poll(PollUpdate::Paths(paths)));
+        let app = pressed(app, &[KeyCode::Enter]);
+        let text = testkit::render(&app, 100, 30)
+            .iter()
+            .map(|row| row.chars().skip(24).take(60).collect::<String>())
+            .map(|row| row.trim_end().to_owned())
+            .filter(|row| !row.is_empty())
+            .collect::<Vec<_>>();
+        let at = text
+            .iter()
+            .position(|row| row.starts_with("Bob - 20 min ago"))
+            .expect("the run");
+        assert_eq!(
+            text[at..at + 10],
+            [
+                "Bob - 20 min ago - via Tor",
+                "  Are we still on?",
+                "  18 min ago - from a keeper",
+                "  For Saturday, I mean.",
+                "You - 17 min ago  vv Delivered - via Tor",
+                "  Yes!",
+                "  16 min ago  vv Delivered - LAN direct",
+                "  I'll bring the map.",
+                "Bob - 11 min ago",
+                "  Great.",
+            ]
+        );
+    }
+
     #[test]
     fn a_run_of_messages_from_one_sender_has_one_sender_line() {
         // Bob twice within 5 min, then you twice, then Bob 5 min later: one
@@ -4341,15 +4430,17 @@ mod tests {
             .iter()
             .position(|row| row.starts_with("Bob - 20 min ago"))
             .expect("the run");
+        // Field test E3: each message in a run says when it came.
         assert_eq!(
-            text[at..at + 9],
+            text[at..at + 10],
             [
                 "Bob - 20 min ago",
                 "  Are we still on?",
+                "  18 min ago",
                 "  For Saturday, I mean.",
                 "You - 17 min ago  vv Delivered",
                 "  Yes!",
-                "  vv Delivered",
+                "  16 min ago  vv Delivered",
                 "  I'll bring the map.",
                 "Bob - 11 min ago",
                 "  Great.",

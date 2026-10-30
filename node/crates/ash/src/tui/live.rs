@@ -125,6 +125,27 @@ impl Route {
         }
     }
 
+    /// How a message came or went as raven-node says it (IPC `Arrivals`);
+    /// None for one a keeper held (no carrier: widgets.rs's
+    /// `arrived_tag` says it).
+    pub(super) fn of_arrived(via: raven_core::arrivals::ArrivedVia) -> Option<Route> {
+        use raven_core::arrivals::ArrivedVia;
+        let (carrier, path) = match via {
+            ArrivedVia::Lan => (Carrier::Lan, ""),
+            ArrivedVia::Internet => (Carrier::Internet, ""),
+            ArrivedVia::P2p => (Carrier::P2p, ""),
+            ArrivedVia::Relayed => (Carrier::P2p, "relayed"),
+            ArrivedVia::Tor => (Carrier::Onion, ""),
+            ArrivedVia::Nearby => (Carrier::Nearby, ""),
+            ArrivedVia::Keeper => return None,
+        };
+        Some(Route {
+            carrier,
+            dial: None,
+            path: path.into(),
+        })
+    }
+
     /// How a delivery went, as raven-node's outbox recorded it (its
     /// carrier and p2p path); None for a carrier this app doesn't know.
     pub(super) fn of_outbox(item: &raven_core::ipc::OutboxItem) -> Option<Route> {

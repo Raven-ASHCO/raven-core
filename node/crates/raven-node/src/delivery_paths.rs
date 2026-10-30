@@ -46,6 +46,7 @@ use std::net::IpAddr;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use raven_core::arrivals::ArrivedVia;
 use raven_core::envelope::{EnvType, Envelope};
 use raven_core::friend_custody::is_rfc1;
 use raven_core::ipc::{ContactPath, ContactWhy, OutboxItem};
@@ -322,6 +323,7 @@ pub(crate) fn note(
             path,
             Instant::now(),
         );
+        note_delivered_messages(frames, carrier, path);
         // A receipt: the contact is online, its reason is stale, and the
         // carrier that brought it works.
         heard(contact);
@@ -333,6 +335,49 @@ pub(crate) fn note(
             note_lost(lost);
         }
     }
+}
+
+/// Our own messages a receipt confirmed, kept (the newest).
+const DELIVERED_MAX: usize = 1024;
+
+/// Our own messages a receipt confirmed since raven-node started, oldest
+/// first: message id, how it went, when (wall clock). For the terminal
+/// app's chat (field test E3: it showed the path of some of your messages
+/// only, those its own send or the outbox delivered). In memory, bounded;
+/// never an address.
+static DELIVERED: Mutex<VecDeque<([u8; 16], ArrivedVia, u64)>> = Mutex::new(VecDeque::new());
+
+/// The messages a dial that brought a receipt carried ([`delivered`]): how
+/// each went, `carrier` and, for p2p, `path`.
+fn note_delivered_messages(frames: &[Vec<u8>], carrier: OutboxCarrier, path: Option<DeliveryPath>) {
+    let via = if path == Some(DeliveryPath::Relayed) {
+        ArrivedVia::Relayed
+    } else {
+        ArrivedVia::of_carrier(carrier)
+    };
+    let at = raven_core::clock::now_ms();
+    let mut kept = DELIVERED.lock().unwrap_or_else(|e| e.into_inner());
+    for env in frames
+        .iter()
+        .filter_map(|f| Envelope::unpack(f))
+        .filter(|env| env.env_type == EnvType::Message as u8)
+    {
+        kept.retain(|(id, _, _)| *id != env.message_id);
+        if kept.len() >= DELIVERED_MAX {
+            kept.pop_front();
+        }
+        kept.push_back((env.message_id, via, at));
+    }
+}
+
+/// [`DELIVERED`], oldest first.
+pub(crate) fn delivered_messages() -> Vec<([u8; 16], ArrivedVia, u64)> {
+    DELIVERED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .collect()
 }
 
 // ── Relays (Phase 6b design A S21, R8; step P6.28) ─────────────────────────
@@ -1218,6 +1263,65 @@ pub(crate) mod tests {
     /// Only a dial that carried a message and whose replies hold a receipt
     /// counts: no reply, a reply that is no ACK, a custody (RFC1) exchange,
     /// or a dial with no message of ours is no delivery.
+    /// Field test E3: the terminal app showed the path of some of your
+    /// messages only. A dial that brought a receipt keeps how each of its
+    /// messages went (by id: never an address); one without, nothing.
+    #[test]
+    fn a_delivered_message_keeps_how_it_went() {
+        let mut message = Envelope::unpack(&envelope(EnvType::Message)).unwrap();
+        message.message_id = [0xD7; 16];
+        let message = message.pack();
+        let ack = envelope(EnvType::Ack);
+        let way = |id: [u8; 16]| {
+            delivered_messages()
+                .into_iter()
+                .rev()
+                .find(|(mid, _, _)| *mid == id)
+                .map(|(_, via, _)| via)
+        };
+        note(
+            &[0x5D; 32],
+            OutboxCarrier::Onion,
+            None,
+            std::slice::from_ref(&message),
+            &[],
+        );
+        assert_eq!(way([0xD7; 16]), None, "no receipt");
+        note(
+            &[0x5D; 32],
+            OutboxCarrier::Onion,
+            None,
+            std::slice::from_ref(&message),
+            std::slice::from_ref(&ack),
+        );
+        assert_eq!(way([0xD7; 16]), Some(ArrivedVia::Tor));
+        // Through a relay: said so; once per message, the newest way.
+        note(
+            &[0x5D; 32],
+            OutboxCarrier::P2p,
+            Some(DeliveryPath::Relayed),
+            std::slice::from_ref(&message),
+            std::slice::from_ref(&ack),
+        );
+        assert_eq!(way([0xD7; 16]), Some(ArrivedVia::Relayed));
+        assert_eq!(
+            delivered_messages()
+                .iter()
+                .filter(|(mid, _, _)| *mid == [0xD7; 16])
+                .count(),
+            1
+        );
+        // IPC `Arrivals` names it by id and way.
+        let raven_core::ipc::IpcResponse::Arrivals { delivered, .. } =
+            crate::arrivals::ipc_rows(raven_core::ipc::IPC_VERSION)
+        else {
+            panic!("Arrivals");
+        };
+        assert!(delivered
+            .iter()
+            .any(|r| r.message_id_hex == hex::encode([0xD7; 16]) && r.via == "relayed"));
+    }
+
     #[test]
     fn only_a_dial_that_brings_back_a_receipt_counts() {
         let message = envelope(EnvType::Message);
