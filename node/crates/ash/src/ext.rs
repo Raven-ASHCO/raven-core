@@ -2999,6 +2999,43 @@ pub(crate) fn lan_only_line(friends_here: u32, waiting: Option<&str>) -> String 
     )
 }
 
+/// The running raven-node's Tor carrier, for `raven status`'s first line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TorNow {
+    /// Off, not built, or no word of it (an older raven-node).
+    Off,
+    Starting,
+    Ready,
+    /// On, but it cannot connect on this network.
+    NotWorking,
+}
+
+/// `raven status`'s first line while raven-node runs the local network and
+/// Tor and no other carrier (field test E3): how friends are reached now,
+/// the contacts it saw here in the last ten minutes (a count) and what
+/// waits ([`waiting_messages_line`], or none). With Tor off it is
+/// [`lan_only_line`].
+pub(crate) fn lan_and_tor_line(friends_here: u32, tor: TorNow, waiting: Option<&str>) -> String {
+    let how = match tor {
+        TorNow::Off => return lan_only_line(friends_here, waiting),
+        TorNow::Ready => {
+            "Raven reaches friends on this network directly, and friends elsewhere over Tor."
+        }
+        TorNow::Starting => {
+            "Raven reaches friends on this network directly; Tor is starting, for friends \
+             elsewhere."
+        }
+        TorNow::NotWorking => {
+            "Raven reaches friends on this network directly; Tor can't connect on this network \
+             now, so friends elsewhere can't be reached."
+        }
+    };
+    format!(
+        "{how} Friends seen here in the last 10 min: {friends_here}. {}",
+        waiting.unwrap_or("Waiting messages: 0.")
+    )
+}
+
 /// `raven status`'s row for a contact whose saved address answered with
 /// another key in the last ten minutes (M0, P3.C6).
 pub(crate) fn pin_blocked_text(who: &str) -> String {

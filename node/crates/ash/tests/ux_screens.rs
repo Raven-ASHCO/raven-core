@@ -579,8 +579,35 @@ fn status_gives_a_plain_receiving_row_and_a_verdict_for_every_node_state() {
         "{out}"
     );
     // What the scripts parse is still there, and the raw OS error is not.
-    assert!(out.contains("bridge") && out.contains("forward_q"), "{out}");
+    assert!(out.contains("BRIDGE") && out.contains("forward_q"), "{out}");
     assert!(!out.contains("os error"), "{out}");
+    // Field test E3: no developer rows unless asked for (`--verbose`, or
+    // RAVEN_VERBOSE=1); the same command still ends the same way.
+    for technical in [
+        "serverless_rvn1",
+        "never silently uses FastAPI",
+        "path_rule",
+        "configured",
+        "policy        ",
+        "endpoint      ",
+    ] {
+        assert!(!out.contains(technical), "{technical}: {out}");
+    }
+    let verbose = ash_out(dir.path(), &["status", "--verbose"], "");
+    assert_eq!(code(&verbose), 0, "{}", text(&verbose.stderr));
+    let verbose = text(&verbose.stdout);
+    for technical in [
+        "serverless_rvn1",
+        "never silently uses FastAPI",
+        "configured",
+        "policy        ",
+    ] {
+        assert!(verbose.contains(technical), "{technical}: {verbose}");
+    }
+    assert_eq!(
+        status_body(&verbose).lines().last(),
+        status_body(&out).lines().last()
+    );
     assert!(
         !out.contains("mock_ble") && !out.contains("transports"),
         "{out}"
@@ -856,8 +883,14 @@ fn status_and_doctor_show_the_nearby_search_row() {
         drop(node);
         assert_eq!(code(&status), 0, "{}", text(&status.stderr));
         let lan_status = text(&lan_status.stdout);
-        for out in [text(&status.stdout), text(&doctor.stdout)] {
-            match row {
+        // `raven status` leaves out what only says this build holds the
+        // search back (field test E3); `raven doctor` keeps it.
+        let held = row == Some("held in this build");
+        for (out, shown) in [
+            (text(&status.stdout), row.filter(|_| !held)),
+            (text(&doctor.stdout), row),
+        ] {
+            match shown {
                 Some(row) => assert!(
                     out.contains(&format!("{}\n  {:<14}{row}\n", lan_row(all), "LAN search")),
                     "{out}"

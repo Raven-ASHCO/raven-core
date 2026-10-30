@@ -625,7 +625,12 @@ enum Commands {
         cmd: LanCmd,
     },
     /// Show your identity, contacts, and whether this computer can send and receive.
-    Status,
+    Status {
+        /// Also the technical rows (messaging path, node policy and
+        /// capabilities, held features). `RAVEN_VERBOSE=1` does the same.
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
+    },
     /// Check your setup and say what to do next (details follow the summary).
     Doctor {
         /// Exit 1 if `daemon_ready` is false. Does not claim send works.
@@ -11217,6 +11222,15 @@ fn doctor_lock_line(state: raven_core::privacy::LockState) -> String {
 }
 
 fn cmd_status(data_dir: &Path) -> Result<(), String> {
+    cmd_status_with(data_dir, ext::verbose())
+}
+
+/// `raven status`; `technical` adds the rows only a developer reads (field
+/// test E3: "messaging serverless_rvn1 (...)", "path_rule never silently
+/// uses FastAPI", "LAN search held in this build", the node's policy and
+/// capabilities): `raven status --verbose` or `RAVEN_VERBOSE=1`. The
+/// messaging path is checked either way (a failure ends the command).
+fn cmd_status_with(data_dir: &Path, technical: bool) -> Result<(), String> {
     let c = c();
     println!();
     println!("{}STATUS \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{}", c.bold, c.reset);
@@ -11252,7 +11266,11 @@ fn cmd_status(data_dir: &Path) -> Result<(), String> {
         "disk",
         &disk_row(raven_core::disk_space::free_bytes(data_dir)),
     );
-    print_messaging_path_diag()?;
+    if technical {
+        print_messaging_path_diag()?;
+    } else {
+        assert_no_silent_fastapi(resolve_terminal_messaging_path())?;
+    }
 
     match try_load_identity(data_dir) {
         Ok(Some(id)) => {
@@ -11308,15 +11326,17 @@ fn cmd_status(data_dir: &Path) -> Result<(), String> {
 
     println!();
     println!("{}BRIDGE \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{}", c.bold, c.reset);
-    kv(
-        "configured",
-        "node_policy.json (what raven-node will do when running)",
-    );
-    kv("bridge", ok(policy.bridge));
-    kv("store", ok(policy.store));
-    kv("relay", ok(policy.relay));
-    kv("endpoint", ok(policy.endpoint));
-    kv("policy", if policy.auto_policy { "AUTO" } else { "manual" });
+    if technical {
+        kv(
+            "configured",
+            "node_policy.json (what raven-node will do when running)",
+        );
+        kv("bridge", ok(policy.bridge));
+        kv("store", ok(policy.store));
+        kv("relay", ok(policy.relay));
+        kv("endpoint", ok(policy.endpoint));
+        kv("policy", if policy.auto_policy { "AUTO" } else { "manual" });
+    }
     match &daemon {
         Ok(IpcResponse::Status {
             capabilities,
@@ -11324,8 +11344,10 @@ fn cmd_status(data_dir: &Path) -> Result<(), String> {
             ..
         }) => {
             kv("daemon", "running (answers IPC)");
-            kv("caps", &capabilities.join(", "));
-            kv("fwd_pending", &forward_pending.to_string());
+            if technical {
+                kv("caps", &capabilities.join(", "));
+                kv("fwd_pending", &forward_pending.to_string());
+            }
         }
         Ok(_) => kv("daemon", "unexpected IPC response"),
         Err(e) if ipc_client::error_means_not_running(e) => kv(
@@ -11348,7 +11370,9 @@ fn cmd_status(data_dir: &Path) -> Result<(), String> {
         "LAN",
         &lan_row_with(&LanSetting::read(data_dir), &lan_extras, &daemon),
     );
-    if let Some(row) = nearby_row(&daemon, lan_extras.verified_only, &book) {
+    if let Some(row) = nearby_row(&daemon, lan_extras.verified_only, &book)
+        .filter(|row| technical || !nearby_row_is_technical(row))
+    {
         kv("LAN search", &row);
     }
     // The Tor onion carrier (lab): raven-node's own status line.
@@ -11439,7 +11463,11 @@ fn cmd_status(data_dir: &Path) -> Result<(), String> {
 /// [`ext::NOT_ON_ANY_NETWORK_TEXT`], then `waiting` as before; while the
 /// local network is the only carrier the running raven-node has
 /// ([`lan_only_friends`]), [`ext::lan_only_line`] with `waiting` in it;
-/// else `waiting` alone (cutoff pack CP.6: only while messages wait).
+/// while it runs the local network and Tor and nothing else, how friends
+/// are reached now ([`ext::lan_and_tor_line`]: field test E3, "works on
+/// this network without the internet" was said while Tor carried every
+/// message); else `waiting` alone (cutoff pack CP.6: only while messages
+/// wait).
 fn status_network_lines(
     on_a_network: Option<bool>,
     daemon: &Result<IpcResponse, String>,
@@ -11451,8 +11479,35 @@ fn status_network_lines(
             .collect();
     }
     match lan_only_friends(daemon) {
-        Some(friends) => vec![ext::lan_only_line(friends, waiting.as_deref())],
+        Some(friends) => vec![ext::lan_and_tor_line(
+            friends,
+            tor_now(daemon),
+            waiting.as_deref(),
+        )],
         None => waiting.into_iter().collect(),
+    }
+}
+
+/// The running raven-node's Tor carrier as its status line says it
+/// (`Status.tor`: "Tor: ready", "Tor: starting (45 %)", "Tor: blocked on
+/// this network (...)"); [`ext::TorNow::Off`] without one, or when it is
+/// off or not built.
+fn tor_now(daemon: &Result<IpcResponse, String>) -> ext::TorNow {
+    let Ok(IpcResponse::Status {
+        tor: Some(line), ..
+    }) = daemon
+    else {
+        return ext::TorNow::Off;
+    };
+    let state = line.trim().strip_prefix("Tor: ").unwrap_or(line.trim());
+    if state.starts_with("ready") {
+        ext::TorNow::Ready
+    } else if state.starts_with("starting") {
+        ext::TorNow::Starting
+    } else if state.starts_with("off") || state.starts_with("not built") {
+        ext::TorNow::Off
+    } else {
+        ext::TorNow::NotWorking
     }
 }
 
@@ -11470,9 +11525,10 @@ fn friends_here_10m(daemon: &Result<IpcResponse, String>) -> Option<u32> {
 
 /// How many contacts the running raven-node saw on this network in the last
 /// ten minutes (`Status.lan.friends_here_10m`), while the local network is
-/// the only carrier it has: its LAN listener is on and bound to a network
-/// (not this computer only), with no Internet listener and no p2p host.
-/// `None` otherwise, and from a raven-node before P3.C6 (no count).
+/// the only direct carrier it has: its LAN listener is on and bound to a
+/// network (not this computer only), with no Internet listener and no p2p
+/// host (Tor, which reaches friends elsewhere, is [`tor_now`]'s). `None`
+/// otherwise, and from a raven-node before P3.C6 (no count).
 fn lan_only_friends(daemon: &Result<IpcResponse, String>) -> Option<u32> {
     use raven_core::ipc::{LAN_MODE_FIXED, LAN_MODE_ON};
     let Ok(IpcResponse::Status {
@@ -12096,6 +12152,16 @@ fn nearby_no_answer(names: &[String], seeds: bool) -> Option<String> {
 /// friends only. Multicast counts as blocked once its queries went out and
 /// none came back to this computer. The contacts of `contacts` it asked for
 /// in vain are named, with the clock hint (P3.C3, [`nearby_no_answer`]).
+/// A `LAN search` row that says only what this build holds back ("held in
+/// this build"): `raven status` leaves it out unless asked for the technical
+/// rows (field test E3); `raven doctor` and `raven lan status` keep it.
+fn nearby_row_is_technical(row: &str) -> bool {
+    row == NEARBY_HELD
+}
+
+/// [`nearby_row`] while the beacon is held in this build.
+const NEARBY_HELD: &str = "held in this build";
+
 fn nearby_row(
     status: &Result<IpcResponse, String>,
     verified_only: bool,
@@ -12134,7 +12200,7 @@ fn nearby_row(
             }
             row
         }
-        "held" => "held in this build".into(),
+        "held" => NEARBY_HELD.into(),
         "off" => "off while LAN is off".into(),
         "starting" => "starting".into(),
         "no-interfaces" => "waiting for a local network".into(),
@@ -15782,8 +15848,8 @@ pub fn run() {
                 std::process::exit(1);
             }
         },
-        Some(Commands::Status) => {
-            if let Err(e) = cmd_status(&data_dir) {
+        Some(Commands::Status { verbose }) => {
+            if let Err(e) = cmd_status_with(&data_dir, verbose || ext::verbose()) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
@@ -23499,6 +23565,58 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                 "{daemon:?}"
             );
             assert!(status_network_lines(Some(true), &daemon, None).is_empty());
+        }
+        // Field test E3: Tor runs beside the local network (it carried every
+        // message): never "without the internet"; how friends are reached
+        // now, as Tor's own state says.
+        let with_tor = |line: &str| {
+            let mut status = on(Some(2));
+            if let Ok(IpcResponse::Status { tor, .. }) = &mut status {
+                *tor = Some(line.to_string());
+            }
+            status
+        };
+        for (tor, how) in [
+            (
+                "Tor: ready",
+                "Raven reaches friends on this network directly, and friends elsewhere over Tor.",
+            ),
+            (
+                "Tor: ready (onion service publishing)",
+                "Raven reaches friends on this network directly, and friends elsewhere over Tor.",
+            ),
+            (
+                "Tor: starting (45 %)",
+                "Raven reaches friends on this network directly; Tor is starting, for friends \
+                 elsewhere.",
+            ),
+            (
+                "Tor: blocked on this network (no bridge)",
+                "Raven reaches friends on this network directly; Tor can't connect on this \
+                 network now, so friends elsewhere can't be reached.",
+            ),
+        ] {
+            assert_eq!(
+                status_network_lines(Some(true), &with_tor(tor), None),
+                [format!(
+                    "{how} Friends seen here in the last 10 min: 2. Waiting messages: 0."
+                )],
+                "{tor}"
+            );
+            let line = &status_network_lines(Some(true), &with_tor(tor), waiting())[0];
+            assert!(!line.contains("without the internet"), "{line}");
+            assert!(
+                line.ends_with("Waiting messages: 2 (the oldest can wait until 14:05)."),
+                "{line}"
+            );
+        }
+        // Tor off or not built: the local network is the only carrier.
+        for tor in ["Tor: off", "Tor: not built in this raven"] {
+            assert!(
+                status_network_lines(Some(true), &with_tor(tor), None)[0]
+                    .starts_with("Raven works on this network without the internet."),
+                "{tor}"
+            );
         }
     }
 
