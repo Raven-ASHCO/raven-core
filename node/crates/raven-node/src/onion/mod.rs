@@ -41,6 +41,11 @@ pub(crate) mod proto;
 pub(crate) mod race;
 pub(crate) mod watch;
 
+/// The Tor helper's own Arti code, run inside this process (the iOS app;
+/// feature `tor-embedded`): [`InProcess`].
+#[cfg(feature = "tor-embedded")]
+mod arti;
+
 #[cfg(debug_assertions)]
 pub(crate) mod loopback;
 
@@ -64,8 +69,10 @@ use proto::{ConnectReply, Event, ServiceState};
 use watch::{Blame, End, Life, Outages, Restarts, SelfChecks, ServiceNews, ServiceWatch, Via};
 
 /// The helper's executable name, next to raven-node.
+#[cfg_attr(feature = "tor-embedded", allow(dead_code))]
 pub(crate) const HELPER_EXECUTABLE: &str = "raven-tor-helper";
 /// Debug builds: the helper to start instead (an absolute path).
+#[cfg_attr(feature = "tor-embedded", allow(dead_code))]
 pub(crate) const HELPER_ENV: &str = "RAVEN_TOR_HELPER";
 /// Debug builds: run the loopback helper ([`loopback`]) with this registry
 /// directory instead of Tor.
@@ -111,6 +118,7 @@ pub(crate) enum Phase {
     #[default]
     Off,
     /// No helper next to raven-node (built without the `tor` feature).
+    #[cfg_attr(feature = "tor-embedded", allow(dead_code))]
     NotBuilt,
     /// The helper bootstraps.
     Starting,
@@ -366,8 +374,10 @@ async fn restart_requested() -> End {
 
 // ── Finding and starting the helper ─────────────────────────────────────────
 
-/// How the helper is started.
+/// How the helper is started (a process; [`InProcess`] with
+/// `tor-embedded`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "tor-embedded", allow(dead_code))]
 pub(crate) enum Launcher {
     /// `raven-tor-helper` (Arti).
     Exe(PathBuf),
@@ -376,6 +386,7 @@ pub(crate) enum Launcher {
     Loopback { exe: PathBuf, dir: PathBuf },
 }
 
+#[cfg_attr(feature = "tor-embedded", allow(dead_code))]
 impl Launcher {
     /// The helper this process would start; `None`: none is built.
     pub(crate) fn find() -> Option<Self> {
@@ -479,6 +490,120 @@ impl Spawn for Launcher {
     }
 }
 
+// ── The helper inside this process (feature `tor-embedded`) ─────────────────
+
+/// The helper run inside raven-node's own process (the iOS app, which may
+/// start no helper process; docs/IOS.md): the same code as
+/// `raven-tor-helper` ([`arti`]), or in a debug build the loopback helper,
+/// on a thread and a two-worker runtime of its own (Tor never shares the
+/// node's pool), speaking the same protocol over in-memory pipes. Every
+/// life gets fresh pipes and a fresh runtime; ending a life (a kill, the
+/// node stopping) closes its input and drops its runtime, and with it
+/// every Tor circuit and socket of that life.
+///
+/// What only a process gives: a panic in Arti is caught here (the life
+/// ends, the supervisor starts another), but Arti's `exit(1)` on a
+/// protocol version the Tor network no longer accepts (Arti #1932) ends the
+/// whole app, and a thread that spins (Arti #2726) cannot be killed, only
+/// left behind (its runtime is dropped). docs/IOS.md says so.
+#[cfg(feature = "tor-embedded")]
+#[derive(Clone, Debug)]
+pub(crate) enum InProcess {
+    /// Arti.
+    Arti,
+    /// Debug builds: the loopback helper with this registry directory.
+    #[cfg(debug_assertions)]
+    Loopback(PathBuf),
+}
+
+#[cfg(feature = "tor-embedded")]
+impl InProcess {
+    /// Arti, or in a debug build the loopback helper when
+    /// [`LOOPBACK_ENV`] names an absolute directory.
+    pub(crate) fn find() -> Self {
+        #[cfg(debug_assertions)]
+        if let Some(dir) = std::env::var_os(LOOPBACK_ENV)
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute())
+        {
+            return Self::Loopback(dir);
+        }
+        Self::Arti
+    }
+}
+
+/// How much one in-memory pipe buffers (a few config and event lines).
+#[cfg(feature = "tor-embedded")]
+const PIPE_BYTES: usize = 64 * 1024;
+
+#[cfg(feature = "tor-embedded")]
+impl Spawn for InProcess {
+    fn spawn(&self) -> Result<Proc, String> {
+        let (node_end, helper_end) = tokio::io::duplex(PIPE_BYTES);
+        let (stderr_node, mut stderr_helper) = tokio::io::duplex(1024);
+        let (node_out, node_in) = tokio::io::split(node_end);
+        let (helper_in, helper_out) = tokio::io::split(helper_end);
+        let (kill, killed) = tokio::sync::oneshot::channel::<()>();
+        let (ended, done) = tokio::sync::oneshot::channel::<()>();
+        let which = self.clone();
+        std::thread::Builder::new()
+            .name("raven-tor".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("raven-tor-worker")
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => {
+                        let _ = ended.send(());
+                        return;
+                    }
+                };
+                let life = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(async move {
+                        let serve = async move {
+                            match which {
+                                InProcess::Arti => arti::serve(helper_in, helper_out).await,
+                                #[cfg(debug_assertions)]
+                                InProcess::Loopback(dir) => {
+                                    loopback::serve_in_process(helper_in, helper_out, dir).await
+                                }
+                            }
+                        };
+                        tokio::select! {
+                            _ = serve => {}
+                            _ = killed => {}
+                        }
+                    })
+                }));
+                if life.is_err() {
+                    // What the supervisor reads from a helper process's
+                    // stderr after a panic.
+                    let _ =
+                        runtime.block_on(stderr_helper.write_all(
+                            b"thread 'raven-tor' panicked at the in-process Tor helper\n",
+                        ));
+                }
+                drop(stderr_helper);
+                // Arti's background tasks go with the runtime.
+                runtime.shutdown_timeout(Duration::from_secs(1));
+                let _ = ended.send(());
+            })
+            .map_err(|e| format!("the Tor helper could not be started ({})", e.kind()))?;
+        Ok(Proc {
+            stdin: Box::pin(node_in),
+            stdout: Box::pin(node_out),
+            stderr: Some(Box::pin(stderr_node)),
+            done: Box::pin(async move {
+                let _ = done.await;
+            }),
+            kill: Some(kill),
+        })
+    }
+}
+
 // ── The service task ────────────────────────────────────────────────────────
 
 /// The onion carrier's service task (supervised by raven-node like every
@@ -489,15 +614,22 @@ pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
     if !raven_core::onion_live_enabled() {
         return std::future::pending().await;
     }
-    let Some(launcher) = Launcher::find() else {
-        update_status(|s| s.phase = Phase::NotBuilt);
-        eprintln!(
-            "raven-node onion: Tor: not built in this raven (no {HELPER_EXECUTABLE} next to \
-             raven-node; build with `--features tor`)"
-        );
-        return std::future::pending().await;
+    // Inside this process (the iOS app): no helper program to find.
+    #[cfg(feature = "tor-embedded")]
+    let spawner: Arc<dyn Spawn> = Arc::new(InProcess::find());
+    #[cfg(not(feature = "tor-embedded"))]
+    let spawner: Arc<dyn Spawn> = match Launcher::find() {
+        Some(launcher) => Arc::new(launcher),
+        None => {
+            update_status(|s| s.phase = Phase::NotBuilt);
+            eprintln!(
+                "raven-node onion: Tor: not built in this raven (no {HELPER_EXECUTABLE} next to \
+                 raven-node; build with `--features tor`)"
+            );
+            return std::future::pending().await;
+        }
     };
-    run_with(data_dir, Arc::new(launcher)).await
+    run_with(data_dir, spawner).await
 }
 
 /// [`run`] with the helper starter given.

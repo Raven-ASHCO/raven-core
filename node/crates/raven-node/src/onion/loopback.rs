@@ -82,6 +82,32 @@ pub(crate) async fn run_cli(registry: PathBuf) -> i32 {
     }
 }
 
+/// The loopback helper inside raven-node's process (feature
+/// `tor-embedded`, [`super::InProcess`]): [`serve`] on in-memory pipes, the
+/// knobs from the environment, as [`run_cli`] reads them.
+#[cfg(feature = "tor-embedded")]
+pub(crate) async fn serve_in_process<R, W>(input: R, output: W, registry: PathBuf) -> i32
+where
+    R: AsyncRead + Send + 'static,
+    W: AsyncWrite + Send + 'static,
+{
+    match serve(
+        Box::pin(input),
+        Box::pin(output),
+        registry,
+        Knobs::from_env(),
+    )
+    .await
+    {
+        Ok(Ended::Stopped) => 0,
+        Ok(Ended::Obsolete) => 1,
+        Err(e) => {
+            eprintln!("raven-node onion: in-process loopback helper: {e}");
+            2
+        }
+    }
+}
+
 /// How [`serve`] ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
