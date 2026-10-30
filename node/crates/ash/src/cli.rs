@@ -14362,6 +14362,14 @@ fn plan_contact_routes_with(
         // Only a p2p route, and it cannot be used: say why.
         return Err(if p2p_unverified {
             unverified_contact_text_for(c, "p2p")
+        } else if raven_core::p2p_live_enabled() {
+            // This build has p2p; this computer's raven-node runs no host.
+            format!(
+                "p2p is off on this computer — {} has only a p2p route saved; turn p2p on \
+                 (`raven node p2p on`) or save a LAN address: {}",
+                c.primary_label(),
+                set_addr_hint(c, "--lan")
+            )
         } else {
             format!(
                 "{} — {} has only a p2p route saved; to reach them on your network save a LAN \
@@ -14373,6 +14381,54 @@ fn plan_contact_routes_with(
         });
     }
     Ok((routes, env_lan))
+}
+
+/// Whether an `auto` send may plan Bluetooth nearby: this build has it and
+/// the user turned it on (`raven nearby enable`; never asked is off). Field
+/// test E3: after `raven nearby disable` every send still tried
+/// `nearby_dial` and its words named Bluetooth as a way tried.
+fn nearby_on(data_dir: &Path) -> bool {
+    raven_core::nearby_live_enabled() && raven_core::node_policy::nearby_settings(data_dir).0
+}
+
+/// Whether this profile's raven-node runs a libp2p host, so a send may plan
+/// p2p: what the running one's Status says (`p2p.up`), else (none runs yet:
+/// the send starts one) whether it will start one ([`p2p_host_at_start`]).
+/// No answer in time: as before, p2p stays planned.
+fn p2p_host_on(data_dir: &Path) -> bool {
+    p2p_host_on_with(
+        &ipc_client::ipc_request_timeout(data_dir, &IpcRequest::status(), P2P_HOST_WAIT),
+        || p2p_host_at_start(data_dir, std::env::var("RAVEN_P2P_LISTEN").ok().as_deref()),
+    )
+}
+
+/// How long [`p2p_host_on`] waits for a Status: a healthy node answers at
+/// once.
+const P2P_HOST_WAIT: Duration = Duration::from_millis(800);
+
+/// [`p2p_host_on`] from a Status answer, and what a raven-node started now
+/// would do (asked only when none runs).
+fn p2p_host_on_with(status: &Result<IpcResponse, String>, at_start: impl FnOnce() -> bool) -> bool {
+    match status {
+        Ok(IpcResponse::Status { p2p, .. }) => p2p.as_ref().is_some_and(|p| p.up),
+        Err(e) if ipc_client::error_means_not_running(e) => at_start(),
+        // Locked, older or busy: not known; as before.
+        _ => true,
+    }
+}
+
+/// Whether a raven-node started now for this profile runs a libp2p host:
+/// `RAVEN_P2P_LISTEN` (it inherits the environment; empty or `off` is off),
+/// else `p2p_listen` in node_policy.json (`raven node p2p on`), as
+/// raven-node decides it.
+fn p2p_host_at_start(data_dir: &Path, env: Option<&str>) -> bool {
+    let on = |listen: &str| {
+        raven_core::p2p_route::normalize_p2p_listen(listen).is_ok_and(|listen| listen.is_some())
+    };
+    match env {
+        Some(listen) => on(listen),
+        None => try_load_policy(data_dir).is_ok_and(|p| on(&p.p2p_listen)),
+    }
 }
 
 /// Contact `c`'s nearby route (Phase 5, RNL1): its key as the route's
@@ -14389,9 +14445,9 @@ fn nearby_route(c: &Contact) -> Option<pair_init_lab::DialRoute> {
 /// last (Phase 5): for `--carrier nearby` (the send path refuses it while
 /// this build holds nearby, or for an unverified contact, before anything is
 /// dialled), and for `auto` to a verified contact once this build has
-/// nearby (`nearby_live`; raven-node finds out whether the contact is in
-/// range). `auto` with nothing else to plan for that contact then sends
-/// over nearby alone.
+/// nearby and the user turned it on (`nearby_live`: [`nearby_on`];
+/// raven-node finds out whether the contact is in range). `auto` with
+/// nothing else to plan for that contact then sends over nearby alone.
 fn with_nearby_route(
     c: &Contact,
     choice: CarrierChoice,
@@ -14487,7 +14543,10 @@ fn resolve_send_target(
                 hits.len()
             ));
         }
-        let p2p_live = raven_core::p2p_live_enabled();
+        // p2p only while this profile's raven-node runs a libp2p host
+        // (field test E3: with p2p off, every send dialled an old PeerId and
+        // its words advised turning p2p on).
+        let p2p_live = raven_core::p2p_live_enabled() && p2p_host_on(data_dir);
         let hidden = hides_ip_from(data_dir, hits[0]);
         if hidden && choice == CarrierChoice::Internet {
             return Err(hidden_ip_text(hits[0]));
@@ -14526,7 +14585,7 @@ fn resolve_send_target(
             with_nearby_route(
                 c,
                 choice,
-                raven_core::nearby_live_enabled(),
+                nearby_on(data_dir),
                 plan_contact_routes_with(
                     data_dir,
                     c,
@@ -29447,9 +29506,17 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             plan(&only, CarrierChoice::Auto, false, true).unwrap(),
             vec![format!("p2p_dial=/p2p/{peer}")]
         );
-        assert!(plan(&only, CarrierChoice::Auto, false, false)
-            .unwrap_err()
-            .starts_with("P2P_HOLD"));
+        // Not usable here: held in this build, or (field test E3) this
+        // build has p2p but this computer's raven-node runs no host.
+        let err = plan(&only, CarrierChoice::Auto, false, false).unwrap_err();
+        if raven_core::p2p_live_enabled() {
+            assert!(
+                err.starts_with("p2p is off on this computer") && err.contains("raven node p2p on"),
+                "{err}"
+            );
+        } else {
+            assert!(err.starts_with("P2P_HOLD"), "{err}");
+        }
         // Unverified: refused for p2p, LAN kept for auto.
         only.pinned = false;
         assert!(plan(&only, CarrierChoice::P2p, false, true)
@@ -29691,6 +29758,105 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         )
         .to_text();
         assert!(with_card_onion_route(&c, CarrierChoice::Onion, true, lan()).is_err());
+    }
+
+    /// Field test E3: after `raven nearby disable` every send still tried
+    /// Bluetooth, and with p2p off every send dialled an old PeerId; the
+    /// words then named both as ways tried. An `auto` send plans nearby only
+    /// while the user has it on, and p2p only while this profile's
+    /// raven-node runs (or, none running, will start) a libp2p host.
+    #[test]
+    fn a_send_plans_neither_bluetooth_nor_p2p_while_they_are_off() {
+        use raven_core::node_policy::update_settings;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        seed_book(d);
+        let peer_id = raven_core::p2p_route::local_peer_id(&ident(0x1a));
+        cmd_contact_set_routes(
+            d,
+            Some("Alice"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&peer_id),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let carriers = |d: &Path| {
+            resolve_send_target(d, "Alice", "", "", "127.0.0.1:0", CarrierChoice::Auto)
+                .unwrap()
+                .routes
+                .iter()
+                .map(|r| r.carrier.label())
+                .collect::<Vec<_>>()
+        };
+        // Never asked, and turned off: neither is planned.
+        for (nearby, p2p) in [(None, ""), (Some(false), "off")] {
+            update_settings(d, |p| {
+                p.nearby = nearby;
+                p.p2p_listen = p2p.into();
+            })
+            .unwrap();
+            assert!(!nearby_on(d));
+            assert!(!p2p_host_on(d), "no node runs, none would start a host");
+            let planned = carriers(d);
+            assert!(!planned.contains(&"nearby_dial"), "{planned:?}");
+            assert!(!planned.contains(&"p2p_dial"), "{planned:?}");
+            assert!(planned.contains(&"lan_dial"), "{planned:?}");
+        }
+        // Turned on: planned where this build has them.
+        update_settings(d, |p| {
+            p.nearby = Some(true);
+            p.p2p_listen = "7423".into();
+        })
+        .unwrap();
+        assert_eq!(nearby_on(d), raven_core::nearby_live_enabled());
+        assert!(p2p_host_at_start(d, None));
+        let planned = carriers(d);
+        assert_eq!(
+            planned.contains(&"nearby_dial"),
+            raven_core::nearby_live_enabled(),
+            "{planned:?}"
+        );
+        if std::env::var_os("RAVEN_P2P_LISTEN").is_none() {
+            assert_eq!(
+                planned.contains(&"p2p_dial"),
+                raven_core::p2p_live_enabled(),
+                "{planned:?}"
+            );
+        }
+        // A running raven-node's own word decides: its host up or not.
+        let status = |up: Option<bool>| {
+            let mut answer = status_bind(&["ipc"], None, None, None);
+            if let Ok(IpcResponse::Status { p2p, .. }) = &mut answer {
+                *p2p = up.map(|up| {
+                    Box::new(raven_core::ipc::P2pStatusInfo {
+                        up,
+                        ..Default::default()
+                    })
+                });
+            }
+            answer
+        };
+        let never = || panic!("asked only while no node runs");
+        assert!(!p2p_host_on_with(&status(None), never));
+        assert!(!p2p_host_on_with(&status(Some(false)), never));
+        assert!(p2p_host_on_with(&status(Some(true)), never));
+        let none = Err(ipc_client::ipc_request_timeout(
+            d,
+            &IpcRequest::status(),
+            Duration::from_millis(200),
+        )
+        .unwrap_err());
+        assert!(p2p_host_on_with(&none, || true));
+        assert!(!p2p_host_on_with(&none, || false));
+        // The environment a started node inherits wins over the setting.
+        assert!(!p2p_host_at_start(d, Some("off")));
+        assert!(!p2p_host_at_start(d, Some("")));
+        assert!(p2p_host_at_start(d, Some("7423")));
     }
 
     /// Phase 5 (P5.28): the nearby route (the contact's key, never an

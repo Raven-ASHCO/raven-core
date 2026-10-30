@@ -2157,6 +2157,15 @@ fn an_unproven_learned_peer_id_is_not_saved_into_the_book() {
     let peer_id = &raven_core::p2p_route::local_peer_id(&Identity::from_seed(&[0x42; 32]));
     let p2p = ("p2p".to_string(), format!("/p2p/{peer_id}"));
     let on = [("RAVEN_LAB_ROUTE_HINTS", "1"), ("RAVEN_LAB_TEST_A", "1")];
+    // Alice's raven-node runs a libp2p host: a send plans p2p only then
+    // (field test E3).
+    *net.p2p.status.lock().unwrap() = (
+        Some(P2pStatusInfo {
+            up: true,
+            ..P2pStatusInfo::default()
+        }),
+        Vec::new(),
+    );
 
     plant_learned_routes(net.a.path(), None, Some((peer_id, false)));
     let o = net.send_env("unproven", &on);

@@ -2763,7 +2763,9 @@ pub(crate) struct AttemptCtx {
     pub(crate) lan_live: fn() -> bool,
     /// The Internet direct gate, read at every attempt.
     pub(crate) internet_live: fn() -> bool,
-    /// The p2p gate (`p2p_live_enabled`), read at every attempt.
+    /// The p2p gate with this node's host (the worker's
+    /// `crate::p2p::dials_possible`: no host, no p2p route), read at every
+    /// attempt.
     pub(crate) p2p_live: fn() -> bool,
     /// The nearby gate (`nearby_live_enabled`), read at every attempt.
     pub(crate) nearby_live: fn() -> bool,
@@ -6475,7 +6477,7 @@ pub async fn run_worker(data_dir: PathBuf) -> Result<(), String> {
         // channel too (it shares this context).
         lan_live: raven_core::lan_usable_now,
         internet_live: raven_core::internet_direct_live_enabled,
-        p2p_live: raven_core::p2p_live_enabled,
+        p2p_live: crate::p2p::dials_possible,
         nearby_live: raven_core::nearby_live_enabled,
         nearby_available: crate::nearby::available,
         onion_live: raven_core::onion_live_enabled,

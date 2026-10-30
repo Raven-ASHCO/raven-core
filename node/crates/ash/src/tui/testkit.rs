@@ -253,7 +253,7 @@ const RUN_SEND_HASH: u64 = 0x9bef_5fb8_b75f_8ad4;
 /// part bridge.rs's `plan_friend_send` mirrors.
 const RESOLVE_SEND_HEAD: &str = concat!("fn resolve_send_target", "(");
 /// [`drift_hash`] of that function as `plan_friend_send` last mirrored it.
-const RESOLVE_SEND_HASH: u64 = 0x3a20_9717_a596_db12;
+const RESOLVE_SEND_HASH: u64 = 0xf009_6a66_26d5_48f9;
 
 /// cli.rs's one comparator of security words and the old code, which
 /// bridge.rs's `security_check` wraps.

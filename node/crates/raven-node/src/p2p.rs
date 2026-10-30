@@ -1014,6 +1014,13 @@ pub(crate) fn host_running() -> bool {
     current_host().is_some()
 }
 
+/// Whether a dial may go over p2p: this build has it and a host runs here.
+/// The outbox plans no p2p route otherwise (field test E3: with p2p off,
+/// every attempt dialled an old PeerId and failed `P2P_NOT_RUNNING`).
+pub(crate) fn dials_possible() -> bool {
+    raven_core::p2p_live_enabled() && host_running()
+}
+
 /// Tells netwatch that every relay went silent ([`RelayLoss`]); it decides
 /// between a moved default route and a path loss. netwatch exists on Unix
 /// and Windows only; elsewhere the slots' own backoff retries the relays.
@@ -10294,9 +10301,11 @@ mod tests {
             );
         }
 
-        // Without a host there is nothing to nudge or re-home.
+        // Without a host there is nothing to nudge or re-home, and nothing
+        // to dial over.
         if current_host().is_none() {
             assert!(!host_running());
+            assert!(!dials_possible());
             assert!(!nudge());
             assert!(!network_changed(Rehome::Wake));
         }

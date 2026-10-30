@@ -1050,7 +1050,9 @@ pub(super) struct FriendSend {
 /// (the CLI saves one a p2p link proved; the app leaves it learned).
 pub(super) fn plan_friend_send(data_dir: &Path, c: &Contact) -> Result<FriendSend, String> {
     let choice = CarrierChoice::Auto;
-    let p2p_live = raven_core::p2p_live_enabled();
+    // As `raven send` plans (field test E3): p2p only while this profile's
+    // raven-node runs a libp2p host, Bluetooth only while the user has it on.
+    let p2p_live = raven_core::p2p_live_enabled() && super::super::p2p_host_on(data_dir);
     let hidden = super::super::hides_ip_from(data_dir, c);
     if hidden && choice == CarrierChoice::Internet {
         return Err(super::super::hidden_ip_text(c));
@@ -1083,7 +1085,7 @@ pub(super) fn plan_friend_send(data_dir: &Path, c: &Contact) -> Result<FriendSen
         super::super::with_nearby_route(
             &planned,
             choice,
-            raven_core::nearby_live_enabled(),
+            super::super::nearby_on(data_dir),
             plan_contact_routes_with(
                 data_dir,
                 &planned,
@@ -3054,13 +3056,13 @@ mod tests {
                 .expect("Bob's row")
         };
         // Without the nearby route `auto` plans last for a verified friend
-        // once this build has nearby (debug RAVEN_LAB_TEST_A=1
-        // RAVEN_LAB_NEARBY=1; cli.rs's tests check where it goes), so the LAN
-        // plan reads the same with and without that switch.
+        // once this build has nearby and the user turned it on (cli.rs's
+        // tests check where it goes), so the LAN plan reads the same with
+        // and without it.
         let plan = |friend: &Contact| {
             plan_friend_send(dir.path(), friend).map(|p| {
                 let mut routes = p.routes;
-                if raven_core::nearby_live_enabled() {
+                if super::super::super::nearby_on(dir.path()) {
                     routes.retain(|r| r.carrier != DialCarrier::Nearby);
                 }
                 (routes, p.unrecorded, p.learned_lan_dials)
@@ -3106,7 +3108,7 @@ mod tests {
                 dial: raven_core::outbox::nearby_dial_for(&key),
             }])
         };
-        if raven_core::nearby_live_enabled() {
+        if super::super::super::nearby_on(dir.path()) {
             assert_eq!(
                 plan_friend_send(dir.path(), &hidden).map(|p| p.routes),
                 nearby_only()
@@ -3138,7 +3140,7 @@ mod tests {
                 plan(&bob_row()),
                 Ok((vec![lan(&guess)], vec![guess.clone()], vec![guess]))
             );
-        } else if !hints && raven_core::nearby_live_enabled() {
+        } else if !hints && super::super::super::nearby_on(dir.path()) {
             assert_eq!(
                 plan_friend_send(dir.path(), &bob_row()).map(|p| p.routes),
                 nearby_only()
