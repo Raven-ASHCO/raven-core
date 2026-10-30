@@ -8637,6 +8637,10 @@ fn forget_saved_address_routes(data_dir: &Path, pub_hex: &str) -> Vec<String> {
 enum Keep {
     /// Nothing ([`forget_outbox_routes`]).
     Nothing,
+    /// What its route hints said about its mail friends (no address in it):
+    /// `raven contact forget-address` ([`forget_contact_address`]; field
+    /// test E3 round 2: it forgot them too).
+    MailFriends,
     /// Its PeerId schedule (a new contact's card naming a PeerId its stored
     /// schedule names, [`card_peer_scheduled`]).
     Schedule,
@@ -8704,10 +8708,14 @@ fn forget_contact_routes(data_dir: &Path, pub_hex: &str, keep: Keep) -> Vec<Stri
         ),
         (
             "what its route hints said",
-            if told_stays {
-                Ok(())
-            } else {
-                raven_core::learned_routes::forget(data_dir, &key)
+            match keep {
+                Keep::WhatItTold => Ok(()),
+                Keep::MailFriends => {
+                    raven_core::learned_routes::forget_routes(data_dir, &key).map(|_| ())
+                }
+                Keep::Nothing | Keep::Schedule => {
+                    raven_core::learned_routes::forget(data_dir, &key)
+                }
             },
         ),
         (
@@ -8716,7 +8724,7 @@ fn forget_contact_routes(data_dir: &Path, pub_hex: &str, keep: Keep) -> Vec<Stri
         ),
         (
             "its PeerId schedule",
-            if keep == Keep::Nothing {
+            if matches!(keep, Keep::Nothing | Keep::MailFriends) {
                 raven_core::peer_rotation::forget_schedule(data_dir, &hex_key)
             } else {
                 Ok(())
@@ -10291,7 +10299,24 @@ fn cmd_contact_forget_address(
              location).{C_RESET}"
         );
     }
+    // Field test E3 round 2: the mail friends it told about went too.
+    if let Ok(key) = parse_pub_hex(&target.pub_hex) {
+        if raven_core::learned_routes::learned_custody(data_dir, &key, now_ms())
+            .is_some_and(|c| !c.tags.is_empty() || !c.plain.is_empty() || c.offer.is_some())
+        {
+            println!("{C_DIM}{}{C_RESET}", mail_friends_kept_line(&name));
+        }
+    }
     Ok(())
+}
+
+/// What `raven contact forget-address` says of the contact's mail friends,
+/// which it keeps.
+fn mail_friends_kept_line(name: &str) -> String {
+    format!(
+        "{name}'s mail friends stay: forget-address forgets the ways to reach {name}, not who \
+         holds mail for it. Its next link with you brings its routes back."
+    )
 }
 
 /// [`cmd_contact_forget_address`] once it was agreed, for the contact
@@ -10320,7 +10345,7 @@ fn forget_contact_address(data_dir: &Path, pub_hex: &str) -> Result<Vec<String>,
         return Err("contact not found — nothing forgotten".into());
     }
     save_contacts(data_dir, &contacts)?;
-    let notes = forget_outbox_routes(data_dir, pub_hex.trim());
+    let notes = forget_contact_routes(data_dir, pub_hex.trim(), Keep::MailFriends);
     let _ = raven_core::privacy::mark_rotation_due(data_dir);
     Ok(notes)
 }
@@ -28494,6 +28519,41 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             forget_address_question("Alice"),
             "Forget Alice's saved address? Raven can then reach Alice only after Alice connects \
              to you, or after you save a new address. [y/N] "
+        );
+    }
+
+    /// Field test E3 round 2 (win-c): forget-address also forgot the mail
+    /// friends the contact told about, so `contact show` said "nobody can
+    /// carry it". Its routes go; its mail friends (no address in them)
+    /// stay, and the command says so.
+    #[test]
+    fn forget_address_keeps_the_mail_friends_the_contact_told_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        seed_book(d);
+        let alice = ident(0x0a).public_key_bytes();
+        let now = super::now_ms();
+        let mut rows: serde_json::Value =
+            serde_json::from_str(&learned_routes_rows(&[(&alice, 7424, "192.168.1.20")])).unwrap();
+        rows[0]["custodian_tags"] = serde_json::json!([hex::encode([0x44; 32])]);
+        rows[0]["custodian_tag_flags"] = serde_json::json!([0]);
+        rows[0]["custody_offer"] = serde_json::json!(1);
+        std::fs::write(
+            d.join(raven_core::learned_routes::LEARNED_ROUTES_FILE),
+            rows.to_string(),
+        )
+        .unwrap();
+        cmd_contact_forget_address(d, Some("@alice"), None, None, None, true).unwrap();
+        let custody = raven_core::learned_routes::learned_custody(d, &alice, now).unwrap();
+        assert_eq!(custody.tags, [[0x44; 32]]);
+        assert_eq!(custody.offer, Some(1));
+        let view = raven_core::learned_routes::learned(d, &alice, now).unwrap();
+        assert!(view.lan.is_none() && view.peer_id.is_none());
+        assert!(raven_core::learned_routes::holds_no_routes(d, &alice, now));
+        assert_eq!(
+            mail_friends_kept_line("Alice"),
+            "Alice's mail friends stay: forget-address forgets the ways to reach Alice, not who \
+             holds mail for it. Its next link with you brings its routes back."
         );
     }
 

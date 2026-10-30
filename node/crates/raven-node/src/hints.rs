@@ -2008,7 +2008,7 @@ fn note_told(
 /// on the next link, whichever carrier it takes (field test E3). Blocking:
 /// one file read.
 pub(crate) fn holds_no_hints(data_dir: &Path, peer: &[u8; 32]) -> bool {
-    learned_routes::learned(data_dir, peer, crate::now_ms()).is_none()
+    learned_routes::holds_no_routes(data_dir, peer, crate::now_ms())
 }
 
 /// `peer`'s route hints came at `now` and were used.

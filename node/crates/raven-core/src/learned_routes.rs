@@ -1353,6 +1353,60 @@ pub fn forget(data_dir: &Path, peer: &[u8; 32]) -> Result<(), String> {
     save(data_dir, all)
 }
 
+/// `raven contact forget-address` (field test E3 round 2): forget what
+/// `peer`'s route hints said about reaching it (its PeerId, relays, direct
+/// and Internet addresses, NAT classes, the relays it offered and its LAN
+/// part) and keep what they said about its mail friends (custodian keys and
+/// tags with their flags, its custody offer: no address in any of them).
+/// The kept entry's generation goes to 0: the contact's next RRH1 replaces
+/// it whatever its generation, and until one comes this node holds no
+/// routes of it ([`holds_no_routes`]), so its next link asks for them. An
+/// entry with no mail friend to keep goes whole ([`forget`]). Whether mail
+/// friends were kept; a missing file or entry is fine.
+pub fn forget_routes(data_dir: &Path, peer: &[u8; 32]) -> Result<bool, String> {
+    let key = hex::encode(peer);
+    let path = data_dir.join(LEARNED_ROUTES_FILE);
+    match at_rest::load_json_advisory::<Vec<Learned>>(data_dir, &path, Kind::LearnedRoutes) {
+        at_rest::Advisory::Missing | at_rest::Advisory::CorruptPlain => return Ok(false),
+        at_rest::Advisory::Loaded(all) if !all.iter().any(|e| e.pub_hex == key) => {
+            return Ok(false);
+        }
+        at_rest::Advisory::Loaded(_) | at_rest::Advisory::Unreadable(_) => {}
+    }
+    let _lock = DataDirLock::acquire(data_dir, LEARNED_ROUTES_LOCK)?;
+    let mut all: Vec<Learned> = at_rest::load_json_for_write(data_dir, &path, Kind::LearnedRoutes)
+        .map_err(|e| format!("{LEARNED_ROUTES_FILE}: {e}"))?;
+    let Some(at) = all.iter().position(|e| e.pub_hex == key) else {
+        return Ok(false);
+    };
+    let old = all.remove(at);
+    let kept =
+        !old.custodians.is_empty() || !old.custodian_tags.is_empty() || old.custody_offer.is_some();
+    if kept {
+        all.push(Learned {
+            generation: 0,
+            peer_id: String::new(),
+            peer_id_proven: false,
+            relays: Vec::new(),
+            direct: Vec::new(),
+            offers: Vec::new(),
+            nat_class: None,
+            inet: Vec::new(),
+            lan: None,
+            ..old
+        });
+    }
+    save(data_dir, all)?;
+    Ok(kept)
+}
+
+/// Whether this node holds no routes of `peer` from its route hints: no live
+/// snapshot, or one whose routes `raven contact forget-address` forgot
+/// ([`forget_routes`]: generation 0, its mail friends kept).
+pub fn holds_no_routes(data_dir: &Path, peer: &[u8; 32], now_ms: u64) -> bool {
+    learned(data_dir, peer, now_ms).is_none_or(|v| v.generation == 0)
+}
+
 /// Phase 6b R5 (design A, step P6.28): another key answered at `ip` when
 /// this node dialled `peer` there often enough to be Suspicious. Forget the
 /// LAN part `peer`'s RRH1 learned at that address (its port, its same-LAN
@@ -2277,6 +2331,60 @@ mod tests {
         let much_later = later + TTL_MS + MIN;
         put(d, &frame(7), &tor, much_later);
         assert_eq!(learned_with_lan(d, &sender(), much_later).1, None);
+    }
+
+    /// Field test E3 round 2: `raven contact forget-address` also forgot
+    /// the mail friends the contact told about ("told you about: none",
+    /// "nobody can carry it"). Its routes go; its custody entries stay, and
+    /// the next frame, whatever its generation, brings the routes back.
+    #[test]
+    fn forgetting_routes_keeps_the_mail_friends_the_contact_told_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let tor = link(OutboxCarrier::Onion);
+        let told = RouteHints {
+            lan_addrs: vec![crate::route_hints::InetDirect {
+                flags: 0,
+                addr: "192.168.7.21:7421".parse().unwrap(),
+            }],
+            custody_offer: Some(OFFER_WAN),
+            custodian_tags: vec![([0x44; 32], 1)],
+            ..frame(5)
+        };
+        put(d, &told, &tor, T0);
+        assert!(!holds_no_routes(d, &sender(), T0));
+        assert_eq!(forget_routes(d, &sender()), Ok(true));
+        assert!(holds_no_routes(d, &sender(), T0));
+        let v = view(d, T0);
+        assert_eq!(v.generation, 0);
+        assert!(v.peer_id.is_none() && v.relays.is_empty() && v.direct.is_empty());
+        assert!(v.lan.is_none() && v.inet.is_empty());
+        assert_eq!((v.custodians.len(), v.custodians[0]), (1, [0x77; 32]));
+        let custody = learned_custody(d, &sender(), T0).unwrap();
+        assert_eq!(custody.tags, [[0x44; 32]]);
+        assert_eq!(custody.offer, Some(OFFER_WAN));
+        // No address is left in the file.
+        let text = String::from_utf8(read(d)).unwrap();
+        for gone in ["192.168", "11.0.", "/p2p/"] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+        // The next frame, an older generation even, brings the routes back.
+        put(d, &frame(4), &tor, T0 + MIN);
+        let v = view(d, T0 + MIN);
+        assert_eq!(v.generation, 4);
+        assert!(v.peer_id.is_some());
+        assert!(!holds_no_routes(d, &sender(), T0 + MIN));
+        // Nothing about mail friends: the entry goes whole.
+        let other = tempfile::tempdir().unwrap();
+        put(other.path(), &frame(5), &link(OutboxCarrier::P2p), T0);
+        let plain = RouteHints {
+            custodians: Vec::new(),
+            ..frame(6)
+        };
+        put(other.path(), &plain, &link(OutboxCarrier::P2p), T0);
+        assert_eq!(forget_routes(other.path(), &sender()), Ok(false));
+        assert!(learned(other.path(), &sender(), T0).is_none());
+        assert!(holds_no_routes(other.path(), &sender(), T0));
     }
 
     #[test]
