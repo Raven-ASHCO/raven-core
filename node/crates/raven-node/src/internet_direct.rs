@@ -1138,7 +1138,7 @@ where
     // RLK1 (P6.35): Internet direct dials knock while it is live.
     let knock_live = link == INTERNET_LINK && crate::link_knock::live();
     let knock_seeds = crate::pair_seed::live();
-    let (identity, local, pinned, knock) = {
+    let (identity, local, pinned, knock, no_hints) = {
         let dd = data_dir.to_path_buf();
         let contact = *expected;
         blocking(move || {
@@ -1148,12 +1148,17 @@ where
             let pinned = pins.load(&dd, &contact)?;
             let knock =
                 crate::link_knock::for_dial(knock_live, knock_seeds, &dd, &identity, &contact);
-            Ok((identity, local, pinned, knock))
+            let no_hints = crate::hints::holds_no_hints(&dd, &contact);
+            Ok((identity, local, pinned, knock, no_hints))
         })
         .await?
     };
     let offers = crate::link::offers(link.carrier);
     let rrh1 = offers.contains(LinkFeatures::RRH1);
+    // We hold none of the contact's route hints (forgotten, or none since
+    // our start): ask for its RRH1 on this link (field test E3: after
+    // `forget-address` a friend at home stayed on Tor, never told again).
+    let offers = offers.with(LinkFeatures::RRH1_ASK, rrh1 && no_hints);
     progress.stage = STAGE_NOISE;
     let (mut stream, (remote_ed, peer_caps, mut transport, remote_static, knocked)) = {
         let (identity, pinned) = (&identity, pinned.as_ref());

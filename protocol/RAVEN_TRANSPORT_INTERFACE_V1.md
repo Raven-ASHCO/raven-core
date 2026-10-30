@@ -26,7 +26,7 @@ Transport {
 |-------------|------|
 | Object | Packed `RavenEnvelopeV1` (or hello/control clearly typed) |
 | Auth layers | Transport auth ≠ E2EE; both may exist |
-| Caps | bits 0-7: `ble`/`internet`/`relay`/`store`/`bridge` (node capabilities, never contacts); bits 8-31: link features (bit 8 = RRH1, [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3.1; bit 9 = PAD1, [`RAVEN_LINK_PADDING_V1.md`](RAVEN_LINK_PADDING_V1.md) §3; bit 10 = RUP1, [`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md) §2) |
+| Caps | bits 0-7: `ble`/`internet`/`relay`/`store`/`bridge` (node capabilities, never contacts); bits 8-31: link features (bit 8 = RRH1, [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3.1; bit 9 = PAD1, [`RAVEN_LINK_PADDING_V1.md`](RAVEN_LINK_PADDING_V1.md) §3; bit 10 = RUP1, [`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md) §2; bit 11 = the RRH1 request, [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3.1) |
 | Errors | Map to [`RAVEN_ERROR_CODES_V1.md`](RAVEN_ERROR_CODES_V1.md) |
 
 ## 3. Internet framing (lab-gated)

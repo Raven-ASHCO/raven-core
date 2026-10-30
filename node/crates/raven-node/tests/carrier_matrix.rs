@@ -314,6 +314,12 @@
 //!   item is unloaded, turned off and removed, and the temp root holds
 //!   nothing of A; B's node (the same process) and C still exchange both
 //!   ways. Unix only (`script`).
+//! - **C99 route hints asked for over Tor (field test E3):** A and B, route
+//!   hints on, reach each other only over Tor (the loopback helper). A
+//!   forgets B's routes (`raven contact forget-address`); B told A lately,
+//!   so it is not due to tell again: A's next dial asks (caps bit 11, it
+//!   holds none of B's), B tells on that Tor link, and A holds B's routes
+//!   again within seconds.
 //! - **C86 part 1 PAD1 link padding (Phase 6b P6.34; its debug switch
 //!   `RAVEN_LAB_LINK_PADDING=1` with `RAVEN_LAB_TEST_A=1`):** every route
 //!   goes through a proxy that keeps each connection's directions apart. Two
@@ -15820,6 +15826,81 @@ fn c98_a_friend_added_from_an_onion_card_and_verified_later_is_reached_over_tor(
         !out.all().contains("no address known"),
         "the onion route was not planned:\n{}",
         out.all()
+    );
+}
+
+/// C99 (field test E3, route hints over Tor): A and B, route hints on,
+/// reach each other only over Tor (the loopback helper) and exchange route
+/// hints there. A then forgets B's routes (`raven contact forget-address
+/// bob --yes`): B told A lately, so B is not due to tell again, and before
+/// this case a friend at home stayed on Tor (no hint line in 10 minutes).
+/// A's next dial asks for B's route hints (caps bit 11, A holds none), B
+/// tells them on that Tor link, and A holds them again within seconds.
+#[test]
+#[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
+fn c99_routes_forgotten_are_asked_for_on_the_next_tor_link() {
+    if !lab_ready() {
+        return;
+    }
+    let _net = shared_host_network();
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("tor-registry");
+    let a = tor_profile(root.path(), "te", &registry).with_route_hints();
+    let b = tor_profile(root.path(), "tf", &registry).with_route_hints();
+    let a_svc = a.start_service();
+    let b_svc = b.start_service();
+    let (card_a, card_b) = (tor_card(&a, &a_svc), tor_card(&b, &b_svc));
+    a.add_card(&card_b, "bob", &b.fingerprint);
+    b.add_card(&card_a, "alice", &a.fingerprint);
+    let logs = || format!("A:\n{}\nB:\n{}", a_svc.log.text(), b_svc.log.text());
+    for (from, to, tag, text) in [
+        (&a, &b, "bob", "c99 a to b"),
+        (&b, &a, "alice", "c99 b to a"),
+    ] {
+        let out = from.send(tag, text);
+        assert!(
+            wait_inbox(to, text, Duration::from_secs(90)),
+            "{text} never arrived:\nsend: {}\n{}",
+            out.all(),
+            logs()
+        );
+    }
+    // B's routes settle after its start (its announcer tells A once more):
+    // A must hold B's newest generation, so that B is not due to tell A
+    // again by itself.
+    let _ = b_svc.log.wait_for(Duration::from_secs(20), |l| {
+        l.contains("raven-node hints: routes changed")
+    });
+    let settle = "c99 settled";
+    let out = a.send("bob", settle);
+    assert!(
+        wait_inbox(&b, settle, Duration::from_secs(90)),
+        "{settle} never arrived:\nsend: {}\n{}",
+        out.all(),
+        logs()
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || learned_entry(&a, &b).is_some()),
+        "a never learned b's routes over Tor:\n{}",
+        logs()
+    );
+
+    let forgot = a.raven(&["contact", "forget-address", "bob", "--yes"], None);
+    assert!(forgot.ok, "forget-address:\n{}", forgot.all());
+    assert!(learned_entry(&a, &b).is_none(), "forgotten");
+
+    let text = "c99 after forget";
+    let out = a.send("bob", text);
+    assert!(
+        wait_inbox(&b, text, Duration::from_secs(90)),
+        "a to b after forget never arrived over Tor:\nsend: {}\n{}",
+        out.all(),
+        logs()
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || learned_entry(&a, &b).is_some()),
+        "a did not learn b's routes again on the next Tor link:\n{}",
+        logs()
     );
 }
 

@@ -76,8 +76,16 @@ any frame that is not RVN1 (§5.6).
 - `CAP_LINK_RRH1 = 0x00000100` (bit 8) means "I accept RRH1 on this link". With
   route hints on, a hello carries `CAP_INTERNET | CAP_LINK_RRH1 = 0x00000102`.
   With them off it carries `0x00000002`, byte-identical to earlier builds.
+- `CAP_LINK_RRH1_ASK = 0x00000800` (bit 11) means "I hold none of your route
+  hints: send me your RRH1 on this link" (§6.1). A side sets it only together
+  with bit 8, on a link to a contact of which it holds no snapshot (none since
+  it started, or it forgot them: `raven contact forget-address`, a new card,
+  a removal). It is a request for this link, never a capability: a later
+  hello without it is no downgrade. Today only a dialer sets it (it knows
+  whom it dials before its hello).
 - Receivers MUST ignore unknown bits. Every build already does: only
-  `CAP_INTERNET` is required.
+  `CAP_INTERNET` is required. A build before bit 11 ignores the request and
+  tells as §6.1 says without it.
 - The caps field is covered by the channel-bound hello signature, so it cannot
   be changed on the path or replayed onto another connection.
 
@@ -118,9 +126,10 @@ any frame that is not RVN1 (§5.6).
   reset.
 - Bit 8 asks the listener for its RRH1 (§3.3). A dialer sets it only when
   route hints are due on that dial (§6.1): on an announce link, when it holds
-  no RRH1 from the listener that it received within the refresh period, or
-  when the listener is due the dialer's own (only an asked listener's RRH1
-  lets the dialer send one). A dial that does not ask carries no RRH1 either
+  no RRH1 from the listener that it received within the refresh period (or
+  no snapshot of the listener at all: it forgot them), or when the listener
+  is due the dialer's own (only an asked listener's RRH1 lets the dialer
+  send one). A dial that does not ask carries no RRH1 either
   way; its other bits (PAD1, RUP1) are offered as before. A LAN showing is
   never complete (`Seen`, Phase 6b P6.29): a dial without bit 8 is no
   downgrade.
@@ -144,7 +153,8 @@ any frame that is not RVN1 (§5.6).
 **Internet direct and p2p.** Both hellos are verified, then the RLB1 offers
 travel as in [`RAVEN_TRANSPORT_INTERFACE_V1.md`](RAVEN_TRANSPORT_INTERFACE_V1.md) §3.
 - The listener sends its RRH1 immediately after its RLB1 offer, if the dialer's
-  verified hello has bit 8 and the dialer is due one (§6.1).
+  verified hello has bit 8 and the dialer is due one (§6.1), or asked for it
+  with bit 11.
 - The dialer sends its RRH1 after verifying the listener's RLB1, before any
   other frame, if the listener's verified hello has bit 8 and the listener is
   due one (§6.1).
@@ -489,13 +499,20 @@ on a link when any of these holds:
   that only lacks something told before is not news (§5.3).
 
 Otherwise the frame is not sent (§3.3; a LAN listener answers an ask all the
-same). A LAN dialer asks (§3.2) when the listener is due its RRH1, when its
+same, and so does every side whose peer's hello has bit 11, §3.1). A LAN dialer asks (§3.2) when the listener is due its RRH1, when its
 own copy of the listener's is 30 minutes old (none at all after a start), or
 when the LAN part it holds is older than the snapshot (a newer one came over
 an Internet or p2p link, which never changes the LAN part, §5.3); a leader
 that told a pair seed proposal asks on its next dial for the ack. The
 generation is read for that before the dial's handshake (the same digests,
 §6), so a change is never held back by a dial that did not ask.
+
+A node that holds no snapshot of a contact (it forgot them, or none came
+since its start) asks on its next dial whichever carrier it takes: RLX1 bit
+8 on LAN, hello bit 11 on Internet direct, p2p, nearby and the onion link
+(field test E3: after `raven contact forget-address` a friend at home was
+not told again for as long as every link went over Tor, so the two never
+went back to the LAN).
 
 30 minutes is far inside the snapshot's TTL (72 h, §5.4), so a contact's
 snapshot never expires while the two link at all. A link is never opened, or

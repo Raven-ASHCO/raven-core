@@ -257,7 +257,8 @@ impl Floor {
     /// Raise the link part by what a link showed (never lowers).
     fn raise_link(&mut self, caps: u32, knock: Option<bool>, day: u32) {
         let before = (self.link_caps_max, self.knock, self.pad1, self.rup1);
-        let caps = caps & LINK_FEATURE_BITS;
+        // The RRH1 request (bit 11) is asked per link, never a feature.
+        let caps = caps & LINK_FEATURE_BITS & !crate::CAP_LINK_RRH1_ASK;
         self.link_caps_max |= caps;
         self.pad1 |= caps & CAP_LINK_PAD1 != 0;
         self.rup1 |= caps & CAP_LINK_RUP1 != 0;

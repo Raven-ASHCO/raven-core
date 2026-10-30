@@ -68,7 +68,7 @@ Companions whose headers say **wire not frozen** (and remain production disabled
 | Mechanism | What it is | Known risk |
 |---|---|---|
 | `RavenProtocolCapabilitiesV1` | Signed, identity-scoped capability record (`env_type=4`). Domain `"rvn1/caps"`. See [`RAVEN_CAPABILITIES_V1.md`](RAVEN_CAPABILITIES_V1.md). | Single signed namespace going forward. |
-| RIH1 hello caps bits 8-31 / RLX1 `LINK_CAPS` | Per-connection link features, channel-bound (the hello signature; RLX1 rides Noise XX message 3). See [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3 and [`RAVEN_LINK_PADDING_V1.md`](RAVEN_LINK_PADDING_V1.md) §3. | Bit 8 = RRH1, bit 9 = PAD1, bit 10 = RUP1 ([`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md) §2). Receivers ignore unknown bits; only `CAP_INTERNET` is required. RLX1 entry `0x7E PAD` (value ignored; RLK1 shape jitter) is skipped like any unknown entry. |
+| RIH1 hello caps bits 8-31 / RLX1 `LINK_CAPS` | Per-connection link features, channel-bound (the hello signature; RLX1 rides Noise XX message 3). See [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3 and [`RAVEN_LINK_PADDING_V1.md`](RAVEN_LINK_PADDING_V1.md) §3. | Bit 8 = RRH1, bit 9 = PAD1, bit 10 = RUP1 ([`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md) §2), bit 11 = the RRH1 request (a per-link request, never a capability; [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3.1). Receivers ignore unknown bits; only `CAP_INTERNET` is required. RLX1 entry `0x7E PAD` (value ignored; RLK1 shape jitter) is skipped like any unknown entry. |
 | Session profile choice and floor | A new session uses the highest session profile in common of this build's set and the contact's offer (a verified bundle's signed `profile_set`, or the profile of the contact's PairInit): no negotiation message, nothing to strip. Per contact, the highest profile a verified bundle or a confirmed session showed is a sticky floor (`raven-core/src/capability_floor.rs`): below it a new session is refused either way while `SUITE_FLOOR_PRODUCTION_ENABLED` (false) is live, and only the person lowers it (the 10 security words, then a typed `accept`). Profile 1 (`atsam/indexed-session/v1`) is the only one, so nothing is refused today; the next profile plugs in through `NextProfile` ([`docs/design/2026-10-suite-retirement.md`](../docs/design/2026-10-suite-retirement.md); ratchet design §5.13). | First contact over a replayed V1-only bundle before any floor exists; a consistent rollback of the profile folder rolls the floor back too. |
 | Suite and protocol-version registry | The ids a security notice ([`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md) §4, `raven-core/src/suite_registry.rs`) marks INFO, DEPRECATED (warn, prefer the newer profile) or BROKEN (refuse at the consult point, no local override). Retirement: ALLOWED -> DEPRECATED -> a per-release sunset date -> BROKEN only for a practical break; release key sets carry an algorithm byte (`0x01` Ed25519; a hybrid post-quantum `0x02` is a later decision). | An id a build does not have is not enforced there; a notice never lowers a floor or opens a gate. |
 | Legacy unsigned RUM v2 `Capabilities` | BLE GATT advertisement bitmask (`docs/MESH_PROTOCOL.md` §A). Anyone in radio range can observe or alter it. | Bits 0–12 agree across current clients. **Bit 13 `doubleRatchet`** is present on iOS/macOS and **unallocated** on Windows/Android. Documented platform drift; this inventory does not authorize a code fix. |
@@ -143,6 +143,22 @@ Watch jobs remain **N/A** on this serverless tree (no `RAVEN-WatchApp/` paths). 
 Platform vector consumers outside this workflow: see [`../shared-vectors/README.md`](../shared-vectors/README.md). **.NET / C# `rvn1` CI consumer is NOT YET.**
 
 ---
+
+## Freeze record changes (2026-10-30, field test E3: route hints asked for)
+
+One new optional hello caps bit; no frame layout, entry type or vector
+changed, and the RRH1 and RLX1 version bytes stay 1.
+
+- **Route Hints V1 (draft).** [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md)
+  §3.1: hello caps bit 11 (`CAP_LINK_RRH1_ASK = 0x00000800`) asks the peer
+  for its RRH1 on this link; set only with bit 8, by a side that holds no
+  snapshot of the peer (none since its start, or forgotten). §3.3 and §6.1:
+  a side whose peer asked tells on that link even when the peer is not due.
+  §3.2 and §6.1: a LAN dialer that holds no snapshot of the listener asks
+  with RLX1 bit 8. A per-link request, never a capability: the capability
+  floor ignores it. Older peers ignore bit 11 and tell as before.
+- **Transport Interface V1 / negotiation (this file).** The caps rows name
+  bit 11.
 
 ## Freeze record changes (2026-10-29, link and message-id hardening)
 

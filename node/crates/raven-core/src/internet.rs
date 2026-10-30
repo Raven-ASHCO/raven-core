@@ -77,6 +77,12 @@ pub const CAP_LINK_PAD1: u32 = 1 << 9;
 /// build sets it while the mesh update gate is shut; the capability floor
 /// records it once one does.
 pub const CAP_LINK_RUP1: u32 = 1 << 10;
+/// Bit 11: this side holds no route hints of the peer's (none since its
+/// start, or it forgot them: `raven contact forget-address`, a new card),
+/// so the peer sends its RRH1 on this link even when it would not be due
+/// (RAVEN_ROUTE_HINTS_V1 §3.1, §6.1). Set only with [`CAP_LINK_RRH1`]; a
+/// per-link request, never a capability (the capability floor ignores it).
+pub const CAP_LINK_RRH1_ASK: u32 = 1 << 11;
 
 /// The link features one side offers on one link: caps bits 8 up, a set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -91,6 +97,8 @@ impl LinkFeatures {
     pub const PAD1: Self = Self(CAP_LINK_PAD1);
     /// RUP1 update exchange ([`CAP_LINK_RUP1`]).
     pub const RUP1: Self = Self(CAP_LINK_RUP1);
+    /// The request for the peer's RRH1 on this link ([`CAP_LINK_RRH1_ASK`]).
+    pub const RRH1_ASK: Self = Self(CAP_LINK_RRH1_ASK);
 
     /// This set, plus `feature` when `on`.
     #[must_use]
@@ -425,6 +433,11 @@ mod tests {
     fn hello_caps_from_a_link_feature_set() {
         assert_eq!(CAP_LINK_PAD1, 0x0000_0200);
         assert_eq!(CAP_LINK_RUP1, 0x0000_0400);
+        assert_eq!(CAP_LINK_RRH1_ASK, 0x0000_0800);
+        assert_eq!(
+            hello_caps(LinkFeatures::RRH1.with(LinkFeatures::RRH1_ASK, true)),
+            0x0000_0902
+        );
         assert_eq!(hello_caps(LinkFeatures::NONE), 0x0000_0002);
         assert_eq!(hello_caps(LinkFeatures::RRH1), 0x0000_0102);
         assert_eq!(hello_caps(LinkFeatures::PAD1), 0x0000_0202);

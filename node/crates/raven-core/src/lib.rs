@@ -228,7 +228,8 @@ pub use indexed_session_store::{
 pub use internet::{
     bits_to_caps, caps_to_bits, deframe_prefix, frame, opaque_store_tag, pack_hello,
     unpack_verify_hello, CAP_BLE, CAP_BRIDGE, CAP_INTERNET, CAP_LINK_PAD1, CAP_LINK_RRH1,
-    CAP_LINK_RUP1, CAP_RELAY, CAP_STORE, HELLO_WIRE_LEN, INTERNET_PROTO_ID, MAX_FRAME_BYTES,
+    CAP_LINK_RRH1_ASK, CAP_LINK_RUP1, CAP_RELAY, CAP_STORE, HELLO_WIRE_LEN, INTERNET_PROTO_ID,
+    MAX_FRAME_BYTES,
 };
 pub use internet_gate::{internet_direct_live_enabled, INTERNET_DIRECT_PRODUCTION_ENABLED};
 pub use introduction::{IntroductionInbox, RavenIntroductionV1};

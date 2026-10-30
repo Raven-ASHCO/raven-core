@@ -296,6 +296,10 @@ pub(crate) struct LinkCtl {
     /// What our dial carries ([`dial_purpose`]), for the log lines; `None`
     /// on a link the peer opened (its frames come after the route hints).
     purpose: Option<&'static str>,
+    /// The peer's verified hello asked for our RRH1 on this link (caps bit
+    /// 11, [`raven_core::CAP_LINK_RRH1_ASK`]: it holds none of ours): told
+    /// whether or not it is due (spec §6.1).
+    asked: bool,
 }
 
 impl LinkCtl {
@@ -327,6 +331,7 @@ impl LinkCtl {
             knock: None,
             update: crate::update_exchange::UpdateLink::off(),
             purpose: None,
+            asked: false,
         }
     }
 
@@ -422,6 +427,7 @@ impl LinkCtl {
     ) -> Self {
         Self {
             peer_accepts: Some(rrh1 && peer_caps & CAP_LINK_RRH1 != 0),
+            asked: peer_caps & raven_core::CAP_LINK_RRH1_ASK != 0,
             link_peer_id,
             features: crate::security::events_live().then_some(LinkFeatures::Complete(peer_caps)),
             ..Self::new(data_dir, carrier, role, keys, rrh1)
@@ -447,7 +453,10 @@ impl LinkCtl {
         // only when it wants ours or has its own to tell ([`lan_asks`]).
         // Otherwise a contact is told only what it was not told lately
         // (spec §6, telling again).
-        let answer = (self.role, self.carrier) == (Role::Listener, OutboxCarrier::Lan);
+        // A peer that asked on an Internet, p2p, nearby or Tor link holds
+        // none of ours (it forgot them, or started afresh): told now.
+        let answer =
+            (self.role, self.carrier) == (Role::Listener, OutboxCarrier::Lan) || self.asked;
         let told = told_to(&self.data_dir, &self.keys.peer);
         if !answer && !tell_due(told.as_ref(), &hints, self.carrier, Instant::now()) {
             return None;
@@ -1920,6 +1929,17 @@ fn note_told(
     }
 }
 
+/// Whether this node holds none of `peer`'s route hints: no live snapshot
+/// of its in `learned_routes.json` (`raven contact forget-address`, a new
+/// card or a removal forgot it; none came since). A dial then asks the
+/// contact for its RRH1 (caps bit 11 on Internet, p2p, nearby and Tor
+/// links, RLX1 bit 8 on LAN: [`lan_asks`]), so a forgotten route comes back
+/// on the next link, whichever carrier it takes (field test E3). Blocking:
+/// one file read.
+pub(crate) fn holds_no_hints(data_dir: &Path, peer: &[u8; 32]) -> bool {
+    learned_routes::learned(data_dir, peer, crate::now_ms()).is_none()
+}
+
 /// `peer`'s route hints came at `now` and were used.
 fn note_heard(data_dir: &Path, peer: &[u8; 32], now: Instant) {
     keep(&HEARD_FROM, data_dir, peer, now, |at| *at);
@@ -1994,10 +2014,11 @@ pub(crate) async fn lan_asks(data_dir: &Path, keys: LinkKeys, announce: bool) ->
         return true;
     }
     // Its newest snapshot came over Internet or p2p: its LAN part (port,
-    // same-LAN addresses) is older and only a LAN link renews it.
+    // same-LAN addresses) is older and only a LAN link renews it. None at
+    // all (forgotten, field test E3): asked again.
     let (dd, peer) = (data_dir.to_path_buf(), keys.peer);
     let behind = tokio::task::spawn_blocking(move || {
-        learned_routes::lan_part_behind(&dd, &peer, crate::now_ms())
+        holds_no_hints(&dd, &peer) || learned_routes::lan_part_behind(&dd, &peer, crate::now_ms())
     })
     .await
     .unwrap_or(true);
@@ -4563,6 +4584,51 @@ mod tests {
         assert!(saved().contains(&peer));
     }
 
+    /// Field test E3: after `raven contact forget-address`, a friend at home
+    /// stayed on Tor: we held none of its route hints, it had told us lately,
+    /// so no link (all over Tor) carried its RRH1 again. A dial that holds
+    /// none of the peer's asks for them (caps bit 11), and a peer asked on
+    /// an Internet, p2p, nearby or Tor link tells them whether or not they
+    /// are due; unasked, the "telling again" rule stands (spec §6.1).
+    #[tokio::test]
+    async fn a_peer_that_asks_is_told_even_when_not_due() {
+        const ASKER: u8 = 0x5f;
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path();
+        write_book(dd, &[(ASKER, true, false, &[])]);
+        let keys = LinkKeys::new(key(ASKER), &Identity::from_seed(&[LOCAL; 32]));
+        let both = raven_core::CAP_INTERNET | CAP_LINK_RRH1;
+        let link = |caps: u32| {
+            LinkCtl::inet(
+                dd,
+                OutboxCarrier::Onion,
+                Role::Listener,
+                keys,
+                true,
+                caps,
+                None,
+            )
+        };
+        // Told once: not due again on the next link.
+        let mut first = link(both);
+        first.outgoing().await.expect("our RRH1");
+        first.written();
+        assert_eq!(link(both).outgoing().await, None, "not due again");
+        // The peer forgot ours and asks: told on this link.
+        let mut asked = link(both | raven_core::CAP_LINK_RRH1_ASK);
+        assert!(asked.outgoing().await.is_some(), "an asking peer is told");
+        asked.written();
+        // The ask needs the RRH1 bit itself (a hello without it takes none).
+        assert_eq!(
+            link(raven_core::CAP_INTERNET | raven_core::CAP_LINK_RRH1_ASK)
+                .outgoing()
+                .await,
+            None
+        );
+        // A dialer asks while it holds none of the peer's route hints.
+        assert!(holds_no_hints(dd, &keys.peer));
+    }
+
     /// A contact is told a generation only once a link carried it (spec §7):
     /// an RRH1 built for a link whose write then failed (no
     /// [`LinkCtl::written`]) leaves the contact due again at the next retry;
@@ -4982,6 +5048,25 @@ mod tests {
         .unwrap()
         .generation;
         keep(&TOLD_TO, dd, &keys.peer, told(g, now), |t| t.at);
+        // Its snapshot is held (field test E3: once forgotten, asked again).
+        assert!(
+            lan_asks(dd, keys, false).await,
+            "none of its route hints held"
+        );
+        let ms = crate::now_ms();
+        let held = serde_json::json!([{
+            "pub_hex": hex::encode(keys.peer), "generation": ms, "received_at_ms": ms,
+            "expires_at_ms": ms + 3_600_000, "via": "lan",
+            "lan": { "generation": ms, "received_at_ms": ms,
+                     "expires_at_ms": ms + 3_600_000, "lan_port": 7431,
+                     "lan_ip": "192.168.7.21" },
+        }]);
+        std::fs::write(
+            dd.join(learned_routes::LEARNED_ROUTES_FILE),
+            held.to_string(),
+        )
+        .unwrap();
+        assert!(!holds_no_hints(dd, &keys.peer));
         assert!(!lan_asks(dd, keys, false).await, "told and heard lately");
         assert!(lan_asks(dd, keys, true).await, "an announce link asks");
         keep(&TOLD_TO, dd, &keys.peer, told(g - 1, now), |t| t.at);
@@ -5005,7 +5090,13 @@ mod tests {
             keep(&TOLD_TO, dd, &keys.peer, told(g, now), |t| t.at);
             note_heard(dd, &keys.peer, old);
             assert!(lan_asks(dd, keys, false).await, "heard long ago");
+            note_heard(dd, &keys.peer, now);
         }
+        // `raven contact forget-address`: asked again at once.
+        keep(&TOLD_TO, dd, &keys.peer, told(g, now), |t| t.at);
+        learned_routes::forget(dd, &keys.peer).unwrap();
+        assert!(holds_no_hints(dd, &keys.peer));
+        assert!(lan_asks(dd, keys, false).await, "its route hints forgotten");
         forget_told(dd);
     }
 
