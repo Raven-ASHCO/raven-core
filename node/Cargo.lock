@@ -281,7 +281,7 @@ checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
 name = "ash"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -5469,7 +5469,7 @@ dependencies = [
 
 [[package]]
 name = "raven-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ash",
  "hex",
@@ -5482,7 +5482,7 @@ dependencies = [
 
 [[package]]
 name = "raven-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -5528,14 +5528,14 @@ dependencies = [
 
 [[package]]
 name = "raven-mlkem768-incremental-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "raven-core",
 ]
 
 [[package]]
 name = "raven-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arti-client",
  "base64 0.22.1",
@@ -5578,7 +5578,7 @@ version = "0.1.0"
 
 [[package]]
 name = "raven-swarm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",

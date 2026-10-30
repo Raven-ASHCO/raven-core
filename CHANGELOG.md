@@ -1,0 +1,113 @@
+# Changelog
+
+What changed in each version of Raven core, for the people who use it. Raven is a pre-release:
+nothing here has had an independent security review, and there are no downloads yet. The
+[README](README.md) says what release builds have and what stays in the lab.
+
+## 0.1.1 (October 2026)
+
+Fixes from our own testing after 0.1.0, the engine for the iPhone app, and a Linux package.
+
+### Sending
+
+- A message to a verified friend no longer gets lost when the secure connection with them has to be
+  set up again and that first step gets no answer over Tor. It now waits and goes as soon as the
+  friend can be reached. A refusal from the friend still says "not sent".
+- A quick "unreachable" from Tor is checked once more before a message is queued, and it no longer
+  makes Raven skip Tor for the next message.
+- When a message is queued at once because Raven is already trying to reach the friend over Tor with
+  an earlier one, Raven says that, instead of "couldn't be reached".
+- After `raven nearby disable`, sending no longer tries Bluetooth. With peer-to-peer off on this
+  computer, sending no longer tries an old peer-to-peer address, and the message no longer advises
+  turning peer-to-peer on.
+
+### Finding friends again
+
+- Verified friends tell each other their local network address inside their encrypted links on every
+  kind of link, not only on the local network. Two friends who only reached each other over Tor move
+  to the faster direct way once they share a network. Raven uses an address it was told only for a
+  verified friend, and only while that address is on one of your own networks.
+- After `raven contact forget-address`, the next connection with the friend asks for their routes
+  again, so the friend is not left reachable over Tor alone.
+- `raven contact forget-address` now forgets every saved route of the friend (local network,
+  Internet, peer-to-peer and its relays). The friend's Tor address, their verification and the mail
+  friends they told you about stay, so mail for them still finds its way.
+- Adding a friend's newer card replaces the routes an older card had saved, and says which went.
+
+### What Raven tells you
+
+- `raven status` no longer prints your 10 security words. People paste status into bug reports and
+  screenshots. The words are shown only when you ask: `raven whoami --words`.
+- `raven status` says plainly how friends are reached ("friends on this network directly, and friends
+  elsewhere over Tor"). Rows only a developer needs moved behind `raven status --verbose`.
+- `raven contact list` and `raven contact show` name the ways Raven has to reach each friend, never
+  with a public address. A way Raven does not use now says why: off on this computer, not until you
+  verify the friend, or not while you hide your IP address from them.
+- The custody settings say what each one does and how to turn it on. The node settings say what to do
+  for the background program that is actually running.
+- The background program's log notes every delivery with the friend's short tag (never an address).
+
+### The terminal app
+
+- Every message says when it came and how (for example "via Tor" or "from a keeper").
+- The unread count reads as a badge, a send shows "Connecting" before "Sending", and pressing Enter
+  right after typing fast sends the message.
+
+### Tor
+
+- When the Tor network requires a newer Tor than this Raven has, Tor turns off with "this version is
+  too old for the Tor network; update Raven" instead of ending the program. Raven carries a small,
+  documented change to the Tor client it uses (Arti 0.47.0) for this.
+
+### iPhone and iPad (the app is in development)
+
+- Raven's background program can now run inside an app, with Tor inside it too, because iOS lets an
+  app start no other program. The keys go to the iOS Keychain, for this device only (never iCloud,
+  never a backup restored elsewhere). It builds for iPhone and the iOS Simulator and has run there in
+  tests; it has not run on a phone yet.
+- New engine operations for the app: pause and resume as it leaves and comes back to the screen; a
+  mail check for iOS background refresh, which says which friends it asked; handing waiting messages
+  to a friend who holds mail before the app goes to sleep; and a setting to use Tor on Wi-Fi only.
+- There is no push server: a phone receives while Raven is open, and otherwise collects what friends
+  hold for it when it opens or iOS lets it check in the background.
+
+### For the desktop and phone apps
+
+- A message a friend holds names that friend ("Held by Max"), and so does each member's copy of a
+  group message of yours. A member's group message says how it came. Tor's start percentage is
+  reported in release builds too.
+
+### Packaging
+
+- A script makes a Linux package (`raven-linux-<arch>-0.1.1.tar.gz`) with an installer that sets
+  Raven up for one user as a systemd user service, and a SHA-256 checksum file. It has not been
+  tested on every distribution yet.
+
+## 0.1.0 (October 2026)
+
+The first version with the features of the October 2026 field test switched on in release builds.
+Three computers, one person: a phone hotspot and a home network reached each other over Tor in every
+direction, a computer that was off for five minutes got its messages afterwards, and a Bluetooth chain
+carried messages both ways. A small test is evidence, not proof.
+
+- **Messages between two computers on the same local network**, end to end encrypted, with friends
+  verified by comparing 10 security words.
+- **Friends on other networks:** Internet direct, peer-to-peer with hole punching and relays run by
+  friends, router port mapping (UPnP, NAT-PMP, PCP), routes friends tell each other inside their
+  encrypted links, finding this computer's public address with STUN (Cloudflare and Google only), and
+  Tor onion services, raced against the direct ways. Listening for Internet direct and peer-to-peer,
+  port mapping, relaying for friends and keeping mail for friends each stay off until you turn them on.
+- **A friend who is away:** friends keep sealed mail for each other (they cannot read it), and a
+  message keeps trying for up to 7 days.
+- **Groups** of up to 16 people; the creator is the only admin.
+- **Bluetooth nearby** between Macs with no network at all (macOS only).
+- **The app channel** for RDAP, Raven's companion for software agents: only from verified friends,
+  only of known types, within size and rate limits.
+- **Contact cards carry no unsigned route.** A card holds your key, your Tor onion address signed by
+  your key and, only if you add one, a local network address. Release builds never put an Internet
+  address, a peer-to-peer network ID or a relay into a card, and ignore them in a card they read.
+- **Fixes from an internal review** (October 2026), among them: a new key under a verified friend's
+  name is refused as a key change; the terminal app shows a friend's code only once they are
+  verified; a new profile is encrypted by the program that creates its identity; Tor links use a key
+  of their own. One fix was taken back: removing a contact keeps its sessions until they expire.
+- Not independently reviewed. Nothing is packaged, signed or notarised.

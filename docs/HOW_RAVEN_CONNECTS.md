@@ -1,7 +1,7 @@
 # How Raven connects without a Raven server
 
 Any messenger without a central server has to answer four questions. This page answers each one
-directly: how Raven does it, what is in **release builds** today (version 0.1.0, with the features
+directly: how Raven does it, what is in **release builds** today (version 0.1.1, with the features
 switched on in October 2026, not independently reviewed) and what is only in **lab** builds (debug
 builds with `RAVEN_LAB_*` switches, see [ROADMAP.md](ROADMAP.md)), and the limits. It
 describes the code in this repository and points to the specs. Where the

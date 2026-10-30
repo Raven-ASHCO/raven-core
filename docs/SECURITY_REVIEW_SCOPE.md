@@ -2,7 +2,7 @@
 
 A package for an independent reviewer of Raven's protocol and code. **No independent review has
 happened yet.** An internal review was done in October 2026, and its fixes are in version 0.1.0
-(except one taken back: a removed contact's sessions stay until they expire, section 3); it is not
+and later (except one taken back: a removed contact's sessions stay until they expire, section 3); it is not
 a substitute for an independent review, and this page does not depend on
 it. This page lists what to review first, where the specs and the code are, what is already known
 and published, how to build and test, and what is out of scope. If you are interested in reviewing
@@ -15,7 +15,7 @@ and identities, then the carriers and features switched on in October 2026.
 
 ## 1. What runs in a release build today
 
-Release builds (version 0.1.0) have **direct messaging between two computers on the same local
+Release builds (version 0.1.1) have **direct messaging between two computers on the same local
 network**, under a recorded exception to the project's own release rules
 ([WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md](WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md)).
 Its exact surface:

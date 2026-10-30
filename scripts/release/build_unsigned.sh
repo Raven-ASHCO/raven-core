@@ -5,7 +5,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 NODE="$REPO/node"
 source "${HOME}/.cargo/env" 2>/dev/null || true
-VER="${RAVEN_RELEASE_VERSION:-0.1.0-serverless}"
+VER="${RAVEN_RELEASE_VERSION:-0.1.1-serverless}"
 HOST="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -30,9 +30,9 @@ Website: https://raven-messager.com
 
 ## Status: early, not independently reviewed, nothing to download yet
 
-- **Pre-release (version 0.1.0).** No independent security review has happened yet. An internal
-  review in October 2026 found problems that this version fixes; it is no substitute for an
-  independent one. Read the [security errata](protocol/SECURITY_ERRATA_RVN1_2026-08-13.md) and
+- **Pre-release (version 0.1.1).** No independent security review has happened yet. An internal
+  review in October 2026 found problems that version 0.1.0 fixed; it is no substitute for an
+  independent one. What changed in each version: [CHANGELOG.md](CHANGELOG.md). Read the [security errata](protocol/SECURITY_ERRATA_RVN1_2026-08-13.md) and
   the [threat model](docs/THREAT_MODEL.md) before relying on anything here.
 - **What release builds have.** Direct messaging between two computers on the same local
   network, and, since October 2026, the features that passed the
