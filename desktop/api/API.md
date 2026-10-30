@@ -247,15 +247,17 @@ raven-node).
 raven-node tries what waits once more and leaves sealed copies of what it could not deliver with
 friends who hold mail now, instead of after the minute it otherwise waits (the kick keeps that so for
 ten minutes). The engine then looks at raven-node's outbox until each message is held by a friend,
-delivered, or `budget_ms` is up (default 5000, from 500 to 20000; it looks at least
-1.5 s, so a message stored a moment before, such as a group copy just parked, counts too).
+delivered, or has nobody who could take it (no friend the recipient told about or you listed for
+them), or `budget_ms` is up (default 5000, from 500 to 20000; it looks at least 1.5 s, so a message
+stored a moment before, such as a group copy just parked, counts too).
 
 - A message counts when it waits on this device (queued, held back or parked) and no friend holds a
   copy of it yet. One already written to the friend's computer (`sent`) does not: it is there.
   Group copies count like any message. Which friends may take a copy is raven-node's rule, as always:
   the friends the recipient told about, or listed by hand for the recipient, verified and unblocked.
 - `handed`: messages a friend took; `holders`: those friends, by your names for them; `left`: still
-  only on this device; `delivered`: delivered meanwhile; `completed`: nothing is left.
+  only on this device (also those nobody could take); `delivered`: delivered meanwhile;
+  `completed`: nothing is left.
 - `custody: "off"` (friend custody held in this build): nothing is handed, `left` counts what waits.
   Without a running raven-node (or a paused one) the answer is `NODE_NOT_RUNNING`.
 - Each message a friend took then reads `path_kind: "friend"` (or `"handoff"`) with `via_name`, and a

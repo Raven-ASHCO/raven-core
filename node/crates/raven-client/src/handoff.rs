@@ -14,7 +14,7 @@
 //! about, or listed by hand, verified and unblocked); a direct try comes
 //! first, so a friend who answers now gets the message itself.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use ash_engine::engine as bridge;
@@ -57,6 +57,8 @@ pub(crate) struct Tally {
     pub delivered: usize,
     /// Still only on this computer (the unlisted ones among them).
     pub left: usize,
+    /// Those messages.
+    pub waiting: Vec<String>,
     /// Not listed by raven-node at this look: between two of its scans (a
     /// copy sealed again is listed anew at the next one), or finished.
     pub unlisted: Vec<String>,
@@ -70,11 +72,15 @@ pub(crate) fn tally(asked: &[String], snap: &OutboxSnap) -> Tally {
             Some(i) if i.state == "delivered" => t.delivered += 1,
             Some(i) if i.in_custody > 0 || snap.letters.contains(mid) => t.handed.push(mid.clone()),
             // Waiting still, or given up (expired, failed, cancelled).
-            Some(_) => t.left += 1,
+            Some(_) => {
+                t.left += 1;
+                t.waiting.push(mid.clone());
+            }
             // Not known now: still waiting, until the chat history says
             // otherwise (`settle_unlisted`).
             None => {
                 t.left += 1;
+                t.waiting.push(mid.clone());
                 t.unlisted.push(mid.clone());
             }
         }
@@ -88,6 +94,7 @@ fn settle_unlisted(t: &mut Tally, delivered: &dyn Fn(&str) -> bool) {
     for mid in std::mem::take(&mut t.unlisted) {
         if delivered(&mid) {
             t.left = t.left.saturating_sub(1);
+            t.waiting.retain(|m| *m != mid);
             t.delivered += 1;
         }
     }
@@ -101,10 +108,32 @@ impl Inner {
             .opt_u64("budget_ms")?
             .map_or(HANDOFF_DEFAULT, Duration::from_millis)
             .clamp(HANDOFF_MIN, HANDOFF_MAX);
-        self.identity()?;
+        let local = self.identity()?.public_key_bytes();
         let dir = self.data_dir()?.to_path_buf();
         let started = Instant::now();
         let custody = raven_core::custody_gate::CustodyGates::current().live;
+        // A message for a friend no friend of yours could hold mail for (no
+        // mail friend they told about, none listed for them) stays here
+        // whatever the time: the hand-off does not wait for it.
+        let mut no_holder: HashMap<String, bool> = HashMap::new();
+        let mut nobody_for = |peer: &str| -> bool {
+            let peer = peer.to_ascii_lowercase();
+            *no_holder.entry(peer.clone()).or_insert_with(|| {
+                hex::decode(&peer)
+                    .ok()
+                    .and_then(|k| <[u8; 32]>::try_from(k).ok())
+                    .is_none_or(|key| {
+                        raven_core::custody_client::custodian_candidates(
+                            &dir,
+                            &local,
+                            &key,
+                            crate::engine::now_ms(),
+                        )
+                        .is_empty()
+                    })
+            })
+        };
+        let mut hopeless: HashSet<String> = HashSet::new();
         self.invalidate_outbox();
         let snap = self.outbox(Duration::ZERO);
         if !snap.answered {
@@ -122,12 +151,14 @@ impl Inner {
             .filter(|(mid, i)| i.in_custody > 0 || snap.letters.contains(*mid))
             .map(|(mid, _)| mid.clone())
             .collect();
-        let mut asked: Vec<String> = snap
-            .items
-            .values()
-            .filter(|i| waits_here(i, &snap))
-            .map(|i| i.message_id_hex.to_ascii_lowercase())
-            .collect();
+        let mut asked: Vec<String> = Vec::new();
+        for i in snap.items.values().filter(|i| waits_here(i, &snap)) {
+            let mid = i.message_id_hex.to_ascii_lowercase();
+            if nobody_for(&i.peer_pub_hex) {
+                hopeless.insert(mid.clone());
+            }
+            asked.push(mid);
+        }
         let result = |t: &Tally, holders: Vec<String>, completed: bool| -> Value {
             json!({
                 "handed": t.handed.len(),
@@ -168,12 +199,17 @@ impl Inner {
                 let new_here = waits_here(i, &now)
                     || (i.kind == "message" && (i.in_custody > 0 || now.letters.contains(mid)));
                 if new_here && !held_before.contains(mid) && !asked.contains(mid) {
+                    if waits_here(i, &now) && nobody_for(&i.peer_pub_hex) {
+                        hopeless.insert(mid.clone());
+                    }
                     asked.push(mid.clone());
                 }
             }
             t = tally(&asked, &now);
             let elapsed = started.elapsed();
-            if (t.left == 0 && elapsed >= settle) || elapsed >= budget {
+            // Done once each is held, delivered, or has nobody to go to.
+            let open = t.waiting.iter().filter(|m| !hopeless.contains(*m)).count();
+            if (open == 0 && elapsed >= settle) || elapsed >= budget {
                 break;
             }
             std::thread::sleep(LOOK_EVERY.min(budget.saturating_sub(elapsed)));
@@ -268,6 +304,7 @@ mod tests {
         let mut t = tally(&asked, &s);
         assert_eq!(t.handed, ["a"]);
         assert_eq!(t.delivered, 1);
+        assert_eq!(t.waiting, ["c", "d", "e"]);
         // "e" is not listed now: waiting, until its row says delivered.
         assert_eq!(
             (t.left, t.unlisted.as_slice()),
@@ -275,6 +312,7 @@ mod tests {
         );
         settle_unlisted(&mut t, &|mid| mid == "e");
         assert_eq!((t.left, t.delivered), (2, 2));
+        assert_eq!(t.waiting, ["c", "d"]);
         let mut t = tally(&asked, &s);
         settle_unlisted(&mut t, &|_| false);
         assert_eq!((t.left, t.delivered), (3, 1));

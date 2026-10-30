@@ -6,6 +6,8 @@
 //! friends and whom A and B list for each other) at once. A's message then
 //! says who holds it (`via_name`, also on its `state` event), and so does
 //! the group receipt for B (`held_by`). B, back, collects both from C.
+//! Then C is away, and a message to C, whose mail nobody holds, is left
+//! at once: the hand-off does not wait out its time for it.
 //!
 //! Lab switches for this test binary only: `RAVEN_LAB_TEST_A=1` (its
 //! harness values), `RAVEN_LAB_CUSTODY_FETCH_MS=1000` (collect every
@@ -218,4 +220,23 @@ fn a_handoff_leaves_what_waits_with_a_friend_now() {
         );
         std::thread::sleep(Duration::from_millis(500));
     }
+
+    // C is away now, and nobody holds mail for C (C told of no mail friend,
+    // A listed none for C): the hand-off does not wait out its time for it.
+    c.stop();
+    let stuck = a.send_until(
+        &c,
+        "nobody-holds-this",
+        &["waiting", "sent", "failed", "not_sent_meet_first"],
+        Duration::from_secs(90),
+    );
+    assert_eq!(stuck["state"], "waiting", "{stuck}");
+    let began = Instant::now();
+    let r = a.ok("messages.handoff", json!({"budget_ms": 15000}));
+    assert!(began.elapsed() < Duration::from_secs(8), "{r}");
+    assert_eq!(
+        (&r["handed"], &r["left"], &r["completed"]),
+        (&json!(0), &json!(1), &json!(false)),
+        "{r}"
+    );
 }
