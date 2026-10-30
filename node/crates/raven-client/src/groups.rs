@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ash_engine::engine as bridge;
+use raven_core::arrivals::ArrivedVia;
 use raven_core::group::{
     self, GroupError, GroupId, GroupSummary, GroupView, Key, MessageView, MAX_GROUP_BODY_BYTES,
 };
@@ -27,13 +28,26 @@ const HISTORY_MAX: usize = 500;
 /// What the watcher last saw of the group store.
 #[derive(Default)]
 pub(crate) struct GroupWatch {
-    stamp: Option<Stamp>,
+    /// The group store's stamp, and the outbox's route records' (they say
+    /// which friend holds a member's copy).
+    stamp: Option<(Stamp, Stamp)>,
     /// The first look only notes what is there.
     looked: bool,
     /// Message ids seen, by group.
     seen: HashSet<(GroupId, [u8; 16])>,
     /// A digest of what a group shows (roster, status, unread, receipts).
     shown: HashMap<GroupId, String>,
+}
+
+/// The friend that holds the copy of your message `m` parked for member
+/// `key` while the member is away (API.md's `held_by`): only while that
+/// copy is not delivered or given up.
+fn held_by(m: &MessageView, key: &Key, state: &str, names: &Names) -> Option<String> {
+    if matches!(state, "delivered" | "failed") {
+        return None;
+    }
+    let (_, copy) = m.copies.iter().find(|(k, _)| k == key)?;
+    names.holders.get(&hex::encode(copy)).cloned()
 }
 
 fn group_error(e: GroupError) -> ApiError {
@@ -121,10 +135,26 @@ fn short_address(address: &str) -> String {
 }
 
 /// Names the engine shows: friends by this profile's name, this profile as
-/// its display name (else "You").
+/// its display name (else "You"); and the friend that holds each copy of
+/// yours parked for a member (by the copy's message id, hex), named.
 struct Names {
     friends: HashMap<Key, String>,
     me: String,
+    holders: HashMap<String, String>,
+}
+
+/// How a member's message came (the copy that brought it, `ArrivedVia`), as
+/// API.md's path kinds (the same words as a 1:1 message's `path`).
+fn path_kind_of(via: ArrivedVia) -> &'static str {
+    match via {
+        ArrivedVia::Lan => "lan",
+        ArrivedVia::Internet => "internet",
+        ArrivedVia::P2p => "p2p",
+        ArrivedVia::Relayed => "p2p_relayed",
+        ArrivedVia::Tor => "onion",
+        ArrivedVia::Nearby => "nearby",
+        ArrivedVia::Keeper => "friend",
+    }
 }
 
 impl Names {
@@ -159,7 +189,20 @@ impl Inner {
             .map(|n| safety::line(&n))
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| "You".to_owned());
-        Ok(Names { friends, me })
+        let holders = self
+            .data_dir()
+            .map(crate::engine::copy_holders)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(mid, keys)| {
+                Some((mid, crate::messages::holder_name(Some(&keys), &contacts)?))
+            })
+            .collect();
+        Ok(Names {
+            friends,
+            me,
+            holders,
+        })
     }
 
     /// A friend's key from its address: NOT_A_CONTACT for anyone else
@@ -265,6 +308,11 @@ impl Inner {
         if let Some(via) = &m.via {
             map.insert("via_name".into(), names.of(view, via).into());
         }
+        // A member's message: how the copy that brought it came.
+        if let Some(kind) = m.path.filter(|_| !m.mine).map(path_kind_of) {
+            map.insert("path_kind".into(), kind.into());
+            map.insert("path".into(), crate::messages::path_words(kind).text.into());
+        }
         map.insert("delivered".into(), m.delivered.into());
         map.insert("total".into(), m.total.into());
         if m.mine {
@@ -272,12 +320,16 @@ impl Inner {
                 .lines
                 .iter()
                 .map(|(key, state, via)| {
-                    json!({
+                    let mut r = json!({
                         "address": raven_core::encode_address(key),
                         "name": names.of(view, key),
                         "state": state,
                         "via": via,
-                    })
+                    });
+                    if let Some(holder) = held_by(m, key, state, names) {
+                        r["held_by"] = holder.into();
+                    }
+                    r
                 })
                 .collect();
             map.insert("receipts".into(), receipts.into());
@@ -533,7 +585,10 @@ impl Inner {
         // The copies' delivery, kept current here too (raven-node's scan
         // does the same).
         let _ = group::refresh_deliveries(dir);
-        let stamp = Stamp::of(&group::store::groups_path(dir));
+        let stamp = (
+            Stamp::of(&group::store::groups_path(dir)),
+            Stamp::of(&dir.join(raven_core::outbox::OUTBOX_ROUTES_FILE)),
+        );
         {
             let w = lock(&self.groups);
             if w.looked && w.stamp == Some(stamp) {
@@ -558,11 +613,17 @@ impl Inner {
                 .iter()
                 .filter(|m| !m.mine && m.received_ms > g.read_ms)
                 .count();
+            // Each line's state, and who holds its copy.
             let lines: Vec<String> = g
                 .messages
                 .iter()
                 .filter(|m| m.mine)
-                .flat_map(|m| m.lines.iter().map(|l| l.state.clone()))
+                .flat_map(|m| {
+                    m.lines.iter().map(|l| {
+                        let holder = names.holders.get(&l.copy.to_ascii_lowercase());
+                        format!("{}:{}", l.state, holder.map_or("", String::as_str))
+                    })
+                })
                 .collect();
             let digest = format!(
                 "{}|{}|{}|{}|{}",

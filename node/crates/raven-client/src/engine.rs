@@ -61,6 +61,10 @@ pub(crate) struct OutboxSnap {
     /// Messages a friend holds as a sealed letter (Phase 5's letter book,
     /// read while letters are live), by message id in lower case.
     pub letters: std::collections::HashSet<String>,
+    /// The friends (keys, hex) that hold a sealed copy of a message, by
+    /// message id in lower case (`outbox_routes.json`'s `custodians_held`,
+    /// read only while a listed message has one).
+    pub holders: HashMap<String, Vec<String>>,
 }
 
 /// contacts.json's and the block list's stamps.
@@ -539,6 +543,9 @@ impl Inner {
             if raven_core::horizon::letter_live_enabled() {
                 snap.letters = letters_held(dir);
             }
+            if snap.items.values().any(|i| i.in_custody > 0) {
+                snap.holders = copy_holders(dir);
+            }
         }
         let snap = Arc::new(snap);
         lock(&self.caches).outbox = Some((Instant::now(), Arc::clone(&snap)));
@@ -638,6 +645,29 @@ fn letters_held(dir: &Path) -> std::collections::HashSet<String> {
                 .iter()
                 .filter(|l| !l.held_by.is_empty() && !l.withdraw)
                 .flat_map(|l| l.message_ids.iter().map(hex::encode))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The friends that hold a sealed copy of each queued object, by message id
+/// in lower case: `outbox_routes.json`'s `custodians_held` (keys, hex, in
+/// the order they took it). Only live records: once a message expires,
+/// which friends held it is not kept (review FU-3).
+pub(crate) fn copy_holders(dir: &Path) -> HashMap<String, Vec<String>> {
+    raven_core::outbox::object_route_records(dir, now_ms())
+        .map(|records| {
+            records
+                .into_iter()
+                .filter(|(_, r)| !r.custodians_held.is_empty())
+                .map(|(mid, r)| {
+                    let keys = r
+                        .custodians_held
+                        .iter()
+                        .map(|k| k.trim().to_ascii_lowercase())
+                        .collect();
+                    (hex::encode(mid), keys)
+                })
                 .collect()
         })
         .unwrap_or_default()

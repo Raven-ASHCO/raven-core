@@ -573,6 +573,7 @@ impl Inner {
                 "completed": r.completed,
                 "new_messages": r.messages,
                 "elapsed_ms": r.elapsed.as_millis() as u64,
+                "names": mail_friend_names(&dir),
             }));
         }
         let _ = budget_ms;
@@ -659,6 +660,13 @@ fn watch(me: Weak<Inner>) {
         }
         std::thread::sleep(TICK);
     }
+}
+
+/// The names on this computer of the friends a mail check asks
+/// (`bridge::mail_asked_keys`): API.md's `mail.check` `names`.
+#[cfg(feature = "embedded-node")]
+fn mail_friend_names(dir: &Path) -> Vec<String> {
+    bridge::contact_names(dir, &bridge::mail_asked_keys(dir))
 }
 
 /// The answer of a lifecycle op the program's node does not have (it runs

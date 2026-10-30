@@ -845,6 +845,44 @@ pub fn outbox_retry_kick(data_dir: &Path, peer_hex: &str) -> bool {
     super::pair_init_lab::outbox_retry_kick(data_dir, Some(&peer))
 }
 
+/// Every friend raven-node's fetch pass asks for this profile's mail
+/// (raven-core's `custody_client::fetch_targets`): friends listed by hand
+/// for a contact (`contact set-addr --custodian`), the mail friends
+/// (`raven custody home`) and those still draining, and the friends a
+/// contact said it leaves mail with. Keys of verified, unblocked contacts.
+pub fn mail_asked_keys(data_dir: &Path) -> Vec<[u8; 32]> {
+    let now = raven_core::clock::now_ms();
+    let local = super::try_load_identity(data_dir)
+        .ok()
+        .flatten()
+        .map(|id| id.public_key_bytes())
+        .unwrap_or([0; 32]);
+    raven_core::custody_client::fetch_targets(data_dir, &local, now)
+        .map(|targets| {
+            targets
+                .into_iter()
+                .map(|(custodian, _)| custodian)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The names on this computer of the contacts with these keys
+/// (`Contact::primary_label`), in that order; a key no saved contact has is
+/// left out.
+pub fn contact_names(data_dir: &Path, keys: &[[u8; 32]]) -> Vec<String> {
+    let contacts = super::load_contacts(data_dir).unwrap_or_default();
+    keys.iter()
+        .filter_map(|k| {
+            let hex = hex::encode(k);
+            contacts
+                .iter()
+                .find(|c| c.pub_hex.trim().eq_ignore_ascii_case(&hex))
+                .map(super::Contact::primary_label)
+        })
+        .collect()
+}
+
 /// `raven outbox cancel <mid> --yes` (the app asked first): raven-node stops
 /// trying the message.
 pub fn outbox_cancel(data_dir: &Path, mid: &str) -> Result<(), String> {
@@ -1202,6 +1240,9 @@ pub struct CarryView {
     pub friends_carry_mine: Option<bool>,
     /// Mail friends this node collects from now.
     pub mail_friends: usize,
+    /// The names on this computer of every friend a mail check asks
+    /// ([`mail_asked_keys`]): the apps say who Raven asks.
+    pub asked_names: Vec<String>,
     /// They were chosen by hand (`raven custody home`).
     pub mail_friends_by_hand: bool,
     /// Verified friends that offer to hold mail (over the internet too,
@@ -1231,9 +1272,11 @@ pub struct CarryView {
 pub fn carry_view(data_dir: &Path) -> CarryView {
     let f = super::custody_cli::gather_facts(data_dir);
     let policy = raven_core::node_policy::try_load_policy(data_dir).unwrap_or_default();
+    let asked = mail_asked_keys(data_dir);
     CarryView {
         friends_carry_mine: f.consent,
         mail_friends: f.home,
+        asked_names: contact_names(data_dir, &asked),
         mail_friends_by_hand: f.manual,
         offering: f.offering,
         offering_internet: f.offering_wan,

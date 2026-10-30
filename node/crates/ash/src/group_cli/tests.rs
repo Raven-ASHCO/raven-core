@@ -253,6 +253,7 @@ fn every_message_says_how_and_when_it_came() {
         received_ms: 2_000,
         via,
         lines: Vec::new(),
+        copies: Vec::new(),
         delivered: 0,
         total: 0,
         path,

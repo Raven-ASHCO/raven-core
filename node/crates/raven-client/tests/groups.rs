@@ -192,6 +192,9 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
     assert_eq!(at_c["from_address"], a.me["address"], "{at_c}");
     assert_eq!(at_c["via_name"], "Friend B", "passed on by B: {at_c}");
     assert_eq!(at_c["mine"], false);
+    // How the copy that brought it came (here: B's forward on the LAN).
+    assert_eq!(at_c["path_kind"], "lan", "{at_c}");
+    assert_eq!(at_c["path"], "LAN direct", "{at_c}");
     // B has it too, straight from A.
     let at_b = wait_for(Duration::from_secs(60), "B to hold A's message", || {
         history(&b, &group)
@@ -199,6 +202,7 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
             .find(|m| m["id"] == id.as_str())
     });
     assert!(at_b.get("via_name").is_none(), "{at_b}");
+    assert_eq!(at_b["path_kind"], "lan", "{at_b}");
 
     // A sees both delivered: B by the pairwise receipt, C by C's signed
     // group receipt that B passed back.

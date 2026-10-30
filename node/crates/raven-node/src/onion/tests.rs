@@ -1257,3 +1257,23 @@ async fn the_arti_patch_tells_the_helper_instead_of_exiting() {
     arti_client::raven_delta::simulate_unsupported_software(&runtime).await;
     assert!(life.said.load(std::sync::atomic::Ordering::Acquire));
 }
+
+/// Tor is on in release builds (since 2026-10): raven-node's Status carries
+/// its line, and so its start percentage, without a lab switch (the apps'
+/// progress bar reads it from the engine's `network.status`).
+#[test]
+fn the_status_line_needs_no_lab_switch() {
+    assert!(raven_core::ONION_PRODUCTION_ENABLED);
+    if raven_core::onion_live_enabled() {
+        let line = status_text().expect("the gate is open: Status has the Tor line");
+        assert!(line.starts_with("Tor: "), "{line}");
+    } else {
+        assert_eq!(status_text(), None);
+    }
+    let s = Status {
+        phase: Phase::Starting,
+        pct: 37,
+        ..Status::default()
+    };
+    assert_eq!(status_line(&s, Instant::now()), "Tor: starting (37 %)");
+}

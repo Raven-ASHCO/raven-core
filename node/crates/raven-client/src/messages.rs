@@ -139,6 +139,9 @@ pub(crate) struct Pending {
     /// path to the friend then): kept, so a later delivery to the same
     /// friend does not change it.
     pub path: Option<PathLabel>,
+    /// The friend that held a sealed copy of it (their name here), kept
+    /// with `path` for this run: the receipt that follows says "via" them.
+    pub via_name: Option<String>,
     pub finished: Option<Instant>,
 }
 
@@ -150,6 +153,8 @@ struct Observed {
     incoming: HashSet<String>,
     presence: HashMap<String, &'static str>,
     receipts: HashSet<String>,
+    /// Each message's friend that holds a copy (`via_name`), as last told.
+    holders: HashMap<String, String>,
     /// Each friend's unread count, by key.
     unread: HashMap<String, usize>,
 }
@@ -211,6 +216,9 @@ pub(crate) struct View {
     pub state: State,
     pub until_ms: Option<u64>,
     pub path: Option<PathLabel>,
+    /// A message of yours a friend holds (path `friend` or `handoff`): that
+    /// friend's name on this computer (API.md's `via_name`).
+    pub via_name: Option<String>,
     /// When the engine saw its receipt (yours, delivered), when it did.
     pub delivered_at_ms: Option<u64>,
     pub attempts: Option<u32>,
@@ -245,6 +253,9 @@ impl View {
         if let Some(path) = &self.path {
             m.insert("path".into(), path.text.clone().into());
             m.insert("path_kind".into(), path.kind.into());
+        }
+        if let Some(via) = &self.via_name {
+            m.insert("via_name".into(), via.clone().into());
         }
         if let Some(at) = self.late_delivery() {
             m.insert("delivered_at_ms".into(), at.into());
@@ -407,6 +418,46 @@ pub(crate) fn carried_label(item: &OutboxItem, letter: bool) -> Option<PathLabel
     }
 }
 
+/// A `state` event's fields (API.md): the state, its deadline while it
+/// waits, and how it travels once known (`path`, `path_kind`, and the
+/// friend that holds a copy, `via_name`).
+fn state_fields(v: &View) -> Value {
+    let mut fields = json!({"id": v.id, "address": v.address, "state": v.state.as_str()});
+    if let Some(until) = v.until_ms {
+        fields["until_ms"] = until.into();
+    }
+    if let Some(path) = &v.path {
+        fields["path"] = path.text.clone().into();
+        fields["path_kind"] = path.kind.into();
+    }
+    if let Some(via) = &v.via_name {
+        fields["via_name"] = via.clone().into();
+    }
+    fields
+}
+
+/// A path on which a friend holds a sealed copy (or held it): `friend` or
+/// `handoff` (a letter's keeper is not named).
+fn held_by_friend(path: &PathLabel) -> bool {
+    matches!(path.kind, "friend" | "handoff")
+}
+
+/// The name on this computer of the first of `holders` (keys, hex) that is
+/// a saved friend: API.md's `via_name`. None when no holder is known, or
+/// none is a saved friend.
+pub(crate) fn holder_name(
+    holders: Option<&Vec<String>>,
+    contacts: &[ContactView],
+) -> Option<String> {
+    holders?.iter().find_map(|key| {
+        contacts
+            .iter()
+            .find(|c| c.pub_hex.trim().eq_ignore_ascii_case(key))
+            .map(|c| safety::line(&c.label))
+            .filter(|name| !name.trim().is_empty())
+    })
+}
+
 /// The state of one message from what is known of it (strongest first).
 fn state_of(
     history: Option<&str>,
@@ -536,6 +587,7 @@ fn views(
                 state: State::Delivered,
                 until_ms: None,
                 path: None,
+                via_name: None,
                 delivered_at_ms: None,
                 attempts: None,
                 history: Some(e.delivery.clone()),
@@ -570,6 +622,12 @@ fn views(
                 })
             }),
         };
+        // The friend that holds a sealed copy, by name (raven-node's route
+        // record names who took it).
+        let mut via_name = path
+            .as_ref()
+            .filter(|l| held_by_friend(l))
+            .and_then(|_| holder_name(outbox.holders.get(&mid), contacts));
         // A message of this session: friends carrying it is kept from when
         // it was seen; once raven-node's outbox delivered it, its last path
         // to the friend (a delivery after the message was written), read
@@ -584,19 +642,27 @@ fn views(
                 (None, None, State::Delivered) => path.clone(),
                 _ => None,
             };
-            if let Some(found) = found {
-                if let Some(send) = book.pendings.iter_mut().find(|s| s.id == p.id) {
+            if let Some(send) = book.pendings.iter_mut().find(|s| s.id == p.id) {
+                if let Some(found) = found {
                     send.path = Some(found);
                 }
+                // Who held it is kept with the path: the record that names
+                // them is gone once it is delivered.
+                if send.via_name.is_none() {
+                    send.via_name.clone_from(&via_name);
+                }
             }
-            let kept = book
-                .pendings
-                .iter()
-                .find(|s| s.id == p.id)
-                .and_then(|s| s.path.clone());
-            if kept.is_some() && (state == State::Delivered || path.is_none()) {
-                path = kept;
+            let kept = book.pendings.iter().find(|s| s.id == p.id);
+            let kept_path = kept.and_then(|s| s.path.clone());
+            if kept_path.is_some() && (state == State::Delivered || path.is_none()) {
+                path = kept_path;
             }
+            if via_name.is_none() {
+                via_name = kept.and_then(|s| s.via_name.clone());
+            }
+        }
+        if !path.as_ref().is_some_and(held_by_friend) {
+            via_name = None;
         }
         out.push(View {
             id: pending
@@ -611,6 +677,7 @@ fn views(
             state,
             until_ms,
             path,
+            via_name,
             delivered_at_ms: None,
             attempts: item.as_ref().map(|i| i.attempts).filter(|n| *n > 0),
             history: Some(e.delivery.clone()),
@@ -635,6 +702,7 @@ fn views(
             state,
             until_ms,
             path,
+            via_name: None,
             delivered_at_ms: None,
             attempts: None,
             history: None,
@@ -927,6 +995,14 @@ impl Inner {
             let before = observed
                 .states
                 .insert(v.id.clone(), (v.state, attempts, v.until_ms));
+            // Which friend holds it: a change is told with the state (the
+            // name is kept once known, so it never goes back to none).
+            let holder_new = match &v.via_name {
+                Some(name) => {
+                    observed.holders.insert(v.id.clone(), name.clone()).as_ref() != Some(name)
+                }
+                None => false,
+            };
             if baseline {
                 if v.state == State::Delivered {
                     observed.receipts.insert(v.id.clone());
@@ -943,14 +1019,13 @@ impl Inner {
                     }
                     // A waiting message whose deadline became known (or
                     // changed) after it started waiting: the apps' "until"
-                    // follows it (E1: "Waiting for … · until –").
-                    if v.state == State::Waiting && v.until_ms.is_some() && v.until_ms != old_until
-                    {
-                        self.emit(
-                            "state",
-                            json!({"id": v.id, "address": v.address, "state": v.state.as_str(),
-                                   "until_ms": v.until_ms}),
-                        );
+                    // follows it (E1: "Waiting for … · until –"). So does a
+                    // friend that took a copy of it (`via_name`).
+                    let until_new = v.state == State::Waiting
+                        && v.until_ms.is_some()
+                        && v.until_ms != old_until;
+                    if until_new || holder_new {
+                        self.emit("state", state_fields(v));
                     }
                 }
                 _ => {
@@ -979,15 +1054,13 @@ impl Inner {
                         if let Some(at) = v.late_delivery() {
                             receipt["delivered_at_ms"] = at.into();
                         }
+                        if let Some(via) = &v.via_name {
+                            receipt["via_name"] = via.clone().into();
+                        }
                         self.emit("receipt", receipt);
                         touched.push(v.peer.clone());
                     }
-                    let mut fields =
-                        json!({"id": v.id, "address": v.address, "state": v.state.as_str()});
-                    if let Some(until) = v.until_ms {
-                        fields["until_ms"] = until.into();
-                    }
-                    self.emit("state", fields);
+                    self.emit("state", state_fields(v));
                 }
             }
         }
@@ -1207,6 +1280,7 @@ impl Inner {
                 outcome: None,
                 raw: String::new(),
                 path: None,
+                via_name: None,
                 finished: None,
             };
             if let Some(observed) = book.observed.as_mut() {
@@ -1233,6 +1307,7 @@ impl Inner {
             state: State::Sending,
             until_ms: None,
             path: None,
+            via_name: None,
             delivered_at_ms: None,
             attempts: None,
             history: None,
@@ -1898,6 +1973,7 @@ mod tests {
             outcome,
             raw: String::new(),
             path: None,
+            via_name: None,
             finished: None,
         }
     }
@@ -1914,6 +1990,7 @@ mod tests {
             state,
             until_ms,
             path: None,
+            via_name: None,
             delivered_at_ms: None,
             attempts: None,
             history: None,

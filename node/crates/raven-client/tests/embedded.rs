@@ -473,6 +473,12 @@ fn embedded_engines_end_to_end() {
     assert_eq!(check["custody"], "on", "{check}");
     assert_eq!(check["started_node"], true, "{check}");
     assert_eq!(check["completed"], true, "{check}\n{}", a.log());
+    // Who it asked, by name: the friend A listed for B.
+    assert_eq!(
+        check["names"],
+        json!([format!("Friend {}", c.name)]),
+        "{check}"
+    );
     assert!(check["new_messages"].as_u64().unwrap() >= 1, "{check}");
     assert!(a.has_incoming(&b, "while you were away"), "{}", a.log());
     let st = a.ok("node.status", json!({}));

@@ -799,6 +799,7 @@ pub(crate) fn network_view(dir: &Path, facts: &NetFacts) -> Value {
                 None => "not_decided",
             },
             "mail_friends": c.mail_friends,
+            "names": c.asked_names,
             "chosen_by_hand": c.mail_friends_by_hand,
             "offering": c.offering,
             "offering_over_internet": c.offering_internet,
@@ -2370,6 +2371,26 @@ mod tests {
         let ready = facts(Some("Tor: ready"));
         assert_eq!(way("tor", &ready)["running"], true);
         assert_eq!(network_view(&dir, &ready)["tor"]["phase"], "ready");
+        // Starting: how far, in every build (release engines too: Tor is on
+        // in release builds, and nothing here reads the build or a lab
+        // switch; the apps' progress bar follows it).
+        let starting = facts(Some("Tor: starting (45 %)"));
+        assert_eq!(
+            network_view(&dir, &starting)["tor"],
+            json!({"phase": "starting", "words": "starting (45 %)", "percent": 45})
+        );
+        let w = way("tor", &starting);
+        assert_eq!(w["running"], false);
+        if g.live && !g.lab() {
+            assert_eq!(w["state"], "on", "{w}");
+            assert_eq!(w["reason"], "Starting: Tor is connecting to its network.");
+        }
+        let says = facts(Some("Tor: starting (80 %, Tor says: loading descriptors)"));
+        let t = &network_view(&dir, &says)["tor"];
+        assert_eq!(
+            (&t["percent"], &t["why"]),
+            (&json!(80), &json!("Tor says: loading descriptors"))
+        );
         // No line: no state, no running, no `tor`.
         let none = facts(None);
         let w = way("tor", &none);
@@ -2378,6 +2399,43 @@ mod tests {
             "{w}"
         );
         assert!(network_view(&dir, &none).get("tor").is_none());
+    }
+
+    /// The phone app's names (API.md): who a mail check asks, by name
+    /// (`carry.friends_carry_mine.names`).
+    #[test]
+    fn mail_friends_by_name() {
+        let facts = NetFacts {
+            status: Err("not running".into()),
+            policy: Some(NodePolicy::default()),
+            lan: bridge::LanView {
+                setting: "on",
+                meeting_until_ms: None,
+                verified_only: false,
+                row: String::new(),
+                beacon_row: None,
+            },
+            nearby: bridge::NearbyView {
+                state: "held",
+                saved: None,
+                info: None,
+                rows: Vec::new(),
+            },
+            carry: bridge::CarryView {
+                mail_friends: 1,
+                asked_names: vec!["Max".into(), "Neighbour".into()],
+                ..Default::default()
+            },
+        };
+        let dir = std::env::temp_dir().join("raven-client-carry-names-test-missing");
+        let view = network_view(&dir, &facts);
+        let mine = &view["carry"]["friends_carry_mine"];
+        assert_eq!(mine["names"], json!(["Max", "Neighbour"]), "{mine}");
+        assert_eq!(mine["mail_friends"], 1, "{mine}");
+        assert_eq!(
+            view["tor_wifi_only"], false,
+            "the default: Tor on mobile data too"
+        );
     }
 
     /// The whole view: a node that answers with a powered radio on a public

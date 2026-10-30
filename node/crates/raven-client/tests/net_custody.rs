@@ -156,6 +156,11 @@ fn a_friend_holds_the_message_until_the_recipient_starts() {
     }
     assert_eq!(mine["path_kind"], "friend", "{mine}");
     assert_eq!(mine["path"], "Held by a friend", "{mine}");
+    // ... and which friend: A's name for C.
+    assert_eq!(mine["via_name"], "Friend Carrier", "{mine}");
+    // Who A's mail checks ask, by name: the friend A listed for B.
+    let names = &a.ok("network.status", json!({}))["carry"]["friends_carry_mine"]["names"];
+    assert_eq!(*names, json!(["Friend Carrier"]), "{names}");
     let details = a.ok("messages.details", json!({"id": mine["id"]}));
     assert!(
         details["why_text"]

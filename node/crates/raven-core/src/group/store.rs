@@ -610,6 +610,10 @@ pub struct MessageView {
     /// Mine only: each member's state (`waiting`, `sent`, `delivered`,
     /// `failed`) and how it is reached (`direct`, `relay`).
     pub lines: Vec<(Key, String, String)>,
+    /// Mine only: the message id of the copy parked for each member reached
+    /// directly, once parked (the outbox's record of that copy says which
+    /// friends hold it while the member is away).
+    pub copies: Vec<(Key, [u8; 16])>,
     pub delivered: usize,
     pub total: usize,
     /// A received one: how the copy that brought it came, when known.
@@ -718,6 +722,11 @@ pub fn history(
                 delivered: lines.iter().filter(|l| l.1 == LINE_DELIVERED).count(),
                 total: lines.len(),
                 lines,
+                copies: m
+                    .lines
+                    .iter()
+                    .filter_map(|l| Some((hex_key(&l.member)?, hex_n::<16>(&l.copy)?)))
+                    .collect(),
                 path: crate::arrivals::ArrivedVia::parse(&m.path),
             })
         })
