@@ -2351,7 +2351,12 @@ fn next_step(cause: Cause, ctx: &SendCtx, first_contact: bool, raw: &str) -> Str
             "In System Settings > Privacy & Security > Local Network, turn on the app that \
              started raven-node (your terminal app, or Raven), then restart raven-node so it \
              gets the permission: {}.",
-            super::service_restart_hint()
+            super::restart_how(
+                ctx.data_dir
+                    .as_deref()
+                    .map_or(super::NodeRun::Started(None), super::node_run),
+                true
+            )
         ),
         Cause::Other => String::new(),
     }

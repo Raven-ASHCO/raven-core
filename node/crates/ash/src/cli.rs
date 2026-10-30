@@ -11910,18 +11910,90 @@ fn set_node_flag(data_dir: &Path, which: &str, on: bool) {
     );
 }
 
-/// How to restart the background service on this OS (the Internet listen
-/// setting is read when raven-node starts).
-fn service_restart_hint() -> &'static str {
-    if cfg!(windows) {
-        "Stop-ScheduledTask -TaskName RavenNodeBridge; Start-ScheduledTask -TaskName \
-         RavenNodeBridge (installed task), or stop raven-node and run `raven listen`"
-    } else if cfg!(target_os = "macos") {
-        "launchctl kickstart -k gui/$(id -u)/com.raven.raven-node (installed agent), or stop \
-         raven-node and run `raven listen`"
+/// Who runs this profile's raven-node now, for what to do after a setting
+/// it reads only when it starts (field test E3: the launchd command was
+/// given with no agent installed and no raven-node running).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeRun {
+    /// No raven-node answers for this profile.
+    NotRunning,
+    /// Raven's own login item for this profile runs it.
+    Item(node_control::Platform),
+    /// Something else started it (a send, `raven listen`, a script): its
+    /// process id, when its Status says.
+    Started(Option<u32>),
+}
+
+/// [`NodeRun`] now: this profile's Status (a short wait), then Raven's own
+/// login item for this profile (only when its `--data-dir` is this one).
+fn node_run(data_dir: &Path) -> NodeRun {
+    let status = ipc_client::ipc_request_timeout(data_dir, &IpcRequest::status(), NODE_RUN_WAIT);
+    node_run_with(&status, || own_item_platform(data_dir))
+}
+
+/// How long [`node_run`] waits for a Status: a healthy node answers at once.
+const NODE_RUN_WAIT: Duration = Duration::from_millis(1500);
+
+/// [`node_run`] from a Status answer and the login item (asked only while
+/// something answers).
+fn node_run_with(
+    status: &Result<IpcResponse, String>,
+    item: impl FnOnce() -> Option<node_control::Platform>,
+) -> NodeRun {
+    if matches!(status, Err(e) if ipc_client::error_means_not_running(e)) {
+        return NodeRun::NotRunning;
+    }
+    match item() {
+        Some(platform) => NodeRun::Item(platform),
+        None => NodeRun::Started(match status {
+            Ok(IpcResponse::Status { pid, .. }) => *pid,
+            _ => None,
+        }),
+    }
+}
+
+/// The system of Raven's own login item for this profile, if one runs it.
+fn own_item_platform(data_dir: &Path) -> Option<node_control::Platform> {
+    node_control::LoginEnv::current()
+        .ok()
+        .and_then(|env| node_control::own_login_item(&env, data_dir))
+        .map(|item| item.platform())
+}
+
+/// How to restart the raven-node `run` says runs: its login item's own
+/// restart, else stop that process and start it again. `listen`: `raven
+/// listen` may start it again (not while LAN is off: it refuses then).
+fn restart_how(run: NodeRun, listen: bool) -> String {
+    use node_control::Platform;
+    let again = if listen {
+        "start it again (`raven listen`, or send a message)"
     } else {
-        "systemctl --user restart raven-node (installed unit), or stop raven-node and run \
-         `raven listen`"
+        "send a message: it starts again by itself"
+    };
+    match run {
+        NodeRun::Item(Platform::MacOs) => {
+            "`launchctl kickstart -k gui/$(id -u)/com.raven.raven-node`".into()
+        }
+        NodeRun::Item(Platform::Linux) => "`systemctl --user restart raven-node`".into(),
+        NodeRun::Item(Platform::Windows) => "`Stop-ScheduledTask -TaskName RavenNodeBridge; \
+             Start-ScheduledTask -TaskName RavenNodeBridge`"
+            .into(),
+        NodeRun::Started(Some(pid)) => {
+            format!("stop it with `{}`, then {again}", ext::stop_advice(pid))
+        }
+        NodeRun::Started(None) | NodeRun::NotRunning => format!("stop raven-node, then {again}"),
+    }
+}
+
+/// What to do so raven-node uses a setting it reads when it starts
+/// (`what`: what it does then, "raven-node opens the port"): nothing while
+/// none runs, else restart it, as [`restart_how`] says for `run`.
+fn apply_at_start_line(run: NodeRun, what: &str) -> String {
+    match run {
+        NodeRun::NotRunning => {
+            "raven-node isn't running: it uses this when it starts (nothing to do now).".into()
+        }
+        run => format!("{what} when it restarts: {}.", restart_how(run, true)),
     }
 }
 
@@ -12359,16 +12431,11 @@ fn apply_lan(
     }
 }
 
-/// How to restart raven-node so it reads the LAN setting again: the login
-/// service's own restart, else stop it and start it again (while LAN is off,
-/// with a send: `raven listen` would refuse).
-fn lan_restart_hint(on: bool) -> String {
-    let hint = service_restart_hint();
-    if on {
-        hint.into()
-    } else {
-        hint.replace("and run `raven listen`", "(a send starts it again)")
-    }
+/// How to restart the running raven-node so it reads the LAN setting
+/// again ([`restart_how`]; while LAN is off with a send: `raven listen`
+/// would refuse). `status`: its Status, as `lan_set` asked for it.
+fn lan_restart_hint(data_dir: &Path, status: &Result<IpcResponse, String>, on: bool) -> String {
+    restart_how(node_run_with(status, || own_item_platform(data_dir)), on)
 }
 
 /// `raven lan on --for`'s minutes (Phase 3 P3.C2): `30m`, `1h`, `3h`, or any
@@ -12570,6 +12637,9 @@ fn lan_set(
             lines[what] = lan_this_computer_text(meeting.as_ref(), &at);
         }
     }
+    let restart = |ask: &mut dyn FnMut(&IpcRequest) -> Result<IpcResponse, String>| {
+        lan_restart_hint(data_dir, &ask(&IpcRequest::status()), on)
+    };
     match applied {
         LanApplied::Now => lines.push(format!(
             "The running raven-node turned LAN {} now.",
@@ -12580,16 +12650,16 @@ fn lan_set(
         }
         LanApplied::Older => lines.push(format!(
             "restart raven-node to apply: the running one is older than this command ({})",
-            lan_restart_hint(on)
+            restart(&mut ask)
         )),
         LanApplied::NoMeetingTime => lines.push(format!(
             "The running raven-node turned LAN on, but it is older than this command and would \
              not turn it off at the meeting time: restart raven-node to apply ({})",
-            lan_restart_hint(on)
+            restart(&mut ask)
         )),
         LanApplied::Unknown(why) => lines.push(format!(
             "The running raven-node did not take it ({why}): restart raven-node to apply ({})",
-            lan_restart_hint(on)
+            restart(&mut ask)
         )),
     }
     Ok(lines)
@@ -12716,7 +12786,12 @@ fn lan_port_random(data_dir: &Path) -> Result<Vec<String>, String> {
                 .trim()
                 .eq_ignore_ascii_case(raven_core::LAN_LISTEN_AUTO)
         });
-    Ok(lan_port_moved_lines(was, port, fixed.as_deref()))
+    Ok(lan_port_moved_lines(
+        was,
+        port,
+        fixed.as_deref(),
+        node_run(data_dir),
+    ))
 }
 
 /// What `raven lan port random` says once the port moved from `was` to
@@ -12728,16 +12803,15 @@ fn lan_port_random(data_dir: &Path) -> Result<Vec<String>, String> {
 /// `RAVEN_LAN_LISTEN` / `-LanListen`): that service keeps its port at every
 /// start, so a restart moves nothing and a new card would name a port
 /// nothing listens on; it must be set up again first (Phase 6 review
-/// traffic-5).
-fn lan_port_moved_lines(was: u16, port: u16, fixed: Option<&str>) -> Vec<String> {
+/// traffic-5). `run`: who runs raven-node now ([`apply_at_start_line`]).
+fn lan_port_moved_lines(was: u16, port: u16, fixed: Option<&str>, run: NodeRun) -> Vec<String> {
     let routes = "contacts whose Raven gets route hints from yours learn the new port by \
                   themselves once raven-node listens there";
     let Some(fixed) = fixed else {
         return vec![
             format!(
-                "{C_GREEN}ok{C_RESET} LAN port {port} (was {was}): raven-node listens there from \
-                 its next start: {}",
-                service_restart_hint()
+                "{C_GREEN}ok{C_RESET} LAN port {port} (was {was}). {}",
+                apply_at_start_line(run, "raven-node listens there")
             ),
             format!(
                 "{C_DIM}A login service set up with an address that names a port \
@@ -13190,8 +13264,8 @@ fn cmd_node_internet(data_dir: &Path, listen: Option<&str>) -> Result<(), String
                 data_dir.join("node_policy.json").display()
             );
             println!(
-                "{C_DIM}raven-node opens it when it (re)starts: {}{C_RESET}",
-                service_restart_hint()
+                "{C_DIM}{}{C_RESET}",
+                apply_at_start_line(node_run(data_dir), "raven-node opens it")
             );
             println!(
                 "{C_DIM}only your contacts get an answer, but anyone who scans that port can see \
@@ -13212,8 +13286,8 @@ fn cmd_node_internet(data_dir: &Path, listen: Option<&str>) -> Result<(), String
                 data_dir.join("node_policy.json").display()
             );
             println!(
-                "{C_DIM}a running raven-node closes the port when it restarts: {}{C_RESET}",
-                service_restart_hint()
+                "{C_DIM}{}{C_RESET}",
+                apply_at_start_line(node_run(data_dir), "raven-node closes the port")
             );
         }
     }
@@ -24370,7 +24444,10 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "{lines:?}"
         );
         assert!(!lines[1].contains("raven listen"), "{lines:?}");
-        assert!(lines[1].contains("(a send starts it again)"), "{lines:?}");
+        assert!(
+            lines[1].ends_with("(stop raven-node, then send a message: it starts again by itself)"),
+            "{lines:?}"
+        );
         let lines = lan_switch(dir.path(), true, older).unwrap();
         assert!(
             lines[1].starts_with("restart raven-node to apply")
@@ -25039,7 +25116,10 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             let lines = lan_port_random(dd).unwrap();
             let port = profile_lan_port(dd).expect("a port");
             assert!(lan_port_pickable(port), "{port}");
-            assert_eq!(lines, lan_port_moved_lines(DEFAULT_LAN_PORT, port, None));
+            assert_eq!(
+                lines,
+                lan_port_moved_lines(DEFAULT_LAN_PORT, port, None, NodeRun::NotRunning)
+            );
             assert_eq!(
                 try_load_policy(dd).unwrap(),
                 NodePolicy {
@@ -25050,7 +25130,10 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             let again = lan_port_random(dd).unwrap();
             let moved = profile_lan_port(dd).expect("a port");
             assert_ne!(moved, port);
-            assert_eq!(again, lan_port_moved_lines(port, moved, None));
+            assert_eq!(
+                again,
+                lan_port_moved_lines(port, moved, None, NodeRun::NotRunning)
+            );
         }
         set_lab_for_this_thread(SecGate::RandomPort, None);
         // The words, without the palette (live when the run has a terminal).
@@ -25066,10 +25149,19 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             }
             text
         };
-        let text = words(lan_port_moved_lines(7420, 43_210, None));
+        let text = words(lan_port_moved_lines(
+            7420,
+            43_210,
+            None,
+            NodeRun::Started(Some(4242)),
+        ));
+        let restart = format!(
+            "raven-node listens there when it restarts: {}.",
+            restart_how(NodeRun::Started(Some(4242)), true)
+        );
         for want in [
-            "LAN port 43210 (was 7420): raven-node listens there from its next start",
-            service_restart_hint(),
+            "LAN port 43210 (was 7420). ",
+            restart.as_str(),
             "keeps that one until you set it up again with Raven's installer",
             "learn the new port by themselves",
             "need your new card (raven whoami --card --lan <this computer's address>:43210)",
@@ -25081,7 +25173,12 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         // auto:PORT): a restart moves nothing, so neither the restart hint
         // nor the new card, but setting the service up again first.
         for fixed in ["auto:7420", "127.0.0.1:7420", "0.0.0.0:7441"] {
-            let text = words(lan_port_moved_lines(7420, 43_210, Some(fixed)));
+            let text = words(lan_port_moved_lines(
+                7420,
+                43_210,
+                Some(fixed),
+                NodeRun::Started(Some(4242)),
+            ));
             for want in [
                 "LAN port 43210 (was 7420) saved for this profile",
                 &format!("starts raven-node with --lan-listen {fixed}, which keeps its own port"),
@@ -25091,14 +25188,91 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             ] {
                 assert!(text.contains(want), "{want:?} missing from: {text}");
             }
-            for never in [
-                service_restart_hint(),
-                "from its next start",
-                "raven whoami --card",
-            ] {
+            for never in [restart.as_str(), "when it restarts", "raven whoami --card"] {
                 assert!(!text.contains(never), "{never:?} in: {text}");
             }
         }
+    }
+
+    /// Field test E3: after `raven node internet off` (or `p2p off`, ...)
+    /// the advice named the launchd agent though none was installed and no
+    /// raven-node ran. It now fits who runs raven-node: nothing to do while
+    /// none runs, Raven's login item's own restart while it runs it (per
+    /// system), else stopping that process and starting it again.
+    #[test]
+    fn the_restart_step_fits_who_runs_raven_node() {
+        use node_control::Platform;
+        let status = |pid: Option<u32>| {
+            let mut answer = status_bind(&["ipc"], None, None, None);
+            if let Ok(IpcResponse::Status { pid: slot, .. }) = &mut answer {
+                *slot = pid;
+            }
+            answer
+        };
+        let none: Result<IpcResponse, String> = Err(ipc_client::ipc_request_timeout(
+            tempfile::tempdir().unwrap().path(),
+            &IpcRequest::status(),
+            Duration::from_millis(200),
+        )
+        .unwrap_err());
+        assert!(ipc_client::error_means_not_running(
+            none.as_ref().unwrap_err()
+        ));
+        assert_eq!(
+            node_run_with(&none, || panic!("no item asked while none runs")),
+            NodeRun::NotRunning
+        );
+        assert_eq!(
+            node_run_with(&status(Some(4242)), || None),
+            NodeRun::Started(Some(4242))
+        );
+        assert_eq!(
+            node_run_with(&status(Some(4242)), || Some(Platform::MacOs)),
+            NodeRun::Item(Platform::MacOs)
+        );
+        assert_eq!(
+            apply_at_start_line(NodeRun::NotRunning, "raven-node opens it"),
+            "raven-node isn't running: it uses this when it starts (nothing to do now)."
+        );
+        let kill = if cfg!(windows) {
+            "taskkill /F /PID 4242"
+        } else {
+            "kill 4242"
+        };
+        assert_eq!(
+            apply_at_start_line(NodeRun::Started(Some(4242)), "raven-node opens it"),
+            format!(
+                "raven-node opens it when it restarts: stop it with `{kill}`, then start it \
+                 again (`raven listen`, or send a message)."
+            )
+        );
+        for (platform, command) in [
+            (
+                Platform::MacOs,
+                "`launchctl kickstart -k gui/$(id -u)/com.raven.raven-node`",
+            ),
+            (Platform::Linux, "`systemctl --user restart raven-node`"),
+            (
+                Platform::Windows,
+                "`Stop-ScheduledTask -TaskName RavenNodeBridge; Start-ScheduledTask -TaskName \
+                 RavenNodeBridge`",
+            ),
+        ] {
+            assert_eq!(restart_how(NodeRun::Item(platform), true), command);
+            assert_eq!(
+                apply_at_start_line(NodeRun::Item(platform), "raven-node closes the port"),
+                format!("raven-node closes the port when it restarts: {command}.")
+            );
+        }
+        // While LAN is off `raven listen` refuses: a send starts it.
+        assert_eq!(
+            restart_how(NodeRun::Started(None), false),
+            "stop raven-node, then send a message: it starts again by itself"
+        );
+        // A profile with no node and (debug build) no login item: nothing
+        // to do, never a launchctl line.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(node_run(dir.path()), NodeRun::NotRunning);
     }
 
     fn send_only() -> NodeReach {

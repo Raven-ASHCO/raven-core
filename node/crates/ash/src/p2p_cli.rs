@@ -36,9 +36,9 @@ use raven_core::relay_allow::{self, RelayAllowList, FRIEND_RELAY_DIR, RELAY_ALLO
 use raven_core::sanitize::sanitize_terminal_line;
 
 use super::{
-    c, ipc_client, kv, load_contacts, no_contact_message, read_line_opt, resolve_contact_arg,
-    service_restart_hint, stdin_is_tty, try_load_identity, Contact, C_DIM, C_GREEN, C_PURPLE,
-    C_RESET,
+    apply_at_start_line, c, ipc_client, kv, load_contacts, no_contact_message, node_run,
+    read_line_opt, resolve_contact_arg, stdin_is_tty, try_load_identity, Contact, C_DIM, C_GREEN,
+    C_PURPLE, C_RESET,
 };
 
 /// The p2p settings of `raven node p2p on`.
@@ -390,8 +390,8 @@ pub(super) fn cmd_node_p2p_asking(
             path.display()
         );
         println!(
-            "{C_DIM}a running raven-node stops its libp2p host when it restarts: {}{C_RESET}",
-            service_restart_hint()
+            "{C_DIM}{}{C_RESET}",
+            apply_at_start_line(node_run(data_dir), "raven-node stops its libp2p host")
         );
         return Ok(());
     };
@@ -442,8 +442,8 @@ pub(super) fn cmd_node_p2p_asking(
         );
     }
     println!(
-        "{C_DIM}raven-node starts its libp2p host when it (re)starts: {}{C_RESET}",
-        service_restart_hint()
+        "{C_DIM}{}{C_RESET}",
+        apply_at_start_line(node_run(data_dir), "raven-node starts its libp2p host")
     );
     if let Some(port) = port {
         println!(
@@ -498,8 +498,8 @@ pub(super) fn cmd_node_upnp(data_dir: &Path, on: bool) -> Result<(), String> {
         data_dir.join("node_policy.json").display()
     );
     println!(
-        "{C_DIM}raven-node applies it when it (re)starts: {}{C_RESET}",
-        service_restart_hint()
+        "{C_DIM}{}{C_RESET}",
+        apply_at_start_line(node_run(data_dir), "raven-node applies it")
     );
     if on {
         println!(
@@ -528,8 +528,8 @@ pub(super) fn node_ipv6_pinhole_with(
             data_dir.join("node_policy.json").display()
         ),
         format!(
-            "{C_DIM}raven-node applies it when it (re)starts: {}{C_RESET}",
-            service_restart_hint()
+            "{C_DIM}{}{C_RESET}",
+            apply_at_start_line(node_run(data_dir), "raven-node applies it")
         ),
     ];
     if on {
@@ -902,10 +902,7 @@ pub(super) fn node_proxy_set(
             "ok proxy={setting} saved in {}",
             data_dir.join(POLICY_FILE).display()
         ),
-        format!(
-            "raven-node applies it when it (re)starts: {}",
-            service_restart_hint()
-        ),
+        apply_at_start_line(node_run(data_dir), "raven-node applies it"),
     ];
     if let Some(source) = service_p2p(daemon)
         .map(|i| sanitize_terminal_line(&i.proxy_source))
@@ -3615,19 +3612,19 @@ pub(super) fn cmd_relay_use_with(
     println!("{C_DIM}{}{C_RESET}", relay_use_saved(&vias));
     if super::card_routes_live() {
         println!(
-            "next: 1) restart raven-node: {}\n      2) give the relay's operator your card \
+            "next: 1) {}\n      2) give the relay's operator your card \
              (raven whoami --card): they allow it (raven-relay allow --card …) and compare your \
              fingerprint\n      3) send the same card to your contacts, so they reach you \
              through this relay",
-            service_restart_hint()
+            apply_at_start_line(node_run(data_dir), "raven-node uses the relay")
         );
     } else {
         println!(
-            "next: 1) restart raven-node: {}\n      2) give the relay's operator your network \
+            "next: 1) {}\n      2) give the relay's operator your network \
              ID (raven whoami --peer-id): they allow it (raven-relay allow <PeerId>)\n      3) \
              your verified contacts learn this relay inside your encrypted links once you are \
              connected",
-            service_restart_hint()
+            apply_at_start_line(node_run(data_dir), "raven-node uses the relay")
         );
     }
     Ok(())
@@ -8685,7 +8682,11 @@ mod tests {
             lines[0].starts_with("ok proxy=http://proxy.example:3128 saved in "),
             "{lines:?}"
         );
-        assert!(lines[1].starts_with("raven-node applies it when it (re)starts: "));
+        // No raven-node runs for this profile: nothing to do (field test E3).
+        assert_eq!(
+            lines[1],
+            "raven-node isn't running: it uses this when it starts (nothing to do now)."
+        );
         assert_eq!(saved(dir.path()), "http://proxy.example:3128");
         assert_eq!(
             lines

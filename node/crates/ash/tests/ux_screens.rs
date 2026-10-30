@@ -1755,6 +1755,34 @@ fn an_empty_inbox_says_why_and_names_the_profile_and_touches_nothing() {
 
 // ── contacts ────────────────────────────────────────────────────────────────
 
+/// Field test E3: after `raven node internet off` and `raven node p2p off`
+/// the advice named the launchd agent though none was installed and no
+/// raven-node ran. With none running there is nothing to do, and it says
+/// so; no login item command.
+#[test]
+fn node_settings_say_nothing_to_do_while_no_node_runs() {
+    let dir = short_dir();
+    plant_identity(dir.path());
+    for args in [
+        &["node", "internet", "off"][..],
+        &["node", "p2p", "off"][..],
+        &["node", "upnp", "off"][..],
+    ] {
+        let o = ash_out(dir.path(), args, "");
+        assert_eq!(code(&o), 0, "{args:?}: {}", text(&o.stderr));
+        let out = text(&o.stdout);
+        assert!(
+            out.contains(
+                "raven-node isn't running: it uses this when it starts (nothing to do now)."
+            ),
+            "{args:?}: {out}"
+        );
+        for never in ["launchctl", "systemctl", "ScheduledTask", "installed agent"] {
+            assert!(!out.contains(never), "{never}: {out}");
+        }
+    }
+}
+
 /// Field test E3: `raven contact forget-address` without a terminal says in
 /// plain words that nothing was forgotten and how a script does it, and
 /// exits 2 (1 is a failure); with --yes it forgets every saved route.
