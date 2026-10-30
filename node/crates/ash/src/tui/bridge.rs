@@ -363,6 +363,14 @@ pub(super) struct ContactView {
     pub(super) internet_dial: String,
     /// The friend's p2p PeerId, or empty.
     pub(super) p2p: String,
+    /// Raven can reach a verified friend over Tor: its onion address, signed
+    /// by its own key (field test E3 round 2: the list marked such a friend
+    /// "No address to reach them").
+    pub(super) tor: bool,
+    /// The friend's route hints hold a way to reach it (cli.rs's
+    /// `ways_to_reach`: after `forget-address` they come back before any
+    /// address is saved again).
+    pub(super) learned: bool,
 }
 
 impl ContactView {
@@ -378,6 +386,8 @@ impl ContactView {
             lan_dial: c.lan_dial.clone(),
             internet_dial: c.internet_dial.clone(),
             p2p: c.p2p.clone(),
+            tor: c.pinned && super::super::onion_route(c).is_some(),
+            learned: false,
         }
     }
 }
@@ -389,10 +399,23 @@ impl ContactView {
 pub(super) fn contact_views(data_dir: &Path) -> Result<Vec<ContactView>, String> {
     let contacts = load_contacts(data_dir)?;
     let blocks = BlockList::load_checked(data_dir).map_err(|e| format!("block list: {e}"))?;
+    let now = raven_core::clock::now_ms();
     Ok(contacts
         .iter()
-        .map(|c| ContactView::of(c, &blocks))
+        .map(|c| ContactView {
+            learned: learned_ways(data_dir, c, now),
+            ..ContactView::of(c, &blocks)
+        })
         .collect())
+}
+
+/// Whether `c`'s route hints hold a way to reach it (one read of the
+/// learned routes).
+fn learned_ways(data_dir: &Path, c: &Contact, now: u64) -> bool {
+    super::super::parse_pub_hex(&c.pub_hex).is_ok_and(|key| {
+        raven_core::route_hints::route_hints_live()
+            && !raven_core::learned_routes::holds_no_routes(data_dir, &key, now)
+    })
 }
 
 /// contacts.json in `data_dir`: the poller watches its size and time.
@@ -3383,6 +3406,38 @@ mod tests {
         // Someone not saved: refused.
         let dave = me_view(&Identity::from_seed(&[0xD0; 32]));
         assert!(forget_address(dd, &dave.pub_hex).is_err());
+    }
+
+    /// Field test E3 round 2 (mac-b #9): after forget-address the list
+    /// marked a friend with a Tor address "No address to reach them" until a
+    /// send saved a LAN address. A verified friend's signed onion address is
+    /// a way to reach it; an unverified one's, or one signed by someone
+    /// else, is not.
+    #[test]
+    fn a_verified_friends_tor_address_is_a_way_to_reach_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path();
+        let bea = Identity::from_seed(&[0xB1; 32]);
+        let hs_id = Identity::from_seed(&[0xB2; 32]).public_key_bytes();
+        let signed = |by: &Identity| {
+            raven_core::onion::OnionBinding::sign(by, hs_id, raven_core::onion::now_s()).to_text()
+        };
+        let write = |pinned: bool, onion: String| {
+            let row = serde_json::json!([{
+                "petname": "Bea", "public_tag": "", "alias": "", "address": bea.address(),
+                "pub_hex": hex::encode(bea.public_key_bytes()), "pinned": pinned,
+                "lan_dial": "", "onion": onion,
+            }]);
+            std::fs::write(dd.join("contacts.json"), row.to_string()).unwrap();
+            contact_views(dd).expect("the book")[0].tor
+        };
+        if raven_core::onion_live_enabled() {
+            assert!(write(true, signed(&bea)));
+        }
+        assert!(!write(false, signed(&bea)), "not verified");
+        let other = Identity::from_seed(&[0xB3; 32]);
+        assert!(!write(true, signed(&other)), "signed by someone else");
+        assert!(!write(true, String::new()), "none");
     }
 
     #[test]

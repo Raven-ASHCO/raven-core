@@ -2321,6 +2321,8 @@ mod tests {
             lan_dial: String::new(),
             internet_dial: String::new(),
             p2p: String::new(),
+            tor: false,
+            learned: false,
         }
     }
 

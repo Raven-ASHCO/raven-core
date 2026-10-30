@@ -4,8 +4,8 @@
 //! Raven has no online indicator, and nothing here asks the network: every
 //! mark comes from the friend's saved addresses and the chat history.
 //!
-//! - No address: no saved address of any kind, so Raven doesn't know where
-//!   to reach them.
+//! - No address: no saved address of any kind, no Tor address and nothing
+//!   their route hints told, so Raven doesn't know where to reach them.
 //! - Waiting: some of your messages to them are still queued.
 //! - In touch: since Raven was opened, a message from them arrived or one of
 //!   yours was delivered, in the last 15 minutes. Rows that were already
@@ -72,11 +72,17 @@ fn with_age(words: &str, now_ms: u64, then_ms: u64) -> String {
     }
 }
 
-/// Whether Raven has any saved address for `friend` (LAN, Internet or p2p).
+/// Whether Raven has a way to reach `friend`: a saved address (LAN,
+/// Internet or p2p), a Tor address (a verified friend's signed onion
+/// address) or what its route hints told (field test E3 round 2: a friend
+/// with a Tor address was marked "No address to reach them" until a send
+/// saved a LAN address).
 pub(super) fn has_address(friend: &ContactView) -> bool {
-    [&friend.lan_dial, &friend.internet_dial, &friend.p2p]
-        .iter()
-        .any(|route| !route.trim().is_empty())
+    friend.tor
+        || friend.learned
+        || [&friend.lan_dial, &friend.internet_dial, &friend.p2p]
+            .iter()
+            .any(|route| !route.trim().is_empty())
 }
 
 /// Where `friend` stands, from their saved addresses and `rows` (their
@@ -258,6 +264,16 @@ mod tests {
             },
             ContactView {
                 p2p: "12D3KooWExample".into(),
+                ..testkit::friend(1)
+            },
+            // Field test E3 round 2: a Tor address, or what its route hints
+            // told, is a way to reach them too.
+            ContactView {
+                tor: true,
+                ..testkit::friend(1)
+            },
+            ContactView {
+                learned: true,
                 ..testkit::friend(1)
             },
             with_address(),

@@ -1989,10 +1989,20 @@ pub fn run_pair_init_and_send_routes(
         // PairInit itself ("pair init refused: peer is not a local contact"), it
         // says nothing on the wire, so the dial ends in a silent close;
         // `not_sent_text` names the likely cause (and nothing was queued).
+        // Field test E3 round 2 (a message LOST): Tor answered the check,
+        // then this PairInit over Tor timed out, and the message was NOT
+        // SENT. One that can wait is parked instead ([`pair_init_lost`]).
         let replies =
-            ipc_carrier_dial_patient(data_dir, carrier, peer, peer_pub_hex, &[init_frame])
-                .map_err(|e| not_sent_text(ctx, &e, true))?;
-        let response = first_pair_response(&replies).ok_or_else(|| {
+            match ipc_carrier_dial_patient(data_dir, carrier, peer, peer_pub_hex, &[init_frame]) {
+                Ok(replies) => replies,
+                Err(e) => {
+                    return pair_init_lost(
+                        data_dir, id, &peer_pub, text, carrier, &e, ctx, &handoff,
+                    )
+                    .map(|()| route.clone())
+                }
+            };
+        let Some(response) = first_pair_response(&replies) else {
             let kinds: Vec<String> = replies
                 .iter()
                 .map(|f| {
@@ -2003,17 +2013,15 @@ pub fn run_pair_init_and_send_routes(
                     }
                 })
                 .collect();
-            not_sent_text(
-                ctx,
-                &format!(
-                    "WAITING_FOR_PAIR_RESPONSE: no PairResponse on {} ({} frames: {})",
-                    carrier.label(),
-                    replies.len(),
-                    kinds.join(",")
-                ),
-                true,
-            )
-        })?;
+            let e = format!(
+                "WAITING_FOR_PAIR_RESPONSE: no PairResponse on {} ({} frames: {})",
+                carrier.label(),
+                replies.len(),
+                kinds.join(",")
+            );
+            return pair_init_lost(data_dir, id, &peer_pub, text, carrier, &e, ctx, &handoff)
+                .map(|()| route.clone());
+        };
         let mut store = IndexedSessionStore::open(data_dir).map_err(|e| e.redacted_display())?;
         let now = now_ms();
         store
@@ -2900,6 +2908,42 @@ fn say_parked_settled(
     }
     for mid in &report.delivered {
         ctx.say_earlier_delivered(&preview(mid));
+    }
+}
+
+/// A new secure connection's PairInit got no answer after the contact's
+/// check answered (`e`: the dial's error, or no PairResponse among its
+/// replies). Field test E3 round 2: Tor answered the check, the PairInit
+/// over Tor then timed out, and the message was "NOT SENT ... It was not
+/// kept" though the two had talked for hours (their connection had ended).
+/// The friend's refusal is its answer: NOT SENT as before. Otherwise a
+/// message to a contact that can wait (the long message horizon) is parked
+/// as one whose check failed ([`park_new_message`]: raven-node's outbox
+/// sets up the connection and sends it when it can), and over Tor its words
+/// say that the friend answered (`ONION_CHECKED_THEN_LOST`), never that Tor
+/// did not reach it.
+#[allow(clippy::too_many_arguments)]
+fn pair_init_lost(
+    data_dir: &Path,
+    id: &Identity,
+    peer_pub: &[u8; 32],
+    text: &str,
+    carrier: DialCarrier,
+    e: &str,
+    ctx: &SendCtx,
+    handoff: &OutboxHandoff<'_>,
+) -> Result<(), String> {
+    if is_peer_refusal(e) {
+        return Err(not_sent_text(ctx, e, true));
+    }
+    let raw = if carrier == DialCarrier::Onion {
+        format!("{ONION_CHECKED_THEN_LOST}: {e}")
+    } else {
+        e.to_string()
+    };
+    match park_new_message(data_dir, id, peer_pub, text, carrier, &raw, ctx, handoff) {
+        Some(parked) => parked,
+        None => Err(not_sent_text(ctx, e, true)),
     }
 }
 

@@ -8885,6 +8885,8 @@ impl App {
                 .as_ref()
                 .map(|p2p| p2p.peer_id.clone())
                 .unwrap_or_default(),
+            tor: *verified && friend.onion.is_some(),
+            learned: false,
         };
         let added = AddedState {
             pub_hex: view.pub_hex.clone(),

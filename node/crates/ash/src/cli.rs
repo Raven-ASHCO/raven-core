@@ -15595,7 +15595,10 @@ fn cmd_send_cli(
             let used = match run_send(data_dir, &id, &target, &text, carrier) {
                 Ok(used) => used,
                 Err(error) => {
-                    eprintln!("{}", pair_init_lab::send_failure_line(&error));
+                    eprintln!(
+                        "{}",
+                        ext::shown_outcome(&pair_init_lab::send_failure_line(&error))
+                    );
                     if error.starts_with(ext::QUEUED_PREFIX) {
                         // Phase 3 item 3: the mailbox question, once.
                         custody_cli::mailbox_after_queued(

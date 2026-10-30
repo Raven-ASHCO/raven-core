@@ -2170,11 +2170,16 @@ enum FailedCarrier {
     Lan,
     Internet,
     P2p,
+    /// Tor (field test E3 round 2: a Tor failure read as a LAN one, with
+    /// "same network" and `set-dial IP:PORT` advice).
+    Tor,
 }
 
 fn failed_carrier(raw: &str) -> FailedCarrier {
     let l = raw.to_ascii_lowercase();
-    if l.contains("internet_dial") || l.contains("internet connect") {
+    if l.contains("onion_dial") || l.contains("onion_") {
+        FailedCarrier::Tor
+    } else if l.contains("internet_dial") || l.contains("internet connect") {
         FailedCarrier::Internet
     } else if l.contains("p2p_dial") || l.contains("p2p_unreachable") {
         FailedCarrier::P2p
@@ -2189,6 +2194,8 @@ fn fix_address_cmd(carrier: FailedCarrier, sel: &str) -> String {
         FailedCarrier::Lan => format!("ash contact set-dial {sel} --lan-dial IP:PORT"),
         FailedCarrier::Internet => format!("ash contact set-addr {sel} --internet HOST:PORT"),
         FailedCarrier::P2p => format!("ash contact set-addr {sel} --p2p PEER_ID --via MULTIADDR"),
+        // A Tor address comes signed in their card; nothing to type.
+        FailedCarrier::Tor => "ask them for their card again".to_string(),
     }
 }
 
@@ -2263,6 +2270,10 @@ fn next_step(cause: Cause, ctx: &SendCtx, first_contact: bool, raw: &str) -> Str
                     step
                 }
             }
+            FailedCarrier::Tor => format!(
+                "{who}'s computer may be off, asleep or without internet; send it again when \
+                 {who} is online."
+            ),
         },
         Cause::NameNotFound => name_not_found_step(ctx, &fix, !first_contact),
         Cause::ClosedEarly => {
@@ -3738,11 +3749,22 @@ fn when_it_goes(raw: &str, retry: &RetryNote, who: &str) -> String {
 /// terminal app read them.
 pub(crate) fn parked_text(ctx: &SendCtx, raw: &str, preview: &str, retry: &RetryNote) -> String {
     let who = ctx.who();
+    // Field test E3 round 2: a friend reached over Tor was told "when you
+    // are both on the same network", and one whose new connection was lost
+    // right after Tor answered was told it could not be reached.
+    let reason = if raw.contains(super::pair_init_lab::ONION_CHECKED_THEN_LOST) {
+        format!("{who} answered over Tor, but the new secure connection was not finished this time")
+    } else {
+        format!("{who} isn't reachable now")
+    };
+    let when = when_it_goes(raw, retry, &who);
+    let when = when
+        .get(..1)
+        .map_or_else(String::new, |first| first.to_uppercase() + &when[1..]);
     join_sentences(&[
         format!(
-            "{QUEUED_PREFIX}: your message{} to {who} is queued: {who} isn't reachable now. When \
-             you are both on the same network, RAVEN first sets up a new secure connection, then \
-             sends it. It can wait until {}.",
+            "{QUEUED_PREFIX}: your message{} to {who} is queued: {reason}. {when}, RAVEN first \
+             sets up a new secure connection, then sends it. It can wait until {}.",
             spaced(preview),
             retry.until()
         ),
@@ -4065,6 +4087,27 @@ pub(crate) const SAME_TIME_HINT: &str =
 /// An outcome's `(technical: ...)` note: the raw text with every address
 /// left out (a queued send's note never names the friend's address). The
 /// cause was read from the raw text before.
+/// A send's outcome line as `raven send` prints it: a message that waits
+/// (it starts with [`QUEUED_PREFIX`]) is safe, so at a terminal its
+/// `(technical: ...)` (raven-node's codes) is shown with --verbose only
+/// (field test E3 round 2: "(technical: ipc ONION_UNREACHABLE: ...)" in a
+/// person's words). A script (stderr not a terminal) keeps it, as every
+/// harness reads it, and so does a refusal: it says what to report.
+pub(crate) fn shown_outcome(line: &str) -> String {
+    use std::io::IsTerminal;
+    shown_outcome_with(line, verbose() || !std::io::stderr().is_terminal())
+}
+
+fn shown_outcome_with(line: &str, verbose: bool) -> String {
+    if verbose || !line.starts_with(QUEUED_PREFIX) {
+        return line.to_string();
+    }
+    match line.rfind(" (technical: ") {
+        Some(i) => line[..i].to_string(),
+        None => line.to_string(),
+    }
+}
+
 fn technical_note(raw: &str) -> String {
     format!("(technical: {})", raven_core::ipc::without_addresses(raw))
 }
@@ -12117,6 +12160,42 @@ mod send_outcome_tests {
     /// P5.8, the long message horizon: a message parked for a contact
     /// without a session keeps the prefix and the retry words the chat and
     /// the terminal app parse, and says what happens next and until when.
+    /// Field test E3 round 2 (mac-b to win-c): a send over Tor that ended
+    /// NOT SENT said "Check that you are on the same network as win-c. If
+    /// their IP changed: ash contact set-dial ... IP:PORT". A Tor failure
+    /// gives no LAN advice.
+    #[test]
+    fn a_tor_failure_gives_no_lan_advice() {
+        let raw = "ipc ONION_UNREACHABLE: ONION_UNREACHABLE: the contact's onion service did not \
+                   answer over Tor (tor timeout)";
+        let text = not_sent_text(&bob(), raw, true);
+        let words = text.split("(technical:").next().unwrap();
+        for advice in ["same network", "set-dial", "IP:PORT", "--lan-dial"] {
+            assert!(!words.contains(advice), "{advice}: {text}");
+        }
+        assert_eq!(failed_carrier(raw), FailedCarrier::Tor);
+        assert_eq!(
+            failed_carrier("lan connect: refused"),
+            FailedCarrier::Lan,
+            "a LAN failure is still one"
+        );
+    }
+
+    /// Field test E3 round 2: a waiting message's line showed raven-node's
+    /// codes; `raven send` shows them with --verbose only, and a refusal
+    /// keeps them.
+    #[test]
+    fn a_waiting_message_shows_its_codes_with_verbose_only() {
+        let queued = format!("{QUEUED_PREFIX}: your message to Bob is queued. (technical: ipc X)");
+        assert_eq!(
+            shown_outcome_with(&queued, false),
+            format!("{QUEUED_PREFIX}: your message to Bob is queued.")
+        );
+        assert_eq!(shown_outcome_with(&queued, true), queued);
+        let refused = "NOT SENT: Bob refused. (technical: LINK_NOT_ACCEPTED)";
+        assert_eq!(shown_outcome_with(refused, false), refused);
+    }
+
     #[test]
     fn parked_text_keeps_the_prefix_and_names_the_deadline() {
         let ctx = bob();

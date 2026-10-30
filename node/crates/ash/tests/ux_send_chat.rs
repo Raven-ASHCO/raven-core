@@ -847,6 +847,10 @@ struct P2pFake {
     error: Arc<Mutex<Option<String>>>,
     delay: Arc<Mutex<Option<Duration>>>,
     status: Arc<Mutex<(Option<P2pStatusInfo>, Vec<ContactWhy>)>>,
+    /// The Tor side: what the next `OnionDial`s get, in order (`None`: Bob
+    /// answers; `Some(text)`: raven-node's ONION_UNREACHABLE with that text).
+    /// Empty: Bob answers every one.
+    onion: Arc<Mutex<std::collections::VecDeque<Option<String>>>>,
 }
 
 impl Net {
@@ -1014,6 +1018,12 @@ impl Net {
         });
     }
 
+    /// The next `OnionDial`s, in order: `None` Bob answers, `Some(text)`
+    /// raven-node's ONION_UNREACHABLE with that text.
+    fn set_onion_plan(&self, plan: &[Option<&str>]) {
+        *self.p2p.onion.lock().unwrap() = plan.iter().map(|p| p.map(str::to_string)).collect();
+    }
+
     /// The dials asked for since the last call: (op, address).
     fn take_dials(&self) -> Vec<(String, String)> {
         std::mem::take(&mut *self.dials.lock().unwrap())
@@ -1087,6 +1097,9 @@ fn serve_one(
                 frames_b64,
                 path: Some("relayed".into()),
             },
+            ("onion", IpcResponse::LanDialResult { v, frames_b64 }) => {
+                IpcResponse::OnionDialResult { v, frames_b64 }
+            }
             (_, other) => other,
         }
     };
@@ -1152,6 +1165,21 @@ fn serve_one(
                     return;
                 }
                 reply
+            }
+        },
+        Ok(IpcRequest::OnionDial {
+            onion_dial,
+            frames_b64,
+            ..
+        }) => match p2p.onion.lock().unwrap().pop_front().flatten() {
+            None => serve_dial("onion", onion_dial, frames_b64),
+            Some(message) => {
+                dials.lock().unwrap().push(("onion".into(), onion_dial));
+                IpcResponse::Error {
+                    v: IPC_VERSION,
+                    code: "ONION_UNREACHABLE".into(),
+                    message,
+                }
             }
         },
         Ok(IpcRequest::OutboxKick { .. }) if outbox.load(Ordering::SeqCst) => {
@@ -1612,6 +1640,149 @@ fn an_unreachable_contact_without_a_session_parks_the_message_with_the_horizon()
         "{out}"
     );
     assert_eq!(net.bob_inbox(), vec!["back again", "while you were away"]);
+}
+
+/// raven-node's words for a Tor connect that did not get through.
+const TOR_TIMEOUT: &str = "ONION_UNREACHABLE: the contact's onion service did not answer over \
+     Tor (tor timeout)";
+
+/// Bob verified and reached only over Tor (a signed onion address, no LAN
+/// address).
+fn make_bob_tor_only(net: &Net) {
+    let bob = Identity::from_seed(&[0x42; 32]);
+    let hs_id = Identity::from_seed(&[0x44; 32]).public_key_bytes();
+    let binding =
+        raven_core::onion::OnionBinding::sign(&bob, hs_id, raven_core::onion::now_s()).to_text();
+    edit_bob_row(net, |row| {
+        row["pinned"] = true.into();
+        row["lan_dial"] = "".into();
+        row["onion"] = binding.clone().into();
+    });
+}
+
+/// Field test E3 round 2 (mac-b to win-c, a message LOST): the two had
+/// talked for hours, their secure connection had ended (24 h), so the send
+/// set up a new one. Tor answered its check ("answered first (10.4 s)"),
+/// then the new connection's first step over Tor got no answer, and the
+/// message was "NOT SENT ... It was not kept: a first message needs you
+/// and win-c both online", with LAN advice ("same network", "set-dial")
+/// and raven-node's code. A message to a verified friend is never dropped
+/// for want of a connection: it waits (the long message horizon), the
+/// words do not contradict Tor's answer and give no LAN or developer
+/// advice, and it goes when the friend can be reached again.
+#[test]
+fn a_message_after_the_session_ended_is_kept_when_tor_drops_the_new_connection() {
+    if !cfg!(debug_assertions) {
+        return; // the lab clock and the lab switches are debug-only
+    }
+    let net = Net::new(true);
+    make_bob_tor_only(&net);
+    let clock_dir = tempfile::tempdir().unwrap();
+    let clock = clock_dir.path().join("offset-ms");
+    std::fs::write(&clock, "0").unwrap();
+    let clock_text = clock.to_string_lossy().into_owned();
+    let env = [
+        ("RAVEN_LAB_TEST_A", "1"),
+        ("RAVEN_LAB_HORIZON", "1"),
+        ("RAVEN_LAB_LETTER", "0"),
+        ("RAVEN_LAB_ROUTE_HINTS", "0"),
+        ("RAVEN_LAB_TOR", "1"),
+        ("RAVEN_LAB_CLOCK_FILE", clock_text.as_str()),
+    ];
+    // Over Tor, a new secure connection, delivered.
+    let o = net.send_env("before the connection ended", &env);
+    assert_eq!(code(&o), 0, "{}\n{}", text(&o.stdout), text(&o.stderr));
+    assert_eq!(net.bob_inbox(), vec!["before the connection ended"]);
+    // A day and an hour later on Alice's clock: the connection ended.
+    std::fs::write(&clock, (25 * 3_600_000u64).to_string()).unwrap();
+    // Tor answers the check; the new connection's first step gets no answer.
+    net.set_onion_plan(&[None, Some(TOR_TIMEOUT)]);
+    let o = net.send_env("after the connection ended", &env);
+    let (out, err) = (text(&o.stdout), text(&o.stderr));
+    assert_eq!(code(&o), 1, "{out}\n{err}");
+    assert!(!err.contains("NOT SENT"), "{err}");
+    assert!(!err.contains("not kept"), "{err}");
+    assert!(err.contains("queued"), "{err}");
+    // The person's words (a script, as here, also gets raven-node's codes
+    // at the end; a terminal shows them with --verbose only).
+    let words = err.split("(technical:").next().unwrap();
+    for advice in [
+        "same network",
+        "set-dial",
+        "IP:PORT",
+        "ONION_UNREACHABLE",
+        "ipc ",
+    ] {
+        assert!(!words.contains(advice), "{advice}: {err}");
+    }
+    // It never says Tor did not answer after Tor answered.
+    assert!(!words.contains("couldn't be reached over Tor"), "{err}");
+    let mut c = with_horizon(ash(net.a.path()));
+    c.args(["outbox", "list"])
+        .env("RAVEN_LAB_CLOCK_FILE", &clock);
+    let o = run(c, b"");
+    let listed = text(&o.stdout);
+    assert!(listed.contains("(1 waiting)"), "{listed}");
+    // Its words: Bob answered over Tor; it goes as soon as Bob can be
+    // reached.
+    assert!(
+        err.starts_with(
+            "not delivered yet: your message \"after the connection ended\" to Bob is queued: \
+             Bob answered over Tor, but the new secure connection was not finished this time. \
+             As soon as Bob can be reached, RAVEN first sets up a new secure connection, then \
+             sends it."
+        ),
+        "{err}"
+    );
+    // Bob can be reached again: the next send that reaches him sends the
+    // waiting message first. (Bob's side runs on this test's real clock:
+    // Alice's goes back to it, so the two agree on what is valid.)
+    std::fs::write(&clock, "0").unwrap();
+    let o = net.send_env("back again", &env);
+    let (out, err) = (text(&o.stdout), text(&o.stderr));
+    assert_eq!(code(&o), 0, "{out}\n{err}");
+    assert_eq!(
+        net.bob_inbox(),
+        vec![
+            "after the connection ended",
+            "back again",
+            "before the connection ended"
+        ]
+    );
+}
+
+/// Field test E3 round 2 (mac-b #11, and R2-6): a send to a friend
+/// reached over Tor, with no secure connection, got Tor's "unreachable"
+/// after 5.3 s while Tor worked, and queued with words about "the same
+/// network". Tor's quick miss is checked once more at once, within the
+/// send's Tor wait: the second check answers, the new connection is set up
+/// over Tor and the message is delivered, nothing queued.
+#[test]
+fn a_quick_tor_miss_on_a_new_connection_is_checked_again_and_delivered() {
+    let net = Net::new(true);
+    make_bob_tor_only(&net);
+    let env = [
+        ("RAVEN_LAB_HORIZON", "1"),
+        ("RAVEN_LAB_LETTER", "0"),
+        ("RAVEN_LAB_ROUTE_HINTS", "0"),
+        ("RAVEN_LAB_TOR", "1"),
+    ];
+    let miss = "ONION_UNREACHABLE: the contact's onion service did not answer over Tor \
+                (rendezvous failed)";
+    net.set_onion_plan(&[Some(miss)]);
+    let o = net.send_env("over Tor at last", &env);
+    let (out, err) = (text(&o.stdout), text(&o.stderr));
+    assert_eq!(code(&o), 0, "{out}\n{err}");
+    assert!(!err.contains("same network"), "{err}");
+    assert_eq!(net.bob_inbox(), vec!["over Tor at last"]);
+    // The check twice, then the new connection and the message.
+    let tor: Vec<String> = net
+        .take_dials()
+        .into_iter()
+        .filter(|(op, _)| op == "onion")
+        .map(|(op, _)| op)
+        .collect();
+    assert!(tor.len() >= 3, "{tor:?}");
 }
 
 /// A saved computer name that resolves nowhere: `.invalid` never does, and
