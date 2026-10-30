@@ -314,12 +314,20 @@
 //!   item is unloaded, turned off and removed, and the temp root holds
 //!   nothing of A; B's node (the same process) and C still exchange both
 //!   ways. Unix only (`script`).
+//! - **C94 a LAN address told over Tor (field test E3, route hints spec
+//!   §16):** A and B, verified friends with route hints on, start out
+//!   reaching each other only over Tor (the loopback helper; their cards
+//!   carry `onion=` alone). Their route hints over Tor carry each one's LAN
+//!   address (LAN_ADDR), which the other keeps, marked as told, because it
+//!   is on one of its own networks: the next message each way goes LAN
+//!   direct (`carrier=lan_dial`).
 //! - **C99 route hints asked for over Tor (field test E3):** A and B, route
 //!   hints on, reach each other only over Tor (the loopback helper). A
 //!   forgets B's routes (`raven contact forget-address`); B told A lately,
 //!   so it is not due to tell again: A's next dial asks (caps bit 11, it
 //!   holds none of B's), B tells on that Tor link, and A holds B's routes
-//!   again within seconds.
+//!   again within seconds, its LAN address among them (§16): the next
+//!   message goes LAN direct again.
 //! - **C86 part 1 PAD1 link padding (Phase 6b P6.34; its debug switch
 //!   `RAVEN_LAB_LINK_PADDING=1` with `RAVEN_LAB_TEST_A=1`):** every route
 //!   goes through a proxy that keeps each connection's directions apart. Two
@@ -877,6 +885,9 @@ impl Profile {
             "RAVEN_LAB_CUSTODY_FORWARD_MS",
             "RAVEN_LAB_ROUTE_HINTS",
             "RAVEN_LAB_HINTS_NO_ANNOUNCE",
+            // Route hints §16: loopback LAN addresses told, only where a
+            // case sets it (C94, C99).
+            "RAVEN_LAB_LAN_ADDR_LOOPBACK",
             // Friend relays (Phase 2): off in every case unless it sets them.
             "RAVEN_LAB_FRIEND_RELAY",
             "RAVEN_LAB_FRIEND_RELAY_LISTEN",
@@ -15835,7 +15846,9 @@ fn c98_a_friend_added_from_an_onion_card_and_verified_later_is_reached_over_tor(
 /// bob --yes`): B told A lately, so B is not due to tell again, and before
 /// this case a friend at home stayed on Tor (no hint line in 10 minutes).
 /// A's next dial asks for B's route hints (caps bit 11, A holds none), B
-/// tells them on that Tor link, and A holds them again within seconds.
+/// tells them on that Tor link, and A holds them again within seconds, B's
+/// LAN address among them (route hints §16; its loopback listener, told
+/// under `RAVEN_LAB_LAN_ADDR_LOOPBACK=1`): A's next message goes LAN direct.
 #[test]
 #[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
 fn c99_routes_forgotten_are_asked_for_on_the_next_tor_link() {
@@ -15845,8 +15858,12 @@ fn c99_routes_forgotten_are_asked_for_on_the_next_tor_link() {
     let _net = shared_host_network();
     let root = tempfile::tempdir().unwrap();
     let registry = root.path().join("tor-registry");
-    let a = tor_profile(root.path(), "te", &registry).with_route_hints();
-    let b = tor_profile(root.path(), "tf", &registry).with_route_hints();
+    let a = tor_profile(root.path(), "te", &registry)
+        .with_route_hints()
+        .with_lab_env("RAVEN_LAB_LAN_ADDR_LOOPBACK", "1");
+    let b = tor_profile(root.path(), "tf", &registry)
+        .with_route_hints()
+        .with_lab_env("RAVEN_LAB_LAN_ADDR_LOOPBACK", "1");
     let a_svc = a.start_service();
     let b_svc = b.start_service();
     let (card_a, card_b) = (tor_card(&a, &a_svc), tor_card(&b, &b_svc));
@@ -15902,6 +15919,135 @@ fn c99_routes_forgotten_are_asked_for_on_the_next_tor_link() {
         "a did not learn b's routes again on the next Tor link:\n{}",
         logs()
     );
+    // B's LAN address came back with them (route hints spec §16): the LAN
+    // route is restored, and the next message goes LAN direct.
+    assert!(
+        wait_until(Duration::from_secs(30), || learned_lan_port(&a, &b)
+            .is_some()),
+        "a did not learn b's LAN address again:\n{}",
+        logs()
+    );
+    let text = "c99 lan again";
+    let sent = a.raven_with(
+        &["send", "--contact", "@bob"],
+        Some(&format!("{text}\n")),
+        &[("RAVEN_VERBOSE", "1")],
+    );
+    assert_delivered("c99 a to b after the hint", &sent);
+    assert!(
+        sent.stdout.contains("carrier=lan_dial"),
+        "not LAN direct:\n{}\n{}",
+        sent.all(),
+        logs()
+    );
+    assert_eq!(b.inbox().matches(text).count(), 1, "exactly once");
+}
+
+/// The LAN port of `other`'s LAN part in `p`'s learned routes, if any.
+fn learned_lan_port(p: &Profile, other: &Profile) -> Option<u64> {
+    learned_entry(p, other)?["lan"]["lan_port"].as_u64()
+}
+
+/// C94 (field test E3, owner decision 2026-10-30; route hints spec §16): A
+/// and B, verified friends with route hints on, start out reaching each
+/// other only over Tor (the loopback helper; their cards carry `onion=`
+/// and nothing else that reaches them). Their route hints over Tor carry
+/// each one's LAN address (LAN_ADDR: here its loopback listener, the
+/// one-machine lab's network, told under `RAVEN_LAB_LAN_ADDR_LOOPBACK=1`),
+/// which the other keeps, marked as told by
+/// the friend's own authenticated link, because it is on one of its own
+/// networks (the marking: learned_routes' unit tests). The next message
+/// each way goes LAN direct, not over Tor.
+#[test]
+#[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
+fn c94_friends_reached_only_over_tor_move_to_lan_direct_after_the_hint() {
+    if !lab_ready() {
+        return;
+    }
+    let _net = shared_host_network();
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("tor-registry");
+    let a = tor_profile(root.path(), "tg", &registry)
+        .with_route_hints()
+        .with_lab_env("RAVEN_LAB_LAN_ADDR_LOOPBACK", "1");
+    let b = tor_profile(root.path(), "th", &registry)
+        .with_route_hints()
+        .with_lab_env("RAVEN_LAB_LAN_ADDR_LOOPBACK", "1");
+    let a_svc = a.start_service();
+    let b_svc = b.start_service();
+    let (card_a, card_b) = (tor_card(&a, &a_svc), tor_card(&b, &b_svc));
+    a.add_card(&card_b, "bob", &b.fingerprint);
+    b.add_card(&card_a, "alice", &a.fingerprint);
+    let logs = || format!("A:\n{}\nB:\n{}", a_svc.log.text(), b_svc.log.text());
+    // Only Tor at first: no LAN route to either.
+    let text = "c94 a to b over tor";
+    let out = a.raven_with(
+        &["send", "--contact", "@bob"],
+        Some(&format!("{text}\n")),
+        &[("RAVEN_VERBOSE", "1")],
+    );
+    assert!(
+        !out.all().contains("carrier=lan_dial"),
+        "a LAN route before any hint:\n{}",
+        out.all()
+    );
+    assert!(
+        wait_inbox(&b, text, Duration::from_secs(90)),
+        "{text} never arrived:\nsend: {}\n{}",
+        out.all(),
+        logs()
+    );
+    // That Tor link carried each one's LAN address (a LAN link's own part
+    // may replace it soon after: an announce, a queued message), and each
+    // holds the other's: the address of its LAN listener.
+    for (p, other, svc) in [(&a, &b, &b_svc), (&b, &a, &a_svc)] {
+        let at = || {
+            learned_entry(p, other).map(|e| {
+                format!(
+                    "{}:{}",
+                    e["lan"]["lan_ip"].as_str().unwrap_or_default(),
+                    e["lan"]["lan_port"].as_u64().unwrap_or_default()
+                )
+            })
+        };
+        assert!(
+            wait_until(Duration::from_secs(30), || at().as_deref()
+                == Some(svc.lan_dial.as_str())),
+            "{} never learned {}'s LAN address: {:?}\n{}",
+            p.name,
+            other.name,
+            at(),
+            logs()
+        );
+    }
+    for svc in [&a_svc, &b_svc] {
+        assert!(
+            svc.log.text().lines().any(|l| l
+                .contains("raven-node hints: learned a contact's routes")
+                && l.contains("lan=yes")
+                && l.contains(", onion, ")),
+            "no LAN address learned over Tor:\n{}",
+            logs()
+        );
+    }
+    for (from, to, tag, text) in [
+        (&a, &b, "bob", "c94 a to b on the lan"),
+        (&b, &a, "alice", "c94 b to a on the lan"),
+    ] {
+        let sent = from.raven_with(
+            &["send", "--contact", &format!("@{tag}")],
+            Some(&format!("{text}\n")),
+            &[("RAVEN_VERBOSE", "1")],
+        );
+        assert_delivered(&format!("{} to {tag}", from.name), &sent);
+        assert!(
+            sent.stdout.contains("carrier=lan_dial"),
+            "{text}: not LAN direct:\n{}\n{}",
+            sent.all(),
+            logs()
+        );
+        assert_eq!(to.inbox().matches(text).count(), 1, "exactly once");
+    }
 }
 
 /// C96 (Tor onion carrier, lab; design §3.7): a Tor helper that exits the

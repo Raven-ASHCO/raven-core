@@ -658,6 +658,15 @@ impl LinkCtl {
             } else {
                 Vec::new()
             },
+            lan_addrs: if self.carrier == OutboxCarrier::Lan {
+                Vec::new()
+            } else {
+                own_lan_addrs(
+                    &crate::lan_direct::listener_addrs(),
+                    &raven_core::netifs::lan_addresses_for_friends(),
+                    route_hints::lab_lan_addr_loopback(),
+                )
+            },
             own: crate::p2p::own_routes(),
             lab_local: raven_core::p2p_local_candidates_enabled(),
             custody_hints: raven_core::custody_gate::custody_hints_live(),
@@ -862,8 +871,17 @@ fn apply_frame_as(
     if let Some(binding) = valid.onion.filter(|_| contact.pinned) {
         crate::onion::learn_binding(data_dir, &ctx.keys.peer, binding);
     }
+    // LAN_ADDR (spec §16): kept only when it is on one of this computer's
+    // own networks (never a LAN address learned this way that is not; the
+    // planner checks again before it dials one).
+    valid
+        .lan_addrs
+        .retain(|e| raven_core::netifs::on_our_networks(e.addr.ip()) == Some(true));
     // The network a LAN part belongs to (its port and same-LAN addresses).
-    let local_tag = if valid.local_direct.is_empty() && valid.lan_port.is_none() {
+    let local_tag = if valid.local_direct.is_empty()
+        && valid.lan_port.is_none()
+        && valid.lan_addrs.is_empty()
+    {
         None
     } else {
         raven_core::route_memory::egress_tag()
@@ -892,7 +910,7 @@ fn apply_frame_as(
                  offer={}, offers={})",
                 relay_count(valid.relays.iter()),
                 valid.direct.len() + valid.local_direct.len(),
-                yes_no(valid.lan_port.is_some()),
+                yes_no(valid.lan_port.is_some() || !valid.lan_addrs.is_empty()),
                 valid.custodians.len() + valid.custodian_tags.len(),
                 yes_no(valid.custody_offer.is_some()),
                 valid.offers.len()
@@ -982,6 +1000,9 @@ struct SnapCtx {
     /// The LAN listener's addresses, IPv4 first (`auto` binds IPv4 and
     /// IPv6; [`crate::lan_direct::listener_addrs`]).
     listeners: Vec<SocketAddr>,
+    /// LAN_ADDR (spec §16), on links other than the LAN: where the LAN
+    /// listener answers on this computer's networks ([`own_lan_addrs`]).
+    lan_addrs: Vec<route_hints::InetDirect>,
     /// The running p2p host's routes ([`crate::p2p::own_routes`]).
     own: Option<OwnP2p>,
     /// [`raven_core::p2p_local_candidates_enabled`]: loopback and private
@@ -1069,6 +1090,14 @@ fn snapshot_for(data_dir: &Path, ctx: &SnapCtx) -> Option<RouteHints> {
                     }
                 }
             }
+        }
+        // LAN_ADDR (spec §16, owner decision 2026-10-30): where our LAN
+        // listener answers, told to a verified contact on any other link
+        // this node shows its IP on (a LAN link carries LAN_PORT, whose IP
+        // is the link's own). The contact keeps it only when it is on one
+        // of its own networks.
+        if ctx.carrier != OutboxCarrier::Lan && !(policy_hide || contact.hide_ip) {
+            hints.lan_addrs = ctx.lan_addrs.clone();
         }
         if let Some(custody) = &custody {
             hints.custody_offer = custody.offer;
@@ -1469,6 +1498,48 @@ fn direct_ip(text: &str, peer_id: &str) -> Option<IpAddr> {
         (Some("ip4" | "ip6"), Some(host)) => host.parse().ok(),
         _ => None,
     }
+}
+
+/// LAN_ADDR entries (spec §16, pure): where the LAN listener `listeners`
+/// answers on this computer's networks, IPv4 first, at most
+/// [`route_hints::MAX_LAN_ADDR`]. A listener bound to one address is that
+/// address; a wildcard one each of `ifs` (the addresses a friend on the
+/// same network may dial, [`raven_core::netifs::lan_addresses_for_friends`])
+/// of its family. Only local-network addresses, never IPv6 link-local (no
+/// zone travels), and loopback only in the one-machine lab (`lab`:
+/// [`route_hints::lab_lan_addr_loopback`]).
+fn own_lan_addrs(
+    listeners: &[SocketAddr],
+    ifs: &[raven_core::netifs::LocalAddr],
+    lab: bool,
+) -> Vec<route_hints::InetDirect> {
+    let mut found: Vec<SocketAddr> = Vec::new();
+    for listen in listeners.iter().filter(|l| l.port() != 0) {
+        let ips: Vec<IpAddr> = if listen.ip().is_unspecified() {
+            ifs.iter()
+                .map(|a| a.ip.to_canonical())
+                .filter(|ip| raven_core::netifs::listener_takes(listen.ip(), *ip))
+                .collect()
+        } else {
+            vec![listen.ip().to_canonical()]
+        };
+        for ip in ips {
+            let addr = SocketAddr::new(ip, listen.port());
+            let entry = route_hints::InetDirect { flags: 0, addr };
+            let usable = route_hints::lan_addr_from_bytes(&entry.to_bytes()).is_some()
+                && (!ip.is_loopback() || lab);
+            if usable && !found.contains(&addr) {
+                found.push(addr);
+            }
+        }
+    }
+    // Stable: equal keys keep the listeners' and the system's order.
+    found.sort_by_key(SocketAddr::is_ipv6);
+    found
+        .into_iter()
+        .take(route_hints::MAX_LAN_ADDR)
+        .map(|addr| route_hints::InetDirect { flags: 0, addr })
+        .collect()
 }
 
 /// What a LAN link's same-LAN DIRECT entries are chosen by
@@ -2034,6 +2105,7 @@ pub(crate) async fn lan_asks(data_dir: &Path, keys: LinkKeys, announce: bool) ->
         local_ifs: Vec::new(),
         local_addr: None,
         listeners: Vec::new(),
+        lan_addrs: Vec::new(),
         own: crate::p2p::own_routes(),
         lab_local: raven_core::p2p_local_candidates_enabled(),
         custody_hints: raven_core::custody_gate::custody_hints_live(),
@@ -2119,7 +2191,7 @@ fn told_line(hints: &RouteHints) -> String {
         "told a contact our routes (relays={}, direct={}, lan={}, offers={}, onion={})",
         relay_count(relays.iter()),
         hints.direct.len(),
-        yes_no(hints.lan_port.is_some()),
+        yes_no(hints.lan_port.is_some() || !hints.lan_addrs.is_empty()),
         hints.offers.len(),
         yes_no(hints.onion.is_some())
     )
@@ -3026,6 +3098,7 @@ mod tests {
             local_ifs: Vec::new(),
             local_addr: Some("192.168.7.5:50000".parse().unwrap()),
             listeners: vec!["0.0.0.0:7531".parse().unwrap()],
+            lan_addrs: Vec::new(),
             own: Some(own()),
             lab_local: false,
             custody_hints: true,
@@ -3234,6 +3307,183 @@ mod tests {
         .unwrap();
         let hidden = snapshot_for(dd, &c).unwrap();
         assert!(hidden.direct.is_empty() && hidden.inet.is_empty());
+    }
+
+    /// LAN_ADDR (spec §16): where the LAN listener answers, IPv4 first, at
+    /// most two; a wildcard listener on each of this computer's addresses
+    /// of its family, a bound one on its own address; never a global or an
+    /// IPv6 link-local address, and loopback only in the one-machine lab.
+    #[test]
+    fn own_lan_addrs_table() {
+        let at = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let texts = |v: Vec<route_hints::InetDirect>| {
+            v.iter().map(|e| e.addr.to_string()).collect::<Vec<_>>()
+        };
+        let ifs = [
+            ifaddr("en0", "fd00:7::5", 4),
+            ifaddr("en0", "fe80::5", 4),
+            ifaddr("en0", "192.168.7.5", 4),
+            ifaddr("en1", "11.0.3.5", 5),
+            ifaddr("bridge100", "10.0.0.5", 6),
+        ];
+        for (listeners, lab, want) in [
+            (vec![], false, vec![]),
+            (vec!["0.0.0.0:0"], false, vec![]),
+            (
+                vec!["0.0.0.0:7531"],
+                false,
+                vec!["192.168.7.5:7531", "10.0.0.5:7531"],
+            ),
+            (
+                vec!["0.0.0.0:7531", "[::]:7531"],
+                false,
+                vec!["192.168.7.5:7531", "10.0.0.5:7531"],
+            ),
+            // A `[::]` listener takes IPv4 too, except on Windows
+            // (`listener_takes`).
+            (
+                vec!["[::]:7531"],
+                false,
+                if cfg!(windows) {
+                    vec!["[fd00:7::5]:7531"]
+                } else {
+                    vec!["192.168.7.5:7531", "10.0.0.5:7531"]
+                },
+            ),
+            (vec!["[fd00:7::5]:7531"], false, vec!["[fd00:7::5]:7531"]),
+            (vec!["192.168.7.5:7420"], false, vec!["192.168.7.5:7420"]),
+            (vec!["11.0.3.5:7420"], false, vec![]),
+            (vec!["127.0.0.1:7420"], false, vec![]),
+            (vec!["127.0.0.1:7420"], true, vec!["127.0.0.1:7420"]),
+        ] {
+            let listeners: Vec<SocketAddr> = listeners.iter().map(|l| at(l)).collect();
+            assert_eq!(
+                texts(own_lan_addrs(&listeners, &ifs, lab)),
+                want,
+                "{listeners:?} lab {lab}"
+            );
+        }
+    }
+
+    /// LAN_ADDR (spec §16, owner decision 2026-10-30): a verified contact
+    /// is told where our LAN listener answers on every link but the LAN
+    /// (whose LAN_PORT rides the link's own IP); hide my IP (for everyone
+    /// or for this contact) leaves it out, and an unverified contact gets
+    /// no frame off the LAN at all. The receiver keeps one only when it is
+    /// on one of its own networks.
+    #[test]
+    fn lan_addr_is_told_to_a_verified_contact_off_the_lan_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let dd = dir.path();
+        book(dd, true);
+        let told = vec![route_hints::InetDirect {
+            flags: 0,
+            addr: "192.168.7.5:7531".parse().unwrap(),
+        }];
+        let with = |carrier: OutboxCarrier| SnapCtx {
+            lan_addrs: told.clone(),
+            ..ctx(carrier, Role::Dialer, "")
+        };
+        for carrier in [
+            OutboxCarrier::Onion,
+            OutboxCarrier::P2p,
+            OutboxCarrier::Internet,
+            OutboxCarrier::Nearby,
+        ] {
+            let h = snapshot_for(dd, &with(carrier)).unwrap();
+            assert_eq!(h.lan_addrs, told, "{carrier:?}");
+            let frame = route_hints::encode(&h);
+            assert_eq!(route_hints::decode(&frame).unwrap().lan_addrs, told);
+            assert!(told_line(&h).contains("lan=yes"), "{}", told_line(&h));
+        }
+        let lan = SnapCtx {
+            lan_addrs: told.clone(),
+            ..lan(Role::Listener)
+        };
+        assert!(snapshot_for(dd, &lan).unwrap().lan_addrs.is_empty());
+        // Hidden from this contact, then from everyone: none.
+        write_book(
+            dd,
+            &[(PEER, true, true, &[]), (CUSTODIAN, true, false, &[])],
+        );
+        assert!(snapshot_for(dd, &with(OutboxCarrier::Onion))
+            .unwrap()
+            .lan_addrs
+            .is_empty());
+        book(dd, true);
+        save_policy(
+            dd,
+            &NodePolicy {
+                hide_ip: true,
+                ..NodePolicy::default()
+            },
+        )
+        .unwrap();
+        assert!(snapshot_for(dd, &with(OutboxCarrier::Onion))
+            .unwrap()
+            .lan_addrs
+            .is_empty());
+        save_policy(dd, &NodePolicy::default()).unwrap();
+        // Unverified: nothing off the LAN.
+        book(dd, false);
+        assert!(snapshot_for(dd, &with(OutboxCarrier::Onion)).is_none());
+
+        // Receiving over Tor (the cache is gated by the route-hints switch).
+        if !route_hints::route_hints_live() {
+            return;
+        }
+        let rx = tempfile::tempdir().unwrap();
+        let rd = rx.path();
+        write_p2p_book(rd, &[(PEER, true, false, "")]);
+        let keys = LinkKeys::new(key(PEER), &Identity::from_seed(&[LOCAL; 32]));
+        let apply = |now_ms: u64| ApplyCtx {
+            carrier: OutboxCarrier::Onion,
+            keys,
+            peer_ip: None,
+            peer_zone: None,
+            link_peer_id: None,
+            lab_local: false,
+            offers_live: false,
+            nat_live: false,
+            stun_live: false,
+            rotation_live: false,
+            seeds_live: false,
+            now_ms,
+        };
+        // An address on none of this computer's networks is never kept.
+        let away = ["10.254.253.9", "172.31.254.9", "192.168.254.9"]
+            .iter()
+            .map(|s| s.parse::<IpAddr>().unwrap())
+            .find(|ip| raven_core::netifs::on_our_networks(*ip) == Some(false));
+        let frame_at = |generation: u64, ip: IpAddr| {
+            route_hints::encode(&RouteHints {
+                generation,
+                ttl_s: 3600,
+                lan_addrs: vec![route_hints::InetDirect {
+                    flags: 0,
+                    addr: SocketAddr::new(ip, 7531),
+                }],
+                ..RouteHints::default()
+            })
+        };
+        if let Some(away) = away {
+            apply_frame(rd, &frame_at(9, away), &apply(T0)).unwrap();
+            let held = learned_routes::learned_with_lan(rd, &keys.peer, T0);
+            assert!(held.1.is_none(), "{away} is on none of our networks");
+        }
+        // One on this computer's own network is kept, marked as told.
+        let Some(here) = raven_core::netifs::lan_addresses_for_friends()
+            .into_iter()
+            .map(|a| a.ip)
+            .find(|ip| ip.is_ipv4())
+        else {
+            return;
+        };
+        apply_frame(rd, &frame_at(10, here), &apply(T0 + 1)).unwrap();
+        let lan = learned_routes::learned(rd, &keys.peer, T0 + 1)
+            .and_then(|v| v.lan)
+            .expect("the told LAN part");
+        assert_eq!((lan.ip, lan.port, lan.told), (Some(here), Some(7531), true));
     }
 
     #[test]
