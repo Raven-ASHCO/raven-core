@@ -579,6 +579,25 @@ impl Inner {
         Err(embedded_only_op("mail.check"))
     }
 
+    /// `network.path {type}` (embedded node only): the kind of network the
+    /// device uses now, as the iOS app's `NWPathMonitor` reports it (`wifi`,
+    /// `wired`, `cellular`, `other`, `offline`, `unknown`). The node keeps
+    /// Tor off on `cellular` while the setting `tor_wifi_only` is on. Extra
+    /// field `changed`.
+    pub(crate) fn network_path(&self, args: &Args) -> OpResult {
+        let word = args.str("type")?;
+        let kind = raven_core::net_path::PathKind::parse(word).ok_or_else(|| {
+            ApiError::bad_request(
+                "\"type\" must be wifi, wired, cellular, other, offline or unknown",
+            )
+        })?;
+        if !embedded_mode() {
+            return Err(embedded_only_op("network.path"));
+        }
+        let changed = raven_core::net_path::set(kind);
+        Ok(json!({"path": kind.word(), "changed": changed}))
+    }
+
     /// `events.poll`: never blocks. Keeps the watcher running (it stops
     /// after half a minute without a poll).
     pub(crate) fn events_poll(&self, args: &Args) -> OpResult {

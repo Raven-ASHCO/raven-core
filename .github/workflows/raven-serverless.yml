@@ -367,6 +367,10 @@ jobs:
           cargo test --locked -p raven-core onion
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
             cargo test --locked -p raven-node --lib -- onion:: tor_race
+          # Tor in process (the iOS app) and Raven's arti-client patch: Tor off
+          # when the Tor network finds it too old, and on Wi-Fi only.
+          cargo test --locked -p raven-node --features tor-embedded --lib -- \
+            onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper
@@ -1131,6 +1135,10 @@ jobs:
           cargo test --locked -p raven-core onion
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
             cargo test --locked -p raven-node --lib -- onion:: tor_race
+          # Tor in process (the iOS app) and Raven's arti-client patch: Tor off
+          # when the Tor network finds it too old, and on Wi-Fi only.
+          cargo test --locked -p raven-node --features tor-embedded --lib -- \
+            onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper
@@ -1396,6 +1404,10 @@ jobs:
           cargo test --locked -p raven-core onion
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
             cargo test --locked -p raven-node --lib -- onion:: tor_race
+          # Tor in process (the iOS app) and Raven's arti-client patch: Tor off
+          # when the Tor network finds it too old, and on Wi-Fi only.
+          cargo test --locked -p raven-node --features tor-embedded --lib -- \
+            onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper.exe

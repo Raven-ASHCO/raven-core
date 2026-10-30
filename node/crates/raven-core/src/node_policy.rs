@@ -273,6 +273,14 @@ pub struct NodePolicy {
     /// empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub send_hold: Vec<String>,
+    /// Tor on Wi-Fi only (the phone app's setting; owner decision 2026-10-30:
+    /// Tor runs on mobile data too unless the user turns this on). While it
+    /// is on and the app says the device is on mobile data
+    /// ([`crate::net_path`]), raven-node keeps Tor off. A setting, so plain;
+    /// read where it applies, so a change needs no restart. Omitted while
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tor_wifi_only: bool,
 }
 
 /// [`NodePolicy::security_silent_to_strangers`] (Phase 6b design B, RLK1):
@@ -352,6 +360,7 @@ impl Default for NodePolicy {
             update_serve: true,
             lan_listen_port: None,
             send_hold: Vec::new(),
+            tor_wifi_only: false,
         }
     }
 }
@@ -422,6 +431,7 @@ impl NodePolicy {
             update_serve: false,
             lan_listen_port: None,
             send_hold: Vec::new(),
+            tor_wifi_only: false,
         }
     }
 

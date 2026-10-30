@@ -93,6 +93,7 @@ plus three lifecycle operations (embedded node only; elsewhere they answer
 | `node.pause` | – | `NodeStatus` + `{was_running}`: the node stopped cleanly and stays stopped |
 | `node.resume` | – | `NodeStatus`: the pause ends and the node starts as `node.start` starts it |
 | `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms}` |
+| `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}`: the kind of network the device uses (section 6) |
 
 `NodeStatus` gains `embedded: true`, `paused`, and `state` `paused` or
 `mail_check`. While paused, `node.start` and a send are refused (the
@@ -104,7 +105,9 @@ signal: its pid is the app's own).
 
 1. **Launch.** Set `RAVEN_DATA_DIR` (section 4) before the first
    `raven_call`. Then `profile.state`, and `identity.create` for a new
-   profile; `node.start` (or `node.resume` after a pause).
+   profile; `node.start` (or `node.resume` after a pause). Start an
+   `NWPathMonitor` and call `network.path` with the current kind of network
+   now and at every change (section 6: Tor on Wi-Fi only).
 2. **To the background** (`sceneDidEnterBackground`): call `node.pause`
    inside `beginBackgroundTask`. It closes the listeners, sends the p2p
    host's goodbyes, ends Tor's circuits and its helper, saves what learning
@@ -120,8 +123,9 @@ signal: its pid is the app's own).
    within its budget whatever the network does (every custody dial is cut
    at the budget, and the small node it started is stopped with a few
    seconds to spare). `new_messages` says how many arrived: show a local
-   notification that names nobody and quotes nothing ("New message in
-   Raven"); the text is read when the app opens.
+   notification that names nobody and quotes nothing: "New message in
+   Raven" (owner decision 2026-10-30; the app shows it); the text is read
+   when the app opens.
 5. **Events** (`events.poll`) only while a window is visible, as on the
    desktop.
 
@@ -217,20 +221,31 @@ stdout. Everything else is unchanged:
   network change; every life gets fresh pipes and a fresh runtime, and
   ending a life drops that runtime with every circuit and socket.
 
-What a separate process gave and the app loses:
+When the Tor network requires a protocol this Arti lacks (a fresh consensus
+lists it as *required*; Arti #1932), upstream Arti calls
+`std::process::exit(1)`, which in the app would end the app. Raven carries a
+small patch of `arti-client` 0.47.0 (owner decision 2026-10-30;
+`node/third_party/arti-client-0.47.0-raven`, `RAVEN_DELTA.md`, wired through
+`[patch.crates-io]` like the `saturating-time` fix): the helper is told
+instead, that Tor life ends, and the node keeps Tor off for the rest of its
+run: "Tor: off: this version is too old for the Tor network; update Raven"
+(`NetworkStatus.tor.phase` `too_old`). The desktop helper process does the
+same (it says so and exits; the node keeps Tor off). A cached consensus that
+says so stops Tor at start the same way.
 
-- **Arti's `exit(1)`.** When a fresh consensus marks a Tor protocol as
-  *required* that this Arti lacks, Arti calls `std::process::exit(1)`
-  (`arti-client` 0.47 `protostatus`, Arti #1932). The helper process used to
-  absorb that; in the app it ends the app. A cached consensus that says so
-  is caught at start instead (Tor then reports "this Tor version is too old"
-  and the app keeps running), so this happens at most once per such
-  consensus. Keeping Arti current avoids it; patching that call out of Arti
-  is an owner decision (section 11).
-- **A Tor thread that spins** (Arti #2726) can be left behind but not
-  killed.
-- A panic in Arti is caught: that life ends and the supervisor starts
-  another.
+What a separate process gave and the app loses: a panic in Arti is caught
+(that life ends and the supervisor starts another), but a Tor thread that
+spins (Arti #2726) can be left behind, not killed.
+
+**Mobile data** (owner decision 2026-10-30): Tor runs on Wi-Fi and on mobile
+data by default. The setting `tor_wifi_only` (`network.set`, kept in
+`node_policy.json`) keeps it off on mobile data. The node cannot tell mobile
+data from Wi-Fi on a phone, so the app reports the kind of network with
+`network.path {type}` whenever `NWPathMonitor` says it changed (`cellular`
+when the path uses the cellular interface, `wifi`, `wired`, `other`,
+`offline`). With the setting on and the path `cellular`, no Tor helper runs
+("Tor: off on mobile data", `tor.phase` `off_mobile_data`); a running one
+ends within two seconds; on Wi-Fi Tor starts again.
 
 Tor stops with the node on `node.pause` (the onion service is unreachable
 while the app is in the background) and is not started for a mail check.
@@ -279,8 +294,8 @@ What iOS allows in the background, and what that means for RNL1:
 - The Simulator has no Bluetooth: all of this needs two devices.
 
 Background Bluetooth is the one way an iOS Raven could carry mail with no
-network at all; it is also the hardest to make reliable. It should come
-after the app works with the network (owner decision).
+network at all; it is also the hardest to make reliable. It comes after
+the app works with the network (owner decision 2026-10-30).
 
 ## 8. How mail reaches a phone without a push server
 
@@ -353,6 +368,7 @@ node stays paused, `node.resume`, and a direct delivery again.
 | Embedded node, in-process IPC, `node.pause` / `node.resume` / `mail.check` | `embedded_engines_end_to_end` | the same test, its three engines in three simulator processes | not yet |
 | Tor in process, loopback helper | in that test | in that test | not yet |
 | Tor in process, real Arti (bootstrap, onion service publishing) | `tor_in_process_bootstraps` | the same test | not yet |
+| Tor off when the Tor network finds it too old (patched Arti told instead of exiting), Tor on Wi-Fi only | `onion::tests`, the end-to-end test (`network.path`) | the end-to-end test, `simulator_smoke.sh` | not yet |
 | iOS Keychain backend (add-only, read, update, `cku` protection, not synchronized, account listing, identity marker `ios-keychain`) | – | `apple_keychain::tests` | not yet |
 | Container-relative profile binding | – | `paths::tests` | not yet |
 | `RavenClient.xcframework` (release) linked by Xcode's clang into a C program: new identity in the Keychain, node started, paused, mail check, resumed, stopped | – | `simulator_smoke.sh` | not yet |
@@ -393,21 +409,19 @@ Limits found while preparing the build:
 - **Memory**: a background task gets less memory than a foreground app;
   the mail check's node runs no listener, Tor or p2p host for that reason.
 
-Decisions:
+Open decisions:
 
 1. **App Store and the AGPL.** Raven is AGPL-3.0-or-later; the App Store's
    terms add restrictions the GPL family does not allow, which has kept GPL
    apps off the store before. Distribution (App Store, TestFlight, or
    another way) needs a decision and possibly a licence exception for the
    app.
-2. **Arti's `exit(1)` in the app** (section 6): accept it with prompt Arti
-   updates, or keep a small patch of `arti-client` (as the tree already
-   keeps one for `saturating-time`) that turns it into "Tor off".
-3. **Tor on phones**: on by its gate, as on the desktop. On cellular data
-   it costs a few MB per bootstrap and battery while the app is open; an
-   app setting (Wi-Fi only, off) may be wanted.
-4. **Bluetooth nearby on iOS** (section 7): now, or after the app works on
-   the network.
-5. **Notifications**: a background refresh that found mail shows a local
-   notification that names nobody (section 3); the wording is the
-   owner's.
+2. **The iOS profile binding** (section 4) changes what an iOS profile's
+   keys and sealed files are bound to; a review of it before the first
+   release.
+
+Decided (2026-10-30): Arti's `exit(1)` is patched into "Tor off ...
+update Raven" (section 6); Tor runs on mobile data by default, with the
+setting Tor on Wi-Fi only (section 6); Bluetooth on iOS comes after the app
+works on the network (section 7); the notification says "New message in
+Raven" and names nobody (the app shows it).

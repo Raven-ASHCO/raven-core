@@ -14,7 +14,9 @@
 //! [`proto`]. When the Tor network requires a protocol this Arti lacks
 //! (Arti #1932; Raven's arti-client patch reports it instead of exiting the
 //! process), Tor stays off for the rest of the run: "Tor: off: this version
-//! is too old for the Tor network; update Raven".
+//! is too old for the Tor network; update Raven". Tor on Wi-Fi only (the
+//! profile's `tor_wifi_only`) keeps it off while the app says the device is
+//! on mobile data ([`raven_core::net_path`]).
 //!
 //! **This module:**
 //! - [`run`]: the supervised service task (only while the gate is open and a
@@ -135,6 +137,9 @@ pub(crate) enum Phase {
     CantStart,
     /// The helper is being started again (a failure, a network change).
     Restarting,
+    /// Tor on Wi-Fi only (the profile's `tor_wifi_only`) and the app says
+    /// this device is on mobile data now: no helper runs until that changes.
+    OffMobileData,
     /// The Tor network requires a protocol this Tor lacks (Arti #1932):
     /// Tor stays off for the rest of this run; only a newer Raven helps.
     TooOld,
@@ -240,12 +245,26 @@ pub(crate) fn status_line(s: &Status, now: Instant) -> String {
             retry,
         ),
         Phase::Restarting => with_parts("Tor: restarting", s.why.clone(), retry),
+        Phase::OffMobileData => format!("Tor: off on mobile data ({MOBILE_DATA_WHY})"),
         Phase::TooOld => format!("Tor: off: {TOO_OLD_WHY}"),
     }
 }
 
+/// Why Tor is off on mobile data, in the status line.
+pub(crate) const MOBILE_DATA_WHY: &str = "the setting uses Tor on Wi-Fi only";
 /// Why Tor is off for good in this run (the Tor network requires a newer Tor).
 pub(crate) const TOO_OLD_WHY: &str = "this version is too old for the Tor network; update Raven";
+/// How often a Tor kept off on mobile data looks again (the app's report
+/// and the setting).
+const MOBILE_DATA_LOOK: Duration = Duration::from_secs(2);
+
+/// Tor on Wi-Fi only (the profile's `tor_wifi_only`) while the app says
+/// this device is on mobile data ([`raven_core::net_path`]). The policy is
+/// read only on mobile data.
+pub(crate) fn off_on_mobile_data(data_dir: &Path) -> bool {
+    raven_core::net_path::current() == raven_core::net_path::PathKind::Cellular
+        && raven_core::node_policy::load_policy(data_dir).tor_wifi_only
+}
 
 /// The onion service's outages since start, for the status line: none
 /// said while there were none.
@@ -735,6 +754,29 @@ async fn supervise(
     let mut restarts = Restarts::default();
     let mut first = true;
     loop {
+        // Tor on Wi-Fi only, on mobile data now: no helper until that
+        // changes (the app's next report, the setting, a network change).
+        if off_on_mobile_data(&data_dir) {
+            update_status(|s| {
+                *s = Status {
+                    phase: Phase::OffMobileData,
+                    starts: s.starts,
+                    published: s.published,
+                    outages: s.outages,
+                    ..Status::default()
+                }
+            });
+            eprintln!(
+                "raven-node onion: {}",
+                status_line(&status(), Instant::now())
+            );
+            while off_on_mobile_data(&data_dir) {
+                tokio::select! {
+                    () = tokio::time::sleep(MOBILE_DATA_LOOK) => {}
+                    _ = restart_requested() => {}
+                }
+            }
+        }
         // A fresh token for every helper life (RAVEN_ONION_CARRIER_V1 §6): a
         // token an earlier helper held opens nothing once it is gone.
         if !first {
@@ -860,6 +902,7 @@ async fn run_once(
     let mut obsolete = false;
     let mut errors_logged = 0u8;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut ticks: u64 = 0;
     let mut ping = tokio::time::interval(watch::PING_EVERY);
     let mut ping_n: u64 = 0;
     let mut service = ServiceWatch::default();
@@ -937,6 +980,17 @@ async fn run_once(
                 return (if obsolete { End::Obsolete } else { End::Exited }, life);
             }
             _ = tick.tick() => {
+                // Tor on Wi-Fi only and the device went to mobile data: this
+                // life ends now (looked at every other second; the policy
+                // is read only on mobile data).
+                ticks += 1;
+                if ticks.is_multiple_of(2) && off_on_mobile_data(data_dir) {
+                    if let Some(k) = proc.kill.take() {
+                        let _ = k.send(());
+                    }
+                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut done).await;
+                    return (End::MobileData, life);
+                }
                 // A friend's authenticated incoming Tor link since the last
                 // tick proves the service reachable ([`friend_reached_us`]).
                 let proofs = FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed);

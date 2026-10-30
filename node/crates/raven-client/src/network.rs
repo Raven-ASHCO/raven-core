@@ -479,7 +479,8 @@ pub(crate) struct TorView {
     /// `unreachable` (ready, the onion service can't be reached), `starting`,
     /// `restarting`, `blocked`, `could_not_start`, `not_built`, `off`,
     /// `too_old` (the Tor network requires a newer Tor: off until Raven is
-    /// updated), or `unknown` for words this engine doesn't know.
+    /// updated), `off_mobile_data` (Tor on Wi-Fi only, on mobile data now),
+    /// or `unknown` for words this engine doesn't know.
     pub phase: &'static str,
     /// The line after `Tor: `.
     pub words: String,
@@ -535,6 +536,8 @@ impl TorView {
             "not_built"
         } else if head.starts_with("off: this version is too old") {
             "too_old"
+        } else if head.starts_with("off on mobile data") {
+            "off_mobile_data"
         } else if head == "off" {
             "off"
         } else {
@@ -586,6 +589,7 @@ impl TorView {
             "not_built" => "Not built into this Raven (its Tor helper is missing).",
             "off" => "Off.",
             "too_old" => "Tor off: this version is too old for the Tor network; update Raven.",
+            "off_mobile_data" => "Off on mobile data: the setting uses Tor on Wi-Fi only.",
             _ => "As Raven's background program reports it.",
         }
     }
@@ -840,6 +844,9 @@ pub(crate) fn network_view(dir: &Path, facts: &NetFacts) -> Value {
         "carry": carry,
         "help": help,
         "hide_ip": p.hide_ip,
+        // Tor on Wi-Fi only (the phone app's setting), and the kind of
+        // network the app last reported (`network.path`; never on a desktop).
+        "tor_wifi_only": p.tor_wifi_only,
         "lab_switches": lab_switches_seen(),
         "texts": {
             "carry_for_friends": bridge::CARRY_FOR_FRIENDS_CONSENT,
@@ -865,6 +872,10 @@ pub(crate) fn network_view(dir: &Path, facts: &NetFacts) -> Value {
     if let Some(t) = facts.tor() {
         v["tor"] = t.json();
     }
+    let path = raven_core::net_path::current();
+    if path != raven_core::net_path::PathKind::Unknown {
+        v["path"] = path.word().into();
+    }
     v
 }
 
@@ -889,7 +900,7 @@ struct Change {
 }
 
 /// The settings `network.set` takes, in the order it applies them.
-const SETTINGS: [&str; 17] = [
+const SETTINGS: [&str; 18] = [
     "lan",
     "internet",
     "p2p",
@@ -904,6 +915,7 @@ const SETTINGS: [&str; 17] = [
     "store",
     "relay",
     "hide_ip",
+    "tor_wifi_only",
     // Taken with their setting: `lan_for` with `lan`, `internet_listen`
     // with `internet`, `p2p_listen` and `relays` with `p2p`.
     "lan_for",
@@ -1329,6 +1341,16 @@ impl Inner {
                 })
                 .map_err(|e| failed(format!("save policy failed: {e}")))?;
                 change.effect = flag_effect(setting).into();
+            }
+            "tor_wifi_only" => {
+                raven_core::node_policy::update_settings(dir, |p| p.tor_wifi_only = on)
+                    .map_err(|e| failed(e.to_string()))?;
+                change.effect = if on {
+                    "Raven uses Tor on Wi-Fi only: on mobile data it reaches friends without Tor."
+                        .into()
+                } else {
+                    "Raven uses Tor on mobile data too.".into()
+                };
             }
             "hide_ip" => {
                 bridge::hide_ip_set(dir, on).map_err(failed)?;
@@ -2241,8 +2263,8 @@ mod tests {
             "not_built"
         );
         assert_eq!(TorView::parse("Tor: off").phase, "off");
-        // Owner decision 2026-10-30: too old for the Tor network (off until
-        // Raven is updated).
+        // Owner decisions 2026-10-30: too old for the Tor network (off until
+        // Raven is updated), and Tor on Wi-Fi only while on mobile data.
         let t =
             TorView::parse("Tor: off: this version is too old for the Tor network; update Raven");
         assert_eq!(t.phase, "too_old");
@@ -2250,6 +2272,10 @@ mod tests {
             t.reason(),
             "Tor off: this version is too old for the Tor network; update Raven."
         );
+        assert!(!t.running());
+        let t = TorView::parse("Tor: off on mobile data (the setting uses Tor on Wi-Fi only)");
+        assert_eq!(t.phase, "off_mobile_data");
+        assert_eq!(t.why.as_deref(), Some("the setting uses Tor on Wi-Fi only"));
         assert!(!t.running());
         assert_eq!(TorView::parse("Tor: something new").phase, "unknown");
         // Control characters from the line never reach the apps.

@@ -209,6 +209,7 @@ impl Inner {
             "node.pause" => |me, _| me.node_pause(),
             "node.resume" => |me, _| me.node_resume(),
             "mail.check" => |me, args| me.mail_check(args),
+            "network.path" => |me, args| me.network_path(args),
             "settings.get" => |me, _| Ok(me.settings_view().to_json()),
             "settings.set" => |me, args| me.settings_set(args),
             // Every way to reach friends (network.rs, NETWORK_PARITY.md).

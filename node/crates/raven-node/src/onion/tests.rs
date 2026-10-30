@@ -1078,7 +1078,7 @@ async fn every_helper_life_gets_a_fresh_token() {
     assert!(tokens.contains(&hex::encode(now)));
 }
 
-// ── Tor off: too old for the Tor network (owner decision 2026-10-30) ───────
+// ── Tor off: too old for the Tor network, mobile data (owner 2026-10-30) ───
 
 /// A helper that says Arti's "too old" words on stderr, as the helper (and
 /// the in-process helper) does when the Tor network requires a protocol it
@@ -1122,6 +1122,39 @@ fn arti_words() -> &'static str {
     }
 }
 
+/// A helper that reads its config line and then stays (answers pings, says
+/// nothing else); how many were started and how many ended.
+struct Quiet(
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+);
+
+impl Spawn for Quiet {
+    fn spawn(&self) -> Result<Proc, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let ended = Arc::clone(&self.1);
+        let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
+        let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
+        let helper = tokio::spawn(fake_helper(Fake::Publishing, helper_in, helper_out));
+        let (kill, killed) = tokio::sync::oneshot::channel::<()>();
+        let abort = helper.abort_handle();
+        let done = async move {
+            tokio::select! {
+                _ = helper => {}
+                _ = killed => abort.abort(),
+            }
+            ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        };
+        Ok(Proc {
+            stdin: Box::pin(to_helper),
+            stdout: Box::pin(from_helper),
+            stderr: None,
+            done: Box::pin(done),
+            kill: Some(kill),
+        })
+    }
+}
+
 fn test_config(dir: &Path) -> proto::Config {
     proto::Config {
         v: proto::PROTO_VERSION,
@@ -1157,6 +1190,59 @@ async fn a_tor_too_old_for_the_network_turns_tor_off_for_good() {
         "Tor: off: this version is too old for the Tor network; update Raven"
     );
     assert!(!raven_core::onion_gate::onion_usable_now());
+}
+
+/// Owner decision 2026-10-30: Tor runs on mobile data unless the profile
+/// says Tor on Wi-Fi only; then no helper runs while the app says the
+/// device is on mobile data, a running one ends when it moves there, and
+/// one starts again on Wi-Fi.
+#[tokio::test(start_paused = true)]
+async fn tor_on_wifi_only_keeps_tor_off_on_mobile_data() {
+    use raven_core::net_path::{self, PathKind};
+    use std::sync::atomic::Ordering::SeqCst;
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut policy = raven_core::node_policy::NodePolicy {
+        tor_wifi_only: true,
+        ..Default::default()
+    };
+    raven_core::node_policy::save_policy(dir.path(), &policy).unwrap();
+    let (starts, ended) = (
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    );
+    net_path::set(PathKind::Cellular);
+    let task = tokio::spawn(supervise(
+        Arc::new(Quiet(Arc::clone(&starts), Arc::clone(&ended))),
+        test_config(dir.path()),
+        Arc::new(Mutex::new([0u8; proto::TOKEN_LEN])),
+        dir.path().to_path_buf(),
+        Arc::new(Identity::from_seed(&[0x3b; 32])),
+    ));
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(starts.load(SeqCst), 0, "no Tor on mobile data");
+    assert_eq!(
+        status_line(&status(), Instant::now()),
+        "Tor: off on mobile data (the setting uses Tor on Wi-Fi only)"
+    );
+    // Wi-Fi: Tor starts.
+    net_path::set(PathKind::Wifi);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(starts.load(SeqCst), 1);
+    assert_eq!(ended.load(SeqCst), 0);
+    // Mobile data again: that life ends, no other starts.
+    net_path::set(PathKind::Cellular);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(ended.load(SeqCst), 1);
+    assert_eq!(starts.load(SeqCst), 1);
+    assert!(status_line(&status(), Instant::now()).starts_with("Tor: off on mobile data"));
+    // The setting off: Tor runs on mobile data too (the default).
+    policy.tor_wifi_only = false;
+    raven_core::node_policy::save_policy(dir.path(), &policy).unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(starts.load(SeqCst), 2);
+    task.abort();
+    net_path::set(PathKind::Unknown);
 }
 
 /// Raven's arti-client patch (third_party/arti-client-0.47.0-raven): the

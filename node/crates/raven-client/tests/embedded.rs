@@ -402,7 +402,29 @@ fn embedded_engines_end_to_end() {
             std::thread::sleep(Duration::from_millis(500));
         }
         assert!(a.log().contains("onion: Tor: ready"), "{}", a.log());
+
+        // Tor on Wi-Fi only: off while the app says mobile data, back on
+        // Wi-Fi (owner decision 2026-10-30; the default is Tor on both).
+        let set = a.ok("network.set", json!({"tor_wifi_only": true}));
+        assert_eq!(set["status"]["tor_wifi_only"], true, "{set}");
+        let path = a.ok("network.path", json!({"type": "cellular"}));
+        assert_eq!(path["path"], "cellular", "{path}");
+        let tor_phase = |a: &Peer| a.ok("network.status", json!({}))["tor"]["phase"].clone();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while tor_phase(&a) != "off_mobile_data" {
+            assert!(Instant::now() < deadline, "Tor still on: {}", a.log());
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        a.ok("network.path", json!({"type": "wifi"}));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while a.carrier("tor")["running"] != true {
+            assert!(Instant::now() < deadline, "Tor never back: {}", a.log());
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        a.ok("network.set", json!({"tor_wifi_only": false}));
     }
+    let bad = a.err("network.path", json!({"type": "5g"}));
+    assert_eq!(bad["code"], "BAD_REQUEST", "{bad}");
 
     // The app goes to the background: A pauses.
     let paused = a.ok("node.pause", json!({}));

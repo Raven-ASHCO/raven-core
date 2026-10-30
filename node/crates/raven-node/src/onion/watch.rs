@@ -75,12 +75,14 @@ pub(crate) enum End {
     NetworkChanged,
     /// This computer woke from sleep (netwatch).
     Woke,
+    /// Tor on Wi-Fi only, and the device went to mobile data.
+    MobileData,
 }
 
 impl End {
     /// A restart for this end waits no backoff and is no failure.
     pub(crate) fn immediate(self) -> bool {
-        matches!(self, Self::NetworkChanged | Self::Woke)
+        matches!(self, Self::NetworkChanged | Self::Woke | Self::MobileData)
     }
 
     /// The bootstrap got stuck (counts toward a fresh guard state).
@@ -98,6 +100,7 @@ impl End {
             Self::Obsolete => "this Tor version is too old for the network",
             Self::NetworkChanged => "network changed",
             Self::Woke => "woke from sleep",
+            Self::MobileData => "on mobile data (Tor on Wi-Fi only)",
         }
     }
 }

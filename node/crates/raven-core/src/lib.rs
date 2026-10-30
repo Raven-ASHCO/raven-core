@@ -97,6 +97,7 @@ pub mod mlkem768_incremental;
 pub mod nearby;
 pub mod nearby_gate;
 pub mod nearby_link;
+pub mod net_path;
 pub mod net_proxy;
 pub mod netifs;
 pub mod node_policy;

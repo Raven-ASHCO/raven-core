@@ -4,7 +4,7 @@
  *
  * One process, no raven-node program: a new profile in the iOS Keychain,
  * its card, the embedded node started, paused, a mail check while paused,
- * resumed and stopped. It prints each answer and exits non-zero at the
+ * resumed, Tor set to Wi-Fi only on mobile data, stopped. It prints each answer and exits non-zero at the
  * first one that is not what an app expects. At the end it removes the
  * keychain items this smoke binary's access group holds.
  *
@@ -69,6 +69,11 @@ int main(int argc, char **argv) {
     call("{\"v\":1,\"op\":\"node.pause\"}", paused);
     call("{\"v\":1,\"op\":\"mail.check\",\"args\":{\"budget_ms\":20000}}", checked);
     call("{\"v\":1,\"op\":\"node.resume\"}", running);
+    /* Tor on Wi-Fi only, and the kind of network the app reports. */
+    const char *wifi_only[] = {"\"ok\":true", "\"tor_wifi_only\":true", NULL};
+    const char *cellular[] = {"\"ok\":true", "\"path\":\"cellular\"", NULL};
+    call("{\"v\":1,\"op\":\"network.set\",\"args\":{\"tor_wifi_only\":true}}", wifi_only);
+    call("{\"v\":1,\"op\":\"network.path\",\"args\":{\"type\":\"cellular\"}}", cellular);
     call("{\"v\":1,\"op\":\"node.stop\"}", stopped);
 
     /* The backend marker says where the identity is. */

@@ -96,6 +96,7 @@ changes. Fields marked `?` may be missing.
 | `node.pause` | – | `NodeStatus` + `{was_running}` (embedded node only: the app went to the background; see "Embedded node") |
 | `node.resume` | – | `NodeStatus` (embedded node only: the app is open again) |
 | `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms}` (embedded node only: one bounded fetch from friends, for iOS background refresh) |
+| `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}` (embedded node only: the kind of network the device uses, from the iOS app's `NWPathMonitor`; with `tor_wifi_only` on, Tor stays off on `cellular`) |
 | `settings.get` | – | `Settings` |
 | `settings.set` | `{...partial Settings}` | `Settings` |
 | `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool}` (see Events) |
@@ -251,7 +252,13 @@ or `mail_check`. `node.pause` stops it cleanly and holds it stopped (a
 this profile within `budget_ms` (default 25000, at most 28000), starting a
 small node for it when none runs and stopping it again; it is refused with
 `PROFILE_LOCKED` while the profile is locked. Without the embedded node the
-three answer `NOT_AVAILABLE_YET`. Architecture, lifecycle and limits:
+three answer `NOT_AVAILABLE_YET`, as does `network.path`: the app reports the kind of network
+the device uses (`NWPathMonitor`), and with the setting `tor_wifi_only` on (`network.set`; off by
+default, so Tor runs on mobile data too) the node keeps Tor off on mobile data
+(`NetworkStatus.tor.phase` `off_mobile_data`). When the Tor network requires a protocol this Tor
+lacks, Tor turns off until Raven is updated (`tor.phase` `too_old`, the words "Tor off: this
+version is too old for the Tor network; update Raven"); the node and the app keep running.
+Architecture, lifecycle and limits:
 [`docs/IOS.md`](../../docs/IOS.md).
 
 ### Network
@@ -317,6 +324,7 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   | `relay_for_friends` | bool | `raven relay offer on\|off` | now |
   | `bridge`, `store`, `relay` | bool | `raven node bridge\|store\|relay on\|off` (AUTO off) | now |
   | `hide_ip` | bool | `raven node hide-ip on\|off` | now |
+  | `tor_wifi_only` | bool (default false: Tor on mobile data too) | none (the phone app's setting; `node_policy.json`) | now |
 
   Turning a held way on is `NOT_AVAILABLE_YET`; turning anything off is always allowed.
   `carry_for_friends`, `friends_carry_mine` and `handoff` turned on need the person's yes to what
@@ -441,10 +449,12 @@ NetworkStatus { build: "release" | "dev", node: "running" | "not_running",
                      carry_for_friends: { on, held_messages, held_bytes, handoff, handoff_lines },
                      letters_left: [..], relay_for_friends: { setting, offering, offered_to } },
             help: { bridge, store, relay, automatic, effects: { bridge, store, relay } },
-            hide_ip, lab_switches: [..],
+            hide_ip, tor_wifi_only, path?: "wifi" | "wired" | "cellular" | "other" | "offline",
+            lab_switches: [..],
             texts: { carry_for_friends, friends_carry_mine, handoff },
             tor?: { phase: "ready" | "publishing" | "unreachable" | "starting" | "restarting" | "blocked"
-                           | "could_not_start" | "not_built" | "off" | "unknown",
+                           | "could_not_start" | "not_built" | "off" | "too_old" | "off_mobile_data"
+                           | "unknown",
                     words, percent?, why?, retry?, outages? } }
             (tor: raven-node's Tor line, read into its parts; only while raven-node's Status has
              that line: see "The Tor way")
