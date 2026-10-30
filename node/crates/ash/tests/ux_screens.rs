@@ -1755,6 +1755,42 @@ fn an_empty_inbox_says_why_and_names_the_profile_and_touches_nothing() {
 
 // ── contacts ────────────────────────────────────────────────────────────────
 
+/// Field test E3: `raven contact forget-address` without a terminal says in
+/// plain words that nothing was forgotten and how a script does it, and
+/// exits 2 (1 is a failure); with --yes it forgets every saved route.
+#[test]
+fn forget_address_without_a_terminal_says_so_and_exits_2() {
+    let dir = short_dir();
+    plant_identity(dir.path());
+    add_bob(dir.path(), "Bob");
+    let mut c = ash(dir.path());
+    c.args(["contact", "forget-address", "Bob"]);
+    let o = run(c, "");
+    assert_eq!(code(&o), 2, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(
+        err.contains(
+            "Nothing forgotten: forget-address asks first, and there is no terminal to ask on. \
+             To forget Bob's addresses from a script, add --yes."
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("stdin"), "{err}");
+    let mut c = ash(dir.path());
+    c.args(["contact", "forget-address", "Bob", "--yes"]);
+    let o = run(c, "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    for row in [
+        "address forgotten Bob",
+        "lan_dial    (none)",
+        "internet    (none)",
+        "p2p         (none)",
+    ] {
+        assert!(out.contains(row), "{row}: {out}");
+    }
+}
+
 #[test]
 fn contact_saved_says_the_other_person_must_add_you_back() {
     let dir = short_dir();

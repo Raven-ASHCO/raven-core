@@ -457,11 +457,12 @@ gate: only what no dial reads any more leaves the disk.
   versions of these files in freed disk blocks still hold what went until the next data-key
   rotation (PP.10).
 - **`raven contact forget-address [NAME] [--tag|--petname|--address] [--yes]`**: clears the
-  contact's saved LAN and Internet routes in the book (sealed write; name, tag, pin, p2p route and
-  custody friends stay) and forgets its sighting, route hints, remembered route and the routes
-  recorded for its waiting messages, after "Forget {name}'s saved address? Raven can then reach
-  {name} only after {name} connects to you, or after you save a new address. [y/N]" on a terminal
-  (`--yes` for scripts; without a terminal it refuses). It sets `rotation_due` too. The terminal
+  contact's saved LAN, Internet and p2p routes and relays in the book (sealed write; name, tag,
+  pin, Tor address and custody friends stay; field test E3 found an old card's p2p route kept)
+  and forgets its sighting, route hints, remembered route and the routes recorded for its waiting
+  messages, after "Forget {name}'s saved address? Raven can then reach {name} only after {name}
+  connects to you, or after you save a new address. [y/N]" on a terminal (`--yes` for scripts;
+  without a terminal it refuses with exit code 2). It sets `rotation_due` too. The terminal
   app's "Forget {name}'s address" (F on the friend's page) takes the same path (PP.21, section
   4.18).
 

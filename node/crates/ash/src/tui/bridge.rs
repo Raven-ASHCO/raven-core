@@ -1555,9 +1555,9 @@ pub(super) fn delete_chat(data_dir: &Path, peer: &str) -> Result<DeleteChatOutco
 }
 
 /// "Forget {name}'s address": `raven contact forget-address --yes`'s path
-/// (privacy pack PP.7) for the friend `peer`: their saved LAN and Internet
-/// addresses are cleared (name, pin and the rest stay) and what Raven
-/// learned about reaching them is forgotten. What could not be forgotten
+/// (privacy pack PP.7) for the friend `peer`: their saved LAN, Internet and
+/// p2p addresses are cleared (name, pin, Tor address and the rest stay) and
+/// what Raven learned about reaching them is forgotten. What could not be forgotten
 /// comes back, one note each, raw (review D-lock-tui-8: the app says so,
 /// with the notes in Details, where it used to say only that it forgot).
 pub(super) fn forget_address(data_dir: &Path, peer: &str) -> Result<Vec<String>, String> {

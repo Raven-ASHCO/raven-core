@@ -1489,14 +1489,16 @@ Interactive (recommended for first-timers):
         #[arg(long, help = "Peer LAN listen host:port, e.g. 192.168.1.31:7420")]
         lan_dial: String,
     },
-    /// Forget a contact's saved LAN and Internet addresses, and where Raven
-    /// last saw them; the contact, its pin and its p2p route stay.
+    /// Forget every saved way to reach a contact (its LAN, Internet and p2p
+    /// addresses and relays) and where Raven last saw them; the contact, its
+    /// pin and its Tor address stay.
     ///
     ///   raven contact forget-address --petname Bob
     ///
-    /// Raven can then reach them only after they connect to you, or after you
-    /// save a new address (`raven contact set-addr`). Addresses Raven learned
-    /// by itself are forgotten after 30 days without contact anyway.
+    /// Raven can then reach them only over Tor, after they connect to you, or
+    /// after you save a new address (`raven contact set-addr`). Addresses
+    /// Raven learned by itself are forgotten after 30 days without contact
+    /// anyway.
     ForgetAddress {
         /// The contact: name, @tag or rvn1 address (as for `raven send --contact`).
         selector: Option<String>,
@@ -1506,7 +1508,8 @@ Interactive (recommended for first-timers):
         petname: Option<String>,
         #[arg(long)]
         address: Option<String>,
-        /// Skip the question (scripts).
+        /// Skip the question (scripts). Without a terminal and without
+        /// --yes nothing is forgotten, and the exit code is 2.
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
@@ -6603,7 +6606,17 @@ fn add_contact(
 ) -> Result<(), String> {
     // A LAN address given here was typed on this computer.
     save_contact_from(
-        data_dir, address, pub_hex, petname, public_tag, verify_fp, lan_dial, "", None, true, true,
+        data_dir,
+        address,
+        pub_hex,
+        petname,
+        public_tag,
+        verify_fp,
+        lan_dial,
+        "",
+        None,
+        true,
+        Routes::Typed,
     )
 }
 
@@ -6666,12 +6679,38 @@ fn save_contact(
         internet_dial,
         p2p,
         report,
-        false,
+        Routes::Hints,
     )
 }
 
-/// [`save_contact`]; `lan_typed`: a non-empty `lan_dial` was typed on this
-/// computer, not taken from a card or invite ([`Contact::lan_dial_trusted`]).
+/// Where the routes a contact is saved with come from
+/// ([`save_contact_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Routes {
+    /// Typed on this computer (`--lan-dial`, the prompt): a LAN address is
+    /// this computer's own ([`Contact::lan_dial_trusted`]); a route not given
+    /// keeps the saved one.
+    Typed,
+    /// A card's or an invite's, or none (a re-save: `contact verify`, a
+    /// rename): a route not given keeps the saved one.
+    Hints,
+    /// The friend's card, as `contact add --card` reads it: it replaces the
+    /// saved LAN, Internet and p2p routes, so one the card no longer carries
+    /// goes (field test E3: a p2p PeerId from an old card stayed after a new
+    /// card without one). Kept: a LAN address typed here or learned from the
+    /// friend's own authenticated link, and a PeerId a p2p link proved is
+    /// theirs. A LAN address typed with the card (`--lan-dial`) is
+    /// `lan_typed`.
+    Card { lan_typed: bool },
+}
+
+impl Routes {
+    fn lan_typed(self) -> bool {
+        matches!(self, Routes::Typed | Routes::Card { lan_typed: true })
+    }
+}
+
+/// [`save_contact`]; `routes`: where the routes come from ([`Routes`]).
 #[allow(clippy::too_many_arguments)]
 fn save_contact_from(
     data_dir: &Path,
@@ -6684,8 +6723,10 @@ fn save_contact_from(
     internet_dial: &str,
     p2p: Option<&P2pRoute>,
     report: bool,
-    lan_typed: bool,
+    routes: Routes,
 ) -> Result<(), String> {
+    let lan_typed = routes.lan_typed();
+    let card = matches!(routes, Routes::Card { .. });
     let new_inet = if internet_dial.trim().is_empty() {
         None
     } else {
@@ -6923,14 +6964,23 @@ fn save_contact_from(
             d.to_string(),
             lan_typed || (prior_trusted && prior_dial == d),
         )
+    } else if card && !prior_trusted {
+        // An old card's address the new card no longer names.
+        (String::new(), false)
     } else {
         (prior_dial, prior_trusted)
     };
     let inet = new_inet.unwrap_or_else(|| {
         prior
             .as_ref()
+            .filter(|_| !card)
             .map(|c| c.internet_dial.clone())
             .unwrap_or_default()
+    });
+    // A card without a p2p route keeps only a PeerId a p2p link proved is
+    // theirs (with the relays saved for it).
+    let prior_p2p = prior.as_ref().filter(|c| {
+        !card || (!c.p2p.trim().is_empty() && learned_peer_id_proven(data_dir, &ed_hex, &c.p2p))
     });
     // Also drop unpinned rows claiming this address under another key: the
     // address is derived from the key, so such a row is an invalid binding.
@@ -6944,28 +6994,19 @@ fn save_contact_from(
         pinned: pin || prior_pinned,
         lan_dial: dial,
         internet_dial: inet,
-        // A card's p2p route replaces the old one; none keeps it.
+        // A card's p2p route replaces the old one; none keeps it, unless a
+        // card without one replaces it ([`Routes::Card`]).
         p2p: p2p.map_or_else(
-            || prior.as_ref().map(|c| c.p2p.clone()).unwrap_or_default(),
+            || prior_p2p.map(|c| c.p2p.clone()).unwrap_or_default(),
             |r| r.peer_id.clone(),
         ),
         p2p_via: p2p.map_or_else(
-            || {
-                prior
-                    .as_ref()
-                    .map(|c| c.p2p_via.clone())
-                    .unwrap_or_default()
-            },
+            || prior_p2p.map(|c| c.p2p_via.clone()).unwrap_or_default(),
             |r| book_via_order(&r.via),
         ),
         // The card's p2pn= goes with its p2p= (none clears an old one).
         p2p_next: p2p.map_or_else(
-            || {
-                prior
-                    .as_ref()
-                    .map(|c| c.p2p_next.clone())
-                    .unwrap_or_default()
-            },
+            || prior_p2p.map(|c| c.p2p_next.clone()).unwrap_or_default(),
             |r| r.next.clone().unwrap_or_default(),
         ),
         // A re-added contact keeps its friends and hide-my-IP choice (local
@@ -6993,6 +7034,27 @@ fn save_contact_from(
     // card naming a PeerId its stored schedule names (a rotating contact's)
     // keeps that schedule, or the card's PeerId alone would be admitted and
     // dialled, which a rotating contact leaves at its next boundary.
+    // What a new card no longer carries, said with the summary.
+    let dropped: Vec<&str> = prior
+        .as_ref()
+        .filter(|_| card)
+        .map(|old| {
+            [
+                (
+                    "a LAN address",
+                    !old.lan_dial.is_empty() && row.lan_dial.is_empty(),
+                ),
+                (
+                    "an Internet address",
+                    !old.internet_dial.is_empty() && row.internet_dial.is_empty(),
+                ),
+                ("a p2p PeerId", !old.p2p.is_empty() && row.p2p.is_empty()),
+            ]
+            .into_iter()
+            .filter_map(|(what, gone)| gone.then_some(what))
+            .collect()
+        })
+        .unwrap_or_default();
     let forget = match prior.as_ref() {
         Some(old) => saved_routes_differ(old, &row).then_some(Keep::WhatItTold),
         None => p2p.map(|r| {
@@ -7048,6 +7110,12 @@ fn save_contact_from(
                 0 => String::new(),
                 n => format!(" (via {n} address{})", if n == 1 { "" } else { "es" }),
             }
+        );
+    }
+    if !dropped.is_empty() {
+        println!(
+            "{C_DIM}removed what the new card no longer carries: {}{C_RESET}",
+            dropped.join(", ")
         );
     }
     // The code once the key is verified only (no copy-back, §8 rule 1).
@@ -10121,16 +10189,32 @@ fn cmd_erase(data_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `raven contact forget-address` (privacy pack PP.7): clear one contact's
-/// saved LAN and Internet routes in the book (sealed in a sealed profile;
-/// petname, tag, pin, p2p route and custody friends stay) and forget what
+/// The exit code of a command that needs `--yes` and has no terminal to
+/// ask on: nothing was changed (a script tells it from a failure, 1).
+const EXIT_NEEDS_YES: i32 = 2;
+
+/// What `raven contact forget-address` says without a terminal and without
+/// `--yes` (field test E3: "stdin is not a terminal: pass --yes ...").
+fn forget_address_needs_yes(name: &str) -> String {
+    format!(
+        "Nothing forgotten: forget-address asks first, and there is no terminal to ask on. To \
+         forget {name}'s addresses from a script, add --yes."
+    )
+}
+
+/// `raven contact forget-address` (privacy pack PP.7): clear every saved
+/// route of one contact in the book (sealed in a sealed profile): its LAN,
+/// Internet and p2p addresses and the p2p relays (field test E3: a p2p
+/// PeerId from an old card stayed, and every send dialled it). Petname,
+/// tag, pin, Tor address and custody friends stay. It also forgets what
 /// Raven learned about reaching it ([`forget_outbox_routes`]): where it last
 /// connected from, its route hints, its remembered route and the routes
 /// recorded for its waiting messages. On a terminal it asks first (`y` or
 /// `yes`; Enter, EOF or anything else keeps everything); without one it
-/// needs `--yes`. What went stays in older sealed copies in freed disk
-/// blocks until the next data-key rotation, which it marks due (PP.10).
-/// Running it again changes nothing more.
+/// needs `--yes` (exit code [`EXIT_NEEDS_YES`] otherwise). What went stays
+/// in older sealed copies in freed disk blocks until the next data-key
+/// rotation, which it marks due (PP.10). Running it again changes nothing
+/// more.
 fn cmd_contact_forget_address(
     data_dir: &Path,
     selector: Option<&str>,
@@ -10138,16 +10222,16 @@ fn cmd_contact_forget_address(
     petname: Option<&str>,
     address: Option<&str>,
     yes: bool,
-) -> Result<(), String> {
+) -> Result<(), custody_cli::Refusal> {
     let contacts = load_contacts(data_dir)?;
     let target = select_contact_for_edit(&contacts, selector, tag, petname, address)?;
     let name = target.primary_label();
     if !yes {
         if !stdin_is_tty() {
-            return Err(
-                "stdin is not a terminal: pass --yes to forget the address without the question"
-                    .into(),
-            );
+            return Err(custody_cli::Refusal {
+                code: EXIT_NEEDS_YES,
+                text: forget_address_needs_yes(&name),
+            });
         }
         print!("{}", forget_address_question(&name));
         let _ = io::stdout().flush();
@@ -10156,7 +10240,7 @@ fn cmd_contact_forget_address(
             answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
         });
         if !agreed {
-            return Err("cancelled — nothing forgotten".into());
+            return Err("cancelled — nothing forgotten".to_string().into());
         }
     }
     for note in forget_contact_address(data_dir, &target.pub_hex)? {
@@ -10165,15 +10249,23 @@ fn cmd_contact_forget_address(
     println!("{C_GREEN}address forgotten{C_RESET} {name}");
     println!("{C_DIM}lan_dial{C_RESET}    (none)");
     println!("{C_DIM}internet{C_RESET}    (none)");
+    println!("{C_DIM}p2p{C_RESET}         (none)");
+    if !target.onion.trim().is_empty() {
+        println!(
+            "{C_DIM}Raven can still reach {name} over Tor (a Tor address shows no \
+             location).{C_RESET}"
+        );
+    }
     Ok(())
 }
 
 /// [`cmd_contact_forget_address`] once it was agreed, for the contact
 /// `pub_hex` (also the terminal app's "Forget {name}'s address", PP.21):
-/// the book is read again, the contact's saved LAN and Internet routes are
-/// cleared (its other fields stay), then what Raven learned about
-/// reaching it ([`forget_outbox_routes`]), and a data-key rotation is marked
-/// due. What could not be forgotten comes back, one line each.
+/// the book is read again, the contact's saved routes are cleared (LAN,
+/// Internet, p2p and its relays; its other fields stay), then what Raven
+/// learned about reaching it ([`forget_outbox_routes`]), and a data-key
+/// rotation is marked due. What could not be forgotten comes back, one
+/// line each.
 fn forget_contact_address(data_dir: &Path, pub_hex: &str) -> Result<Vec<String>, String> {
     let mut contacts = load_contacts(data_dir)?;
     let mut found = false;
@@ -10182,7 +10274,11 @@ fn forget_contact_address(data_dir: &Path, pub_hex: &str) -> Result<Vec<String>,
         .filter(|c| c.pub_hex.eq_ignore_ascii_case(pub_hex.trim()))
     {
         row.lan_dial.clear();
+        row.lan_dial_trusted = false;
         row.internet_dial.clear();
+        row.p2p.clear();
+        row.p2p_via.clear();
+        row.p2p_next.clear();
         found = true;
     }
     if !found {
@@ -16359,6 +16455,13 @@ pub fn run() {
                     None => {}
                 }
                 let p2p = card.as_ref().and_then(|c| c.p2p.clone());
+                let routes = if card.is_some() {
+                    Routes::Card { lan_typed }
+                } else if lan_typed {
+                    Routes::Typed
+                } else {
+                    Routes::Hints
+                };
                 if let Err(e) = save_contact_from(
                     &data_dir,
                     &address,
@@ -16370,7 +16473,7 @@ pub fn run() {
                     &internet_dial,
                     p2p.as_ref(),
                     true,
-                    lan_typed,
+                    routes,
                 ) {
                     eprintln!("{}", sanitize_terminal_line(&e));
                     ext::flush_security_sink();
@@ -16539,14 +16642,20 @@ pub fn run() {
                 petname,
                 address,
                 yes,
-            } => exit_on_err(cmd_contact_forget_address(
-                &data_dir,
-                selector.as_deref(),
-                tag.as_deref(),
-                petname.as_deref(),
-                address.as_deref(),
-                yes,
-            )),
+            } => {
+                if let Err(refusal) = cmd_contact_forget_address(
+                    &data_dir,
+                    selector.as_deref(),
+                    tag.as_deref(),
+                    petname.as_deref(),
+                    address.as_deref(),
+                    yes,
+                ) {
+                    eprintln!("{}", sanitize_terminal_line(&refusal.text));
+                    ext::flush_security_sink();
+                    std::process::exit(refusal.code);
+                }
+            }
             ContactCommands::HideIp { selector, state } => {
                 exit_on_err(cmd_contact_hide_ip(&data_dir, &selector, state == "on"))
             }
@@ -19959,10 +20068,109 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "",
             None,
             false,
-            true,
+            Routes::Typed,
         )
         .unwrap();
         assert!(trusted());
+    }
+
+    /// Field test E3: after `forget-address` and a release card (no p2p
+    /// field), the PeerId of an older card stayed, and every send dialled
+    /// it. A card now replaces the saved routes: what it no longer carries
+    /// goes (a card's LAN address, the Internet address, the p2p PeerId with
+    /// its relays), except a LAN address typed here or learned from the
+    /// friend's own link and a PeerId a p2p link proved. A re-save without
+    /// a card (`contact verify`, a rename) keeps every route.
+    #[test]
+    fn a_new_card_replaces_the_routes_it_no_longer_carries() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let alice = ident(0x0a);
+        let (address, pub_hex) = (alice.address(), hex::encode(alice.public_key_bytes()));
+        let peer_id = raven_core::p2p_route::local_peer_id(&ident(0x1a));
+        let old_card = || {
+            add_contact_with_routes(
+                d,
+                &address,
+                &pub_hex,
+                "Alice",
+                "",
+                Some(&device_fingerprint_v1(&alice.public_key_bytes())),
+                "192.168.1.20:7420",
+                "203.0.113.7:7422",
+                None,
+            )
+            .unwrap();
+            cmd_contact_set_routes(
+                d,
+                Some("Alice"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&peer_id),
+                &[],
+                &[],
+            )
+            .unwrap();
+            let row = load_contacts(d).unwrap()[0].clone();
+            assert!(
+                row.p2p == peer_id && !row.internet_dial.is_empty() && !row.lan_dial.is_empty()
+            );
+        };
+        let new_card = || {
+            save_contact_from(
+                d,
+                &address,
+                &pub_hex,
+                "",
+                "",
+                None,
+                "",
+                "",
+                None,
+                false,
+                Routes::Card { lan_typed: false },
+            )
+            .unwrap();
+            load_contacts(d).unwrap()[0].clone()
+        };
+        // A re-save without a card keeps them all.
+        old_card();
+        save_contact(d, &address, &pub_hex, "", "", None, "", "", None, false).unwrap();
+        let kept = load_contacts(d).unwrap()[0].clone();
+        assert_eq!(kept.p2p, peer_id);
+        assert_eq!(kept.internet_dial, "203.0.113.7:7422");
+        assert_eq!(kept.lan_dial, "192.168.1.20:7420");
+        // A card without them: gone; name and pin stay.
+        let row = new_card();
+        assert!(row.p2p.is_empty() && row.p2p_via.is_empty() && row.p2p_next.is_empty());
+        assert!(row.internet_dial.is_empty() && row.lan_dial.is_empty());
+        assert_eq!(row.petname, "Alice");
+        assert!(row.pinned);
+        // A LAN address typed here stays.
+        old_card();
+        cmd_contact_set_dial(d, None, Some("Alice"), None, "192.168.1.30:7420").unwrap();
+        let row = new_card();
+        assert_eq!(row.lan_dial, "192.168.1.30:7420");
+        assert!(row.lan_dial_trusted);
+        assert!(row.p2p.is_empty() && row.internet_dial.is_empty());
+        // A PeerId a p2p link proved is theirs stays.
+        old_card();
+        let now = super::now_ms();
+        let learned = serde_json::json!([{
+            "pub_hex": pub_hex, "generation": now, "received_at_ms": now,
+            "expires_at_ms": now + 3_600_000, "via": "p2p",
+            "peer_id": peer_id, "peer_id_proven": true,
+        }]);
+        std::fs::write(
+            d.join(raven_core::learned_routes::LEARNED_ROUTES_FILE),
+            learned.to_string(),
+        )
+        .unwrap();
+        assert!(learned_peer_id_proven(d, &pub_hex, &peer_id));
+        assert_eq!(new_card().p2p, peer_id);
     }
 
     #[test]
@@ -27822,11 +28030,12 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         serde_json::Value::from(rows).to_string()
     }
 
-    /// Privacy pack PP.7: `raven contact forget-address` clears the contact's
-    /// saved LAN and Internet routes and what Raven learned about reaching it
-    /// (where it last connected from, its route hints, the routes recorded
-    /// for its waiting message), and keeps the contact itself (name, tag, pin,
-    /// p2p route) and every other contact's. A second run changes nothing.
+    /// Privacy pack PP.7: `raven contact forget-address` clears every saved
+    /// route of the contact (LAN, Internet, p2p and its relays: field test
+    /// E3, an old card's PeerId stayed) and what Raven learned about reaching
+    /// it (where it last connected from, its route hints, the routes recorded
+    /// for its waiting message), and keeps the contact itself (name, tag,
+    /// pin) and every other contact's. A second run changes nothing.
     #[test]
     fn forget_address_clears_saved_and_learned_but_keeps_the_contact() {
         use raven_core::outbox::{CarrierChoice, OutboxCarrier, OutboxRoute};
@@ -27886,10 +28095,18 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             let after = load_contacts(d).unwrap();
             assert_eq!(after.len(), before.len());
             let mut kept = row(&before, &alice);
-            kept["lan_dial"] = serde_json::json!("");
-            kept.as_object_mut().unwrap().remove("internet_dial");
-            assert_eq!(row(&after, &alice), kept);
             assert_eq!(kept["p2p"], serde_json::json!(peer_id));
+            kept["lan_dial"] = serde_json::json!("");
+            for gone in [
+                "internet_dial",
+                "p2p",
+                "p2p_via",
+                "p2p_next",
+                "lan_dial_trusted",
+            ] {
+                kept.as_object_mut().unwrap().remove(gone);
+            }
+            assert_eq!(row(&after, &alice), kept);
             assert_eq!(kept["pinned"], serde_json::json!(true));
             assert_eq!(raven_core::lan_seen::seen_ip(d, &alice, now), None);
             assert!(raven_core::learned_routes::learned(d, &alice, now).is_none());

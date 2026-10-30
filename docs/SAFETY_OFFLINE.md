@@ -390,8 +390,9 @@ Do these on a calm day.
 - **Addresses are forgotten too.** Raven forgets the addresses it learned for
   a friend, and where they last connected from, after 30 days without
   contact. An address you saved stays until you forget it (in the full-screen
-  app: F on Sam's page); Raven can then reach Sam only after Sam connects to
-  you, or after you save a new address:
+  app: F on Sam's page). Forgetting clears every saved address of Sam (local
+  network, internet, p2p); Raven can then reach Sam only over Tor, after Sam
+  connects to you, or after you save a new address:
 
   ```sh
   raven contact forget-address --petname Sam
