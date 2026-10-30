@@ -7,9 +7,11 @@
 //!
 //! raven-node starts it, writes one config line on its stdin and reads its
 //! events on stdout. It exits when its stdin closes (raven-node is gone) or
-//! on `stop`. If Arti panics or calls `exit(1)` (an obsolete protocol
-//! version, Arti #1932), only this process ends; raven-node restarts it with
-//! backoff.
+//! on `stop`. If Arti panics, only this process ends; raven-node restarts
+//! it with backoff. When the Tor network requires a protocol this Arti
+//! lacks (Arti #1932), it says so on stderr and exits with 1 (Raven's
+//! arti-client patch tells it instead of exiting itself), and raven-node
+//! keeps Tor off.
 
 #[path = "../../onion/proto.rs"]
 #[allow(dead_code)]
@@ -31,6 +33,14 @@ fn main() {
         Err(_) => std::process::exit(3),
     };
     let code = runtime.block_on(arti::serve(tokio::io::stdin(), tokio::io::stdout()));
+    // Too old for the Tor network: say so where raven-node reads it (as
+    // Arti's own exit used to), and end as it did.
+    let code = if code == arti::EXIT_OBSOLETE {
+        eprintln!("{}", arti::OBSOLETE_WORDS);
+        1
+    } else {
+        code
+    };
     // Do not wait for Arti's background tasks: raven-node is gone or asked.
     runtime.shutdown_timeout(Duration::from_secs(1));
     std::process::exit(code);

@@ -1305,20 +1305,18 @@ impl<R: Runtime> RunningInner<R> {
             crate::supported_protocols(),
             // TODO #1932: It would be nice to have a cleaner shutdown mechanism here,
             // but that will take some work.
+            //
+            // Raven delta (RAVEN_DELTA.md): the message and the exit moved to
+            // `raven_delta::unsupported_software`, which calls the embedding
+            // program's hook instead when it set one.
             |fatal| async move {
                 use tor_error::ErrorReport as _;
                 // We already logged this error, but let's tell stderr too.
-                eprintln!(
-                    "Shutting down because of unsupported software version.\nError was:\n{}",
-                    fatal.report(),
-                );
-                if let Some(hint) = crate::err::Error::from(fatal).hint() {
-                    eprintln!("{}", hint);
-                }
-                // Give the tracing module a while to flush everything, since it has no built-in
-                // flush function.
-                rtclone.sleep(std::time::Duration::new(5, 0)).await;
-                std::process::exit(1);
+                let report = fatal.report().to_string();
+                let hint = crate::err::Error::from(fatal)
+                    .hint()
+                    .map(|hint| hint.to_string());
+                crate::raven_delta::unsupported_software(&rtclone, report, hint).await;
             },
         )?;
 

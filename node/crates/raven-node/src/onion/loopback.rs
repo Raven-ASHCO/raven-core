@@ -100,7 +100,8 @@ where
     .await
     {
         Ok(Ended::Stopped) => 0,
-        Ok(Ended::Obsolete) => 1,
+        // As the Arti helper in process says it.
+        Ok(Ended::Obsolete) => super::arti::EXIT_OBSOLETE,
         Err(e) => {
             eprintln!("raven-node onion: in-process loopback helper: {e}");
             2

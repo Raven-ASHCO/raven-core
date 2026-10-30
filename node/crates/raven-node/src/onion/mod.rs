@@ -7,10 +7,14 @@
 //! authenticates nothing for Raven.
 //!
 //! **Arti runs in a helper process** (`raven-tor-helper`, cargo feature
-//! `tor`), never in raven-node: a panic, Arti's `exit(1)` on an obsolete
-//! protocol version (Arti #1932) or a bootstrap that spins at 100 % CPU (Arti
-//! #2726) ends or hangs the helper, which this module kills and restarts.
-//! raven-node itself never links Arti. The local protocol is [`proto`].
+//! `tor`), never in raven-node: a panic or a bootstrap that spins at 100 %
+//! CPU (Arti #2726) ends or hangs the helper, which this module kills and
+//! restarts. raven-node itself never links Arti, except with
+//! `tor-embedded` (the iOS app: [`InProcess`]). The local protocol is
+//! [`proto`]. When the Tor network requires a protocol this Arti lacks
+//! (Arti #1932; Raven's arti-client patch reports it instead of exiting the
+//! process), Tor stays off for the rest of the run: "Tor: off: this version
+//! is too old for the Tor network; update Raven".
 //!
 //! **This module:**
 //! - [`run`]: the supervised service task (only while the gate is open and a
@@ -131,6 +135,9 @@ pub(crate) enum Phase {
     CantStart,
     /// The helper is being started again (a failure, a network change).
     Restarting,
+    /// The Tor network requires a protocol this Tor lacks (Arti #1932):
+    /// Tor stays off for the rest of this run; only a newer Raven helps.
+    TooOld,
 }
 
 /// The onion carrier's state ([`status`]).
@@ -233,8 +240,12 @@ pub(crate) fn status_line(s: &Status, now: Instant) -> String {
             retry,
         ),
         Phase::Restarting => with_parts("Tor: restarting", s.why.clone(), retry),
+        Phase::TooOld => format!("Tor: off: {TOO_OLD_WHY}"),
     }
 }
+
+/// Why Tor is off for good in this run (the Tor network requires a newer Tor).
+pub(crate) const TOO_OLD_WHY: &str = "this version is too old for the Tor network; update Raven";
 
 /// The onion service's outages since start, for the status line: none
 /// said while there were none.
@@ -501,11 +512,12 @@ impl Spawn for Launcher {
 /// node stopping) closes its input and drops its runtime, and with it
 /// every Tor circuit and socket of that life.
 ///
-/// What only a process gives: a panic in Arti is caught here (the life
-/// ends, the supervisor starts another), but Arti's `exit(1)` on a
-/// protocol version the Tor network no longer accepts (Arti #1932) ends the
-/// whole app, and a thread that spins (Arti #2726) cannot be killed, only
-/// left behind (its runtime is dropped). docs/IOS.md says so.
+/// A panic in Arti is caught here (the life ends, the supervisor starts
+/// another). A protocol version the Tor network no longer accepts (Arti
+/// #1932) ends the life, not the app: Raven's arti-client patch tells the
+/// helper instead of exiting, and Tor stays off ([`Phase::TooOld`]). What
+/// only a process gives: a thread that spins (Arti #2726) cannot be killed,
+/// only left behind (its runtime is dropped). docs/IOS.md says so.
 #[cfg(feature = "tor-embedded")]
 #[derive(Clone, Debug)]
 pub(crate) enum InProcess {
@@ -573,11 +585,17 @@ impl Spawn for InProcess {
                             }
                         };
                         tokio::select! {
-                            _ = serve => {}
-                            _ = killed => {}
+                            code = serve => code,
+                            _ = killed => 0,
                         }
                     })
                 }));
+                // Too old for the Tor network (Arti #1932): what the
+                // supervisor reads from a helper process's stderr then.
+                if matches!(life, Ok(arti::EXIT_OBSOLETE)) {
+                    let words = format!("{}\n", arti::OBSOLETE_WORDS);
+                    let _ = runtime.block_on(stderr_helper.write_all(words.as_bytes()));
+                }
                 if life.is_err() {
                     // What the supervisor reads from a helper process's
                     // stderr after a panic.
@@ -760,6 +778,25 @@ async fn supervise(
             live.connect = None;
         }
         raven_core::onion_gate::set_onion_ready(false);
+        // The Tor network requires a protocol this Tor lacks: no restart
+        // can help (Arti would end the same way, or refuse to start), and an
+        // obsolete client must not keep trying. Off until Raven is updated.
+        if end == End::Obsolete {
+            update_status(|s| {
+                *s = Status {
+                    phase: Phase::TooOld,
+                    starts: s.starts,
+                    published: s.published,
+                    outages: s.outages,
+                    ..Status::default()
+                }
+            });
+            eprintln!(
+                "raven-node onion: {}",
+                status_line(&status(), Instant::now())
+            );
+            return std::future::pending::<Infallible>().await;
+        }
         let next = restarts.ended(end, started.elapsed(), &blame);
         config.fresh_state = next.fresh_state;
         let retry_at = (!next.wait.is_zero()).then(|| Instant::now() + next.wait);

@@ -1077,3 +1077,97 @@ async fn every_helper_life_gets_a_fresh_token() {
     let now = *current.lock().unwrap();
     assert!(tokens.contains(&hex::encode(now)));
 }
+
+// ── Tor off: too old for the Tor network (owner decision 2026-10-30) ───────
+
+/// A helper that says Arti's "too old" words on stderr, as the helper (and
+/// the in-process helper) does when the Tor network requires a protocol it
+/// lacks, then ends; how many were started.
+struct TooOldHelper(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Spawn for TooOldHelper {
+    fn spawn(&self) -> Result<Proc, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
+        let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
+        let (mut err_in, err_out) = tokio::io::duplex(1024);
+        let done = async move {
+            let mut lines = LineReader::new(Box::pin(helper_in));
+            let _ = lines.next_line().await;
+            let words = format!("{}\n", arti_words());
+            let _ = err_in.write_all(words.as_bytes()).await;
+            drop(err_in);
+            drop(helper_out);
+        };
+        Ok(Proc {
+            stdin: Box::pin(to_helper),
+            stdout: Box::pin(from_helper),
+            stderr: Some(Box::pin(err_out)),
+            done: Box::pin(done),
+            kill: None,
+        })
+    }
+}
+
+/// The words a too-old helper says (the Arti helper's [`arti::OBSOLETE_WORDS`]
+/// where it is built).
+fn arti_words() -> &'static str {
+    #[cfg(feature = "tor-embedded")]
+    {
+        arti::OBSOLETE_WORDS
+    }
+    #[cfg(not(feature = "tor-embedded"))]
+    {
+        "Shutting down because of unsupported software version."
+    }
+}
+
+fn test_config(dir: &Path) -> proto::Config {
+    proto::Config {
+        v: proto::PROTO_VERSION,
+        state_dir: dir.join(TOR_DIR).to_string_lossy().into_owned(),
+        token: "00".repeat(proto::TOKEN_LEN),
+        forward: "127.0.0.1:9".into(),
+        port: raven_core::onion::ONION_VIRTUAL_PORT,
+        fresh_state: false,
+    }
+}
+
+/// Owner decision 2026-10-30: when the Tor network requires a protocol
+/// this Tor lacks, Tor turns off ("update Raven") instead of the process
+/// ending, and is never started again in this run.
+#[tokio::test(start_paused = true)]
+async fn a_tor_too_old_for_the_network_turns_tor_off_for_good() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task = tokio::spawn(supervise(
+        Arc::new(TooOldHelper(Arc::clone(&starts))),
+        test_config(dir.path()),
+        Arc::new(Mutex::new([0u8; proto::TOKEN_LEN])),
+        dir.path().to_path_buf(),
+        Arc::new(Identity::from_seed(&[0x3a; 32])),
+    ));
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    let line = status_line(&status(), Instant::now());
+    task.abort();
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        line,
+        "Tor: off: this version is too old for the Tor network; update Raven"
+    );
+    assert!(!raven_core::onion_gate::onion_usable_now());
+}
+
+/// Raven's arti-client patch (third_party/arti-client-0.47.0-raven): the
+/// path a consensus requiring a missing protocol takes tells the helper
+/// instead of ending the process. Without the patch this test process
+/// would exit with 1 here.
+#[cfg(feature = "tor-embedded")]
+#[tokio::test]
+async fn the_arti_patch_tells_the_helper_instead_of_exiting() {
+    let life = arti::watch_too_old();
+    let runtime = tor_rtcompat::PreferredRuntime::current().unwrap();
+    arti_client::raven_delta::simulate_unsupported_software(&runtime).await;
+    assert!(life.said.load(std::sync::atomic::Ordering::Acquire));
+}

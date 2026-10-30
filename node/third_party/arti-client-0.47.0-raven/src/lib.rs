@@ -54,6 +54,7 @@ mod address;
 mod builder;
 mod client;
 mod protostatus;
+pub mod raven_delta;
 mod release_date;
 #[cfg(feature = "rpc")]
 pub mod rpc;

@@ -15,6 +15,7 @@ exclude = [
     "third_party/libsqlite3-sys-raven",
     "third_party/secret-service-2.0.2-raven-noprompt",
     "third_party/saturating-time-0.5.0-raven",
+    "third_party/arti-client-0.47.0-raven",
 ]
 
 [workspace.package]
@@ -54,3 +55,7 @@ libsqlite3-sys = { path = "third_party/libsqlite3-sys-raven" }
 # fix for arti#2726 (its limit search never ends on Windows, so Tor bootstrap
 # hangs at 15 %). Drop this once a fixed crates.io release is in Cargo.lock.
 saturating-time = { path = "third_party/saturating-time-0.5.0-raven" }
+# Tor carrier: arti-client 0.47.0 told instead of exiting when the Tor network
+# requires a protocol this Arti lacks (arti#1932): in the iOS app Tor runs in
+# the app's own process (third_party/arti-client-0.47.0-raven/RAVEN_DELTA.md).
+arti-client = { path = "third_party/arti-client-0.47.0-raven" }

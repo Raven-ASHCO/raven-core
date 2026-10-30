@@ -92,9 +92,50 @@ impl Events {
     }
 }
 
+/// The exit code of a helper life the Tor network found too old: it requires
+/// a protocol this Arti lacks (Arti #1932). Arti's own `exit(1)` is replaced
+/// by a hook (third_party/arti-client-0.47.0-raven/RAVEN_DELTA.md); the host
+/// then says [`OBSOLETE_WORDS`] where raven-node reads the helper's stderr.
+pub(crate) const EXIT_OBSOLETE: i32 = 5;
+/// The words raven-node's supervisor reads as "too old" (upstream Arti's).
+pub(crate) const OBSOLETE_WORDS: &str = "Shutting down because of unsupported software version.";
+
+/// One helper life's "too old" signal.
+#[derive(Default)]
+pub(crate) struct TooOld {
+    /// The signal came (read after the life ended).
+    pub(crate) said: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+/// The current life's signal: Arti's hook is set once per process, and an
+/// in-process helper has many lives.
+static TOO_OLD: std::sync::Mutex<Option<Arc<TooOld>>> = std::sync::Mutex::new(None);
+
+/// The Tor network requires a protocol this Arti lacks: this life ends.
+fn too_old() {
+    if let Some(life) = TOO_OLD.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        life.said.store(true, std::sync::atomic::Ordering::Release);
+        life.notify.notify_one();
+    }
+}
+
+/// This life gets the "too old" signal: Arti's hook (set once) and the
+/// errors that say the same at start.
+pub(crate) fn watch_too_old() -> Arc<TooOld> {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let _ = arti_client::raven_delta::on_unsupported_software(Box::new(too_old));
+    });
+    let life = Arc::new(TooOld::default());
+    *TOO_OLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&life));
+    life
+}
+
 /// The helper on `input` (raven-node's lines) and `output` (its events),
 /// until `input` closes, `stop`, or Tor gives up for good; the exit code
-/// (0 asked to stop, 2 a bad config line, 4 Tor gave up).
+/// (0 asked to stop, 2 a bad config line, 4 Tor gave up, [`EXIT_OBSOLETE`]
+/// the Tor network requires a newer Tor).
 pub(crate) async fn serve<R, W>(input: R, output: W) -> i32
 where
     R: AsyncRead + Unpin + Send,
@@ -141,6 +182,7 @@ where
         set_guard_state_aside(&state_dir);
     }
     upload_rounds::install(events.clone());
+    let obsolete = watch_too_old();
 
     // Everything Tor does runs in this task; stdin ends it.
     let (checks, check_requests) = mpsc::unbounded_channel::<u64>();
@@ -173,7 +215,14 @@ where
                 code = 4;
                 break;
             }
+            // The Tor network requires a protocol this Arti lacks: this
+            // client must stop (the host tells raven-node, which keeps Tor
+            // off).
+            () = obsolete.notify.notified() => break,
         }
+    }
+    if obsolete.said.load(std::sync::atomic::Ordering::Acquire) {
+        code = EXIT_OBSOLETE;
     }
     tor.abort();
     drop(events);
@@ -215,7 +264,13 @@ async fn tor_main(
     .create_unbootstrapped()
     {
         Ok(c) => c,
-        Err(e) => return events.arti("Tor client not created", e.kind()),
+        Err(e) => {
+            // A cached consensus already says this Arti is too old.
+            if e.kind() == arti_client::ErrorKind::SoftwareDeprecated {
+                too_old();
+            }
+            return events.arti("Tor client not created", e.kind());
+        }
     };
 
     // Bootstrap progress, as percent and Tor's own word for a blockage.
@@ -245,7 +300,10 @@ async fn tor_main(
     };
     if let Err(e) = client.bootstrap().await {
         // raven-node's watchdogs decide; a cause on this computer is said
-        // as such.
+        // as such. Too old for the Tor network ends this life.
+        if e.kind() == arti_client::ErrorKind::SoftwareDeprecated {
+            too_old();
+        }
         events.arti("bootstrap failed", e.kind());
         reporter.abort();
         return std::future::pending().await;

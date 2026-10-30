@@ -477,8 +477,9 @@ fn way(id: &'static str, facts: &NetFacts) -> Value {
 pub(crate) struct TorView {
     /// `ready`, `publishing` (ready, the onion service not confirmed yet),
     /// `unreachable` (ready, the onion service can't be reached), `starting`,
-    /// `restarting`, `blocked`, `could_not_start`, `not_built`, `off`, or
-    /// `unknown` for words this engine doesn't know.
+    /// `restarting`, `blocked`, `could_not_start`, `not_built`, `off`,
+    /// `too_old` (the Tor network requires a newer Tor: off until Raven is
+    /// updated), or `unknown` for words this engine doesn't know.
     pub phase: &'static str,
     /// The line after `Tor: `.
     pub words: String,
@@ -532,6 +533,8 @@ impl TorView {
             "could_not_start"
         } else if head.starts_with("not built") {
             "not_built"
+        } else if head.starts_with("off: this version is too old") {
+            "too_old"
         } else if head == "off" {
             "off"
         } else {
@@ -582,6 +585,7 @@ impl TorView {
             "could_not_start" => "Could not start on this computer.",
             "not_built" => "Not built into this Raven (its Tor helper is missing).",
             "off" => "Off.",
+            "too_old" => "Tor off: this version is too old for the Tor network; update Raven.",
             _ => "As Raven's background program reports it.",
         }
     }
@@ -2237,6 +2241,16 @@ mod tests {
             "not_built"
         );
         assert_eq!(TorView::parse("Tor: off").phase, "off");
+        // Owner decision 2026-10-30: too old for the Tor network (off until
+        // Raven is updated).
+        let t =
+            TorView::parse("Tor: off: this version is too old for the Tor network; update Raven");
+        assert_eq!(t.phase, "too_old");
+        assert_eq!(
+            t.reason(),
+            "Tor off: this version is too old for the Tor network; update Raven."
+        );
+        assert!(!t.running());
         assert_eq!(TorView::parse("Tor: something new").phase, "unknown");
         // Control characters from the line never reach the apps.
         assert!(!TorView::parse("Tor: ready\u{1b}[31m")
