@@ -27,8 +27,16 @@ set -euo pipefail
 # (an attribute-only search of the session service) are `raven erase`'s
 # (privacy pack PP.16; review C-deletion-erase-1). raven_passphrase.rs's
 # `get` / `put` / `delete` / `accounts` are the login keychain of the Raven
-# passphrase's switch (Lock v2, P6.40).
+# passphrase's switch (Lock v2, P6.40). apple_keychain.rs names the calls for
+# both Apple systems: on macOS it only re-exports security-framework's (the
+# allow-listed callers guard them), on iOS it is the data-protection keychain.
+#
+# iOS: the guard is for the macOS login keychain's access dialogs, which iOS
+# does not have. A function under `#[cfg(target_os = "ios")]` must still be
+# allow-listed by its file and name (the iOS twin of a macOS function, such
+# as identity_store's keychain_set), but its calls need no guarded(...).
 ALLOWED='node/crates/raven-core/src/macos_keychain.rs:*
+node/crates/raven-core/src/apple_keychain.rs:*
 node/crates/raven-core/src/identity_store.rs:keychain_get
 node/crates/raven-core/src/identity_store.rs:keychain_set
 node/crates/raven-core/src/identity_store.rs:keychain_delete
@@ -64,6 +72,7 @@ BEGIN {
   hot = "guarded|security_framework|ItemSearchOptions|SecItem|SecKeychain|_(generic|internet)_password"
   decl = "^[[:space:]]*(pub([(][a-z_ ]+[)])?[[:space:]]+)?((async|const|unsafe)[[:space:]]+)*(extern[[:space:]]+\"[A-Za-z]+\"[[:space:]]+)?fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*"
   usestmt = "^[[:space:]]*(pub([(][a-z_ ]+[)])?[[:space:]]+)?use[[:space:]]"
+  iosattr = "^[[:space:]]*#[[][[:space:]]*cfg[(][[:space:]]*target_os[[:space:]]*=[[:space:]]*\"ios\"[[:space:]]*[)][[:space:]]*[]]"
 }
 # The line without its // comment and with every string or char literal
 # replaced by one space. A string can span lines: in_str carries over.
@@ -120,16 +129,22 @@ function walk(s, lineno, usage,   tok) {
 FILENAME == ARGV[1] { if ($0 != "") allow[$0] = 1; next }
 FNR == 1 {
   fname = "<module>"; fid = FILENAME ":" fname ":0"
-  gdepth = 0; in_str = 0; in_use = 0
+  gdepth = 0; in_str = 0; in_use = 0; ios_next = 0
 }
 {
   line = $0
   sub(/\/\/.*/, "", line)
+  # `#[cfg(target_os = "ios")]` marks the next fn as iOS only (attributes,
+  # comments and blank lines may come between).
+  if (line ~ iosattr) ios_next = 1
+  else if (ios_next && line !~ /^[[:space:]]*(#[[]|$)/ && !match(line, decl)) ios_next = 0
   if (match(line, decl)) {
     n = split(substr(line, RSTART, RLENGTH), parts, /[[:space:]]+/)
     fname = parts[n]
     fid = FILENAME ":" fname ":" FNR
     gdepth = 0; in_str = 0; in_use = 0
+    if (ios_next) ios_fn[fid] = 1
+    ios_next = 0
   }
   starts_use = (!in_use && line ~ usestmt)
   usage = (in_use || starts_use)
@@ -151,6 +166,7 @@ END {
       continue
     }
     used[key] = 1
+    if (id in ios_fn) continue
     if (id in raw) {
       printf "%s:%d: %s() calls the Keychain outside macos_keychain::guarded\n", f, raw[id], name
       bad = 1
@@ -392,6 +408,48 @@ EOF
   selftest_expect "nested guard" "$root" "$pre/ok.rs:read_item
 $pre/nested.rs:read_item" 0
   rm "$src/nested.rs"
+  # iOS (no login keychain dialogs): an allow-listed function's iOS twin may
+  # call without the guard; its macOS twin still needs it; an iOS function
+  # that is not allow-listed still fails.
+  cat >"$src/twins.rs" <<'EOF'
+/// iOS: the data-protection keychain.
+#[cfg(target_os = "ios")]
+fn read_item(account: &str) -> u8 {
+    crate::apple_keychain::get_generic_password("s", account)
+}
+
+#[cfg(target_os = "macos")]
+fn read_item(account: &str) -> u8 {
+    guarded(KeychainWhat::IdentitySeed, || get_generic_password("s", account))
+}
+EOF
+  selftest_expect "iOS twin of an allow-listed function" "$root" "$pre/ok.rs:read_item
+$pre/twins.rs:read_item" 0
+  cat >"$src/twins.rs" <<'EOF'
+#[cfg(target_os = "ios")]
+fn read_item(account: &str) -> u8 {
+    crate::apple_keychain::get_generic_password("s", account)
+}
+
+#[cfg(target_os = "macos")]
+fn read_item(account: &str) -> u8 {
+    get_generic_password("s", account)
+}
+EOF
+  selftest_expect "macOS twin still needs the guard" "$root" "$pre/ok.rs:read_item
+$pre/twins.rs:read_item" 1 \
+    "$pre/twins.rs:8: read_item() calls the Keychain outside macos_keychain::guarded"
+  rm "$src/twins.rs"
+  cat >"$src/iosonly.rs" <<'EOF'
+#[cfg(target_os = "ios")]
+fn sneaky_ios(account: &str) {
+    let _ = crate::apple_keychain::set_generic_password("svc", account, b"x");
+}
+EOF
+  selftest_expect "iOS function not allow-listed" "$root" "$pre/ok.rs:read_item" 1 \
+    "$pre/iosonly.rs:3: Keychain API used in sneaky_ios(), which is not allow-listed"
+  rm "$src/iosonly.rs"
+
   # An API name inside a string is a message, not a call.
   cat >"$src/message.rs" <<'EOF'
 fn describe() -> &'static str {
