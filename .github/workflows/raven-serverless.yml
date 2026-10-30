@@ -100,6 +100,14 @@ jobs:
         run: bash scripts/freeze_protocol_hashes.sh --check
       - name: No diverging docs/ duplicates under node/
         run: bash scripts/check_doc_pointers.sh
+      # A person's Apple signing team never comes back as a default or a
+      # setting in a tracked file (it comes from the environment or a local
+      # file kept out of git). Values are never printed.
+      - name: No Apple team id in tracked files
+        run: |
+          set -euo pipefail
+          bash scripts/check_apple_team_id.sh --self-test
+          bash scripts/check_apple_team_id.sh
       # Phase 6a P6.17: learning code never writes settings or the contact
       # book, opens no gate and feeds nothing it learned into RRH1/RLB1/RFC1.
       - name: Learning source boundary (static)

@@ -43,7 +43,13 @@ RESULT_PREFIX="RAVEN_FB_PHYSICAL_GATE_JSON:"
 HARNESS_ID="raven.atsam.full-braid.physical-gate.v1"
 FROZEN_HOLD="FULL_BRAID_PHYSICAL_GATE_HOLD_MAIN_APP_CANNOT_RUN_BEFORE_FIRST_UNLOCK_V1"
 RECOVERY_TOKEN="YES-DELETE-SCOPED-FULLBRAID-KEYCHAIN"
-DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-72QQ5Q324C}"
+# The Apple development team that signs the device build is the operator's
+# own and never part of this repository: DEVELOPMENT_TEAM from the
+# environment, else the DEVELOPMENT_TEAM line of TEAM_XCCONFIG (default
+# $IOS/Config/Team.local.xcconfig, a local file kept out of git). Checked
+# below, before anything is built; never printed.
+DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-}"
+TEAM_XCCONFIG="${TEAM_XCCONFIG:-$IOS/Config/Team.local.xcconfig}"
 
 DEVICE_UDID="${DEVICE_UDID:-}"
 PHASE="${PHASE:-all}"
@@ -89,6 +95,12 @@ if xcrun simctl list devices 2>/dev/null | grep -q "$DEVICE_UDID"; then
   die "DEVICE_UDID is a simulator; physical gate requires a real iPhone"
 fi
 
+if [[ -z "$DEVELOPMENT_TEAM" && -f "$TEAM_XCCONFIG" ]]; then
+  DEVELOPMENT_TEAM="$(sed -n 's/^[[:space:]]*DEVELOPMENT_TEAM[[:space:]]*=[[:space:]]*\([A-Za-z0-9]*\).*/\1/p' "$TEAM_XCCONFIG" | tail -n 1)"
+fi
+[[ -n "$DEVELOPMENT_TEAM" ]] \
+  || die "set DEVELOPMENT_TEAM to your Apple development team (or put a DEVELOPMENT_TEAM = ... line in $TEAM_XCCONFIG, which stays out of git); this repository carries none"
+
 touch "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -97,7 +109,7 @@ echo "harness=$HARNESS_ID"
 echo "device_udid=$DEVICE_UDID"
 echo "evidence_dir=$EVIDENCE_DIR"
 echo "derived_data=$DERIVED_DATA"
-echo "development_team=$DEVELOPMENT_TEAM"
+echo "development_team=set (not printed)"
 echo "phase_mode=$PHASE"
 echo "frozen_hold=$FROZEN_HOLD"
 echo "note: digests only — seed bytes never written to host evidence"
