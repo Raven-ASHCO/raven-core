@@ -112,17 +112,16 @@ fn group_row(
     focused: bool,
 ) -> Line<'static> {
     let (g, t) = (&app.look().glyphs, &app.look().theme);
+    let width = usize::from(width);
+    let lead = 4;
+    let name_cells = display::width(&group.name).min(usize::from(home::LIST_NAME_CELLS));
+    let fits = |words: &str| lead + name_cells + 1 + cells(words) <= width;
     let (badge, badge_style) = match group.status.as_str() {
         STATUS_LEFT => (LEFT.to_owned(), t.secondary),
         STATUS_REMOVED => (REMOVED.to_owned(), t.secondary),
-        _ if group.unread > 0 && t.chips => {
-            (format!(" {} ", home::unread_count(group.unread)), t.unread)
-        }
-        _ if group.unread > 0 => (home::unread_count(group.unread), t.unread),
+        _ if group.unread > 0 => (home::unread_badge(group.unread, t.chips, fits), t.unread),
         _ => (String::new(), Style::default()),
     };
-    let width = usize::from(width);
-    let lead = 4;
     let badge_room = if badge.is_empty() {
         0
     } else {

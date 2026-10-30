@@ -531,7 +531,7 @@ fn two_profiles_add_verify_and_message_each_other() {
         presence::presence(&friend, bob.app.rows(alice_key), now.0, now.1),
         Presence::Recent { .. }
     ));
-    // Her row in the list: highlighted, the in-touch mark, the count.
+    // Her row in the list: highlighted, the in-touch mark, the unread badge.
     let dot = bob.app.look().glyphs.dot_recent;
     let in_list: Vec<String> = bob
         .frame()
@@ -539,9 +539,10 @@ fn two_profiles_add_verify_and_message_each_other() {
         .map(|row| row.chars().skip(1).take(20).collect())
         .collect();
     assert!(
-        in_list.iter().any(
-            |row| row.starts_with(&format!("> {dot} Alice ")) && row.trim_end().ends_with(" 1")
-        ),
+        in_list
+            .iter()
+            .any(|row| row.starts_with(&format!("> {dot} Alice "))
+                && row.trim_end().ends_with(" 1 new")),
         "{in_list:?}"
     );
 

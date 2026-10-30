@@ -759,10 +759,9 @@ fn friend_row(
         (BLOCKED.to_owned(), t.secondary)
     } else if app.notices_about(&friend.pub_hex).next().is_some() {
         (g.alarm_badge.to_owned(), t.warn)
-    } else if unread > 0 && t.chips {
-        (format!(" {} ", unread_count(unread)), t.unread)
     } else if unread > 0 {
-        (unread_count(unread), t.unread)
+        let fits = |words: &str| lead + name_cells + 1 + cells(words) <= usize::from(width);
+        (unread_badge(unread, t.chips, fits), t.unread)
     } else if app.paused(&friend.pub_hex) {
         (PAUSED.to_owned(), t.secondary)
     } else if !friend.pinned && roomy(NOT_VERIFIED) {
@@ -858,6 +857,21 @@ fn dot(presence: Presence) -> Dot {
         Presence::Waiting(_) => Dot::Waiting,
         Presence::Recent { .. } => Dot::Recent,
         Presence::Quiet { .. } => Dot::Quiet,
+    }
+}
+
+/// The unread badge (field test E3: a bare "10" beside a name read like
+/// data, not like messages to read): "10 new" where the row has room for it
+/// with the name whole (`fits`), else the count alone; a chip where the
+/// theme draws chips (`chips`), in brackets where it does not.
+pub(super) fn unread_badge(n: usize, chips: bool, fits: impl Fn(&str) -> bool) -> String {
+    let count = unread_count(n);
+    let words = format!("{count} new");
+    match (chips, fits(&format!(" {words} "))) {
+        (true, true) => format!(" {words} "),
+        (true, false) => format!(" {count} "),
+        (false, _) if fits(&words) => words,
+        (false, _) => format!("({count})"),
     }
 }
 
@@ -2122,8 +2136,8 @@ mod tests {
             &[
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
-                "│> o Bob            2││                                                        │",
-                "│  o Alice          1││                                                        │",
+                "│> o Bob        2 new││                                                        │",
+                "│  o Alice      1 new││                                                        │",
                 "│  x Carol          !││                                                        │",
                 "│                    ││                                                        │",
                 "│                    ││                                                        │",
@@ -2155,7 +2169,7 @@ mod tests {
             "R A V E N                                                                         o Receiving is off",
             "┌ Friends ───────────┐┌────────────────────────────────────────────────────────────────────────────┐",
             "│> o Bob             ││ Bob  v Verified - Last message 5 min ago                                   │",
-            "│  o Alice          1││ You *--------------------------* Bob                                       │",
+            "│  o Alice      1 new││ You *--------------------------* Bob                                       │",
             "│  x Carol          !││                                                                            │",
             "│                    ││                                                                            │",
             "│                    ││                                                                            │",
@@ -2196,7 +2210,7 @@ mod tests {
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
                 "│> o Bob             ││ Bob  v Verified - Last message 5 min ago               │",
-                "│  o Alice          1││ You *--------------------------* Bob                   │",
+                "│  o Alice      1 new││ You *--------------------------* Bob                   │",
                 "│  x Carol          !││                                                        │",
                 "│                    ││                                                        │",
                 "│                    ││                                                        │",
@@ -2229,8 +2243,8 @@ mod tests {
             &[
                 "R A V E N                                           o Receiving is off",
                 "┌ Friends ───────────────────────────────────────────────────────────┐",
-                "│> o Bob                                                            2│",
-                "│  o Alice                                                          1│",
+                "│> o Bob                                                        2 new│",
+                "│  o Alice                                                      1 new│",
                 "│  x Carol                                                          !│",
                 "│                                                                    │",
                 "│                                                                    │",
@@ -2305,7 +2319,7 @@ mod tests {
             &[
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
-                "│  o Bob            2││ Alice  ! Not verified - Last message 3 d ago           │",
+                "│  o Bob        2 new││ Alice  ! Not verified - Last message 3 d ago           │",
                 "│> o Alice          !││ You *--------------------------* Alice                 │",
                 "│  x Carol          !││ You haven't checked this is really Alice. Compare      │",
                 "│                    ││ security words with Alice: press V.                    │",
@@ -2342,8 +2356,8 @@ mod tests {
             &[
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
-                "│  o Bob            2││ Carol  ! Not verified - No address to reach them       │",
-                "│  o Alice          1││ You haven't checked this is really Carol. Compare      │",
+                "│  o Bob        2 new││ Carol  ! Not verified - No address to reach them       │",
+                "│  o Alice      1 new││ You haven't checked this is really Carol. Compare      │",
                 "│> x Carol          !││ security words with Carol: press V.                    │",
                 "│                    ││ Raven doesn't know where to reach Carol yet. Ask them  │",
                 "│                    ││ for their invite again, or press E to enter their      │",
@@ -2419,7 +2433,7 @@ mod tests {
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
                 "│  o Bob             ││ Bob  v Verified - Last message 5 min ago               │",
-                "│  o Alice          1││ You *--------------------------* Bob                   │",
+                "│  o Alice      1 new││ You *--------------------------* Bob                   │",
                 "│> x Carol          !││                                                        │",
                 "│                    ││                                                        │",
                 "│                    ││                                                        │",
@@ -2751,7 +2765,7 @@ mod tests {
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
                 "│> o Bob             ││ Bob  v Verified - Last message 5 min ago               │",
-                "│  o Alice          1││ You *--------------------------* Bob                   │",
+                "│  o Alice      1 new││ You *--------------------------* Bob                   │",
                 "│  x Carol          !││ Your message history can't be read.                    │",
                 "│                    ││ Press D for details.                                   │",
                 "│                    ││                                                        │",
@@ -2782,7 +2796,7 @@ mod tests {
             "R A V E N                                                                       ",
             "╭ Friends ───────────╮╭────────────────────────────────────────────────────────╮",
             "│> ○ Bob             ││ Bob  ✓ Verified · Last message 5 min ago               │",
-            "│  ○ Alice          1││ You ◉┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◉ Bob                   │",
+            "│  ○ Alice      1 new││ You ◉┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◉ Bob                   │",
             "│  ✕ Carol          !││                                                        │",
             "│                    ││                                                        │",
             "│                    ││                                                        │",
@@ -2808,7 +2822,7 @@ mod tests {
             "R A V E N                                                                       ",
             "+ Friends -----------++--------------------------------------------------------+",
             "|> o Bob             || Bob  v Verified - Last message 5 min ago               |",
-            "|  o Alice          1|| You *--------------------------* Bob                   |",
+            "|  o Alice      1 new|| You *--------------------------* Bob                   |",
             "|  x Carol          !||                                                        |",
             "|                    ||                                                        |",
             "|                    ||                                                        |",
@@ -2921,7 +2935,7 @@ mod tests {
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
                 "│> o Bob             ││ Bob  v Verified - Last message 5 min ago               │",
-                "│  o Alice          1││ You *--------------------------* Bob                   │",
+                "│  o Alice      1 new││ You *--------------------------* Bob                   │",
                 "│  x Carol          !││ If Bob is away, Raven keeps trying until about 24 h    │",
                 "│                    ││ from now.                                              │",
                 "│                    ││                                                        │",
@@ -2952,7 +2966,7 @@ mod tests {
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
                 "│> o Bob             ││ Bob  v Verified - Last message 5 min ago               │",
-                "│  o Alice          1││ You *--------------------------* Bob                   │",
+                "│  o Alice      1 new││ You *--------------------------* Bob                   │",
                 "│  x Carol          !││ To write to Bob, meet first: Raven can't hold new      │",
                 "│                    ││ messages for them now.                                 │",
                 "│                    ││                                                        │",
@@ -2982,7 +2996,7 @@ mod tests {
                 "R A V E N                                                     o Receiving is off",
                 "┌ Friends ───────────┐┌────────────────────────────────────────────────────────┐",
                 "│> o Bob             ││ Bob  v Verified - Last message 5 min ago               │",
-                "│  o Alice          1││ You *--------------------------* Bob                   │",
+                "│  o Alice      1 new││ You *--------------------------* Bob                   │",
                 "│  x Carol          !││                                                        │",
                 "│                    ││                                                        │",
                 "│                    ││                                                        │",
@@ -4278,6 +4292,28 @@ mod tests {
             rows[2]
         );
         assert_eq!(colour_at(2, "via Tor"), tor);
+    }
+
+    /// Field test E3: a bare "10" beside a friend's name read like data.
+    /// The badge says "new" where the row has room, else it is a chip (a
+    /// colour theme) or in brackets (no chips), never a bare number.
+    #[test]
+    fn the_unread_badge_says_new_or_is_marked() {
+        let room = |cells_free: usize| move |words: &str| cells(words) <= cells_free;
+        assert_eq!(unread_badge(10, false, room(20)), "10 new");
+        assert_eq!(unread_badge(10, true, room(20)), " 10 new ");
+        assert_eq!(unread_badge(10, false, room(4)), "(10)");
+        assert_eq!(unread_badge(10, true, room(4)), " 10 ");
+        assert_eq!(unread_badge(250, false, room(20)), "99+ new");
+        for chips in [false, true] {
+            for free in [0, 4, 20] {
+                let badge = unread_badge(3, chips, room(free));
+                assert!(
+                    badge.contains("new") || badge.contains('(') || badge.starts_with(' '),
+                    "{badge:?}"
+                );
+            }
+        }
     }
 
     #[test]

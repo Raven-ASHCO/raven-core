@@ -264,7 +264,7 @@ fn the_list_has_a_groups_section_under_the_friends() {
             "│  x Friend 1       !││                                                        │",
             "│  x Friend 2       !││                                                        │",
             "│ Groups             ││                                                        │",
-            "│> # Book club      2││                                                        │",
+            "│> # Book club  2 new││                                                        │",
             "│  # Hikers          ││                                                        │",
             "│  # Old crew    left││                                                        │",
             "│                    ││                                                        │",
