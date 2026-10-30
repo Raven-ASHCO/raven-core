@@ -86,10 +86,9 @@ pub fn park_copy(data_dir: &Path, member: &Key, text: &str, now_ms: u64) -> Park
     if revoked {
         return Parked::Never("revoked".into());
     }
-    // Security review 2026-10-29 #4: every group copy (forwards, receipts,
-    // rosters too, not only this profile's own messages) counts against
-    // the group budget of the outbound stage, so forwards cannot take the
-    // half kept for 1:1 chat.
+    // Every group copy (forwards, receipts, rosters too, not only this
+    // profile's own messages) counts against the group budget of the
+    // outbound stage, so forwards cannot take the half kept for 1:1 chat.
     match crate::chat_history::list_staged_outbound_bodies(data_dir) {
         Ok(staged) if staged.len() < GROUP_STAGE_BUDGET => {}
         Ok(_) => return Parked::Later("the group share of the outbound stage is full".into()),

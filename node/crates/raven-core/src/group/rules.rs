@@ -259,9 +259,9 @@ fn apply_msg(
     if !msg.verify() {
         return dropped(file);
     }
-    // Security review 2026-10-29 #8: a signed message older than the replay
-    // horizon (or dated far in the future) is refused, and its key is kept
-    // until then, so an old message cannot come back as new.
+    // A signed message older than the replay horizon (or dated far in the
+    // future) is refused, and its key is kept until then, so an old message
+    // cannot come back as new.
     if msg.sent_ms.saturating_add(store::REPLAY_HORIZON_MS) <= now_ms
         || msg.sent_ms > now_ms.saturating_add(store::MAX_FUTURE_SKEW_MS)
         || g.seen_full()
@@ -293,9 +293,8 @@ fn apply_msg(
         changed: true,
         work: false,
     };
-    // Security review 2026-10-29 #11: a signed receipt goes only to a
-    // carrier that is a member (never a membership oracle for anyone
-    // else holding an old message).
+    // A signed receipt goes only to a carrier that is a member (never a
+    // membership oracle for anyone else holding an old message).
     if forwarded && roster.has(peer) {
         // Tell the author through the member that passed it on.
         g.push_intent(Intent {
@@ -317,8 +316,8 @@ fn apply_msg(
         copy.relay.clear();
         let forward = GroupFrame::Msg(copy);
         let author = hex::encode(msg.from);
-        // Security review 2026-10-29 #4: one author's forwards that may wait
-        // here are bounded; more are not taken on.
+        // One author's forwards that may wait here are bounded; more are not
+        // taken on.
         let mut waiting = g.intents.iter().filter(|i| i.author == author).count();
         for target in &msg.relay {
             if !roster.has(target)
@@ -329,7 +328,7 @@ fn apply_msg(
                 continue;
             }
             // Per author too: another author's message with the same id
-            // must not stop this forward (security review 2026-10-29 #7).
+            // must not stop this forward.
             let marker = format!("{}/{id}:{}", hex::encode(msg.from), hex::encode(target));
             if g.is_done(&marker) {
                 continue;
@@ -416,10 +415,10 @@ fn apply_leave(
     let Some(roster) = g.roster() else {
         return dropped(file);
     };
-    // Security review 2026-10-29 #11: a leave is tied to its epoch: only
-    // one made for the roster held counts (an old leave, delivered again
-    // after the member was added back, removed it again). A leave that
-    // crossed a newer roster is made again by its member.
+    // A leave is tied to its epoch: only one made for the roster held counts
+    // (an old leave, delivered again after the member was added back, does
+    // not remove it again). A leave that crossed a newer roster is made again
+    // by its member.
     if roster.admin != *me
         || l.from == roster.admin
         || *peer != l.from
@@ -461,8 +460,8 @@ fn apply_sync(file: &mut GroupsFile, me: &Key, peer: &Key, s: &GroupSync, now_ms
     let Some(roster) = g.roster() else {
         return dropped(file);
     };
-    // Security review 2026-10-29 #11: a removed member is sent no later
-    // roster (it got the one that removed it); only members are answered.
+    // A removed member is sent no later roster (it got the one that removed
+    // it); only members are answered.
     if roster.admin != *me || !roster.has(peer) {
         return dropped(file);
     }

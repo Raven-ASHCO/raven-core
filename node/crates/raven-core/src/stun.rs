@@ -357,10 +357,9 @@ pub fn classify(
     };
     let same_ip = answers.iter().all(|a| a.mapped.ip() == first.mapped.ip());
     let same_endpoint = answers.iter().all(|a| a.mapped == first.mapped);
-    // Security review 2026-10-29 #3: one unauthenticated STUN answer (a
-    // spoofed UDP reply) is no address to advertise to friends: the
-    // address and the endpoint count only when two independent servers
-    // (both operators) agree on them.
+    // One unauthenticated STUN answer (a spoofed UDP reply) is no address to
+    // advertise to friends: the address and the endpoint count only when two
+    // independent servers (both operators) agree on them.
     let agreed = independent >= 2;
     let public_ip = (agreed && same_ip).then_some(*first.mapped.ip());
     let mapped = (agreed && same_endpoint).then_some(first.mapped);
@@ -770,8 +769,8 @@ mod tests {
         );
         assert_eq!(one.class, StunClass::Unknown);
         assert_eq!(one.independent, 1);
-        // Security review 2026-10-29 #3: one server alone (one answer could
-        // be spoofed) names no address and no endpoint.
+        // One server alone (one answer could be spoofed) names no address
+        // and no endpoint.
         assert_eq!((one.public_ip, one.mapped), (None, None));
         let agreed = classify(
             local,

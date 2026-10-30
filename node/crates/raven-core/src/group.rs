@@ -110,9 +110,9 @@ const DOMAIN_LEAVE: &[u8] = b"rvn1/group-leave";
 const DOMAIN_GROUP_ID: &[u8] = b"rvn1/group-id";
 
 /// Protocol §1: a group's id, `SHA-256(lp("rvn1/group-id") || admin ||
-/// salt)[..16]`. Bound to the admin: nobody else can sign a roster for it
-/// (security review 2026-10-29 #2: a member could claim a group's id at a
-/// friend first and have the real admin's roster refused for good).
+/// salt)[..16]`. Bound to the admin: nobody else can sign a roster for it,
+/// so no member can claim a group's id at a friend first and have the real
+/// admin's roster refused.
 pub fn group_id_for(admin: &Key, salt: &[u8; 16]) -> GroupId {
     let mut h = Sha256::new();
     let mut domain = Vec::new();
@@ -143,7 +143,7 @@ pub struct Member {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupState {
     /// [`group_id_for`] of `admin` and `salt`: a group id names one admin
-    /// for good (security review 2026-10-29 #2).
+    /// for good.
     pub group: GroupId,
     /// The admin's random salt for the group id.
     pub salt: [u8; 16],

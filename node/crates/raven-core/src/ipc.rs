@@ -317,8 +317,8 @@ pub enum IpcRequest {
         /// The contact's device key, 64 hex chars.
         peer_pub_hex: String,
         /// The routes the send is about to try, in its order: the answer
-        /// names a failed route by its index here, never by its address
-        /// (security review 2026-10-29 #11). Empty from an older client
+        /// names a failed route by its index here, never by its address.
+        /// Empty from an older client
         /// (the answer then names no route).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routes: Vec<ReachRoute>,
@@ -348,8 +348,8 @@ pub struct ArrivalRow {
 /// the carrier label (`lan_dial`, ...), the route's index in the request's
 /// `routes`, how long ago, and the dial's error text with every address in
 /// it replaced by [`ADDRESS_PLACEHOLDER`] ([`without_addresses`]). No
-/// address, multiaddr or onion address of a friend is ever in an IPC answer
-/// (security review 2026-10-29 #11); the client knows its own routes.
+/// address, multiaddr or onion address of a friend is ever in an IPC
+/// answer; the client knows its own routes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RouteFailure {
@@ -2433,8 +2433,8 @@ pub fn default_ipc_endpoint(data_dir: &std::path::Path) -> IpcEndpoint {
 mod tests {
     use super::*;
 
-    /// Security review 2026-10-29 #11: no address of a friend in an IPC
-    /// answer or a send's technical text; the words stay.
+    /// No address of a friend in an IPC answer or a send's technical text;
+    /// the words stay.
     #[test]
     fn without_addresses_keeps_the_words_and_drops_every_address() {
         let onion = format!("did not answer at onion:{}", "ab".repeat(32));

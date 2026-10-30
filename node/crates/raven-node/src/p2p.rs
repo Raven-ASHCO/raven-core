@@ -5643,8 +5643,7 @@ impl Host {
         };
         // The pair's phase is made from the secret both friends share (their
         // R2 pair root): nobody who only knows the two keys can tell when
-        // they punch (security review 2026-10-29 #5). A key without a root
-        // is not punched.
+        // they punch. A key without a root is not punched.
         let open: Vec<raven_core::punch::Target> = self
             .punch_targets
             .iter()

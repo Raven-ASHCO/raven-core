@@ -85,7 +85,7 @@ decision AR-1, 2026-10-28), IPv4 over UDP:
   route names). Every probe asks both at once. The public address and
   endpoint count only when both answer and agree (two independent answers):
   one unauthenticated answer could be a spoofed UDP reply, and the address
-  is advertised to friends (security review 2026-10-29 #3). When one does
+  is advertised to friends. When one does
   not answer (or its name does not resolve), nothing is advertised from
   that probe; the NAT class needs both too, so a punch waits for a probe
   both answer.
@@ -341,8 +341,8 @@ The two friends agree on the moments without exchanging anything:
   and `day = floor(unix_ms / 86400000)`: `p` from its first 4 bytes, `d`
   from the next 2, reduced to the first third of a slot. Both sides compute
   the same values, they change every UTC day, and an observer who knows
-  both public keys (both cards) cannot (security review 2026-10-29 #5: v1
-  hashed the two public keys only).
+  both public keys (both cards) cannot (v1 hashed the two public keys
+  only).
 - A side at level `L` (0 to 5) takes part in slot `n` when
   `(n + p) mod 2^L == 0`, and dials at the slot's start plus `d`. The sets
   are nested, so two sides at levels `La` and `Lb` meet in every

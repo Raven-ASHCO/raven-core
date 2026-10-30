@@ -345,8 +345,8 @@ async fn tor_main(
     }
     // Each rendezvous circuit gets its own number, sent to raven-node after
     // the token with each of its streams: raven-node counts its slots per
-    // circuit, so one client cannot take them all (security review
-    // 2026-10-29 #1). The numbers are opaque and never reused in this life.
+    // circuit, so one client cannot take them all. The numbers are opaque
+    // and never reused in this life.
     let mut requests = Box::pin(requests);
     let mut circuits: u64 = 0;
     while let Some(rend) = requests.next().await {

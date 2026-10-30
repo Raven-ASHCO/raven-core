@@ -543,8 +543,7 @@ fn usable(ip: Ipv4Addr, lab_local: bool) -> bool {
 
 /// Whether a contact's connection from `remote` can confirm the address
 /// STUN found: an outside IPv4 source only. The address is IPv4; an IPv6
-/// connection says nothing about whether the IPv4 port is reachable
-/// (security review 2026-10-29 #9).
+/// connection says nothing about whether the IPv4 port is reachable.
 fn confirms_from(remote: IpAddr, lab_local: bool) -> bool {
     match remote {
         IpAddr::V4(v4) => usable(v4, lab_local),
@@ -954,8 +953,8 @@ mod tests {
         );
     }
 
-    /// Security review 2026-10-29 #9: an IPv6 connection confirmed the
-    /// IPv4 address STUN found. Only an outside IPv4 source confirms.
+    /// Only an outside IPv4 source confirms the IPv4 address STUN found; an
+    /// IPv6 connection does not.
     #[test]
     fn only_an_outside_ipv4_source_confirms_the_stun_address() {
         assert!(confirms_from("1.1.1.1".parse().unwrap(), false));

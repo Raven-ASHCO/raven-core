@@ -701,8 +701,8 @@ struct ApplyCtx {
     /// [`raven_core::nat_class_live_enabled`]: a NAT_CLASS is kept.
     nat_live: bool,
     /// [`raven_core::portmap_gate::stun_discovery_live_enabled`]: an
-    /// INET_DIRECT address is kept (spec §13.3; security review 2026-10-29
-    /// #9: kept while the gate was closed).
+    /// INET_DIRECT address is kept (spec §13.3), never while the gate is
+    /// closed.
     stun_live: bool,
     /// [`raven_core::peer_rotation_live_enabled`]: a pinned contact's
     /// PEER_SCHEDULE is kept (and a snapshot without one forgets it).
@@ -4000,8 +4000,8 @@ mod tests {
             }],
             ..RouteHints::default()
         });
-        // Security review 2026-10-29 #9: the STUN discovery gate (spec
-        // §13.3) closed with the NAT_CLASS gate here: no INET_DIRECT kept.
+        // The STUN discovery gate (spec §13.3) closed with the NAT_CLASS
+        // gate here: no INET_DIRECT kept.
         let apply = |nat_live: bool, now_ms: u64| ApplyCtx {
             carrier: OutboxCarrier::P2p,
             keys,

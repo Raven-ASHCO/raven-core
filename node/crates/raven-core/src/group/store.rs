@@ -25,12 +25,11 @@ pub const MAX_MESSAGE_BYTES_TOTAL: usize = 8 * 1024 * 1024;
 /// Message keys kept per group after their messages left `messages`
 /// ([`GroupRecord::seen`]): each until its message is older than
 /// [`REPLAY_HORIZON_MS`]. A group at this many takes no new message until
-/// some expire (security review 2026-10-29 #8: never forget a message that
-/// could still be replayed).
+/// some expire: a message that could still be replayed is never forgotten.
 pub const MAX_SEEN_PER_GROUP: usize = 8_192;
-/// A message whose `sent_ms` is older than this is refused (security review
-/// 2026-10-29 #8: an old signed message replayed after its id was
-/// forgotten); the message horizon (7 days).
+/// A message whose `sent_ms` is older than this is refused (an old signed
+/// message replayed after its id was forgotten is not taken as new); the
+/// message horizon (7 days).
 pub const REPLAY_HORIZON_MS: u64 = crate::horizon::MESSAGE_HORIZON_MS;
 /// How far in this computer's future a message's `sent_ms` may be (clocks
 /// differ); later is refused.
@@ -38,10 +37,9 @@ pub const MAX_FUTURE_SKEW_MS: u64 = 24 * 3_600_000;
 pub const MAX_HELD_PER_GROUP: usize = 64;
 pub const MAX_UNKNOWN_HELD: usize = 32;
 pub const MAX_INTENTS_PER_GROUP: usize = 512;
-/// Forwards of one author's messages that may wait per group (security
-/// review 2026-10-29 #4: one member's forward requests evicted every other
-/// pending intent): 15 authors at most use under half of
-/// [`MAX_INTENTS_PER_GROUP`].
+/// Forwards of one author's messages that may wait per group (one member's
+/// forward requests cannot evict every other pending intent): 15 authors at
+/// most use under half of [`MAX_INTENTS_PER_GROUP`].
 pub const MAX_FORWARDS_PER_AUTHOR: usize = 16;
 pub const MAX_DONE_PER_GROUP: usize = 4_096;
 pub const MAX_COPIES: usize = 8_192;
@@ -392,8 +390,7 @@ impl GroupsFile {
 
 /// The intents over [`MAX_INTENTS_PER_GROUP`] go, forwards first (oldest
 /// first), then the oldest others; a copy of this profile's own message
-/// that goes fails its line (security review 2026-10-29 #4: lines stayed
-/// "waiting" for ever).
+/// that goes fails its line (it does not stay "waiting" for ever).
 fn trim_intents(g: &mut GroupRecord) {
     while g.intents.len() > MAX_INTENTS_PER_GROUP {
         let at = g
@@ -468,9 +465,9 @@ impl GroupRecord {
     }
 
     /// Whether message `id` by `from` (both hex) is known here: a message is
-    /// known by its author and its id (security review 2026-10-29 #7: by id
-    /// alone, a member could send another author's message id first and have
-    /// the real message dropped as a duplicate, and ACKed).
+    /// known by its author and its id, so a member who sends another author's
+    /// message id first cannot have the real message dropped as a duplicate
+    /// (and ACKed).
     pub fn has_seen(&self, from: &str, id: &str) -> bool {
         let key = seen_key(from, id);
         let at = format!("{key}@");

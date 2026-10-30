@@ -1001,8 +1001,8 @@ pub(crate) fn failed_routes(contact: &[u8; 32]) -> Vec<FreshFailure> {
 
 /// IPC `ContactReach`: `contact`'s failed routes among `routes` (the
 /// send's, in its order), each named by its index there and its error
-/// without any address (security review 2026-10-29 #11). A failure on a
-/// route the send did not name is left out.
+/// without any address. A failure on a route the send did not name is left
+/// out.
 pub(crate) fn reach_failures(
     contact: &[u8; 32],
     routes: &[raven_core::ipc::ReachRoute],
@@ -1085,10 +1085,10 @@ fn fill_why_with(item: &mut OutboxItem, current: Option<(Diag, Duration)>) {
 pub(crate) mod tests {
     use super::*;
 
-    /// Security review 2026-10-29 #11: `ContactReach` named a failed route
-    /// by its dial (a LAN address, a multiaddr, an onion route) and passed
-    /// the dial's raw error. Now: the index in the send's routes, the error
-    /// without addresses, and nothing for a route the send did not name.
+    /// `ContactReach` names a failed route by its index in the send's routes,
+    /// never by its dial (a LAN address, a multiaddr, an onion route), gives
+    /// the error without addresses, and nothing for a route the send did not
+    /// name.
     #[test]
     fn reach_failures_name_routes_by_index_and_carry_no_address() {
         let fresh = vec![

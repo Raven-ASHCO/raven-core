@@ -733,7 +733,7 @@ fn handle_req(req: IpcRequest, data_dir: &Path, forward: &Option<ForwardQueue>) 
 
 /// IPC `ContactReach` (E2 r9): since when the contact was last on an
 /// authenticated LAN link with us, and which of the send's `routes` failed
-/// lately, by index (never an address: security review 2026-10-29 #11).
+/// lately, by index (never an address).
 fn contact_reach(
     data_dir: &Path,
     v: u16,

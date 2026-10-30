@@ -1266,12 +1266,10 @@ fn a_received_message_keeps_how_it_came() {
     assert_eq!(back.path, "tor");
 }
 
-/// Security review 2026-10-29 #2: a member (2) learned a group's id and
-/// sent a friend (3) its own roster for that id first; the real admin's
-/// roster was then refused for good, and real members' messages landed in
-/// the squatter's record. Now a group id is bound to its admin
-/// ([`group_id_for`]): a roster for another admin's id is not well formed,
-/// and the real admin's roster is taken.
+/// A group id is bound to its admin ([`group_id_for`]): a member (2) that
+/// learned a group's id and sends a friend (3) its own roster for that id
+/// first sends one that is not well formed, and the real admin's roster is
+/// taken (no other record gets the real members' messages).
 #[test]
 fn a_roster_for_another_admins_group_id_is_refused() {
     let me = key(3);
@@ -1330,10 +1328,9 @@ fn msg_with_id(author: u8, epoch: u32, body: &str, id_bytes: [u8; 16], relay: &[
     m
 }
 
-/// Security review 2026-10-29 #7: messages were deduplicated by id alone:
-/// a member (2) that saw author 1's message first could send its own
-/// message under the same id, and the real one was then dropped as a
-/// duplicate (and ACKed). Now a message is known by (author, id): both are
+/// A message is known by (author, id), not by id alone: a member (2) that
+/// saw author 1's message first and sends its own message under the same id
+/// does not get the real one dropped as a duplicate (and ACKed). Both are
 /// kept, and the same author's copy again is still a duplicate.
 #[test]
 fn another_authors_message_with_the_same_id_does_not_hide_the_real_one() {
@@ -1375,11 +1372,10 @@ fn another_authors_message_with_the_same_id_does_not_hide_the_real_one() {
     assert!(!g.has_seen(&hex::encode(key(4)), &hex::encode(target_id)));
 }
 
-/// Security review 2026-10-29 #8: once a message's id had left `messages`
-/// and `seen`, the original signed frame was taken again from any carrier
-/// and shown as new (sent_ms was never checked). Now a message older than
-/// the replay horizon is refused, one dated far ahead too, and a message's
-/// key stays in `seen` until the horizon has passed.
+/// A message older than the replay horizon is refused, one dated far ahead
+/// too, and a message's key stays in `seen` until the horizon has passed:
+/// the original signed frame, offered again by any carrier once its id has
+/// left `messages`, is never shown as new.
 #[test]
 fn an_old_message_replayed_later_is_refused() {
     let me = key(3);
@@ -1458,11 +1454,10 @@ fn a_full_seen_list_refuses_new_messages_until_keys_expire() {
     assert_eq!(group(&file).messages.len(), 1);
 }
 
-/// Security review 2026-10-29 #4: one member's forward requests evicted
-/// every other pending intent (here the admin's roster answer) from the
-/// 512-intent cap, and a dropped copy of an own message left its line
-/// "waiting" for ever. Now one author's waiting forwards are bounded, the
-/// cap drops forwards first, and a dropped own copy fails its line.
+/// One author's waiting forwards are bounded and the 512-intent cap drops
+/// forwards first, so one member's forward requests cannot evict every other
+/// pending intent (here the admin's roster answer); a dropped copy of an own
+/// message fails its line instead of staying "waiting" for ever.
 #[test]
 fn one_members_forwards_cannot_evict_other_work() {
     let state = roster(1, &[2, 3, 4], 1);
@@ -1546,9 +1541,8 @@ fn send_intent_for_tests(to: &Key, now_ms: u64) -> store::Intent {
     }
 }
 
-/// Security review 2026-10-29 #11: a removed member's sync was answered with
-/// the current roster (who joined after its removal). Now only members are
-/// answered.
+/// Only members are answered: a removed member's sync does not get the
+/// current roster (who joined after its removal).
 #[test]
 fn a_removed_member_gets_no_later_roster() {
     let mut admin = joined(1, &roster(1, &[2, 3], 1));
@@ -1576,9 +1570,9 @@ fn a_removed_member_gets_no_later_roster() {
     assert_eq!(intents_of(&admin, INTENT_SEND).len(), 1);
 }
 
-/// Security review 2026-10-29 #11: a non-member carrier (9) holding a
-/// genuine signed message got a signed receipt back (a membership
-/// oracle). Now no receipt goes to a non-member.
+/// No receipt goes to a non-member: a non-member carrier (9) holding a
+/// genuine signed message gets no signed receipt back (no membership
+/// oracle).
 #[test]
 fn no_receipt_goes_to_a_non_member_carrier() {
     let me = key(3);
@@ -1608,9 +1602,9 @@ fn no_receipt_goes_to_a_non_member_carrier() {
     assert_eq!(r[0].via, hex::encode(key(1)));
 }
 
-/// Security review 2026-10-29 #11: a leave was not tied to its epoch: the
-/// same frame delivered again after the member was added back removed it
-/// again. Now an older leave of a member removed since is refused.
+/// A leave is tied to its epoch: the same frame delivered again after the
+/// member was added back does not remove it again (an older leave of a
+/// member removed since is refused).
 #[test]
 fn an_old_leave_after_a_readd_is_refused() {
     let state = roster(1, &[2, 3], 1);

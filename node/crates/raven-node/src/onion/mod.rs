@@ -79,8 +79,7 @@ pub(crate) const TOR_DIR: &str = "tor";
 /// number from the helper ([`proto::decode_forward`]), as a unique-local
 /// IPv6 /64 (the admission folds a source to its /64). Tor hides who
 /// dialled; a circuit is the finest thing the helper can tell apart, and
-/// one client's circuit cannot take every slot (security review
-/// 2026-10-29 #1).
+/// one client's circuit cannot take every slot.
 fn circuit_source(circuit: u64) -> IpAddr {
     let mut octets = [0u8; 16];
     octets[0] = 0xfd;
@@ -586,9 +585,8 @@ async fn supervise(
     let mut restarts = Restarts::default();
     let mut first = true;
     loop {
-        // A fresh token for every helper life (security review 2026-10-29
-        // #11; RAVEN_ONION_CARRIER_V1 §6): a token an earlier helper held
-        // opens nothing once it is gone.
+        // A fresh token for every helper life (RAVEN_ONION_CARRIER_V1 §6): a
+        // token an earlier helper held opens nothing once it is gone.
         if !first {
             let token = fresh_token();
             *current_token.lock().unwrap_or_else(PoisonError::into_inner) = token;
@@ -1202,7 +1200,7 @@ async fn serve_forward(
         let (admission, pre_token) = (Arc::clone(&admission), Arc::clone(&pre_token));
         tokio::spawn(async move {
             // The header before any slot: a local program without the token
-            // holds none (security review 2026-10-29 #1).
+            // holds none.
             let header = tokio::select! {
                 got = check_token(stream, &token) => got,
                 () = kicked.notified() => Err("a local connection waited too long for its token".into()),

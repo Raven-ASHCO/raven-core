@@ -1166,8 +1166,8 @@ pub(crate) mod netutil {
     /// with the number of the rendezvous circuit it came on; the admission
     /// key is that circuit (`crate::onion`), so the per-source caps are per
     /// circuit and one client's circuit cannot hold every slot (a full
-    /// listener displaces a pre-auth link of the busiest circuit; security
-    /// review 2026-10-29 #1). The handshake deadline allows Tor round trips
+    /// listener displaces a pre-auth link of the busiest circuit). The
+    /// handshake deadline allows Tor round trips
     /// (`raven_core::onion::ONION_HANDSHAKE_DEADLINE`).
     pub(crate) const ONION_INBOUND: InboundLimits = InboundLimits {
         max_conns: 16,

@@ -1384,11 +1384,10 @@ fn recent_failures_with(
     known: &ProbePlan,
     on_net: impl Fn(std::net::IpAddr) -> bool,
 ) -> Vec<Option<(String, u64)>> {
-    // Security review 2026-10-29 #10: a refusal at the friend's *old* LAN
-    // address (another computer has it now) kept Tor out of the race. It
-    // says the friend's Raven stopped only while raven-node also had a LAN
-    // link with the friend lately (`lan_seen_s`, within
-    // [`LAN_SEEN_SPAN_S`]); otherwise Tor stays in the race.
+    // A refusal at a LAN address says the friend's Raven stopped only while
+    // raven-node also had a LAN link with the friend lately (`lan_seen_s`,
+    // within [`LAN_SEEN_SPAN_S`]); otherwise the address may be an old one
+    // that another computer has now, and Tor stays in the race.
     let seen_here = lan_seen_s.is_some_and(|s| s <= LAN_SEEN_SPAN_S);
     let stopped = seen_here && friend_raven_stopped(failed, on_net);
     let failure_of = |route: &DialRoute| {
@@ -4516,10 +4515,9 @@ mod tests {
         // took the old address) is no sign the friend's Raven stopped.
         let elsewhere = recent_failures_with(&routes, &all, false, Some(30), &plan, |_| false);
         assert!(elsewhere[2].is_none(), "Tor stays in the race");
-        // Security review 2026-10-29 #10: a refusal at an address on this
-        // network, but the friend not seen on this LAN lately (an old
-        // address another computer took): Tor stays in the race, no quick
-        // queue.
+        // A refusal at an address on this network, but the friend not seen
+        // on this LAN lately (an old address another computer took): Tor
+        // stays in the race, no quick queue.
         for unseen in [None, Some(LAN_SEEN_SPAN_S + 1)] {
             let old_address = recent_failures_with(&routes, &all, false, unseen, &plan, here);
             assert!(old_address[2].is_none(), "Tor stays in the race");

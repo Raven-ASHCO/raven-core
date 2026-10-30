@@ -4013,8 +4013,8 @@ pub(crate) const SAME_TIME_HINT: &str =
     "If this keeps happening while you are together, check that both laptops show the same time.";
 
 /// An outcome's `(technical: ...)` note: the raw text with every address
-/// left out (security review 2026-10-29 #11: a queued send's note named the
-/// friend's LAN address). The cause was read from the raw text before.
+/// left out (a queued send's note never names the friend's address). The
+/// cause was read from the raw text before.
 fn technical_note(raw: &str) -> String {
     format!("(technical: {})", raven_core::ipc::without_addresses(raw))
 }
@@ -12895,8 +12895,7 @@ mod send_outcome_tests {
         let raw = "ipc LAN_DIAL: lan connect: cannot connect to 10.0.0.5:7420 (10.0.0.5:7420: Connection refused (os error 61))";
         let named = friendly_send_error(raw, "Bob");
         assert!(named.contains("Bob's computer is there"), "{named}");
-        // Security review 2026-10-29 #11: the daemon's text stays, without
-        // the address.
+        // The daemon's text stays, without the address.
         assert!(
             !named.contains("10.0.0.5") && named.contains("cannot connect to <local address>"),
             "the daemon's own text, without the address: {named}"
@@ -13823,8 +13822,7 @@ mod send_outcome_tests {
             )),
             "{text}"
         );
-        // Security review 2026-10-29 #11: the friend's LAN address is not in
-        // a queued send's text.
+        // The friend's LAN address is not in a queued send's text.
         assert!(
             !text.contains("10.0.0.") && !text.contains("192.168."),
             "{text}"

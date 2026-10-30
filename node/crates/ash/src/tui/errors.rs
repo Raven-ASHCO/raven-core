@@ -1884,7 +1884,7 @@ mod tests {
     fn a_technical_part_is_the_last_one_and_keeps_its_own_brackets() {
         let raw = "cannot connect to 10.0.0.5:7420 (Connection refused)";
         let text = bridge::not_sent_text(&bob(), raw, false);
-        // Security review 2026-10-29 #11: no address in the technical part.
+        // No address in the technical part.
         assert_eq!(
             technical_part(&text),
             "cannot connect to <local address> (Connection refused)"

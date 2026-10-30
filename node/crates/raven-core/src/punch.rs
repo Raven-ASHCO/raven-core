@@ -9,9 +9,8 @@
 //! root, a static Diffie-Hellman of their identity keys:
 //! [`crate::lan_beacon::pair_root`]) and the UTC day ([`pair_phase`]), so
 //! both friends compute the same ones, they change every day, and nobody
-//! who only knows the two public keys can (security review 2026-10-29 #5:
-//! the phase came from the public keys alone, so anyone holding both cards
-//! knew when the pair would punch). A side at level `L`
+//! who only knows the two public keys can (holding both cards does not tell
+//! when the pair will punch). A side at level `L`
 //! takes part in slot `n` when `(n + phase) mod 2^L == 0` ([`takes_part`]),
 //! and dials at the slot's start plus the offset. The sets are nested, so two
 //! sides at levels `a` and `b` meet in every `2^max(a, b)`-th slot.
@@ -310,8 +309,8 @@ mod tests {
     /// The tests' pair secret (both sides hold the same one).
     const S: [u8; 32] = [0x5E; 32];
 
-    /// Security review 2026-10-29 #5: the phase came from the two public
-    /// keys alone. Now it needs the pair's secret and changes every day.
+    /// The phase needs the pair's secret, not only the two public keys, and
+    /// changes every day.
     #[test]
     fn the_phase_needs_the_pairs_secret_and_changes_daily() {
         let ab = pair_phase(&A, &B, &S, 20_000, SLOT_MS);

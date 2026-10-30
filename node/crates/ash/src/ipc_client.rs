@@ -186,8 +186,7 @@ fn arrivals_with(
 /// `None` when none answers within `timeout`, or an older one does not know
 /// the op (the send then probes as before).
 /// `routes`: the send's routes (carrier label, dial), in its order;
-/// raven-node names a failed one by its index there, never by its address
-/// (security review 2026-10-29 #11).
+/// raven-node names a failed one by its index there, never by its address.
 pub fn contact_reach_within(
     data_dir: &Path,
     peer_pub_hex: &str,
@@ -1226,9 +1225,9 @@ mod tests {
         );
     }
 
-    /// Security review 2026-10-29 #11: the send names its routes in the
-    /// request; raven-node's answer names a failed one by index, with its
-    /// error address-free; the send puts its own dial back.
+    /// The send names its routes in the request; raven-node's answer names a
+    /// failed one by index, with its error address-free; the send puts its
+    /// own dial back.
     #[test]
     fn contact_reach_names_routes_by_index_and_the_send_puts_its_dial_back() {
         let routes = vec![

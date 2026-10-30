@@ -572,12 +572,10 @@ impl Drop for Friends {
     }
 }
 
-/// Security review 2026-10-29 #1: anyone holding a card opened 8 silent Tor
-/// streams to a friend's onion service and every inbound onion slot was
-/// theirs (one fixed source for all onion links); the friend's dial failed
-/// until they let go. Now the slots are counted per circuit and a full
-/// listener displaces a silent link of the busiest circuit: a friend gets
-/// in while a stranger holds 16 silent streams.
+/// Inbound onion slots are counted per circuit, and a full listener
+/// displaces a silent link of the busiest circuit: a friend gets in while a
+/// stranger who holds the card keeps 16 silent Tor streams open to the onion
+/// service.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn silent_tor_streams_of_a_stranger_cannot_lock_a_friend_out() {
     let _one_at_a_time = LAB_ONION.lock().await;
@@ -597,7 +595,7 @@ async fn silent_tor_streams_of_a_stranger_cannot_lock_a_friend_out() {
     drop(held);
 }
 
-/// Security review 2026-10-29 #1: the streams of one rendezvous circuit
+/// The streams of one rendezvous circuit
 /// (the helper's circuit number) count against that circuit's own caps: a
 /// third pre-auth link on one circuit is closed at once, and a friend on
 /// another circuit gets in.
@@ -634,10 +632,9 @@ async fn one_circuit_cannot_take_every_onion_slot() {
     assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
 }
 
-/// Security review 2026-10-29 #1: a local program without the helper's
-/// token held admission slots while the forward listener waited for the
-/// token. Now the token comes before any slot: 40 bare local connections
-/// (more than the pre-token cap) do not keep a friend out.
+/// The helper's token comes before any admission slot: 40 bare local
+/// connections without it (more than the pre-token cap) do not keep a
+/// friend out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_connections_without_the_token_take_no_onion_slot() {
     let _one_at_a_time = LAB_ONION.lock().await;
@@ -1044,10 +1041,9 @@ impl Spawn for TokenRecorder {
     }
 }
 
-/// Security review 2026-10-29 #11 (spec §6: "32 random bytes per helper
-/// life"): the token was made once per run and every restarted helper got
-/// the same one. Now each life gets a fresh token, and the forward
-/// listener checks the current one.
+/// Each helper life gets a fresh token (spec §6: "32 random bytes per
+/// helper life"), not one per run, and the forward listener checks the
+/// current one.
 #[tokio::test(start_paused = true)]
 async fn every_helper_life_gets_a_fresh_token() {
     let _one_at_a_time = LAB_ONION.lock().await;
