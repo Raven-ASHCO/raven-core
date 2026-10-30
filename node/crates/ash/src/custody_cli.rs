@@ -702,15 +702,37 @@ pub(super) struct CustodyFacts {
     pub listed: usize,
 }
 
-/// `raven custody status` rows (counts only).
+/// `raven custody status` rows (counts only). Each says what is on, what
+/// it means, and how to change it (field test E3: "friend mailboxes off,
+/// holding for others off" next to "2 verified friends offer to hold mail"
+/// left a user guessing, and mail was left with a friend listed by hand
+/// while the first row said off).
 pub(super) fn custody_status_rows(f: &CustodyFacts) -> Vec<String> {
     let s = |n: usize| if n == 1 { "" } else { "s" };
+    // Contacts with friends listed by hand use them whatever the answer.
+    let except = if f.listed > 0 && f.consent != Some(true) {
+        format!(
+            ", except for {} contact{} you chose mail friends for by hand",
+            f.listed,
+            s(f.listed)
+        )
+    } else {
+        String::new()
+    };
     let mut rows = vec![format!(
         "friend mailboxes   {}",
         match f.consent {
-            Some(true) => "on".to_string(),
-            Some(false) => "off (`raven custody use on` to use them)".to_string(),
-            None => "not decided yet (`raven custody use on` or `off`)".to_string(),
+            Some(true) => "on: when a contact can't be reached, Raven leaves a sealed copy with a \
+                           friend you both verified"
+                .to_string(),
+            Some(false) => format!(
+                "off: messages that wait stay on this computer{except} (`raven custody use on` \
+                 lets friends who offer hold them)"
+            ),
+            None => format!(
+                "not decided yet, so off: messages that wait stay on this computer{except} \
+                 (`raven custody use on` or `off`)"
+            ),
         }
     )];
     let mut friends = if f.consent == Some(true) {
@@ -735,21 +757,33 @@ pub(super) fn custody_status_rows(f: &CustodyFacts) -> Vec<String> {
     }
     rows.push(format!("mail friends       {friends}"));
     rows.push(format!(
-        "offering friends   {} verified friend{} offer{} to hold mail ({} over the internet, {} \
-         reachable)",
+        "offering friends   {} verified friend{} offer{} to hold your mail ({} over the \
+         internet, {} reachable from the internet)",
         f.offering,
         s(f.offering),
         if f.offering == 1 { "s" } else { "" },
         f.offering_wan,
         f.offering_reachable
     ));
-    rows.push(format!(
-        "holding for others {}: {} sealed message{}, {} bytes",
-        if f.holding_on { "on" } else { "off" },
-        f.held_rows,
-        if f.held_rows == 1 { "" } else { "s" },
-        f.held_bytes
-    ));
+    rows.push(if f.holding_on {
+        format!(
+            "holding for others on: {} sealed message{}, {} bytes held for friends",
+            f.held_rows,
+            if f.held_rows == 1 { "" } else { "s" },
+            f.held_bytes
+        )
+    } else if f.held_rows > 0 {
+        format!(
+            "holding for others off: {} sealed message{} left from before ({} bytes)",
+            f.held_rows,
+            if f.held_rows == 1 { "" } else { "s" },
+            f.held_bytes
+        )
+    } else {
+        "holding for others off: this computer holds no mail for friends (`raven node custody \
+         on` offers it)"
+            .to_string()
+    });
     if f.listed > 0 {
         rows.push(listed_note(f.listed));
     }

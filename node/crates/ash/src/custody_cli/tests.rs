@@ -347,13 +347,51 @@ fn custody_status_rows_counts_only() {
     assert_eq!(
         rows,
         [
-            "friend mailboxes   on",
+            "friend mailboxes   on: when a contact can't be reached, Raven leaves a sealed copy \
+             with a friend you both verified",
             "mail friends       2 (picked automatically), 1 more still collected from (up to 97 h)",
-            "offering friends   3 verified friends offer to hold mail (1 over the internet, 2 \
-             reachable)",
-            "holding for others on: 4 sealed messages, 9000 bytes",
+            "offering friends   3 verified friends offer to hold your mail (1 over the internet, \
+             2 reachable from the internet)",
+            "holding for others on: 4 sealed messages, 9000 bytes held for friends",
         ]
     );
+    // Field test E3: a fresh profile said "friend mailboxes off, holding
+    // for others off" next to "2 verified friends offer to hold mail". Each
+    // row now says what it means and what turns it on; a contact with
+    // friends listed by hand is named as the exception.
+    let fresh = custody_status_rows(&CustodyFacts {
+        offering: 2,
+        offering_wan: 2,
+        hints_live: true,
+        ..CustodyFacts::default()
+    });
+    assert_eq!(
+        fresh,
+        [
+            "friend mailboxes   not decided yet, so off: messages that wait stay on this \
+             computer (`raven custody use on` or `off`)",
+            "mail friends       none",
+            "offering friends   2 verified friends offer to hold your mail (2 over the internet, \
+             0 reachable from the internet)",
+            "holding for others off: this computer holds no mail for friends (`raven node \
+             custody on` offers it)",
+        ]
+    );
+    let listed = custody_status_rows(&CustodyFacts {
+        consent: Some(false),
+        listed: 1,
+        hints_live: true,
+        ..CustodyFacts::default()
+    });
+    assert_eq!(
+        listed[0],
+        "friend mailboxes   off: messages that wait stay on this computer, except for 1 contact \
+         you chose mail friends for by hand (`raven custody use on` lets friends who offer hold \
+         them)"
+    );
+    assert!(listed
+        .iter()
+        .any(|row| row.starts_with("note: 1 contact still uses")));
     // From a profile: the friends are counted, never named.
     let dir = tmp();
     let (carol, dan) = (contact(0x31, "Carol", true), contact(0x32, "Dan", true));
