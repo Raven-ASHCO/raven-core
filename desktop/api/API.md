@@ -90,12 +90,13 @@ changes. Fields marked `?` may be missing.
 | `messages.delete` | `{id}` | `{id, deleted: true}` (an ended message of yours: see below) |
 | `messages.details` | `{id}` | `{message, status_text, why_text, action_text, detail, technical}` (`detail`: plain lines, such as the stored message ID, the way it went and what the last try said; `technical`: the developer fields, shown only under "Technical details") |
 | `messages.mark_read` | `{address, id?}` | `{address, unread, note?}` (the chat is read up to `id`, default its newest message; see "Read and unread") |
+| `messages.handoff` | `{budget_ms?}` | `{handed, left, delivered, holders: [name], custody: "on" \| "off", completed, elapsed_ms}` (before the app goes to the background: what waits goes to friends who hold mail now; see "Hand-off") |
 | `node.status` | – | `NodeStatus` |
 | `node.start` | – | `NodeStatus` |
 | `node.stop` | – | `NodeStatus` + `{stop, note?}` (see below) |
 | `node.pause` | – | `NodeStatus` + `{was_running}` (embedded node only: the app went to the background; see "Embedded node") |
 | `node.resume` | – | `NodeStatus` (embedded node only: the app is open again) |
-| `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms}` (embedded node only: one bounded fetch from friends, for iOS background refresh) |
+| `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms, names: [name]}` (embedded node only: one bounded fetch from friends, for iOS background refresh; `names`: the friends it asked, by your names for them) |
 | `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}` (embedded node only: the kind of network the device uses, from the iOS app's `NWPathMonitor`; with `tor_wifi_only` on, Tor stays off on `cellular`) |
 | `settings.get` | – | `Settings` |
 | `settings.set` | `{...partial Settings}` | `Settings` |
@@ -239,6 +240,27 @@ raven-node).
   (`note` says how to stop it by hand), `managed` (a login service runs it; left running),
   `not_running` or `failed` (`note` has the reason).
 
+### Hand-off
+
+`messages.handoff` is for the moment an app goes to the background (the iOS app does it before
+`node.pause`; a desktop app may do it when it quits). It is `raven outbox hand-off` for every friend:
+raven-node tries what waits once more and leaves sealed copies of what it could not deliver with
+friends who hold mail now, instead of after the minute it otherwise waits (the kick keeps that so for
+ten minutes). The engine then looks at raven-node's outbox until each message is held by a friend,
+delivered, or `budget_ms` is up (default 5000, from 500 to 20000; it looks at least
+1.5 s, so a message stored a moment before, such as a group copy just parked, counts too).
+
+- A message counts when it waits on this device (queued, held back or parked) and no friend holds a
+  copy of it yet. One already written to the friend's computer (`sent`) does not: it is there.
+  Group copies count like any message. Which friends may take a copy is raven-node's rule, as always:
+  the friends the recipient told about, or listed by hand for the recipient, verified and unblocked.
+- `handed`: messages a friend took; `holders`: those friends, by your names for them; `left`: still
+  only on this device; `delivered`: delivered meanwhile; `completed`: nothing is left.
+- `custody: "off"` (friend custody held in this build): nothing is handed, `left` counts what waits.
+  Without a running raven-node (or a paused one) the answer is `NODE_NOT_RUNNING`.
+- Each message a friend took then reads `path_kind: "friend"` (or `"handoff"`) with `via_name`, and a
+  `state` event tells the app.
+
 ### Embedded node (iOS)
 
 On iOS (and on macOS or Linux with the engine's `embedded-node` feature and
@@ -285,8 +307,8 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   adapter's fixed public one (a debug build's `RAVEN_LAB_NEARBY_ALLOW_PUBLIC_ADDR` allows that, as
   it does in raven-node). Windows reports its address as public (row N7w), so nearby there reads
   not running even with the radio on.
-- **The Tor way** (`tor`, lab: `ONION_PRODUCTION_ENABLED` is false; a debug build opens it with
-  `RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1`, in the engine's process and in raven-node's). It has no switch
+- **The Tor way** (`tor`; on in release builds since 2026-10, `ONION_PRODUCTION_ENABLED`; a debug
+  build closes it with `RAVEN_LAB_TOR=0`, in the engine's process and in raven-node's). It has no switch
   (`can_set: false`, no `setting`): raven-node runs Tor by itself while its gate is open. Its state
   comes from raven-node's Status line (`Tor: starting (45 %)`, `Tor: ready`, `Tor: blocked on this
   network (why; retrying in 2 min)`, `Tor: could not start on this computer (why)`, `Tor: ready,
@@ -294,14 +316,15 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   terminal app's Network screen show. While raven-node has that line: `running` is true once Tor is
   ready (`ready`, `publishing`, `unreachable`), `detail` is the line after `Tor: `, `reason` says
   the state in a plain sentence (with the gate open), and `NetworkStatus.tor` has its parts:
-  `phase`, `words` (the line after `Tor: `), `percent` (starting), `why`, `retry` and `outages` (the
+  `phase`, `words` (the line after `Tor: `), `percent` (how far Tor's start is, while `starting`,
+  in release and debug engines alike), `why`, `retry` and `outages` (the
   onion service's outage history since raven-node started, when it had any). States only: the line
   holds no address, onion or IP, and the engine adds none. Without that line (gate closed, an
   older raven-node, none running) nothing is said of Tor's state: no `running`, no `detail`, no
   `tor`. Apps show it as a way card in the Tor path colour, with the phase (`network.tor.phase.*`),
   the why and the outage history (`network.tor.why`, `network.tor.outages`).
-- **Gates, both directions.** A release engine reads no lab switch: every way but LAN direct is
-  `preview`, `network.set` refuses to turn one on with `NOT_AVAILABLE_YET` (nothing is changed;
+- **Gates, both directions.** A release engine reads no lab switch: every way whose gate is closed
+  in the build is `preview`, `network.set` refuses to turn one on with `NOT_AVAILABLE_YET` (nothing is changed;
   `detail` names the gate) and `lab`, `lab_switches` are empty. A debug engine honours the
   `RAVEN_LAB_*` switches in its environment; the raven-node it starts inherits them and reads them
   again itself (a release raven-node ignores them). `NetworkStatus.lab_switches` and
@@ -325,6 +348,11 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   | `bridge`, `store`, `relay` | bool | `raven node bridge\|store\|relay on\|off` (AUTO off) | now |
   | `hide_ip` | bool | `raven node hide-ip on\|off` | now |
   | `tor_wifi_only` | bool (default false: Tor on mobile data too) | none (the phone app's setting; `node_policy.json`) | now |
+
+  Tor on mobile data has this one name: `tor_wifi_only: true` keeps Tor off while the app says the
+  device is on mobile data (`network.path`), `false` (the default) runs it on Wi-Fi and mobile data
+  alike. An app that sends the opposite spelling `tor_on_cellular` gets `BAD_REQUEST` (its detail
+  names `tor_wifi_only`) and nothing changes. `NetworkStatus.tor_wifi_only` is the saved choice.
 
   Turning a held way on is `NOT_AVAILABLE_YET`; turning anything off is always allowed.
   `carry_for_friends`, `friends_carry_mine` and `handoff` turned on need the person's yes to what
@@ -391,7 +419,7 @@ Contact   { address, name, short_address, verified: bool, blocked: bool,
             (see "Read and unread").
 Message   { id, address, direction: "in" | "out", text, at_ms,
             state: "sending" | "sent" | "delivered" | "waiting" | "time_ran_out" | "not_sent_meet_first" | "failed",
-            until_ms?, path?, path_kind?, delivered_at_ms?, attempts? }
+            until_ms?, path?, path_kind?, via_name?, delivered_at_ms?, attempts? }
             path_kind and its path words (every label raven-node can report):
               lan "LAN direct" · internet "Internet direct" · p2p "p2p" (path not known) ·
               p2p_direct "p2p · direct" · p2p_reversed "p2p · reversed" · p2p_relayed "p2p · relayed" ·
@@ -403,6 +431,13 @@ Message   { id, address, direction: "in" | "out", text, at_ms,
               friend "Held by a friend" (friend custody; said while it waits too) ·
               handoff "Passed on between friends" (multi-hop custody) ·
               letter "Sealed letter with a friend".
+            via_name: a message of yours a friend holds (path_kind friend or handoff): that friend,
+            by your name for them (the first of them when several hold it). raven-node's outbox
+            lists such a message as written (it left this device), so its state is `sent` while
+            the friend holds it, not `waiting`. The name is kept with the message for the rest of
+            the run, so its delivery still says it; it is never written down: after a restart a
+            delivered message says only "Held by a friend" (which friends held a message is not
+            kept once it is done).
             A delivery raven-node's outbox made takes raven-node's last path to the friend. The path
             of each delivered message of yours is kept in `desktop_private.rms` (by history id), so
             it comes back after a restart.
@@ -444,12 +479,17 @@ NetworkStatus { build: "release" | "dev", node: "running" | "not_running",
             nearby: { state: "held" | "node_held" | "not_running" | "live", saved, on_this_os,
                       enabled?, radio?, address_privacy?, in_range?, connected?, rows: [{label, value}] },
             carry: { friends_carry_mine: { setting: "on" | "off" | "not_decided", mail_friends,
-                                           chosen_by_hand, offering, offering_over_internet,
-                                           offering_reachable, listed_by_hand },
+                                           names: [name], chosen_by_hand, offering,
+                                           offering_over_internet, offering_reachable,
+                                           listed_by_hand },
                      carry_for_friends: { on, held_messages, held_bytes, handoff, handoff_lines },
                      letters_left: [..], relay_for_friends: { setting, offering, offered_to } },
             help: { bridge, store, relay, automatic, effects: { bridge, store, relay } },
             hide_ip, tor_wifi_only, path?: "wifi" | "wired" | "cellular" | "other" | "offline",
+            (carry.friends_carry_mine.names: every friend a mail check asks for your mail, by your
+             names for them: your mail friends, friends you listed for a contact, and friends a
+             contact said it leaves your mail with; mail_friends counts only your mail friends.
+             tor_wifi_only: see network.set; path: what the phone app last reported)
             lab_switches: [..],
             texts: { carry_for_friends, friends_carry_mine, handoff },
             tor?: { phase: "ready" | "publishing" | "unreachable" | "starting" | "restarting" | "blocked"
@@ -507,9 +547,14 @@ Group     { id, name, short_id, status: "active" | "left" | "removed", admin: bo
 GroupMember { address, short_address, name, label, friend: bool, admin: bool, me: bool }
 GroupMessage { id, group, from_address, from_name, mine: bool, text, at_ms,
             via_name? (the member that passed it on, when it was not its author),
+            path_kind?, path? (a member's message: how the copy that brought it came, the kinds and
+                               words of Message.path_kind; friend when a friend held it),
             delivered: n, total: n,
             receipts: [{ address, name, state: "waiting" | "sent" | "delivered" | "failed",
-                         via: "direct" | "relay" }] }   (receipts only on yours)
+                         via: "direct" | "relay", held_by? }] }   (receipts only on yours)
+            held_by: the friend that holds the copy for that member while the member is away, by
+            your name for them, until it is delivered or given up (its state is then `waiting` or
+            `sent`, as raven-node's outbox lists it).
 ```
 
 ### Events
@@ -526,7 +571,7 @@ its first look only notes what is there, so old messages do not arrive as `incom
 Event     { seq, kind, at_ms, ... } kinds:
             "status_ok"            heartbeat: a successful status check            -> heartbeat pulse
             "send_started"  {id}    a send attempt began                           -> packet travels out
-            "receipt"       {id, address?, path, path_kind, ms, delivered_at_ms?}  signed receipt arrived
+            "receipt"       {id, address?, path, path_kind, ms, delivered_at_ms?, via_name?}  signed receipt arrived
                                        -> receipt travels back, Delivered (delivered_at_ms as on Message)
             "incoming"      {message}                                              -> packet travels in, bubble slides in
             "outgoing"      {message}  yours, sent by another program on this profile (the
@@ -534,8 +579,9 @@ Event     { seq, kind, at_ms, ... } kinds:
                                        in the open chat (its path once delivered; a receipt follows)
             "retry"         {id, address, attempts}                                -> retry ring on the friend's dot
             "presence"      {address, presence}                                    -> dot changes (blink)
-            "state"         {id, address?, state, until_ms?}                       -> tick text changes
-                            (also sent when a waiting message's until_ms becomes known or changes)
+            "state"         {id, address?, state, until_ms?, path?, path_kind?, via_name?}  -> tick text changes
+                            (also sent when a waiting message's until_ms becomes known or changes,
+                             and when a friend takes a copy of it: via_name)
             "node"          {status}                                               -> header/menu-bar chip changes
             "unread"        {address, unread}  the friend's count changed (a message came, or the
                                        chat was read here or in the terminal app) -> badge follows

@@ -1013,6 +1013,14 @@ fn plain_lines(lines: Vec<String>) -> Vec<String> {
 /// (CONSENT_NEEDED). The companions (`lan_for`, `internet_listen`,
 /// `p2p_listen`, `relays`) are read with their setting.
 pub(crate) fn checked_settings(args: &Args) -> Result<Vec<(&'static str, Value)>, ApiError> {
+    // Tor on mobile data has one name in the API, `tor_wifi_only` (its
+    // opposite): an app that sends the other is told so, nothing changes.
+    if args.get("tor_on_cellular").is_some() {
+        return Err(ApiError::bad_request(
+            "\"tor_on_cellular\" is not a setting: Tor on mobile data is \"tor_wifi_only\" \
+             (false: Tor on Wi-Fi and mobile data, the default; true: Wi-Fi only)",
+        ));
+    }
     let main: Vec<(&'static str, Value)> = SETTINGS
         .iter()
         .filter(|s| !matches!(**s, "lan_for" | "internet_listen" | "p2p_listen"))
@@ -2402,9 +2410,10 @@ mod tests {
     }
 
     /// The phone app's names (API.md): who a mail check asks, by name
-    /// (`carry.friends_carry_mine.names`).
+    /// (`carry.friends_carry_mine.names`), and Tor on mobile data under one
+    /// name, `tor_wifi_only`: the other spelling is refused, never ignored.
     #[test]
-    fn mail_friends_by_name() {
+    fn mail_friends_by_name_and_one_name_for_tor_on_mobile_data() {
         let facts = NetFacts {
             status: Err("not running".into()),
             policy: Some(NodePolicy::default()),
@@ -2436,6 +2445,15 @@ mod tests {
             view["tor_wifi_only"], false,
             "the default: Tor on mobile data too"
         );
+        let one = |key: &str| {
+            let mut m = serde_json::Map::new();
+            m.insert(key.into(), true.into());
+            checked_settings(&Args(&m))
+        };
+        let e = one("tor_on_cellular").unwrap_err();
+        assert_eq!(e.code, code::BAD_REQUEST);
+        assert!(e.detail.contains("tor_wifi_only"), "{e:?}");
+        assert!(one("tor_wifi_only").is_ok());
     }
 
     /// The whole view: a node that answers with a powered radio on a public
