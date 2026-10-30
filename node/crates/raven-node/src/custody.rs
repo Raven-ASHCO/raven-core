@@ -1128,6 +1128,13 @@ pub(crate) fn dial_route_path(
         } else {
             PER_DIAL_DEADLINE
         };
+        // A bounded mail check (embedded node, iOS background refresh):
+        // no dial outlives its budget.
+        let deadline = match pass_budget_left() {
+            Some(left) if left.is_zero() => return Err(MAIL_CHECK_BUDGET.into()),
+            Some(left) => deadline.min(left),
+            None => deadline,
+        };
         tokio::time::timeout(deadline, work)
             .await
             .unwrap_or_else(|_| Err("custody dial deadline".into()))
@@ -1523,6 +1530,10 @@ fn fetch_pass_with(
                 (io.kick)(peer);
             }
             if r.accepted_messages + r.accepted_acks > 0 {
+                FETCHED_MESSAGES.fetch_add(
+                    r.accepted_messages as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 eprintln!(
                     "raven-node custody: {}",
                     fetched_line(r, carrier.get(), &custodian)
@@ -1926,6 +1937,72 @@ fn jitter() -> f64 {
     rand::thread_rng().gen_range(0.0..=1.0)
 }
 
+// ── Passes, for a bounded mail check (embedded node; docs/IOS.md) ──────────
+
+/// Fetch passes begun in this process (each pass's number), the number of
+/// the latest one that finished (a pass whose node stopped never does), and
+/// the messages they took in: a mail check waits for a pass that began
+/// after its kick.
+static PASSES_BEGUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PASSES_DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FETCHED_MESSAGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PASS_DONE: OnceLock<Notify> = OnceLock::new();
+/// While a bounded mail check runs: when its custody dials must be done.
+static PASS_DEADLINE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// The error of a custody dial a mail check's budget no longer allows.
+pub(crate) const MAIL_CHECK_BUDGET: &str = "MAIL_CHECK_BUDGET: the mail check's time is up";
+
+fn pass_done() -> &'static Notify {
+    PASS_DONE.get_or_init(Notify::new)
+}
+
+/// How long the dials of a bounded mail check still have (`None`: no
+/// check runs, the usual deadlines apply).
+fn pass_budget_left() -> Option<Duration> {
+    let until = (*PASS_DEADLINE.lock().unwrap_or_else(|e| e.into_inner()))?;
+    Some(until.saturating_duration_since(std::time::Instant::now()))
+}
+
+/// Bound every custody dial until `until` (`None`: the usual deadlines).
+#[cfg(feature = "embedded")]
+pub(crate) fn set_pass_deadline(until: Option<std::time::Instant>) {
+    *PASS_DEADLINE.lock().unwrap_or_else(|e| e.into_inner()) = until;
+}
+
+/// Passes begun, the latest pass finished, messages taken in, in this
+/// process.
+#[cfg(feature = "embedded")]
+pub(crate) fn pass_counts() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        PASSES_BEGUN.load(Relaxed),
+        PASSES_DONE.load(Relaxed),
+        FETCHED_MESSAGES.load(Relaxed),
+    )
+}
+
+/// Waits (at most `limit`) until pass number `n` (counting from 1), or a
+/// later one, has finished; whether it did.
+#[cfg(feature = "embedded")]
+pub(crate) async fn wait_pass_done(n: u64, limit: Duration) -> bool {
+    let wait = async {
+        loop {
+            let notified = pass_done().notified();
+            if PASSES_DONE.load(std::sync::atomic::Ordering::Acquire) >= n {
+                return;
+            }
+            notified.await;
+        }
+    };
+    tokio::time::timeout(limit, wait).await.is_ok()
+}
+
+/// Whether the fetcher works in this process (the custody gate).
+#[cfg(feature = "embedded")]
+pub(crate) fn fetcher_live() -> bool {
+    CustodyGates::current().live
+}
+
 /// The supervised fetcher task.
 pub async fn run_fetcher(data_dir: PathBuf) -> Result<(), String> {
     if !CustodyGates::current().live {
@@ -1947,9 +2024,11 @@ pub async fn run_fetcher(data_dir: PathBuf) -> Result<(), String> {
             .max(Duration::from_millis(200));
         let (dd, id) = (data_dir.clone(), Arc::clone(&identity));
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || fetch_pass(&dd, &id, &handle))
-            .await
-            .map_err(|e| format!("custody blocking join: {e}"))?;
+        let number = PASSES_BEGUN.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let pass = tokio::task::spawn_blocking(move || fetch_pass(&dd, &id, &handle)).await;
+        PASSES_DONE.fetch_max(number, std::sync::atomic::Ordering::AcqRel);
+        pass_done().notify_waiters();
+        pass.map_err(|e| format!("custody blocking join: {e}"))?;
         let wait = lock().next_wait(Instant::now(), base);
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}

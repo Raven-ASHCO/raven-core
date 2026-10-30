@@ -234,7 +234,7 @@ const NODE_LOG_TEXTS: &[(&str, &str)] = &[
     ("raven-node lan_direct: listen {local}", "lan_direct.rs"),
     ("retry_until_ok(\"lan_direct\"", "lan_direct.rs"),
     ("lan_direct bind {lan_listen}: {e}", "lan_direct.rs"),
-    ("{name} failed: {e}", "main.rs"),
+    ("{name} failed: {e}", "lib.rs"),
 ];
 
 /// raven-node's outbox codes (`pub(crate) mod code` in
@@ -2203,7 +2203,7 @@ fn bridge_api_pins() {
     let lan = gates().lan;
     assert!(lan.production && lan.live, "{lan:?}");
     // The vault, the files the poller watches, and the Keychain waits.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     {
         let _: fn(&Path) -> Result<bool, String> = bridge::uses_vault;
         assert_eq!(
@@ -2326,11 +2326,11 @@ fn raven_core_still_words_the_keychain_wait_as_the_app_reads_it() {
 #[test]
 fn raven_node_still_logs_its_listener_as_the_app_reads_it() {
     let lan_direct = joined_strings(include_str!("../../../raven-node/src/lan_direct.rs"));
-    let main = joined_strings(include_str!("../../../raven-node/src/main.rs"));
+    let main = joined_strings(include_str!("../../../raven-node/src/lib.rs"));
     let missing: Vec<String> = NODE_LOG_TEXTS
         .iter()
         .filter(|(text, file)| {
-            let source = if *file == "main.rs" {
+            let source = if *file == "lib.rs" {
                 &main
             } else {
                 &lan_direct

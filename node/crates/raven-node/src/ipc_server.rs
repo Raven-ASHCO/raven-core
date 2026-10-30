@@ -1785,6 +1785,73 @@ async fn run_uds_server(data_dir: PathBuf, forward_path: Option<PathBuf>) -> Res
     }
 }
 
+/// How many new in-process connections may wait for a slot: like a socket's
+/// backlog, a connect beyond it is told to try again.
+#[cfg(all(unix, feature = "embedded"))]
+const INPROC_BACKLOG: usize = 64;
+
+/// [`run_ipc_server`] for a raven-node embedded in the caller's process
+/// (docs/IOS.md): the same checks (the profile folder, the instance lock
+/// next to where the socket would be, the forward queue), the same
+/// connection limit, peer check and request handling, on connections made
+/// in process ([`raven_core::ipc::inproc`]: a socket pair each) instead of
+/// a socket file. The endpoint is registered once the lock is held and is
+/// gone when this future ends or is dropped.
+#[cfg(all(unix, feature = "embedded"))]
+pub async fn run_inproc_server(
+    data_dir: PathBuf,
+    forward_path: Option<PathBuf>,
+) -> Result<(), String> {
+    ensure_private_data_dir(&data_dir)?;
+    let sock = socket_path(&data_dir);
+    let _instance_lock = acquire_instance_lock(&sock)?;
+    let forward = open_forward_queue(forward_path)?;
+    let (tx, mut incoming) =
+        tokio::sync::mpsc::channel::<std::os::unix::net::UnixStream>(INPROC_BACKLOG);
+    let _endpoint = raven_core::ipc::inproc::register(
+        &data_dir,
+        Box::new(move |stream| {
+            tx.try_send(stream).map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(s)
+                | tokio::sync::mpsc::error::TrySendError::Closed(s) => s,
+            })
+        }),
+    )?;
+    eprintln!("raven-node ipc: listening in process");
+    let data_dir = Arc::new(data_dir);
+    let slots = Arc::new(Semaphore::new(MAX_IPC_CONNECTIONS));
+    loop {
+        let permit = slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "ipc connection limiter closed".to_string())?;
+        let Some(stream) = incoming.recv().await else {
+            return Err("ipc in-process endpoint closed".into());
+        };
+        let stream = match stream
+            .set_nonblocking(true)
+            .and_then(|()| UnixStream::from_std(stream))
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("raven-node ipc: in-process connection refused: {e}");
+                continue;
+            }
+        };
+        if !peer_uid_matches_self(&stream) {
+            eprintln!("raven-node ipc: reject peer (uid mismatch)");
+            continue;
+        }
+        let dd = data_dir.clone();
+        let fq = forward.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            serve_one(stream, dd, fq).await;
+        });
+    }
+}
+
 /// Client helper for same-process smoke tests.
 #[cfg(unix)]
 #[allow(dead_code)]

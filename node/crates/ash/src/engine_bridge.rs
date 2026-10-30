@@ -895,6 +895,12 @@ pub fn ensure_node(
     super::ext::ensure_daemon_in(data_dir, program, listen, &slot.0)
 }
 
+/// A raven-node inside this process and how the CLI's code starts it
+/// (ext.rs; the engine's embedded mode, docs/IOS.md).
+// The binaries compile this module too (with `engine` on) and use neither.
+#[allow(unused_imports)]
+pub use super::ext::{set_embedded_node, EmbeddedNode};
+
 /// [`ensure_node`]'s whole `Err` while `raven lock` stopped this profile
 /// (privacy pack PP.15): only `raven unlock` starts it again.
 pub const LOCKED_TEXT: &str = raven_core::privacy::LOCKED_TEXT;

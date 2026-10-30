@@ -5,9 +5,19 @@ edition.workspace = true
 license.workspace = true
 description = "RAVEN local node — queue, TCP peer, envelope DM"
 
+# The node itself is a library (src/lib.rs): the `raven-node` program below
+# is its command line.
+[lib]
+name = "raven_node"
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "raven-node"
 path = "src/main.rs"
+# The library has the same name: its documentation is the one kept.
+doc = false
+test = false
 
 # The macOS nearby radio (P5.31): CoreBluetooth in its own process, shipped as
 # RavenNearby.app (macos/RavenNearby.app, node/scripts/build_nearby_helper_app.sh).
@@ -71,6 +81,16 @@ tor = [
     "dep:safelog",
     "dep:tracing",
 ]
+# The node inside the caller's own process (src/embedded.rs; the iOS app,
+# docs/IOS.md): the service on a runtime of its own, its IPC in process (a
+# socket pair per connection), start / stop / pause / resume and a bounded
+# mail check. No new crate.
+embedded = []
+# Tor inside the node's process (no raven-tor-helper; iOS forbids helper
+# processes): the helper's own Arti code on a runtime of its own, speaking
+# the same protocol over in-memory pipes (src/onion/arti.rs). Same crates
+# as `tor`.
+tor-embedded = ["tor"]
 # Explicit lab opt-in for the publicly-derivable pre-ATSAM demo cipher.
 unsafe-demo-crypto = ["raven-core/unsafe-demo-crypto"]
 

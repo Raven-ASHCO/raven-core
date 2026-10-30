@@ -2453,7 +2453,7 @@ mod tests {
         };
         let lan = read("lan_direct.rs");
         let inet = read("internet_direct.rs");
-        let main = read("main.rs");
+        let main = read("lib.rs");
         for (source, name, text) in [
             (&lan, "LAN_HANDSHAKE_TIMEOUT", LAN_HANDSHAKE_TIMEOUT),
             (&lan, "LAN_FRAME_LENGTH", LAN_FRAME_LENGTH),

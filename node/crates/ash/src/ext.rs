@@ -958,6 +958,32 @@ pub(super) fn ensure_lan_daemon_as_before(
     ensure_daemon_in(data_dir, &raven_node_bin(), &listen, &STARTED_DAEMON).map(|_| ())
 }
 
+/// A raven-node that runs inside this process (the desktop engine's
+/// embedded mode: raven-node's `embedded` host, docs/IOS.md). Once set,
+/// every start the CLI's code makes ([`ensure_node`], a send, `raven
+/// listen`'s start) goes to it instead of starting the program.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+pub trait EmbeddedNode: Send + Sync {
+    /// A node runs for `data_dir` in this process.
+    fn running(&self, data_dir: &Path) -> bool;
+    /// Start it for `data_dir`, its LAN listener on `listen`, and wait
+    /// until its IPC answers.
+    fn start(&self, data_dir: &Path, listen: &str) -> Result<(), String>;
+}
+
+static EMBEDDED_NODE: std::sync::OnceLock<&'static dyn EmbeddedNode> = std::sync::OnceLock::new();
+
+/// Sets this process's embedded node, once (later calls change nothing).
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+pub fn set_embedded_node(node: &'static dyn EmbeddedNode) {
+    let _ = EMBEDDED_NODE.set(node);
+}
+
+/// This process's embedded node, when one was set.
+pub(super) fn embedded_node() -> Option<&'static dyn EmbeddedNode> {
+    EMBEDDED_NODE.get().copied()
+}
+
 /// [`ensure_mac_lan_daemon`] with the program, the listen address and the
 /// record of the service this process started (`slot`) given by the caller:
 /// the desktop engine (engine_bridge.rs) names its own program and listens
@@ -969,6 +995,32 @@ pub(super) fn ensure_daemon_in(
     listen: &str,
     slot: &StartedDaemon,
 ) -> Result<Option<u32>, String> {
+    // A node embedded in this process (the iOS app; engine_bridge.rs
+    // `set_embedded_node`): started in process, never as a program. A node
+    // that runs is used as it is; else the same refusals as below.
+    if let Some(embedded) = embedded_node() {
+        if embedded.running(data_dir) {
+            return Ok(Some(std::process::id()));
+        }
+        if let Some(why) = auto_start_refusal(data_dir) {
+            return Err(why.to_owned());
+        }
+        embedded.start(data_dir, listen)?;
+        // Up once its IPC answers; its LAN listener a moment later, waited
+        // for as for the program (start_and_report).
+        if !raven_core::lan_user_off() {
+            if let Some(message) = listener_message(
+                listen,
+                wait_for_lan_listener(data_dir, DAEMON_LISTENER_WAIT),
+                &daemon_log_path(data_dir),
+                &LISTENER_WARNED,
+                Some(std::process::id()),
+            ) {
+                eprintln!("{message}");
+            }
+        }
+        return Ok(Some(std::process::id()));
+    }
     // A service this process started earlier may still be coming up: its socket
     // is not stale, and it must not be replaced.
     let still_starting = slot

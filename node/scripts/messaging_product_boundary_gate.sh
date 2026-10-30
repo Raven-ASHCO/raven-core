@@ -92,7 +92,7 @@ for src_root in shipping_src:
             if needle in text:
                 failures.append(f"shipping source reintroduces social/central surface in {rel}: {needle}")
 
-node_main = read_path(root / "node/crates/raven-node/src/main.rs", "raven-node main")
+node_main = read_path(root / "node/crates/raven-node/src/lib.rs", "raven-node main")
 require_text(node_main, "RAVEN serverless local node", "raven-node product label")
 
 
