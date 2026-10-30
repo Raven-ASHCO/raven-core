@@ -684,7 +684,7 @@ impl ProtectedPrekeyBackend for PlatformProtectedPrekeyBackend {
         }
         use crate::apple_keychain::set_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "macos"))]
         crate::macos_keychain::track_new_test_item(PLATFORM_SERVICE, account);
         guarded(KeychainWhat::PrekeyState, || {
             set_generic_password(PLATFORM_SERVICE, account, value)

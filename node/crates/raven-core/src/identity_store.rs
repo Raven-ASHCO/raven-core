@@ -878,7 +878,7 @@ fn keychain_get(account: &str) -> Result<Option<[u8; 32]>, IdentityStoreError> {
     })
 }
 
-#[cfg(all(any(target_os = "macos", target_os = "ios"), test))]
+#[cfg(all(target_os = "macos", test))]
 fn keychain_status_is_proven_absent(status: i32) -> bool {
     use security_framework_sys::base::errSecItemNotFound;
     status == errSecItemNotFound

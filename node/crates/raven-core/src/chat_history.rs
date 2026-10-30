@@ -1420,11 +1420,7 @@ fn history_account(data_dir: &Path) -> String {
 
 #[cfg(all(
     test,
-    any(
-        target_os = "macos",
-        target_os = "ios",
-        all(target_os = "linux", target_env = "gnu")
-    )
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
 ))]
 pub(crate) fn history_account_for_tests(data_dir: &Path) -> String {
     history_account(data_dir)

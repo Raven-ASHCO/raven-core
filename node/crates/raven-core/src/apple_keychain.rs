@@ -32,25 +32,34 @@ pub(crate) use security_framework::passwords::{
 
 #[cfg(target_os = "ios")]
 pub(crate) use ios::{
-    add_generic_password, delete_generic_password, get_generic_password, set_generic_password,
+    accounts, add_generic_password, delete_generic_password, get_generic_password,
+    set_generic_password,
 };
 
 #[cfg(target_os = "ios")]
 mod ios {
+    use core_foundation::array::CFArray;
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
+    use core_foundation_sys::array::CFArrayRef;
     use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFTypeRef};
     use core_foundation_sys::data::CFDataRef;
     use core_foundation_sys::string::CFStringRef;
     use security_framework::base::{Error, Result};
     use security_framework_sys::access_control::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-    use security_framework_sys::base::{errSecDuplicateItem, errSecParam, errSecSuccess};
+    use security_framework_sys::base::{
+        errSecDuplicateItem, errSecItemNotFound, errSecParam, errSecSuccess,
+    };
     use security_framework_sys::item::{
         kSecAttrAccount, kSecAttrService, kSecAttrSynchronizable, kSecClass,
-        kSecClassGenericPassword, kSecReturnData, kSecValueData,
+        kSecClassGenericPassword, kSecMatchLimit, kSecMatchLimitAll, kSecReturnAttributes,
+        kSecReturnData, kSecValueData,
+    };
+    use security_framework_sys::keychain_item::{
+        SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate,
     };
 
     // The attribute key itself; security-framework-sys binds only its
@@ -58,9 +67,6 @@ mod ios {
     extern "C" {
         static kSecAttrAccessible: CFStringRef;
     }
-    use security_framework_sys::keychain_item::{
-        SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate,
-    };
 
     fn key(k: CFStringRef) -> CFString {
         // SAFETY: a Security framework constant: a valid, immortal CFString.
@@ -75,9 +81,10 @@ mod ios {
         }
     }
 
-    /// The item: class, service, account, and never a synchronized one.
-    fn query(service: &str, account: &str) -> Vec<(CFString, CFType)> {
-        vec![
+    /// The items of `service` (of `account`, when given), never a
+    /// synchronized one.
+    fn query(service: &str, account: Option<&str>) -> Vec<(CFString, CFType)> {
+        let mut q = vec![
             (
                 key(unsafe { kSecClass }),
                 key(unsafe { kSecClassGenericPassword }).into_CFType(),
@@ -87,19 +94,35 @@ mod ios {
                 CFString::new(service).into_CFType(),
             ),
             (
-                key(unsafe { kSecAttrAccount }),
-                CFString::new(account).into_CFType(),
-            ),
-            (
                 key(unsafe { kSecAttrSynchronizable }),
                 CFBoolean::false_value().into_CFType(),
             ),
-        ]
+        ];
+        if let Some(account) = account {
+            q.push((
+                key(unsafe { kSecAttrAccount }),
+                CFString::new(account).into_CFType(),
+            ));
+        }
+        q
+    }
+
+    /// Runs a copy query: its result as a +1 reference (`None`: no match).
+    fn copy_matching(q: &[(CFString, CFType)]) -> Result<Option<CFTypeRef>> {
+        let q = CFDictionary::from_CFType_pairs(q);
+        let mut found: CFTypeRef = std::ptr::null();
+        // SAFETY: a valid dictionary; `found` receives a +1 reference.
+        let status = unsafe { SecItemCopyMatching(q.as_concrete_TypeRef(), &mut found) };
+        if status == errSecItemNotFound {
+            return Ok(None);
+        }
+        check(status)?;
+        Ok((!found.is_null()).then_some(found))
     }
 
     /// Add-only: `errSecDuplicateItem` when the item exists.
     pub(crate) fn add_generic_password(service: &str, account: &str, value: &[u8]) -> Result<()> {
-        let mut attrs = query(service, account);
+        let mut attrs = query(service, Some(account));
         attrs.push((
             key(unsafe { kSecAttrAccessible }),
             key(unsafe { kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }).into_CFType(),
@@ -118,7 +141,7 @@ mod ios {
     pub(crate) fn set_generic_password(service: &str, account: &str, value: &[u8]) -> Result<()> {
         match add_generic_password(service, account, value) {
             Err(e) if e.code() == errSecDuplicateItem => {
-                let found = CFDictionary::from_CFType_pairs(&query(service, account));
+                let found = CFDictionary::from_CFType_pairs(&query(service, Some(account)));
                 let change = CFDictionary::from_CFType_pairs(&[(
                     key(unsafe { kSecValueData }),
                     CFData::from_buffer(value).into_CFType(),
@@ -134,32 +157,99 @@ mod ios {
 
     /// The item's value; `errSecItemNotFound` when there is none.
     pub(crate) fn get_generic_password(service: &str, account: &str) -> Result<Vec<u8>> {
-        let mut q = query(service, account);
+        let mut q = query(service, Some(account));
         q.push((
             key(unsafe { kSecReturnData }),
             CFBoolean::true_value().into_CFType(),
         ));
-        let q = CFDictionary::from_CFType_pairs(&q);
-        let mut found: CFTypeRef = std::ptr::null();
-        // SAFETY: a valid dictionary; `found` receives a +1 reference.
-        check(unsafe { SecItemCopyMatching(q.as_concrete_TypeRef(), &mut found) })?;
-        if found.is_null() {
-            return Err(Error::from_code(errSecParam));
-        }
+        let found = copy_matching(&q)?.ok_or_else(|| Error::from_code(errSecItemNotFound))?;
         // SAFETY: `found` is a live CF object we own (create rule).
         if unsafe { CFGetTypeID(found) } != CFData::type_id() {
             unsafe { CFRelease(found) };
             return Err(Error::from_code(errSecParam));
         }
         let data = unsafe { CFData::wrap_under_create_rule(found as CFDataRef) };
+        // An empty value has no byte pointer to read.
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
         Ok(data.bytes().to_vec())
     }
 
     /// Removes the item; `errSecItemNotFound` when there is none.
     pub(crate) fn delete_generic_password(service: &str, account: &str) -> Result<()> {
-        let q = CFDictionary::from_CFType_pairs(&query(service, account));
+        let q = CFDictionary::from_CFType_pairs(&query(service, Some(account)));
         // SAFETY: a valid dictionary.
         check(unsafe { SecItemDelete(q.as_concrete_TypeRef()) })
+    }
+
+    /// The attributes of every item of `service` (of `account`, when
+    /// given). No value is read.
+    fn attributes(
+        service: &str,
+        account: Option<&str>,
+    ) -> Result<Vec<CFDictionary<CFString, CFType>>> {
+        let mut q = query(service, account);
+        q.push((
+            key(unsafe { kSecReturnAttributes }),
+            CFBoolean::true_value().into_CFType(),
+        ));
+        q.push((
+            key(unsafe { kSecMatchLimit }),
+            key(unsafe { kSecMatchLimitAll }).into_CFType(),
+        ));
+        let Some(found) = copy_matching(&q)? else {
+            return Ok(Vec::new());
+        };
+        // SAFETY: `found` is a live CF object we own (create rule).
+        if unsafe { CFGetTypeID(found) } != CFArray::<CFType>::type_id() {
+            unsafe { CFRelease(found) };
+            return Err(Error::from_code(errSecParam));
+        }
+        let items: CFArray<CFType> =
+            unsafe { CFArray::wrap_under_create_rule(found as CFArrayRef) };
+        Ok(items
+            .iter()
+            .filter_map(|item| item.downcast::<CFDictionary>())
+            // SAFETY: a dictionary the array holds (get rule: retained here).
+            .map(|d| unsafe {
+                CFDictionary::<CFString, CFType>::wrap_under_get_rule(d.as_concrete_TypeRef())
+            })
+            .collect())
+    }
+
+    /// The account of every item of `service` (for erase). Attributes
+    /// only: no secret is read.
+    pub(crate) fn accounts(service: &str) -> Result<Vec<String>> {
+        Ok(attributes(service, None)?
+            .iter()
+            .filter_map(|attrs| {
+                attrs
+                    .find(key(unsafe { kSecAttrAccount }))
+                    .and_then(|v| v.downcast::<CFString>())
+                    .map(|s| s.to_string())
+            })
+            .collect())
+    }
+
+    /// One item's protection class (`kSecAttrAccessible`'s value, such as
+    /// "cku") and whether it is synchronized, as the keychain reports them.
+    #[cfg(test)]
+    pub(crate) fn protection(service: &str, account: &str) -> Result<(String, bool)> {
+        let all = attributes(service, Some(account))?;
+        let attrs = all
+            .first()
+            .ok_or_else(|| Error::from_code(errSecItemNotFound))?;
+        let class = attrs
+            .find(key(unsafe { kSecAttrAccessible }))
+            .and_then(|v| v.downcast::<CFString>())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let synced = attrs
+            .find(key(unsafe { kSecAttrSynchronizable }))
+            .and_then(|v| v.downcast::<CFBoolean>())
+            .is_some_and(bool::from);
+        Ok((class, synced))
     }
 }
 
@@ -168,7 +258,6 @@ mod ios {
 #[cfg(all(test, target_os = "ios"))]
 mod tests {
     use super::*;
-    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 
     const NOT_FOUND: i32 = -25_300;
     const DUPLICATE: i32 = -25_299;
@@ -189,33 +278,13 @@ mod tests {
             DUPLICATE
         );
         assert_eq!(get_generic_password(service, &account).unwrap(), b"one");
-        let protection = || {
-            let found = ItemSearchOptions::new()
-                .class(ItemClass::generic_password())
-                .service(service)
-                .account(&account)
-                .load_attributes(true)
-                .limit(Limit::All)
-                .search()
-                .unwrap();
-            assert_eq!(found.len(), 1);
-            found[0].simplify_dict().unwrap()
-        };
-        let attrs = protection();
         // kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly is "cku".
-        assert_eq!(
-            attrs.get("pdmn").map(String::as_str),
-            Some("cku"),
-            "{attrs:?}"
-        );
+        let cku = || (String::from("cku"), false);
+        assert_eq!(ios::protection(service, &account).unwrap(), cku());
+        assert!(accounts(service).unwrap().contains(&account));
         set_generic_password(service, &account, b"three").unwrap();
         assert_eq!(get_generic_password(service, &account).unwrap(), b"three");
-        let attrs = protection();
-        assert_eq!(
-            attrs.get("pdmn").map(String::as_str),
-            Some("cku"),
-            "{attrs:?}"
-        );
+        assert_eq!(ios::protection(service, &account).unwrap(), cku());
         delete_generic_password(service, &account).unwrap();
         assert_eq!(
             get_generic_password(service, &account).unwrap_err().code(),

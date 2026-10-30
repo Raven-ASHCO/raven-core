@@ -1390,7 +1390,7 @@ impl ProtectedSessionBackend for PlatformProtectedSessionBackend {
         use crate::apple_keychain::set_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
         let scoped = self.scoped_account(account);
-        #[cfg(test)]
+        #[cfg(all(test, target_os = "macos"))]
         crate::macos_keychain::track_new_test_item(PLATFORM_SERVICE, &scoped);
         guarded(KeychainWhat::SessionSecret, || {
             set_generic_password(PLATFORM_SERVICE, &scoped, value)

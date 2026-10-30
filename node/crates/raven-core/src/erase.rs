@@ -1118,10 +1118,18 @@ fn platform_delete_prefix(role: KeyRole, service: &str, prefix: &str) -> Result<
     Ok(deleted)
 }
 
+/// iOS: the account of every item of `service` in the data-protection
+/// keychain (attributes only; read without `simplify_dict`, which reads an
+/// empty data attribute through a null pointer).
+#[cfg(target_os = "ios")]
+fn keychain_accounts(_role: KeyRole, service: &str) -> Result<Vec<String>, String> {
+    crate::apple_keychain::accounts(service).map_err(|e| format!("keychain search failed: {e}"))
+}
+
 /// The account of every generic password of `service`, inside the
 /// access-dialog guard. Attributes only: no secret is read, so no item asks
 /// for access (owner row R34.6 records it).
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(target_os = "macos")]
 fn keychain_accounts(role: KeyRole, service: &str) -> Result<Vec<String>, String> {
     use crate::macos_keychain::guarded;
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
