@@ -1,12 +1,12 @@
 # Raven on iPhone and iPad
 
-> **Status: the engine is ready for an iOS app; the app itself does not exist
-> yet.** The node, its IPC and Tor run inside one process, behind the same
-> C function the desktop apps call. Tested on macOS and in the iOS
-> Simulator (three engines, each running its node in its own process, with
-> no `raven-node` program; the iOS Keychain; the release XCFramework linked
-> into a small program). Section 10 says what ran where and what waits for
-> a device.
+> **Status (version 0.1.1): the engine is ready for an iOS app; the app is in
+> development and will come through TestFlight first.** The node, its IPC and
+> Tor run inside one process, behind the same C function the desktop apps
+> call. Tested on macOS and in the iOS Simulator (three engines, each running
+> its node in its own process, with no `raven-node` program; the iOS
+> Keychain; the release XCFramework linked into a small program). Section 10
+> says what ran where and what waits for a device.
 
 ## 1. Why one process
 
@@ -85,15 +85,27 @@ it is tested.
 ## 2. The engine's operations on iOS
 
 The contract is [`desktop/api/API.md`](../desktop/api/API.md), unchanged,
-plus three lifecycle operations (embedded node only; elsewhere they answer
-`NOT_AVAILABLE_YET`):
+plus four lifecycle operations (embedded node only; elsewhere they answer
+`NOT_AVAILABLE_YET`) and the hand-off, which any engine with a running node
+has:
 
 | Operation | Args | Result |
 |---|---|---|
 | `node.pause` | – | `NodeStatus` + `{was_running}`: the node stopped cleanly and stays stopped |
 | `node.resume` | – | `NodeStatus`: the pause ends and the node starts as `node.start` starts it |
-| `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms}` |
+| `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms, names}`: `names`, the friends it asked, by your names for them |
 | `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}`: the kind of network the device uses (section 6) |
+| `messages.handoff` | `{budget_ms?}` | `{handed, left, delivered, holders, custody, completed, elapsed_ms}`: what waits goes to friends who hold mail now (section 3; API.md "Hand-off") |
+
+What the app shows about friends who carry mail comes from API.md's fields:
+a message of yours a friend holds has `path_kind` `friend` (or `handoff`)
+and `via_name`, that friend's name ("Held by Max"; the same on its `receipt`
+and `state` events; the message's state is `sent` while the friend holds
+it); a group message of yours has `held_by` on the receipt of a member who
+is away; a member's group message has `path_kind`; `NetworkStatus.carry.
+friends_carry_mine.names` names the friends a mail check asks ("Asking Max
+and Neighbour"); and `NetworkStatus.tor.percent` is Tor's start percentage
+(release builds too).
 
 `NodeStatus` gains `embedded: true`, `paused`, and `state` `paused` or
 `mail_check`. While paused, `node.start` and a send are refused (the
@@ -108,8 +120,11 @@ signal: its pid is the app's own).
    profile; `node.start` (or `node.resume` after a pause). Start an
    `NWPathMonitor` and call `network.path` with the current kind of network
    now and at every change (section 6: Tor on Wi-Fi only).
-2. **To the background** (`sceneDidEnterBackground`): call `node.pause`
-   inside `beginBackgroundTask`. It closes the listeners, sends the p2p
+2. **To the background** (`sceneDidEnterBackground`): inside
+   `beginBackgroundTask`, first `messages.handoff {"budget_ms": 5000}` when
+   a message of yours waits (it leaves sealed copies with friends who hold
+   mail, so they keep trying while the phone sleeps; it returns within its
+   budget), then `node.pause`. The pause closes the listeners, sends the p2p
    host's goodbyes, ends Tor's circuits and its helper, saves what learning
    saw, and flushes the security ledger: about a second, eight at most. The
    node holds no socket while the app is suspended.
@@ -239,7 +254,10 @@ spins (Arti #2726) can be left behind, not killed.
 
 **Mobile data** (owner decision 2026-10-30): Tor runs on Wi-Fi and on mobile
 data by default. The setting `tor_wifi_only` (`network.set`, kept in
-`node_policy.json`) keeps it off on mobile data. The node cannot tell mobile
+`node_policy.json`, shown as `NetworkStatus.tor_wifi_only`) keeps it off on
+mobile data. It is the API's one name: the app's switch "Use Tor on mobile
+data" is its opposite (`tor_wifi_only: !on`), and `tor_on_cellular` is
+answered with `BAD_REQUEST`. The node cannot tell mobile
 data from Wi-Fi on a phone, so the app reports the kind of network with
 `network.path {type}` whenever `NWPathMonitor` says it changed (`cellular`
 when the path uses the cellular interface, `wifi`, `wired`, `other`,
@@ -369,6 +387,7 @@ node stays paused, `node.resume`, and a direct delivery again.
 | Tor in process, loopback helper | in that test | in that test | not yet |
 | Tor in process, real Arti (bootstrap, onion service publishing) | `tor_in_process_bootstraps` | the same test | not yet |
 | Tor off when the Tor network finds it too old (patched Arti told instead of exiting), Tor on Wi-Fi only | `onion::tests`, the end-to-end test (`network.path`) | the end-to-end test, `simulator_smoke.sh` | not yet |
+| `messages.handoff`, `via_name`, `held_by`, mail check `names` | `net_handoff` (three `raven-node` programs), `net_custody`, the end-to-end test (`names`) | – | not yet |
 | iOS Keychain backend (add-only, read, update, `cku` protection, not synchronized, account listing, identity marker `ios-keychain`) | – | `apple_keychain::tests` | not yet |
 | Container-relative profile binding | – | `paths::tests` | not yet |
 | `RavenClient.xcframework` (release) linked by Xcode's clang into a C program: new identity in the Keychain, node started, paused, mail check, resumed, stopped | – | `simulator_smoke.sh` | not yet |

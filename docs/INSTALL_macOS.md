@@ -1,5 +1,9 @@
 # Install Raven Serverless (macOS)
 
+Version 0.1.1 ([changelog](../CHANGELOG.md)). The Raven app for macOS and its download are
+prepared in the `raven-macos` repository and are not published yet; this guide builds the command
+line and the background program from source and runs them as a login service.
+
 `node/scripts/install.sh` is **not** a production installer. It fails closed
 and does not put binaries on `PATH`. Use the release-build steps below
 (`scripts/install/macos_launchd.sh`). Do not `curl | bash` a convenience

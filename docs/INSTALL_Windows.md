@@ -1,5 +1,10 @@
 # Install Raven Serverless (Windows)
 
+Version 0.1.1 ([changelog](../CHANGELOG.md)). The Raven app for Windows and its download are
+prepared in the `raven-windows` repository and are not published yet; this guide builds the
+command line and the background program from source. Windows has no Bluetooth nearby in release
+builds (macOS only).
+
 Also see [`node/WINDOWS.md`](../node/WINDOWS.md) and [`node/scripts/install/WINDOWS_SERVICE.md`](../node/scripts/install/WINDOWS_SERVICE.md).
 
 Unix `node/scripts/install.sh` is **not** an installer (fail-closed). It never

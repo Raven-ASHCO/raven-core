@@ -28,7 +28,7 @@ Related repositories, each using this one as a git submodule at `core/`:
 
 Website: https://raven-messager.com
 
-## Status: early, not independently reviewed, nothing to download yet
+## Status: early, not independently reviewed, downloads coming
 
 - **Pre-release (version 0.1.1).** No independent security review has happened yet. An internal
   review in October 2026 found problems that version 0.1.0 fixed; it is no substitute for an
@@ -87,8 +87,14 @@ Website: https://raven-messager.com
   `RAVEN_LAB_*` environment variables, for testing only; see [docs/ROADMAP.md](docs/ROADMAP.md).
   Older documents (the `docs/WAIVER_*` drafts, design documents, protocol status tables) still
   describe the switched-on features as held: they record the state before October 2026.
-- **The desktop apps are in development.** Nothing is packaged, signed or notarised, and there
-  are no downloads yet.
+- **Downloads are coming, not published yet.** The desktop apps (macOS, Windows, Linux) and a
+  Linux package of the command line (`scripts/release/make-linux.sh`, with an installer for one
+  user) are being prepared for their first download. Nothing is signed or notarised yet. Until
+  then, build from source (below).
+- **iPhone and iPad: the app is in development**, and will come through TestFlight first. The
+  engine it uses is here: Raven's node and Tor run inside the app, the keys stay in the iOS
+  Keychain on that device, and there is no push server ([docs/IOS.md](docs/IOS.md)). It has run in
+  the iOS Simulator, not yet on a phone. Bluetooth nearby is not on iPhone (macOS only).
 - Some documents and code comments refer to internal planning documents that are not part of
   this repository.
 
@@ -145,12 +151,19 @@ everything up as a login service: [Linux](docs/INSTALL_Linux.md),
 (a router with a dead uplink, a hotspot, a cable): read [the safety guide](docs/SAFETY_OFFLINE.md)
 and [the offline guide](docs/OFFLINE_GUIDE.md).
 
+The Linux package (`raven-linux-<arch>-<version>.tar.gz` with an installer and its SHA-256), on
+the Linux it is for: `bash scripts/release/make-linux.sh` ([how](docs/INSTALL_Linux.md#make-the-linux-package)).
+
 The desktop engine:
 
 ```sh
 cd node
 cargo build --release --locked -p raven-client -p raven-node --features raven-node/tor
 ```
+
+The iOS engine (`RavenClient.xcframework`, the node and Tor inside the app):
+`node/scripts/ios/build_xcframework.sh`, then `node/scripts/ios/simulator_smoke.sh`
+([docs/IOS.md](docs/IOS.md) section 9).
 
 ## Test
 

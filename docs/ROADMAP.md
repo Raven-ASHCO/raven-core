@@ -35,7 +35,8 @@ Some drafts propose switching a feature on under a written exception instead of 
 exception is the one for LAN direct
 ([WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md](WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md)),
 and no independent review has happened yet ([SECURITY_REVIEW_SCOPE.md](SECURITY_REVIEW_SCOPE.md)).
-There is nothing to download yet and there are no signed packages (last section).
+There is nothing to download yet and there are no signed packages (last section); the first
+downloads are being prepared.
 
 "Field test" below means the three-computer test of October 2026
 ([FIELD_TEST_2026_10.md](FIELD_TEST_2026_10.md)); "carrier matrix" means the multi-process loopback
@@ -105,13 +106,17 @@ reviewed ratchet with forward secrecy and post-compromise security
 
 ## Packages
 
-Nothing is packaged yet; every build is a local build.
+Nothing is published yet. The Linux package can be made from this repository
+(`scripts/release/make-linux.sh`: the programs, an installer for one user and SHA-256 checksums,
+[how](INSTALL_Linux.md#make-the-linux-package)); the desktop apps' packages are made in their own
+repositories. The iPhone and iPad app is in development ([IOS.md](IOS.md)).
 
 | Package | Still needed |
 |---|---|
 | **macOS** | an Apple Developer ID, signing with the hardened runtime, Apple notarisation and stapling ([checklist](SIGNING_NOTARIZATION_CHECKLIST.md)) |
 | **Windows** | an Authenticode code-signing certificate, a signed installer |
-| **Linux** | packages for the main distributions, published with SHA-256 checksums and a signature |
+| **Linux** | the package published with its SHA-256 checksum and a signature; packages for the main distributions |
+| **iPhone and iPad** | the app, TestFlight, a decision on App Store distribution and the AGPL ([IOS.md](IOS.md) section 11) |
 | **All** | Raven's own release signature (two of three offline keys, a public release log): the [key ceremony](RELEASE_KEY_CEREMONY.md) has not been held; reproducible builds (an advisory CI job compares two builds today) |
 
 ## How you can help

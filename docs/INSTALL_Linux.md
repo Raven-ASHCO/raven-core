@@ -1,6 +1,6 @@
 # Install Raven Serverless (Linux)
 
-Two ways: the Linux package (`raven-linux-<arch>-<version>.tar.gz`, x86_64 and
+Version 0.1.1 ([changelog](../CHANGELOG.md)). Two ways: the Linux package (`raven-linux-<arch>-<version>.tar.gz`, x86_64 and
 aarch64; downloads are not published yet, so for now you make it yourself, see
 [Make the Linux package](#make-the-linux-package)), or a build from source.
 Both set Raven up the same way: the programs in `~/.local/bin`, your profile in
