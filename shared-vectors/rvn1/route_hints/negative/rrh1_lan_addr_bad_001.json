@@ -1,0 +1,23 @@
+{
+  "description": "An RRH1 frame (the sender seed's P2P_ID, then six LAN_ADDR entries, type 0x09): a globally routable address, an IPv6 link-local one, a port with a leading zero (not canonical), two good ones (the second with every flag bit set) and a third good one past the limit of 2. Each bad or extra entry is dropped alone with an RRH1_MALFORMED debug log; the frame, its P2P_ID and the two good entries (flag bits cleared) are kept",
+  "deterministic": true,
+  "expected": {
+    "dropped": 4,
+    "frame_kept": true,
+    "lan_addrs": [
+      {
+        "addr": "192.168.7.21:7421",
+        "value_hex": "003139322e3136382e372e32313a37343231"
+      },
+      {
+        "addr": "10.0.0.21:7421",
+        "value_hex": "0031302e302e302e32313a37343231"
+      }
+    ]
+  },
+  "inputs": {
+    "frame_hex": "525248310100000199c82cc07b0003f480010026002408011220074ee21a9f187d5f65e5fd3effc19a7c2ca18ba9685444553601690c8c0fed5f09000e0031312e302e332e373a37343231090010005b666538303a3a32315d3a37343231090013003139322e3136382e372e32313a3037343231090012003139322e3136382e372e32313a3734323109000fff31302e302e302e32313a37343231090011003137322e31362e302e32313a37343231"
+  },
+  "name": "LAN_ADDR entries that break §16",
+  "protocol_version": "rvn1"
+}

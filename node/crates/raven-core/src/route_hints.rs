@@ -252,8 +252,8 @@ pub const DIRECT_MAX_LEN: usize = 120;
 // reserved 0x21, the rest of the range reserved for Phase 4 (0x25-0x2F) and
 // Phase 5's (0x30-0x3F), is skipped. A receiver built before §11 skips 0x20
 // too, one built before §12 skips 0x06 and 0x07, one built before §13 skips
-// 0x22 and 0x23 (and one built before §13.3 0x24), and one built before §14
-// skips 0x08.
+// 0x22 and 0x23 (and one built before §13.3 0x24), one built before §14
+// skips 0x08, and one built before §16 skips 0x09.
 const T_P2P_ID: u8 = 0x01;
 const T_RELAY: u8 = 0x02;
 const T_DIRECT: u8 = 0x03;
@@ -266,6 +266,9 @@ const T_CUSTODIAN_TAG: u8 = 0x07;
 /// Phase 6b (§14): the pair seed ([`crate::pair_seed`]), the next free type
 /// of this document's own range.
 const T_PAIR_SEED: u8 = 0x08;
+/// §16 (field test E3, owner decision 2026-10-30): the sender's LAN direct
+/// address, told on a link other than the LAN to a verified contact.
+const T_LAN_ADDR: u8 = 0x09;
 const T_RELAY_OFFER: u8 = 0x20;
 const T_NAT_CLASS: u8 = 0x22;
 const T_PEER_SCHEDULE: u8 = 0x23;
@@ -280,7 +283,9 @@ const ENTRY_HEADER_LEN: usize = 3;
 const _: () = assert!(MAX_GLOBAL_DIRECT + MAX_LOCAL_DIRECT == MAX_DIRECT);
 // The custody entries (§12) are this document's types, outside the ranges
 // reserved for Phase 4 (0x22-0x2F) and Phase 5 (0x30-0x3F).
-const _: () = assert!(T_CUSTODY_OFFER < 0x20 && T_CUSTODIAN_TAG < 0x20 && T_PAIR_SEED < 0x20);
+const _: () = assert!(
+    T_CUSTODY_OFFER < 0x20 && T_CUSTODIAN_TAG < 0x20 && T_PAIR_SEED < 0x20 && T_LAN_ADDR < 0x20
+);
 const _: () = assert!(CUSTODIAN_TAG_LEN == 32 + 1);
 // A frame with every registered entry at its limits still fits, so
 // [`encode`] never writes one a receiver ignores for its length.
@@ -294,6 +299,7 @@ const _: () = assert!(
         + (ENTRY_HEADER_LEN + 1)
         + MAX_CUSTODIANS * (ENTRY_HEADER_LEN + CUSTODIAN_TAG_LEN)
         + (ENTRY_HEADER_LEN + crate::pair_seed::ENTRY_LEN)
+        + MAX_LAN_ADDR * (ENTRY_HEADER_LEN + INET_DIRECT_MAX_LEN)
         + MAX_RELAY_OFFERS * (ENTRY_HEADER_LEN + RELAY_OFFER_MAX_LEN)
         + (ENTRY_HEADER_LEN + NAT_CLASS_LEN)
         + (ENTRY_HEADER_LEN + PEER_SCHEDULE_MAX_LEN)
@@ -367,6 +373,30 @@ impl InetDirect {
     pub fn confirmed(&self) -> bool {
         self.flags & INET_FLAG_CONFIRMED != 0
     }
+}
+
+// ── LAN_ADDR (spec §16) ─────────────────────────────────────────────────────
+
+/// LAN_ADDR entries per frame.
+pub const MAX_LAN_ADDR: usize = 2;
+/// The LAN_ADDR flags this revision defines (none: sent as 0, cleared on
+/// decode).
+pub const LAN_ADDR_FLAGS_KNOWN: u8 = 0;
+
+/// A LAN_ADDR value (type 0x09, spec §16): INET_DIRECT's shape (flags u8,
+/// then canonical `ip:port`), but a local-network address
+/// ([`crate::outbox::is_local_network_ip`]) that is not IPv6 link-local (no
+/// zone travels: it names an interface of the sender's), with its flags
+/// cleared (none is defined yet). `None` for anything else. A loopback one
+/// decodes; [`validate`] drops it outside the one-machine lab.
+pub fn lan_addr_from_bytes(value: &[u8]) -> Option<InetDirect> {
+    let e = InetDirect::from_bytes(value)?;
+    let ip = e.addr.ip();
+    let link_local = matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
+    (crate::outbox::is_local_network_ip(ip) && !link_local).then_some(InetDirect {
+        flags: e.flags & LAN_ADDR_FLAGS_KNOWN,
+        ..e
+    })
 }
 
 // ── Phase 4 extensions (spec §13) ───────────────────────────────────────────
@@ -632,9 +662,12 @@ pub struct RouteHints {
     /// Auto-reach (spec §13.3): the public address of the sender's Internet
     /// direct listener, at most [`MAX_INET_DIRECT`], in frame order.
     pub inet: Vec<InetDirect>,
-    /// Phase 4 entries [`decode`] dropped alone (spec §13): a NAT_CLASS,
-    /// PEER_SCHEDULE or INET_DIRECT that breaks its rules, or one too many.
-    /// Not on the wire; counts-only logs.
+    /// The sender's LAN direct addresses (LAN_ADDR, spec §16), told on a
+    /// link other than the LAN: at most [`MAX_LAN_ADDR`], in frame order.
+    pub lan_addrs: Vec<InetDirect>,
+    /// Entries [`decode`] dropped alone (spec §13, §16): a NAT_CLASS,
+    /// PEER_SCHEDULE, INET_DIRECT or LAN_ADDR that breaks its rules, or one
+    /// too many. Not on the wire; counts-only logs.
     pub dropped_phase4: u32,
     /// The sender's pair seed (PAIR_SEED, Phase 6b, spec §14): its seed
     /// offer and the generation it uses.
@@ -742,6 +775,17 @@ pub fn decode(frame: &[u8]) -> Option<RouteHints> {
                 Some(entry) if h.pair_seed.is_none() => h.pair_seed = Some(entry),
                 _ => h.dropped_pair_seed += 1,
             },
+            // §16: checked one at a time, a bad one dropped alone, at most
+            // two distinct addresses.
+            T_LAN_ADDR => match lan_addr_from_bytes(value) {
+                Some(e)
+                    if h.lan_addrs.len() < MAX_LAN_ADDR
+                        && h.lan_addrs.iter().all(|o| o.addr != e.addr) =>
+                {
+                    h.lan_addrs.push(e)
+                }
+                _ => h.dropped_phase4 += 1,
+            },
             T_RELAY_OFFER => match decode_offer(value) {
                 // A later record format: ignored, the frame kept (§11.2).
                 Err(OfferDecode::Unsupported) => {}
@@ -832,6 +876,17 @@ pub fn encode(h: &RouteHints) -> Vec<u8> {
     }
     if let Some(entry) = h.pair_seed.as_ref().filter(|e| e.valid()) {
         put(T_PAIR_SEED, &entry.to_bytes());
+    }
+    let mut lan_addrs: Vec<std::net::SocketAddr> = Vec::new();
+    for e in &h.lan_addrs {
+        let value = e.to_bytes();
+        if lan_addrs.len() < MAX_LAN_ADDR
+            && !lan_addrs.contains(&e.addr)
+            && lan_addr_from_bytes(&value).as_ref() == Some(e)
+        {
+            lan_addrs.push(e.addr);
+            put(T_LAN_ADDR, &value);
+        }
     }
     let mut offered: Vec<&[u8; 32]> = Vec::with_capacity(MAX_RELAY_OFFERS);
     for offer in &h.offers {
@@ -940,6 +995,20 @@ pub fn lab_loopback_relays() -> bool {
     })
 }
 
+/// Debug builds with route hints on through their debug switch and
+/// `RAVEN_LAB_LAN_ADDR_LOOPBACK=1`: a sender tells its loopback LAN listener
+/// as a LAN_ADDR (spec §16), for the one-machine harness cases that move to
+/// LAN direct after one (carrier matrix C94, C99). Without it the nodes of a
+/// one-machine harness, all on loopback, learn no LAN route this way, so its
+/// relay, Internet and Tor cases keep their routes. Release builds never
+/// read the variable: there a loopback address is never told.
+pub fn lab_lan_addr_loopback() -> bool {
+    lab_loopback_relays()
+        && crate::p2p_gate::lab_flag(cfg!(debug_assertions), || {
+            std::env::var("RAVEN_LAB_LAN_ADDR_LOOPBACK").ok()
+        })
+}
+
 impl HintLink<'static> {
     /// A fixed link for the fuzz target and the vectors (not test-only: the
     /// fuzz crate's library is compiled outside `cfg(test)`). The sender is
@@ -1029,6 +1098,11 @@ pub struct ValidHints {
     /// from a pinned sender only, a globally routable IP (any under
     /// `lab_local`), at most [`MAX_INET_DIRECT`].
     pub inet: Vec<InetDirect>,
+    /// The sender's LAN direct addresses (§16): from a pinned sender only,
+    /// on a link other than the LAN, at most [`MAX_LAN_ADDR`]. Whether one
+    /// is on one of the receiver's own networks is the receiver's check
+    /// before it stores it (it reads the system: [`validate`] is pure).
+    pub lan_addrs: Vec<InetDirect>,
     /// The sender's onion binding (§15): from a pinned sender only, on any
     /// link, and only when the sender's own key signed it
     /// ([`crate::onion::OnionBinding::verify`]).
@@ -1070,6 +1144,9 @@ pub struct ValidHints {
 /// - PEER_SCHEDULE (§13.2): from a pinned sender, whatever its P2P_ID;
 /// - INET_DIRECT (§13.3): from a pinned sender, a globally routable IP only
 ///   (any under `lab_local`);
+/// - LAN_ADDR (§16): from a pinned sender, on a link other than the LAN
+///   (where the link's own peer IP is the LAN part's), never a loopback
+///   address (except under `lab_loopback`);
 /// - PAIR_SEED (§14): from a pinned sender, on any link;
 /// - ONION (§15): from a pinned sender, on any link, and only a binding the
 ///   sender's own key (the link's authenticated one) signed.
@@ -1125,6 +1202,20 @@ pub fn validate(h: &RouteHints, link: &HintLink) -> ValidHints {
                 v.inet.push(e);
             }
         }
+        if link.carrier != OutboxCarrier::Lan {
+            for e in &h.lan_addrs {
+                if v.lan_addrs.len() < MAX_LAN_ADDR
+                    && lan_addr_from_bytes(&e.to_bytes()).is_some()
+                    && (!e.addr.ip().is_loopback() || link.lab_loopback)
+                    && v.lan_addrs.iter().all(|o| o.addr != e.addr)
+                {
+                    v.lan_addrs.push(InetDirect {
+                        flags: e.flags & LAN_ADDR_FLAGS_KNOWN,
+                        ..*e
+                    });
+                }
+            }
+        }
         for (tag, flags) in &h.custodian_tags {
             let flags = flags & CUSTODIAN_TAG_KNOWN_FLAGS;
             if let Some(i) = v.custodian_tags.iter().position(|t| t == tag) {
@@ -1148,6 +1239,7 @@ pub fn validate(h: &RouteHints, link: &HintLink) -> ValidHints {
         + usize::from(h.peer_schedule.is_some())
         + usize::from(h.pair_seed.is_some())
         + h.inet.len()
+        + h.lan_addrs.len()
         + usize::from(h.onion.is_some());
     let kept = usize::from(v.peer_id.is_some())
         + v.relays.len()
@@ -1162,6 +1254,7 @@ pub fn validate(h: &RouteHints, link: &HintLink) -> ValidHints {
         + usize::from(v.peer_schedule.is_some())
         + usize::from(v.pair_seed.is_some())
         + v.inet.len()
+        + v.lan_addrs.len()
         + usize::from(v.onion.is_some());
     v.dropped = u32::try_from(carried.saturating_sub(kept)).unwrap_or(u32::MAX);
     v
@@ -4084,6 +4177,212 @@ mod tests {
         assert_eq!(validate(&h, &lab).inet.len(), MAX_INET_DIRECT);
         let stranger = HintLink::fixture(OutboxCarrier::Lan, false);
         assert!(validate(&h, &stranger).inet.is_empty());
+    }
+
+    // ── LAN_ADDR (§16) ──────────────────────────────────────────────────────
+
+    fn lan_addr_json(entries: &[InetDirect]) -> serde_json::Value {
+        entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "addr": e.addr.to_string(),
+                    "value_hex": hex::encode(e.to_bytes()),
+                })
+            })
+            .collect()
+    }
+
+    /// KAT (spec §16): the full snapshot with two LAN_ADDR entries (an IPv4
+    /// and an IPv6 local-network address) in ascending type order (after
+    /// PAIR_SEED 0x08, before RELAY_OFFER 0x20), and its negative: a global
+    /// address, an IPv6 link-local one, a non-canonical one and a third good
+    /// one are dropped alone, the frame kept. A receiver built before §16
+    /// skips 0x09 and keeps the same hints. Regenerate with
+    /// `RAVEN_REGEN_RRH1_VECTORS=1` only when the wire format changes on
+    /// purpose.
+    #[test]
+    fn lan_addr_tlv_matches_vectors() {
+        let entries_in = vec![inet(0, "192.168.7.21:7421"), inet(0, "[fd00:7::21]:7421")];
+        let h = RouteHints {
+            lan_addrs: entries_in.clone(),
+            ..full()
+        };
+        let frame = encode(&h);
+        let phase2 = encode(&full());
+        let values: usize = entries_in.iter().map(|e| e.to_bytes().len()).sum();
+        assert_eq!(frame.len(), phase2.len() + 2 * ENTRY_HEADER_LEN + values);
+        let kinds: Vec<u8> = entries(&frame).into_iter().map(|(k, _)| k).collect();
+        let at = kinds.iter().position(|k| *k == T_LAN_ADDR).unwrap();
+        assert!(kinds[..at].iter().all(|k| *k < T_LAN_ADDR));
+        assert!(kinds[at + 2..].iter().all(|k| *k > T_LAN_ADDR));
+        assert_eq!(decode(&frame), Some(h.clone()));
+        // A receiver built before §16 skips 0x09 and keeps the same hints.
+        let older: Vec<(u8, Vec<u8>)> = entries(&frame)
+            .into_iter()
+            .filter(|(k, _)| *k != T_LAN_ADDR)
+            .collect();
+        assert_eq!(raw(G, RRH1_DEFAULT_TTL_S, &older), phase2);
+        let retyped: Vec<(u8, Vec<u8>)> = entries(&frame)
+            .into_iter()
+            .map(|(k, v)| (if k == T_LAN_ADDR { 0x7f } else { k }, v))
+            .collect();
+        assert_eq!(decode(&raw(G, RRH1_DEFAULT_TTL_S, &retyped)), Some(full()));
+        // Kept from a verified sender on every link but the LAN (whose own
+        // peer IP is the LAN part's); never from an unverified one.
+        for carrier in [
+            OutboxCarrier::Internet,
+            OutboxCarrier::P2p,
+            OutboxCarrier::Nearby,
+            OutboxCarrier::Onion,
+        ] {
+            let link = HintLink::fixture(carrier, true);
+            let v = validate(&h, &link);
+            assert_eq!(v.lan_addrs, entries_in, "{carrier:?}");
+            assert_eq!(v.dropped, validate(&full(), &link).dropped, "{carrier:?}");
+            let stranger = HintLink::fixture(carrier, false);
+            assert!(validate(&h, &stranger).lan_addrs.is_empty(), "{carrier:?}");
+        }
+        let lan = HintLink::fixture(OutboxCarrier::Lan, true);
+        let v = validate(&h, &lan);
+        assert!(v.lan_addrs.is_empty());
+        assert_eq!(v.dropped, validate(&full(), &lan).dropped + 2);
+        let mut decoded = decoded_json(&h);
+        decoded["lan_addrs"] = lan_addr_json(&h.lan_addrs);
+        assert_vector(
+            "rrh1_lan_addr_001.json",
+            &vector(
+                "RRH1 with LAN_ADDR entries (a LAN address told over another link)",
+                "RRH1 v1 frame (RAVEN_ROUTE_HINTS_V1 §4, §16) carrying two LAN_ADDR entries \
+                 (type 0x09, len 10..=48: flags u8 | ASCII ip:port, canonical; no flag defined, \
+                 sent as 0): the sender's LAN direct address, told to a verified contact on a \
+                 link other than the LAN. The frame is rrh1_full_001.json's with the entries in \
+                 ascending type order: a receiver built before §16 skips them and keeps the \
+                 same hints. A receiver keeps them from a verified sender on a non-LAN link \
+                 only, and stores one only when it is on one of its own networks",
+                json!({
+                    "sender_seed_hex": hex::encode([SENDER; 32]),
+                    "sender_peer_id": pid(SENDER),
+                    "hints": decoded.clone(),
+                }),
+                json!({
+                    "frame_hex": hex::encode(&frame),
+                    "frame_len": frame.len(),
+                    "phase2_frame_hex": hex::encode(&phase2),
+                    "decoded": decoded,
+                }),
+            ),
+        );
+
+        let bad = p2p_id_then(&[
+            (T_LAN_ADDR, [&[0u8][..], b"11.0.3.7:7421"].concat()),
+            (T_LAN_ADDR, [&[0u8][..], b"[fe80::21]:7421"].concat()),
+            (T_LAN_ADDR, [&[0u8][..], b"192.168.7.21:07421"].concat()),
+            (T_LAN_ADDR, [&[0u8][..], b"192.168.7.21:7421"].concat()),
+            (T_LAN_ADDR, [&[0xffu8][..], b"10.0.0.21:7421"].concat()),
+            (T_LAN_ADDR, [&[0u8][..], b"172.16.0.21:7421"].concat()),
+        ]);
+        let h = decode(&bad).expect("a bad LAN_ADDR never costs the frame");
+        assert!(h.p2p_id.is_some());
+        assert_eq!(
+            h.lan_addrs,
+            vec![
+                inet(0, "192.168.7.21:7421"),
+                // Unknown flag bits cleared.
+                inet(0, "10.0.0.21:7421"),
+            ]
+        );
+        assert_eq!(h.dropped_phase4, 4);
+        assert_vector(
+            "negative/rrh1_lan_addr_bad_001.json",
+            &vector(
+                "LAN_ADDR entries that break §16",
+                "An RRH1 frame (the sender seed's P2P_ID, then six LAN_ADDR entries, type 0x09): \
+                 a globally routable address, an IPv6 link-local one, a port with a leading zero \
+                 (not canonical), two good ones (the second with every flag bit set) and a third \
+                 good one past the limit of 2. Each bad or extra entry is dropped alone with an \
+                 RRH1_MALFORMED debug log; the frame, its P2P_ID and the two good entries (flag \
+                 bits cleared) are kept",
+                json!({ "frame_hex": hex::encode(&bad) }),
+                json!({
+                    "frame_kept": true,
+                    "lan_addrs": lan_addr_json(&h.lan_addrs),
+                    "dropped": 4,
+                }),
+            ),
+        );
+    }
+
+    /// §16: the LAN_ADDR value rules, the writer's and the receiver's: a
+    /// local-network address that is not IPv6 link-local; a loopback one
+    /// decodes but is kept only in the one-machine lab; duplicates go.
+    #[test]
+    fn lan_addr_values_and_receiver_rules() {
+        let ok = |t: &str| lan_addr_from_bytes(&[&[0u8][..], t.as_bytes()].concat());
+        for good in [
+            "192.168.1.5:7421",
+            "10.1.2.3:1",
+            "172.31.0.9:65535",
+            "169.254.3.4:7421",
+            "127.0.0.1:7421",
+            "[fd12:3456::9]:7421",
+            "[::1]:7421",
+        ] {
+            assert!(ok(good).is_some(), "{good:?}");
+        }
+        for bad in [
+            "",
+            "192.168.1.5",
+            "192.168.1.5:0",
+            "192.168.01.5:7421",
+            "11.0.3.7:7421",
+            "[2c0f:fff0:a::5]:7421",
+            "[fe80::1]:7421",
+            "[fe80::1%4]:7421",
+            "0.0.0.0:7421",
+            "host.local:7421",
+        ] {
+            assert_eq!(ok(bad), None, "{bad:?}");
+        }
+        // The writer writes only what decode keeps: no global address, no
+        // duplicate, at most two.
+        let h = RouteHints {
+            lan_addrs: vec![
+                inet(0, "11.0.3.7:7421"),
+                inet(0, "192.168.1.5:7421"),
+                inet(0, "192.168.1.5:7421"),
+                inet(0, "127.0.0.1:7421"),
+                inet(0, "10.0.0.5:7421"),
+            ],
+            ..full()
+        };
+        let decoded = decode(&encode(&h)).unwrap();
+        assert_eq!(
+            decoded.lan_addrs,
+            vec![inet(0, "192.168.1.5:7421"), inet(0, "127.0.0.1:7421")]
+        );
+        assert_eq!(decoded.dropped_phase4, 0);
+        // A loopback address is the sender's own computer: dropped, except
+        // in the one-machine lab.
+        let link = HintLink::fixture(OutboxCarrier::Onion, true);
+        assert_eq!(
+            validate(&decoded, &link).lan_addrs,
+            vec![inet(0, "192.168.1.5:7421")]
+        );
+        let lab = HintLink {
+            lab_loopback: true,
+            ..link
+        };
+        assert_eq!(validate(&decoded, &lab).lan_addrs, decoded.lan_addrs);
+        // A frame built by hand is held to decode's rules in validate too.
+        let by_hand = RouteHints {
+            lan_addrs: vec![inet(0x80, "11.0.3.7:7421"), inet(0x80, "10.0.0.5:7421")],
+            ..full()
+        };
+        assert_eq!(
+            validate(&by_hand, &link).lan_addrs,
+            vec![inet(0, "10.0.0.5:7421")]
+        );
     }
 
     // ── PEER_SCHEDULE (§13.2) ───────────────────────────────────────────────

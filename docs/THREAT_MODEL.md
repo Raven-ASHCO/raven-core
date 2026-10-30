@@ -387,6 +387,18 @@ key, and a wrong key ends the link). Two ways to be that listener:
   addresses arrive only in route hints, inside an authenticated, encrypted
   link ([RAVEN_ROUTE_HINTS_V1](../protocol/RAVEN_ROUTE_HINTS_V1.md) §9.1).
   Debug builds keep the old fields under the lab unlock only.
+- *A LAN address told over another link* (route hints §16, field test E3,
+  owner decision 2026-10-30): a verified friend tells its LAN address inside
+  route hints on any authenticated link, Tor included, so two friends who
+  met over Tor move to LAN direct once they share a network. The receiver
+  keeps such an address, marked as told by the friend's own link, and dials
+  it only while it is on one of its own networks, never another network's.
+  A wrong host at that address is the same risk as at a stale LAN address
+  (the impostor items above and below: M0 and the knock). In turn a
+  verified friend learns our LAN address over Tor: where on its
+  network we are, which a contact on the same LAN sees anyway. An unverified
+  contact never gets it, nor does anyone while hide my IP is on, and cards
+  carry no address.
 
 **Phase 6b (built, gated off; not in this version):**
 

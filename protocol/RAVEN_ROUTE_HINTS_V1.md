@@ -220,6 +220,7 @@ Noise transport plaintext. All integers are big-endian.
 | 0x06 | CUSTODY_OFFER | 1 | flags u8. Bit 0 WAN: the sender serves RFC1 on Internet and p2p links. Bit 1 REACHABLE: the sender's libp2p endpoint is confirmed reachable (public or mapped). Bits 2-7 are sent as 0 and cleared on receipt. Its presence means "I hold sealed mail (RFC1) for my verified contacts" (§12). | 1 |
 | 0x07 | CUSTODIAN_TAG | 33 | tag[32] \|\| flags u8. tag = SHA-256(`"raven/rrh1/custodian-tag/v1"` \|\| sender_ed25519[32] \|\| receiver_ed25519[32] \|\| custodian_ed25519[32]): a friend the sender collects its own mail from, or one it listed for this receiver (§12). The flags follow the custodian flags rule below. | 2 |
 | 0x08 | PAIR_SEED | 40 (§14) | generation u32 \|\| seed[32] \|\| acked_generation u32: the pair's rotating seed (Phase 6b) | 1; checked on its own, never costing the frame (§14) |
+| 0x09 | LAN_ADDR | 10..=48 (§16) | flags u8 \|\| ASCII `ip:port`: a local-network address of the sender's LAN-direct listener, told on links other than the LAN to a verified contact | 2; checked one at a time, never costing the frame (§16) |
 | 0x20 | RELAY_OFFER | any (§11.1) | one relay offer record (§11): a relay the sender runs for its contacts, under the relay's own key | 2 kept, one per relay; checked one record at a time, never costing the frame (§11.2) |
 | 0x21 | reserved | any | reserved, not used; skipped | - |
 | 0x22 | NAT_CLASS | 5 (§13.1) | the sender's NAT mapping classes (Phase 4) | 1; checked on its own, never costing the frame (§13) |
@@ -291,7 +292,7 @@ These rules cover the types 0x01-0x07. A RELAY_OFFER record never makes the
 frame ignored: it is checked on its own, and a bad one is dropped (§11.2).
 Neither does a Phase 4 entry (NAT_CLASS, PEER_SCHEDULE, INET_DIRECT): a bad
 one is dropped alone (§13). Nor does a PAIR_SEED (0x08, Phase 6b): a bad one is dropped alone
-(§14).
+(§14). Nor does a LAN_ADDR (0x09): a bad one is dropped alone (§16).
 A CUSTODY_OFFER value and a CUSTODIAN_TAG flags byte are never a reason to
 ignore the frame: unknown bits are cleared (§5.2).
 
@@ -300,7 +301,8 @@ Unregistered types, including the reserved 0x21 and the reserved ranges
 many there are. The frame bound limits them. A receiver built before §11 skips
 0x20 the same way, so a frame that carries relay offers stays valid for it and
 gives it the same hints. A receiver built before §12 skips 0x06 and 0x07 the
-same way, and one built before §14 skips 0x08.
+same way, one built before §14 skips 0x08, and one built before §16 skips
+0x09.
 
 ### 5.2 Semantic: drop the entry, keep the rest
 
@@ -357,6 +359,10 @@ same way, and one built before §14 skips 0x08.
   P2P_ID.
 - **PAIR_SEED** (§14): kept only from a pinned sender, on any link; it is not
   part of either snapshot part (§5.3) and follows its own rules (§14.3).
+- **LAN_ADDR** (§16): kept only from a pinned sender, on a link other than
+  the LAN, never a loopback address (debug builds under
+  `RAVEN_LAB_ROUTE_HINTS=1` admit one, one-machine harnesses), and stored
+  only when it is on one of the receiver's own networks (§16.3).
 
 `route_hints/rrh1_validated_001.json` has one case per rule, and
 `route_hints/rrh1_validated_relay_002.json` one per case of the RELAY address
@@ -371,7 +377,9 @@ The receiver keeps one snapshot per sender, in two parts:
   them, never used once the snapshot expired (the record a receiver keeps of an
   expired snapshot holds neither), and dropped when the sender is removed or
   blocked;
-- the **per-link LAN part**: LAN_PORT, same-LAN DIRECT and the LAN IP.
+- the **per-link LAN part**: LAN_PORT, same-LAN DIRECT and the LAN IP; or
+  (§16) the LAN address a verified sender told over another link
+  (LAN_ADDR), marked as told.
 
 The global part follows every frame, from any link:
 - **generation higher than stored, or the stored snapshot expired:** replace
@@ -379,7 +387,8 @@ The global part follows every frame, from any link:
 - **equal generation:** extend the expiry;
 - **lower generation:** ignore.
 
-The LAN part follows only frames that arrived on a LAN link:
+The LAN part follows only frames that arrived on a LAN link (a told one,
+§16, also frames over other links):
 - such a frame replaces the whole LAN part when its generation is >= the LAN
   part's, or the LAN part expired;
 - except that a frame of the LAN part's own generation that came from another
@@ -390,9 +399,12 @@ The LAN part follows only frames that arrived on a LAN link:
   receiver keeps fewer same-LAN DIRECT entries from one link than from the
   other (§5.2): replacing the part on every link made the stored view
   alternate (field E2: about 240 times an hour per contact, each a retry);
-- the LAN IP is the link's peer IP. It is never taken from frame content;
-- a frame that arrived on an Internet or p2p link never changes or withdraws the
-  LAN part.
+- the LAN IP is the link's peer IP. It is never taken from frame content,
+  except a told LAN part's (§16), which is the sender's own LAN_ADDR;
+- a frame that arrived on another link (Internet, p2p, nearby, onion) never
+  changes or withdraws a LAN link's part. Only its LAN_ADDR makes or replaces
+  a told one, and a newer one without a LAN_ADDR withdraws a told one
+  (§16.3).
 
 ### 5.4 Expiry
 
@@ -459,6 +471,9 @@ therefore MUST NOT send RRH1 without the §3 signal.
   - the listener always sends its own listener port;
   - the dialer sends it only when its LAN listener is bound to the link's local
     IP or to the unspecified address of that family.
+- LAN_ADDR (§16), on every other link, only with the full snapshot and only
+  when this node shows the receiver its IP: where its LAN-direct listener
+  answers on this computer's networks, at most 2.
 - CUSTODIAN (0x05): never (receive-only since §12).
 - CUSTODY_OFFER: only with the full snapshot, while the friend custody gate is
   live, `NodePolicy.custody` is on and some carrier can serve custody now (the
@@ -568,9 +583,20 @@ An announce link is an ordinary authenticated link with no message frames, and
   contact (links only: no DCUtR, no Identify) until a p2p link proves it.
 - A contact can record what it was told. Hints are deniable, not secret from
   their receiver.
+- A verified contact can tell the receiver a LAN address (LAN_ADDR, §16) over
+  any link. The receiver keeps it only when it is on one of its own networks
+  and dials it only then, so a contact never makes the receiver dial another
+  network's address this way; on its own network a contact could already
+  name the LAN port it is dialled on (LAN_PORT). Whoever answers at a wrong
+  address is held to every LAN dial's rules, as at a stale LAN address: the
+  link authenticates the contact before any message goes, and with the noise
+  pin and the knock (gated off) the dialer stops before its identity.
+- A verified contact learns the sender's LAN address over Tor (or any other
+  link): where on its network the sender is, never more than a contact on
+  the same LAN sees. An unverified contact never gets it (§6).
 
 **Hide my IP**
-- No DIRECT entries are sent.
+- No DIRECT, INET_DIRECT or LAN_ADDR entries are sent.
 - Dials to that contact use circuits only, and only through a relay the
   contact names that the node itself also reserves on (set by hand or picked
   from an offer). A relay only the contact names is never dialled: the contact
@@ -745,6 +771,15 @@ In [`shared-vectors/rvn1/route_hints/`](../shared-vectors/rvn1/route_hints/):
   frame it extends.
 - `negative/rrh1_pair_seed_short_001.json`: a PAIR_SEED of 39 bytes after a
   P2P_ID. The entry is dropped, the frame and its P2P_ID kept.
+- `rrh1_lan_addr_001.json` (§16): `rrh1_full_001.json`'s frame with two
+  LAN_ADDR entries (an IPv4 and an IPv6 local-network address) in ascending
+  type order, and the Phase 2 frame it extends.
+- `negative/rrh1_lan_addr_bad_001.json`: six LAN_ADDR entries after a P2P_ID:
+  a global address, an IPv6 link-local one, a non-canonical one, two good
+  ones (the second with every flag bit set) and a third good one. The bad and
+  the extra entries are dropped, the frame, its P2P_ID and the two good
+  entries (flags cleared) kept. The Python reference
+  (`protocol/reference/tests/test_route_hints_lan_addr.py`) re-reads both.
 
 In [`shared-vectors/rvn1/pair_seed/`](../shared-vectors/rvn1/pair_seed/)
 (written by `raven_core::pair_seed` under `RAVEN_REGEN_SECURITY_VECTORS=1`;
@@ -1286,3 +1321,80 @@ Value: exactly the 104-byte onion binding of the sender (carrier spec §3):
 A receiver built before §15 skips 0x40 like any unregistered type (§5.1), so a
 frame that carries it gives it the same hints.
 
+## 16. LAN address over another link (LAN_ADDR, 0x09)
+
+Field test E3 (owner decision 2026-10-30): two verified friends who first
+reached each other only over Tor stayed on Tor when both were at home on one
+network. The LAN part (§5.3) came only from LAN links, and no LAN link was
+ever opened without it. A verified contact now tells its LAN address over
+any authenticated link. Addresses travel only inside encrypted links between
+verified friends; cards still carry none (§9).
+
+### 16.1 Layout
+
+INET_DIRECT's (§13.3): `flags u8 || ASCII ip:port`, 10..=48 bytes, the
+address canonical.
+
+- `addr` is a local-network address (IPv4 private, link-local or loopback;
+  IPv6 unique-local `fc00::/7` or loopback) and never IPv6 link-local
+  (`fe80::/10`: no zone travels, and it names an interface of the sender's).
+- No flag is defined: senders write 0, receivers clear every bit.
+- At most 2 per frame. A value that breaks a rule is dropped alone with an
+  `RRH1_MALFORMED` debug log, and so is a repeated address or a third one;
+  the frame and its other entries are kept.
+
+### 16.2 Sender
+
+- Only with the full snapshot (a verified contact, §6), only on a link other
+  than the LAN (there LAN_PORT rides the link's own peer IP), and only when
+  this node shows the receiver its IP (hide my IP off, globally and for this
+  contact).
+- The addresses its LAN-direct listener answers on: a listener bound to one
+  address, that address; a wildcard one, each address of this computer that a
+  friend on the same network could dial (an interface that is up, not
+  loopback, not point-to-point and not Apple's peer-to-peer Wi-Fi; no IPv6
+  link-local address) of the family the listener takes. IPv4 first, at most
+  2. A loopback address only in one-machine harnesses that ask for it
+  (debug builds under `RAVEN_LAB_ROUTE_HINTS=1` with
+  `RAVEN_LAB_LAN_ADDR_LOOPBACK=1`): without it a harness's nodes, all on
+  loopback, keep the relay, Internet and Tor routes their cases test.
+- The LAN listener's address and, for a wildcard one, this computer's
+  networks are inputs of the generation already (§6), so a move is told
+  again (§6.1).
+
+### 16.3 Receiver
+
+- Kept (§5.2) only from a pinned sender, on a link other than the LAN, never
+  a loopback one outside the one-machine lab.
+- Stored only when it is on one of the receiver's own networks: inside the
+  network of one of this computer's addresses (by its prefix; /24 or /64
+  when the system gives none), the rule its planner applies to every LAN
+  address a contact was only seen at. Any other is dropped before it is
+  stored, and so is every one while the interfaces cannot be read.
+- The first one stored becomes the sender's LAN part (§5.3), marked as told:
+  its IP and port, no same-LAN DIRECT, with the network it was learned on.
+  Precedence, by generation:
+  - a LAN link's part (its LAN IP is the link's own) of the same generation
+    or newer stays; a told one never replaces it at an equal generation;
+  - a LAN link's frame replaces a told part of its generation or older;
+  - a told part replaces a LAN part of an older generation, a LAN link's or
+    a told one;
+  - a newer frame over another link with no LAN_ADDR stored (none sent, or
+    none on the receiver's networks) withdraws a told part, never a LAN
+    link's.
+- It expires, and is kept past its expiry for dialling, like a LAN link's
+  part (§5.4).
+- **Use.** Only to reach the sender over LAN direct, only while the sender is
+  verified and while the address is on one of the receiver's own networks
+  (checked again when the plan is made, with the network tag of §5.3).
+  Never re-sent, never put into the receiver's own RRH1 or a card.
+
+### 16.4 Old peers
+
+A receiver built before §16 skips 0x09 like any unregistered type (§5.1),
+so a frame that carries it gives it the same hints. A sender built before
+§16 never writes it, and its receivers keep learning the LAN part from LAN
+links only.
+
+Vectors: `rrh1_lan_addr_001.json`, `negative/rrh1_lan_addr_bad_001.json`
+(§10).
