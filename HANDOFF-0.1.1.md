@@ -28,37 +28,39 @@ commits below. Local commits only; nothing pushed.
   only), docs/IOS.md, install guides open with the version and where downloads are prepared,
   ROADMAP packages table.
 
-## Verified (on the code before the last two commits' small follow-ups)
+## Verified
 
 Test env: `RAVEN_IDENTITY_BACKEND=locked-file RAVEN_SESSION_BACKEND=locked-file
 RAVEN_PREKEY_BACKEND=locked-file RAVEN_CHAT_HISTORY_BACKEND=locked-file RAVEN_ALLOW_EPHEMERAL_DATA_DIR=1`,
 `CARGO_INCREMENTAL=0`, a separate `CARGO_TARGET_DIR`, after `cargo build --locked -p ash -p raven-node`:
 
-- fmt clean; raven-core 2412 passed / 6 ignored; raven-node 1261 / 69 ignored; ash 3271 / 3 ignored;
-  raven-client 92 (incl. net_handoff, net_custody, groups); embedded e2e (`--features tor-embedded
-  --test embedded`) passed. The hand-off follow-up re-ran raven-client lib + net_handoff: passed.
-- make-linux-selftest.sh, check_doc_pointers.sh, check_install_helpers.sh passed; scanner clean.
+- fmt clean. Full suites: raven-core 2412 passed / 6 ignored; raven-node 1261 / 69 ignored; ash 3271 /
+  3 ignored; raven-client 92 (incl. net_handoff, net_custody, groups); embedded e2e
+  (`-p raven-client --features tor-embedded --test embedded`) passed. After the later follow-ups:
+  raven-client lib + net_handoff, raven-core lib (2269, the registry test after b0db4b6) and the
+  onion status test passed again.
+- Clippy `-D warnings` clean: CI's desktop sets, debug features, embedded + tor-embedded, plain
+  raven-client, raven-node `--features tor`, swarm all-features, fuzz, and raven-client
+  `--features tor-embedded` for aarch64-apple-ios and aarch64-apple-ios-sim.
+- Checkers: freeze hashes, doc pointers, install helpers, keychain guard (after 092906a), harness
+  selftest, installer LAN default, make-linux-selftest, offline guide + safety offline (debug raven),
+  release-tool and SQLCipher audits, apple team id check. Pre-publication scanner clean.
+  Not run: desktop/design/check_strings.py (needs the app checkouts); shellcheck (not installed).
+- Release build of the shipped desktop configuration (`-p ash -p raven-node -p raven-client
+  --features raven-node/tor,raven-node/nearby-radio`): compiled warning-free, not run.
+- iOS: release `build_xcframework.sh` with the path rewrite: 0 strings with /Users/ in both slices
+  (b0db4b6 made the shared-vector loaders test-only; before that one CARGO_MANIFEST_DIR string per
+  slice remained). `simulator_smoke.sh` on an iOS 27.2 simulator (booted for it, shut down after):
+  SMOKE OK, app.info 0.1.1 release, ios-keychain backend, Tor percent in network.status.
 
 ## Remaining
 
-1. Clippy `-D warnings`: the CI sets (raven-serverless.yml "clippy" step), plain `-p raven-client`,
-   `-p raven-node --features tor`, fuzz, and `-p raven-client --features tor-embedded` for
-   `--target aarch64-apple-ios` and `aarch64-apple-ios-sim`.
-2. Checkers: `freeze_protocol_hashes.sh --check`, `keychain_guard_check.sh`, `harness_util_selftest.sh`,
-   `lan_default_selftest.sh`, `check_offline_guide.sh <debug raven>`, `check_safety_offline.sh`,
-   `desktop/design/check_strings.py`, `release_tool_feature_audit.sh`, `sqlcipher_release_feature_audit.sh`.
-   shellcheck is not installed on the build Mac: CI's shellcheck step is unverified for the new scripts.
-3. `node/scripts/ios/build_xcframework.sh` (release, path rewrite: first full rebuild of both iOS
-   targets), expect "0 with /Users/"; then boot one iOS 27.2 simulator that nobody else uses,
-   `UDID=<id> node/scripts/ios/simulator_smoke.sh`, shut that simulator down.
-4. Release build of the desktop shipped configuration, compile only (never run a release binary
-   beyond --help): `cargo build --locked --release -p ash -p raven-node -p raven-client --features
-   raven-node/tor,raven-node/nearby-radio`, warning-free.
-5. Linux package on Linux: aarch64 in an Ubuntu 24.04 VM, x86_64 via the workflow. Note: the Lima VM
-   `raven-linux` on the build Mac runs Ubuntu 26.04; a package built there needs 26.04's glibc.
-6. iOS app changes (raven-ios), not done here: `tor_on_cellular` -> `tor_wifi_only` (inverted) in
+1. Linux package on Linux: aarch64 in an Ubuntu 24.04 VM, x86_64 via the manual workflow. Note: the
+   Lima VM `raven-linux` on the build Mac runs Ubuntu 26.04; a package built there needs 26.04's glibc.
+2. iOS app changes (raven-ios), not done here: `tor_on_cellular` -> `tor_wifi_only` (inverted) in
    `network.set` and `NetworkStatus`; call `network.path` from NWPathMonitor; a message a friend holds
    is `state: sent` with `path_kind` friend/handoff + `via_name` (the app keys "held" on `waiting`);
    group `held_by` can come with state `sent`; optional `mail.check` `names`; Engine.xcconfig path to
-   the new XCFramework; README "What waits for the engine" table is now implemented.
-7. Delete this file before publishing.
+   the new XCFramework (`$CARGO_TARGET_DIR/ios/RavenClient.xcframework`); README "What waits for the
+   engine" table is now implemented.
+3. Delete this file before publishing.
