@@ -1395,7 +1395,7 @@ pub(super) fn contact_show_lines(
     )];
     lines.push(format!("  fp {}", super::shown_fingerprint(&target)));
     // Field test E3 round 2: no command showed how a contact is reached.
-    let ways = super::ways_to_reach(data_dir, &target, now);
+    let ways = super::ways_to_reach(data_dir, &target, now, super::WaysOn::now(data_dir));
     lines.push(format!(
         "  ways to reach {name}: {}",
         if ways.is_empty() {

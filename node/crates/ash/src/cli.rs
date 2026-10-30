@@ -7326,6 +7326,7 @@ fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
     };
 
     println!();
+    let on = WaysOn::now(data_dir);
     for (i, ct) in contacts.iter().enumerate() {
         let name = ct.primary_label();
         let tag = ct.tag_subtitle().unwrap_or_else(|| "—".into());
@@ -7337,7 +7338,7 @@ fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
         let fp = shown_fingerprint(ct);
         // The ways to reach it (field test E3 round 2), never a public
         // address.
-        let ways = ways_to_reach(data_dir, ct, now);
+        let ways = ways_to_reach(data_dir, ct, now, on);
         let dial = if ways.is_empty() {
             String::new()
         } else {
@@ -14548,28 +14549,74 @@ fn onion_route(c: &Contact) -> Option<pair_init_lab::DialRoute> {
     })
 }
 
+/// The ways this computer uses now to reach friends (field test E3: `raven
+/// contact list` named "p2p" while p2p was off here): what this build has,
+/// and p2p only while this profile's raven-node runs a libp2p host (as a
+/// send plans it, [`p2p_host_on`]). Asked once per command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WaysOn {
+    pub(crate) internet: bool,
+    pub(crate) p2p: bool,
+    pub(crate) tor: bool,
+}
+
+impl WaysOn {
+    pub(crate) fn now(data_dir: &Path) -> WaysOn {
+        WaysOn {
+            internet: raven_core::internet_direct_live_enabled(),
+            p2p: raven_core::p2p_live_enabled() && p2p_host_on(data_dir),
+            tor: raven_core::onion_live_enabled(),
+        }
+    }
+}
+
+/// Why Raven does not use a way it knows for contact `c` now, as words
+/// after the way (`None`: it does). The order a send decides in: off on
+/// this computer, then a contact not verified yet (every way but LAN needs
+/// that), then an IP hidden from this contact (Internet direct only).
+fn way_not_used(on: bool, c: &Contact, ip_hidden: bool) -> Option<&'static str> {
+    if !on {
+        Some("off on this computer")
+    } else if !c.pinned {
+        Some("once you verify them")
+    } else if ip_hidden {
+        Some("off: your IP stays hidden from them")
+    } else {
+        None
+    }
+}
+
 /// The ways Raven has to reach contact `c`, in plain words (field test E3
 /// round 2: no command showed them): its saved LAN address (local, so shown),
 /// "internet direct" and "p2p" (never a public address or a PeerId), "Tor"
 /// (a signed onion address), then what its route hints taught, marked
 /// "learned". A LAN address that is not on a local network is not shown.
-fn ways_to_reach(data_dir: &Path, c: &Contact, now: u64) -> Vec<String> {
+/// A way Raven does not use now says why in brackets ([`way_not_used`];
+/// field test E3: "p2p" was listed while p2p was off on this computer).
+fn ways_to_reach(data_dir: &Path, c: &Contact, now: u64, on: WaysOn) -> Vec<String> {
     let mut ways: Vec<String> = Vec::new();
     let lan_words = |dial: &str| match lan_dial_shown(dial) {
         Some(at) => format!("same network (LAN) at {at}"),
         None => "same network (LAN)".to_string(),
     };
+    let hidden = hides_ip_from(data_dir, c);
+    let said = |words: &str, used: Option<&str>| match used {
+        Some(why) => format!("{words} ({why})"),
+        None => words.to_string(),
+    };
+    let internet = way_not_used(on.internet, c, hidden);
+    let p2p = way_not_used(on.p2p, c, false);
     if looks_like_lan_dial(&c.lan_dial) {
         ways.push(lan_words(c.lan_dial.trim()));
     }
     if !c.internet_dial.trim().is_empty() {
-        ways.push("internet direct".into());
+        ways.push(said("internet direct", internet));
     }
     if !c.p2p.trim().is_empty() {
-        ways.push("p2p".into());
+        ways.push(said("p2p", p2p));
     }
     if onion_route(c).is_some() {
-        ways.push("Tor".into());
+        ways.push(said("Tor", way_not_used(on.tor, c, false)));
     }
     let learned = parse_pub_hex(&c.pub_hex)
         .ok()
@@ -14592,10 +14639,10 @@ fn ways_to_reach(data_dir: &Path, c: &Contact, now: u64) -> Vec<String> {
         }
         if let Some(view) = view {
             if !view.inet.is_empty() && c.internet_dial.trim().is_empty() {
-                ways.push("internet direct, learned".into());
+                ways.push(said("internet direct, learned", internet));
             }
             if view.peer_id.is_some() && c.p2p.trim().is_empty() {
-                ways.push("p2p, learned".into());
+                ways.push(said("p2p, learned", p2p));
             }
         }
     }
@@ -29948,7 +29995,12 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         c.onion =
             raven_core::onion::OnionBinding::sign(&id, hs_id, raven_core::onion::now_s()).to_text();
         let now = now_ms();
-        let ways = ways_to_reach(d, &c, now);
+        let all_on = WaysOn {
+            internet: true,
+            p2p: true,
+            tor: true,
+        };
+        let ways = ways_to_reach(d, &c, now, all_on);
         assert_eq!(
             ways,
             [
@@ -29970,7 +30022,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             onion: String::new(),
             ..c.clone()
         };
-        assert_eq!(ways_to_reach(d, &far, now), ["same network (LAN)"]);
+        assert_eq!(ways_to_reach(d, &far, now, all_on), ["same network (LAN)"]);
         // Nothing saved: what the friend's route hints told, marked learned.
         let bare = Contact {
             lan_dial: String::new(),
@@ -29979,7 +30031,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             onion: String::new(),
             ..c.clone()
         };
-        assert!(ways_to_reach(d, &bare, now).is_empty());
+        assert!(ways_to_reach(d, &bare, now, all_on).is_empty());
         if raven_core::route_hints::route_hints_live() {
             let link = raven_core::route_hints::HintLink {
                 sender: id.public_key_bytes(),
@@ -29997,9 +30049,75 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             raven_core::learned_routes::apply(d, &id.public_key_bytes(), &told, &link, None, now)
                 .unwrap();
             assert_eq!(
-                ways_to_reach(d, &bare, now),
+                ways_to_reach(d, &bare, now, all_on),
                 ["same network (LAN) at 192.168.1.21:17420, learned"]
             );
+        }
+    }
+
+    /// Field test E3: `raven contact list` named "p2p" as a way to a friend
+    /// while p2p was off on this computer. A way Raven does not use now says
+    /// why: off here, the friend not verified yet (every way but LAN), or an
+    /// IP this computer hides from them (Internet direct).
+    #[test]
+    fn ways_to_reach_say_which_ways_are_not_used_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let id = Identity::from_seed(&[0x5c; 32]);
+        let mut c = contact_with("192.168.1.20:17420", "203.0.113.7:7422");
+        c.pub_hex = hex::encode(id.public_key_bytes());
+        c.p2p = raven_core::p2p_route::local_peer_id(&id);
+        let hs_id = Identity::from_seed(&[0x5d; 32]).public_key_bytes();
+        c.onion =
+            raven_core::onion::OnionBinding::sign(&id, hs_id, raven_core::onion::now_s()).to_text();
+        let now = now_ms();
+        let on = |internet: bool, p2p: bool, tor: bool| WaysOn { internet, p2p, tor };
+        assert_eq!(
+            ways_to_reach(d, &c, now, on(true, false, true)),
+            [
+                "same network (LAN) at 192.168.1.20:17420",
+                "internet direct",
+                "p2p (off on this computer)",
+                "Tor"
+            ]
+        );
+        assert_eq!(
+            ways_to_reach(d, &c, now, on(false, false, false))[1..],
+            [
+                "internet direct (off on this computer)",
+                "p2p (off on this computer)",
+                "Tor (off on this computer)"
+            ]
+        );
+        // Not verified: LAN only, the others once verified.
+        let unverified = Contact {
+            pinned: false,
+            ..c.clone()
+        };
+        assert_eq!(
+            ways_to_reach(d, &unverified, now, on(true, true, true))[1..],
+            [
+                "internet direct (once you verify them)",
+                "p2p (once you verify them)",
+                "Tor (once you verify them)"
+            ]
+        );
+        // This computer hides its IP from them: no Internet direct.
+        let hidden = Contact {
+            hide_ip: true,
+            ..c.clone()
+        };
+        assert_eq!(
+            ways_to_reach(d, &hidden, now, on(true, true, true))[1],
+            "internet direct (off: your IP stays hidden from them)"
+        );
+        // What this computer does now: p2p only with a p2p host, which a
+        // profile without `raven node p2p on` (and no raven-node) has not.
+        let here = WaysOn::now(d);
+        assert_eq!(here.internet, raven_core::internet_direct_live_enabled());
+        assert_eq!(here.tor, raven_core::onion_live_enabled());
+        if std::env::var_os("RAVEN_P2P_LISTEN").is_none() {
+            assert!(!here.p2p, "{here:?}");
         }
     }
 
