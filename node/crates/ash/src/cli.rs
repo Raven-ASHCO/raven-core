@@ -8119,16 +8119,11 @@ fn cmd_contact_remove(
                 sanitize_terminal_line(&e)
             );
         }
-        // And its sessions, secrets included (the roots and chains in the
-        // keystore), now rather than when they would expire (up to a day, a
-        // letter session's week): its traffic is refused anyway.
-        if let Err(e) = delete_sessions_for_removed_contact(data_dir, &ed) {
-            eprintln!(
-                "{C_DIM}note: could not delete the secure sessions with this contact \
-                 ({}){C_RESET}",
-                sanitize_terminal_line(&e)
-            );
-        }
+        // Its sessions stay until they expire (at most a day, a letter
+        // session's week), their secrets encrypted at rest like the rest of
+        // the profile: a contact added back is reached again at once. Gone
+        // here, the contact's copy of a session, and what it sealed under
+        // it, would be refused until that expiry (carrier matrix C90).
         // And its capability floor (Phase 6b P6.29): a contact added again
         // starts a new high-water mark.
         if let Err(e) = raven_core::capability_floor::forget(data_dir, &ed) {
@@ -8169,24 +8164,6 @@ fn cmd_contact_remove(
     // freed disk blocks until the next data-key rotation (PP.10).
     let _ = raven_core::privacy::mark_rotation_due(data_dir);
     Ok(())
-}
-
-/// [`cmd_contact_remove`]'s part for the session store: every session with
-/// the removed contact `peer` goes with its protected state
-/// ([`raven_core::IndexedSessionStore::delete_sessions_with_peer`]), under
-/// the per-peer send lock raven-node's worker takes, so no send uses one
-/// meanwhile. No store: nothing is created. How many went.
-fn delete_sessions_for_removed_contact(data_dir: &Path, peer: &[u8; 32]) -> Result<usize, String> {
-    if !data_dir
-        .join(raven_core::INDEXED_SESSION_METADATA_FILE)
-        .is_file()
-    {
-        return Ok(0);
-    }
-    let _lock = pair_init_lab::acquire_send_lock(data_dir, peer)?;
-    raven_core::IndexedSessionStore::open(data_dir)
-        .and_then(|mut store| store.delete_sessions_with_peer(peer))
-        .map_err(|e| e.redacted_display())
 }
 
 /// [`cmd_contact_remove`]'s part for the long message horizon: every message

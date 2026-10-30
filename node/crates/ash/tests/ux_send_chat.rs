@@ -1271,10 +1271,11 @@ fn a_delivered_send_names_the_person_keeps_the_status_line_and_drops_the_jargon(
     assert_eq!(net.bob_inbox(), vec!["hello Bob", "second"]);
 }
 
-/// Removing a contact deletes its secure sessions at once, their secrets
-/// included, rather than leaving them until they expire.
+/// Removing a contact keeps its secure sessions until they expire, so a
+/// contact added back is reached again at once (carrier matrix C90): the
+/// contact still holds its side of them, and what it sealed under them.
 #[test]
-fn removing_a_contact_deletes_its_sessions_now() {
+fn removing_a_contact_keeps_its_sessions_until_they_expire() {
     let net = Net::new(true);
     let o = net.send("hello Bob");
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
@@ -1291,7 +1292,7 @@ fn removing_a_contact_deletes_its_sessions_now() {
     c.args(["contact", "remove", "--petname", "Bob", "--yes"]);
     let o = run(c, b"");
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
-    assert_eq!(sessions(net.a.path()), 0);
+    assert_eq!(sessions(net.a.path()), 1);
 }
 
 /// Field test E2 r7: a secure connection set up again with a contact this

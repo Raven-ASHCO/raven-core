@@ -1,8 +1,9 @@
 # Security review scope
 
 A package for an independent reviewer of Raven's protocol and code. **No independent review has
-happened yet.** An internal review was done in October 2026, and its findings were fixed in
-version 0.1.0; it is not a substitute for an independent review, and this page does not depend on
+happened yet.** An internal review was done in October 2026, and its fixes are in version 0.1.0
+(except one taken back: a removed contact's sessions stay until they expire, section 3); it is not
+a substitute for an independent review, and this page does not depend on
 it. This page lists what to review first, where the specs and the code are, what is already known
 and published, how to build and test, and what is out of scope. If you are interested in reviewing
 Raven, write to security@raven-messager.com.
@@ -123,6 +124,9 @@ unless you find something worse than written.
 - The Tor design's risks ([design](design/2026-10-tor-fallback.md) §8): reachability is not
   guaranteed, some networks block Tor, Arti has had no dedicated audit, and anyone with a card can
   tell when its owner is online over Tor.
+- [THREAT_MODEL.md](THREAT_MODEL.md) §3.7a, limit 8: a removed contact's session secrets stay on
+  disk, encrypted at rest, until the session expires (at most 24 h; a letter session 7 days), so
+  that a contact added back is reached again at once.
 - [SECURITY.md](../SECURITY.md) "Cryptography actually used".
 
 ## 4. Build, test, vectors, fuzzers

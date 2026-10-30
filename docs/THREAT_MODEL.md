@@ -527,6 +527,13 @@ replaces the index key and the epochs.
    read the book) and may write small advisory files in plain, which the new
    build seals again; `raven privacy unseal` writes the profile back in plain
    on the user's typed request (fault scenario s124).
+8. **A removed contact's sessions stay until they expire.** A removed
+   contact's session secrets stay on disk, encrypted at rest, until the
+   session expires (at most 24 h; a letter session 7 days). Removing a
+   contact keeps its sessions so that a contact added back is reached again
+   at once: the contact still holds its side of them, and what it sealed
+   under them (carrier matrix C90). Its traffic is refused meanwhile, and
+   erase removes the secrets with the rest.
 
 ### 3.7b Learning connectivity (Phase 6a, gated off)
 
@@ -686,7 +693,9 @@ users who have not established a relationship with the sender.
 first message surfaces as a message request rather than landing directly in
 an established conversation, and a recipient can block a contact or remove
 them (removing per-pair key material — see the "swipe-to-remove a contact"
-serverless key cleanup shipped in this branch). This raises the cost of
+serverless key cleanup shipped in this branch; the session secrets stay,
+encrypted at rest, until the session expires: §3.7a, limit 8). This raises
+the cost of
 unsolicited contact relative to an open, discoverable inbox.
 
 **Why not fully protected, stated plainly:** There is no central,

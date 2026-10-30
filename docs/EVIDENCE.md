@@ -8,7 +8,9 @@ together with the [threat model](THREAT_MODEL.md), the
 
 Short version: there are many automated tests, shared test vectors checked by two independent
 implementations, 30 fuzz targets, CI on three operating systems, one small field test on three
-real computers, and an internal review (October 2026) whose findings are fixed in version 0.1.0.
+real computers, and an internal review (October 2026) whose fixes are in version 0.1.0, except one
+taken back so that a contact added back is reached again at once ([THREAT_MODEL.md](THREAT_MODEL.md)
+§3.7a, limit 8).
 There has been **no independent security review**, no signed package, no long soak, no test with
 many users and no test on phones.
 
@@ -147,8 +149,8 @@ builds afterwards, in October 2026, without an independent review.
 ## 6. Not done yet
 
 - **Independent security review.** Nobody outside the project has reviewed the protocol, the
-  cryptography or the code. An internal review was done in October 2026 and its findings were
-  fixed in version 0.1.0; it is not a substitute. What an auditor would look at:
+  cryptography or the code. An internal review was done in October 2026 and its fixes are in
+  version 0.1.0, except the one named above; it is not a substitute. What an auditor would look at:
   [SECURITY_REVIEW_SCOPE.md](SECURITY_REVIEW_SCOPE.md).
 - **Formal model** of PairInit, the session state machine or the hybrid ratchet.
 - **Signed and notarised packages.** There is nothing to download; every build is a local build.
