@@ -81,6 +81,9 @@ pub mod lan_noise;
 pub mod lan_noise_pin;
 pub mod lan_rlb1;
 pub mod lan_seen;
+/// The shared test vectors' loaders and checks: tests only (they name the
+/// source folder, which a shipped library must not carry).
+#[cfg(test)]
 pub mod lan_vectors;
 pub mod learned_routes;
 pub mod learning;
@@ -157,6 +160,9 @@ pub mod transport;
 pub mod update_downloads;
 pub mod update_exchange;
 pub mod update_state;
+/// The shared test vectors' loaders and checks: tests only (they name the
+/// source folder, which a shipped library must not carry).
+#[cfg(test)]
 pub mod vectors;
 /// Owner-only DACLs behind the private file helpers in [`paths`] (Windows).
 #[cfg(windows)]

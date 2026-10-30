@@ -638,16 +638,6 @@ mod tests {
     /// (source file below `node/crates`, pattern of the literal, reason).
     const NOT_PROFILE_FILES: &[(&str, &str, &str)] = &[
         (
-            "raven-core/src/vectors.rs",
-            "*/*.json",
-            "shared-vectors fixtures, named relative to the vectors folder",
-        ),
-        (
-            "raven-core/src/lan_vectors.rs",
-            "*_0*.json",
-            "shared-vectors fixtures, named relative to the vectors folder",
-        ),
-        (
             "raven-core/src/hybrid_ratchet_v2_tr.rs",
             "atsam/*.json",
             "a shared-vectors fixture (full-braid lab)",
