@@ -174,9 +174,12 @@ mouse wheel that the terminal turns into arrow keys therefore can't redirect a m
 | Lock (LOCK; `L` on Home's friend list or conversation, SET's 'Lock now', `L` in QUIT) | `Enter` lock (on a keychain profile: stop); `Esc` cancel (also while a send goes first); after a stop that left Raven running, `Esc` close |
 | SMALL | `C` classic menu; `Q` quit |
 
-A paste is data only: it never sends, saves or confirms. Bracketed paste is used on Unix; on every
-OS a burst of 3 or more keystrokes within 10 ms counts as one paste (Windows delivers every paste as
-keystrokes). `Enter` is ignored for 300 ms after a paste.
+A paste is data only: its own line breaks never send, save or confirm. Bracketed paste is used on
+Unix; on every OS a burst of 3 or more keystrokes within 10 ms counts as one paste (Windows delivers
+every paste as keystrokes). An `Enter` less than 30 ms after such text is a pasted line break when
+more text follows it, and the user's `Enter` when nothing does (field test E3: Enter sent right after
+fast text did not send). In the composer `Enter` sends right after a paste too; a question ignores
+`Enter` for 300 ms after a paste.
 
 **Persian keyboard layout** (UXF.4, `tui/keys_fa.rs`). A key arrives as the character its layout
 types: with a Persian layout on, the Q key types U+0636, not `q`. Wherever no field takes text, the

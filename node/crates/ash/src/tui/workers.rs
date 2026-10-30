@@ -256,7 +256,25 @@ fn read_input(gate: &InputGate, tx: &Sender<Msg>, size: (u16, u16)) -> io::Resul
                 push_event(&mut batch, &mut keys, event::read()?);
             }
         }
-        for msg in coalesce(&batch, &mut burst) {
+        // An Enter right after text keys is a pasted line break only when
+        // more text follows it: wait out the gap a pasted Enter keeps. With
+        // nothing after it, it is the user's Enter (field test E3: Enter
+        // sent right after fast text, as tmux sends it, did not send).
+        let mut settled = false;
+        while batch.len() < MAX_BURST_EVENTS && ends_in_quick_enter(&batch, &burst) {
+            let left = batch.last().map_or(Duration::ZERO, |(at, _)| {
+                PASTED_ENTER_GAP.saturating_sub(at.elapsed())
+            });
+            if !event::poll(left)? {
+                settled = true;
+                break;
+            }
+            push_event(&mut batch, &mut keys, event::read()?);
+            while batch.len() < MAX_BURST_EVENTS && event::poll(BURST_GAP)? {
+                push_event(&mut batch, &mut keys, event::read()?);
+            }
+        }
+        for msg in coalesce_settled(&batch, &mut burst, settled) {
             if let Msg::Resize { cols, rows } = msg {
                 last_size = Some((cols, rows));
             }
@@ -400,6 +418,57 @@ impl Burst {
     }
 }
 
+/// Whether `batch` ends in an Enter that came less than
+/// [`PASTED_ENTER_GAP`] after another text key (in the batch, or the one
+/// `burst` ended with): a pasted line break if more text follows, the
+/// user's Enter if nothing does.
+fn ends_in_quick_enter(batch: &[(Instant, Event)], burst: &Burst) -> bool {
+    let Some(((at, last), before)) = batch.split_last() else {
+        return false;
+    };
+    if !is_enter(last) {
+        return false;
+    }
+    let previous = before
+        .iter()
+        .rev()
+        .find(|(_, event)| is_text(event))
+        .map(|(at, _)| *at)
+        .or(burst.last_text);
+    previous.is_some_and(|previous| at.saturating_duration_since(previous) < PASTED_ENTER_GAP)
+}
+
+/// An Enter that is a text key (no Ctrl or Alt).
+fn is_enter(event: &Event) -> bool {
+    is_text(event) && matches!(event, Event::Key(key) if key.code == KeyCode::Enter)
+}
+
+/// [`coalesce_settled`] for a batch that is not known to end in silence.
+#[cfg(test)]
+pub(super) fn coalesce(events: &[(Instant, Event)], burst: &mut Burst) -> Vec<Msg> {
+    coalesce_settled(events, burst, false)
+}
+
+/// [`coalesce_inner`], except that when `settled` (nothing came for
+/// [`PASTED_ENTER_GAP`] after it) a final Enter is the user's Enter: it
+/// sends or confirms, after the text before it, however fast that came.
+pub(super) fn coalesce_settled(
+    events: &[(Instant, Event)],
+    burst: &mut Burst,
+    settled: bool,
+) -> Vec<Msg> {
+    match events.split_last() {
+        Some(((at, last @ Event::Key(key)), before)) if settled && is_enter(last) => {
+            let mut out = coalesce_inner(before, burst);
+            out.push(Msg::Key(Key::Event(*key)));
+            burst.last_text = Some(*at);
+            burst.keys = 0;
+            out
+        }
+        _ => coalesce_inner(events, burst),
+    }
+}
+
 /// Turns a batch of events, each stamped with when it was read, into
 /// messages:
 ///
@@ -411,7 +480,7 @@ impl Burst {
 ///   [`PASTED_ENTER_GAP`] after another text key becomes `Key::PastedEnter`;
 /// - a bracketed paste becomes `Msg::Paste { via: Bracketed }` and a resize
 ///   `Msg::Resize`. Focus and mouse events are never turned on, and dropped.
-pub(super) fn coalesce(events: &[(Instant, Event)], burst: &mut Burst) -> Vec<Msg> {
+fn coalesce_inner(events: &[(Instant, Event)], burst: &mut Burst) -> Vec<Msg> {
     // First the bursts: which one each text key belongs to, and their sizes.
     // Burst 0 is the one the previous batch ended in.
     let mut sizes = vec![burst.keys];
@@ -2118,6 +2187,66 @@ mod tests {
             coalesce(&[enter], &mut burst),
             [Msg::Key(Key::Event(KeyEvent::new(KeyCode::Enter, NONE)))]
         );
+    }
+
+    /// Field test E3: text sent fast (tmux `send-keys -l`, a text expander,
+    /// a paste without bracketed paste) and an Enter right after it, then
+    /// nothing: the Enter sends, after the text. A line break inside the
+    /// burst stays text; an Enter more text follows stays a line break.
+    #[test]
+    fn an_enter_after_fast_text_and_then_nothing_is_the_users_enter() {
+        let t0 = Instant::now();
+        let enter = || Msg::Key(Key::Event(KeyEvent::new(KeyCode::Enter, NONE)));
+        // In the same batch as the burst.
+        let mut burst = Burst::default();
+        let batch = timed(t0, 1, chars("hello bob\n"));
+        assert!(ends_in_quick_enter(&batch, &burst));
+        assert_eq!(
+            coalesce_settled(&batch, &mut burst, true),
+            [pasted("hello bob"), enter()]
+        );
+        // Not settled (more text came): a line break, as before.
+        let mut burst = Burst::default();
+        assert_eq!(
+            coalesce_settled(&batch, &mut burst, false),
+            [pasted("hello bob\n")]
+        );
+        // A line break inside, the Enter at the end.
+        let mut burst = Burst::default();
+        assert_eq!(
+            coalesce_settled(&timed(t0, 1, chars("one\ntwo\n")), &mut burst, true),
+            [pasted("one\ntwo"), enter()]
+        );
+        // In a batch of its own, 20 ms after the text: the user's Enter
+        // once nothing followed, a pasted Enter while it is not known.
+        let mut burst = Burst::default();
+        assert_eq!(
+            coalesce_settled(&timed(t0, 1, chars("hey")), &mut burst, false),
+            [pasted("hey")]
+        );
+        let late = [(
+            t0 + Duration::from_millis(22),
+            key_event(KeyCode::Enter, NONE),
+        )];
+        assert!(ends_in_quick_enter(&late, &burst));
+        let mut unsettled = Burst {
+            last_text: burst.last_text,
+            keys: burst.keys,
+        };
+        assert_eq!(
+            coalesce_settled(&late, &mut unsettled, false),
+            [Msg::Key(Key::PastedEnter)]
+        );
+        assert_eq!(coalesce_settled(&late, &mut burst, true), [enter()]);
+        // Typing (an Enter long after the last key) waits for nothing.
+        let slow = [(
+            t0 + Duration::from_millis(500),
+            key_event(KeyCode::Enter, NONE),
+        )];
+        assert!(!ends_in_quick_enter(&slow, &burst));
+        // An Enter with Ctrl is no text key.
+        let ctrl = [(t0, key_event(KeyCode::Enter, KeyModifiers::CONTROL))];
+        assert!(!ends_in_quick_enter(&ctrl, &Burst::default()));
     }
 
     #[test]

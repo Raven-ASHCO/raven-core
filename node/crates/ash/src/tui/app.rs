@@ -2728,8 +2728,9 @@ pub(super) enum Key {
     /// (Windows Alt+numpad codes become presses there), but releases are
     /// ignored here too.
     Event(KeyEvent),
-    /// An Enter that came within 30 ms of another text key: part of a paste,
-    /// so it is text and never confirms or sends.
+    /// An Enter that came within 30 ms of another text key with more text
+    /// right after it: part of a paste, so it is text and never confirms or
+    /// sends. One with nothing after it is the user's Enter (workers.rs).
     PastedEnter,
 }
 
@@ -7076,7 +7077,10 @@ impl App {
     /// new line, and Backspace, Delete, Left, Right, Home and End edit. Up,
     /// Down, PgUp and PgDn scroll the conversation and never change the
     /// friend. Esc goes back to the list; ? on an empty composer opens HELP.
-    /// Enter sends, but not right after a paste.
+    /// Enter sends, also right after a paste: a paste's own line breaks are
+    /// text (a bracketed paste's, and `Key::PastedEnter`), so an Enter key
+    /// is the user's (field test E3: Enter right after fast text did not
+    /// send). Questions keep [`PASTE_GUARD`].
     fn on_composer_key(&mut self, key: KeyEvent) {
         if is_ctrl(key, 'j') {
             self.compose(|composer| composer.insert("\n"));
@@ -7087,7 +7091,7 @@ impl App {
             (KeyCode::Esc, _) => self.set_focus(Focus::Friends),
             (_, Some('?')) if empty => self.open_overlay(Overlay::Help { scroll: 0 }),
             (_, Some(c)) => self.compose(|composer| composer.insert(c.encode_utf8(&mut [0; 4]))),
-            _ if self.confirms(key) => self.composer_enter(),
+            (KeyCode::Enter, _) if !has_ctrl_or_alt(key) => self.composer_enter(),
             (KeyCode::Backspace, _) if !has_ctrl_or_alt(key) => self.compose(Composer::backspace),
             (KeyCode::Delete, _) => self.compose(Composer::delete),
             (KeyCode::Left, _) => self.compose(Composer::left),
@@ -12611,6 +12615,26 @@ mod tests {
         assert_eq!(app.focus(), Focus::Friends);
     }
 
+    /// Field test E3: Enter right after fast text (tmux's keys, a paste
+    /// without brackets) did not send, a second Enter did. A paste's own
+    /// line breaks stay text; the user's Enter right after a paste sends
+    /// what is there, as after typing.
+    #[test]
+    fn enter_right_after_a_paste_sends_what_is_in_the_composer() {
+        for via in [PasteVia::Bracketed, PasteVia::Keystrokes] {
+            let mut app = home(&[]);
+            testkit::press(&mut app, KeyCode::Enter);
+            assert!(testkit::paste(&mut app, "hello bob", via).is_empty());
+            let cmds = testkit::press(&mut app, KeyCode::Enter);
+            assert_eq!(
+                testkit::send_job(&cmds).map(|(_, text)| text).as_deref(),
+                Some("hello bob"),
+                "{via:?}: {cmds:?}"
+            );
+            assert_eq!(app.composer().map(Composer::text), Some(""));
+        }
+    }
+
     #[test]
     fn the_composer_takes_pastes_and_line_breaks_as_text_and_never_sends() {
         let mut app = home(&[]);
@@ -12621,8 +12645,7 @@ mod tests {
         );
         assert_eq!(text(&app).as_deref(), Some("hello\nworld[2J"));
         assert_eq!(app.composer().and_then(Composer::problem), None);
-        // Enter right after a paste, and a pasted Enter, send nothing.
-        assert!(testkit::press(&mut app, KeyCode::Enter).is_empty());
+        // A pasted Enter sends nothing: a line break.
         assert!(testkit::send(&mut app, Msg::Key(Key::PastedEnter)).is_empty());
         assert_eq!(toast_text(&app), None);
         assert_eq!(text(&app).as_deref(), Some("hello\nworld[2J\n"));
@@ -12646,10 +12669,8 @@ mod tests {
         testkit::paste(&mut app, "e\u{301}", PasteVia::Bracketed);
         testkit::press(&mut app, KeyCode::Backspace);
         assert_eq!(text(&app).as_deref(), Some("hello\noWrld[2!J"));
-        // 300 ms after the last paste, Enter sends the draft as it is to the
-        // open friend, and the composer is empty again.
-        assert!(testkit::press(&mut app, KeyCode::Enter).is_empty());
-        testkit::tick(&mut app, PASTE_GUARD);
+        // Enter sends the draft as it is to the open friend, also right
+        // after a paste (field test E3), and the composer is empty again.
         let cmds = testkit::press(&mut app, KeyCode::Enter);
         let to = key_of(1);
         assert!(
