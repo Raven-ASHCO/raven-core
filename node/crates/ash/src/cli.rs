@@ -1129,12 +1129,14 @@ enum CustodyCommands {
     },
     /// The friends you collect your mail from (at most 2 verified
     /// contacts), or `auto` to let raven-node pick among those who offer.
+    /// Without names: who they are now, and why.
     Home {
-        #[arg(required = true, num_args = 1.., value_name = "@CONTACT|auto")]
+        #[arg(num_args = 0.., value_name = "@CONTACT|auto")]
         who: Vec<String>,
     },
     /// Counts only: your mailbox choice, mail friends, friends who offer,
-    /// and what this computer holds for others.
+    /// and what this computer holds for others (`raven custody home` names
+    /// your mail friends).
     Status,
 }
 
@@ -1261,67 +1263,61 @@ enum LabCommands {
 
 #[derive(Subcommand, Debug)]
 enum ContactCommands {
-    /// Add a contact from QR/OOB public bits (never a private key).
-    ///
-    /// Soft Unique Tags: `@alias` is public and NOT globally unique — always
-    /// confirm fingerprint. Petname is your private label on this device.
+    /// Add a contact from their card or invite (public lines only, never a
+    /// private key).
     ///
     /// Examples:
     ///
-    ///   ash contact add --address rvn1q… --pub-hex <64 hex> --petname "Poline"
+    ///   raven contact add --card '<the card line they sent you>' --petname Bob
     ///
-    ///   ash contact add --address rvn1q… --pub-hex <64 hex> --petname "Poline" --tag poline --verify-fp XXXX-XXXX-XXXX
+    ///   raven contact add --address rvn1q… --pub-hex <64 hex> --petname Bob --tag bob
     ///
-    ///   ash contact add --address rvn1q… --pub-hex <64 hex> --petname "Bike club" --tag sam
-    ///
-    ///   ash contact add --card 'raven-card/1 address=rvn1q… pub_hex=… fingerprint=… inet=203.0.113.7:7422' --petname Bob --verify-fp XXXX-XXXX-XXXX
-    ///
-    /// Petnames stay on this computer and in your shell history; a nickname is
-    /// safer.
+    /// Then compare security words on a call or in person: `raven contact
+    /// verify Bob`. Your name for them stays on this computer and in your
+    /// shell history; a nickname is safer.
     #[command(after_help = "\
-Soft Unique Tags (Raven Tag V1):
-  • Layer A — Raven address (rvn1…) is the durable identity
-  • Layer B — @alias / public tag is Soft Unique (conflicts show a picker)
-  • Layer C — petname is local-only (e.g. \"Poline\") and primary in the UI
-  • --verify-fp pins Tag+key locally after you confirm fingerprint OOB
-  Never pass seeds or private keys. Public hex + address only.
+A tag (@bob) is public and not unique: someone else may use the same one, so
+always check the security words. Never pass a seed or a private key: a card,
+an address and a public key are public.
 
-Interactive (recommended for first-timers):
-  ash                  # menu → 5 Contacts → guided add
+Step by step: run `raven` and pick Contacts.
 ")]
     Add {
         #[arg(
             long,
             required_unless_present = "card",
             conflicts_with = "card",
-            help = "Raven address (rvn1… bech32m) from QR/OOB"
+            help = "Their Raven address (rvn1…)"
         )]
         address: Option<String>,
         #[arg(
             long,
             required_unless_present = "card",
             conflicts_with = "card",
-            help = "Ed25519 public key hex (64 chars) — never a seed"
+            help = "Their public key (64 hex characters), never a seed"
         )]
         pub_hex: Option<String>,
-        /// A contact card (`raven whoami --card` line), the invite line `ash
-        /// whoami` prints, or a file holding one, instead of --address /
-        /// --pub-hex. A card's addresses are saved as routes (hints only); its
-        /// key is checked against its address and fingerprint. An invite holds
-        /// no address to reach them by: add --lan-dial if they gave you one.
+        /// A contact card (the `raven whoami --card` line), the invite line
+        /// `raven whoami` prints, or a file holding one, instead of --address
+        /// and --pub-hex. Its key is checked against its address and
+        /// fingerprint.
         #[arg(long, value_name = "CARD|FILE")]
         card: Option<String>,
-        /// Layer C — unique on this device only (primary label).
-        #[arg(long, default_value = "", help = "Local petname, e.g. Poline")]
+        /// Your name for them, on this computer only.
+        #[arg(long, default_value = "", help = "Your name for them, e.g. Bob")]
         petname: String,
-        /// Layer B — public Alias V1 tag (NOT globally unique), e.g. sam.
-        #[arg(long, default_value = "", help = "Optional public @tag (Soft Unique)")]
+        /// Their public tag, e.g. sam (not unique: others may use it too).
+        #[arg(
+            long,
+            default_value = "",
+            help = "Their public @tag, if any (not unique)"
+        )]
         tag: String,
         /// Legacy alias of --tag (deprecated).
         #[arg(long, default_value = "")]
         alias: String,
         /// What they read out: their 10 security words or their old code
-        /// (fingerprint). On match: pin Tag+key (DHT cannot overwrite).
+        /// (fingerprint). On a match they are saved as verified.
         #[arg(
             long,
             visible_alias = "verify-words",
@@ -1329,11 +1325,11 @@ Interactive (recommended for first-timers):
             help = "Their security words (or old code) to pin Tag+key locally"
         )]
         verify_fp: Option<String>,
-        /// Optional OOB prekey JSON: verified against --pub-hex and stored in
-        /// the local prekey store (like `ash prekey fetch --file`).
+        /// Their prekey file, if they gave you one: checked against their key
+        /// and kept on this computer.
         #[arg(long)]
         prekey_file: Option<PathBuf>,
-        /// Optional LAN listen host:port (saved for Send / Chat — beginners pick #, not dial).
+        /// Their address on your network (host:port), if they gave you one.
         #[arg(
             long,
             default_value = "",
@@ -1381,12 +1377,12 @@ Interactive (recommended for first-timers):
         #[arg(long, value_name = "WORDS|CODE")]
         check: Option<String>,
     },
-    /// Resolve @tag with ambiguity picker (never silent winner).
+    /// Find a contact by @tag (asks when more than one matches).
     Resolve {
         #[arg(long)]
         tag: String,
     },
-    /// Send encrypted contact request (E2EE; delivered via MessageRouter / store).
+    /// Send an encrypted contact request.
     Request {
         /// Target `@alias` or `rvn1…` address.
         target: String,
@@ -1399,19 +1395,19 @@ Interactive (recommended for first-timers):
     },
     /// List pending inbound contact requests (opened locally).
     Pending,
-    /// Ingest a received RavenContactRequestV1 wire blob into the local inbox.
+    /// Read a contact request someone gave you into your requests.
     Ingest {
         #[arg(long)]
         file: PathBuf,
     },
-    /// Accept a pending request: emit ContactAcceptV1 + bind petname locally.
+    /// Accept a pending request and give them a name on this computer.
     Accept {
         /// request_id hex (32 chars).
         request_id: String,
         #[arg(long)]
         petname: String,
     },
-    /// Decline a pending request (local only — no central moderation).
+    /// Decline a pending request (on this computer only).
     Decline { request_id: String },
     /// Block sender of a pending request (local block list).
     Block { request_id: String },
@@ -2328,6 +2324,15 @@ fn require_identity_before_state(data_dir: &Path, what: &str) -> Result<(), Stri
 /// printed them, and status is what people paste into bug reports): they
 /// belong to the verify flow, read aloud, and show only on request
 /// ([`print_own_words`], `raven whoami --words`).
+/// The identity rows a person reads: the address and the fingerprint.
+fn print_identity_short(id: &Identity) {
+    kv("address", &id.address());
+    kv(
+        "fingerprint",
+        &device_fingerprint_v1(&id.public_key_bytes()),
+    );
+}
+
 fn print_public_identity(id: &Identity) {
     kv("address", &id.address());
     kv(
@@ -2335,6 +2340,11 @@ fn print_public_identity(id: &Identity) {
         &device_fingerprint_v1(&id.public_key_bytes()),
     );
     kv("pub_hex", &hex::encode(id.public_key_bytes()));
+    print_invite(id);
+}
+
+/// The invite line: what a friend pastes into `raven contact add --card`.
+fn print_invite(id: &Identity) {
     println!(
         "{0}invite{1}        {2}raven:{3}:{4}{5}",
         c().dim,
@@ -4620,7 +4630,12 @@ fn extract_pub_hex_field(blob: &str) -> Option<String> {
     if t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some(t.to_lowercase());
     }
-    None
+    // A whoami block without its key row (field test E3 round 2: `raven
+    // whoami` shows it with --verbose only): the key from its invite line.
+    blob.lines().find_map(|line| {
+        let invite = parse_raven_invite(line)?.ok()?;
+        Some(invite.pub_hex.to_ascii_lowercase())
+    })
 }
 
 fn extract_address_field(blob: &str) -> Option<String> {
@@ -5741,37 +5756,35 @@ fn unresolved_hint_listen(
     }
 }
 
-fn print_lan_unresolved_hint(data_dir: &Path, contact_label: &str) {
+/// What a send to `c` says when it has no LAN address for it and no other
+/// way to try: plainly that none is saved, how to save one, and where
+/// friends reach this computer (field test E3 round 2: it read "LAN peer not
+/// resolved ... identity ≠ IP ... iPhone Serverless LAN ... raven-node run
+/// --listen 0.0.0.0:7420").
+fn print_lan_unresolved_hint(data_dir: &Path, c: &Contact) {
     let s = style();
     let bold = s.bold;
-    let dim = s.dim;
     let reset = s.reset;
     let listen = unresolved_hint_listen(
         profile_service(data_dir).as_ref(),
         ext::service_lan_listen_env().as_deref(),
     );
-    let port = listen
-        .as_ref()
-        .map_or_else(|_| ext::own_lan_port(), |at| at.port());
-    println!(
-        "{bold}LAN peer not resolved{reset} for {} — identity ≠ IP.",
-        sanitize_terminal_line(contact_label)
-    );
-    println!(
-        "Peer must reach this computer (iPhone Serverless LAN → Host=this computer's IP, \
-         Port={port}),"
-    );
-    println!("or set listen on the phone / export RAVEN_PEER=host:port. No host:port prompt.");
-    println!("Save it once: ash contact set-dial --petname <name> --lan-dial host:port");
+    for line in lan_unresolved_lines(&c.primary_label(), &set_addr_hint(c, "--lan")) {
+        println!("{line}");
+    }
     match &listen {
         Ok(listen) => print_friend_tip(&friend_tip(*listen, &netifs::lan_addresses_for_friends())),
         Err(cannot) => println!("{bold}{cannot}{reset}"),
     }
-    println!(
-        "{dim}Also:{reset} `raven-node run --listen 0.0.0.0:{}` (this computer listens; phone \
-         dials).",
-        ext::own_lan_port()
-    );
+}
+
+/// [`print_lan_unresolved_hint`]'s first lines (pure).
+fn lan_unresolved_lines(name: &str, save: &str) -> [String; 2] {
+    let name = sanitize_terminal_line(name);
+    [
+        format!("No LAN address saved for {name}."),
+        format!("Save their address once: {save} (or ask {name} for a new card)."),
+    ]
 }
 
 /// Pure resolution used by tests: saved dial → env. No dial → `None`
@@ -7322,24 +7335,19 @@ fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
             format!("{0}○ unpinned{1}", c.dim, c.reset)
         };
         let fp = shown_fingerprint(ct);
-        let mut dial = if ct.lan_dial.is_empty() {
+        // The ways to reach it (field test E3 round 2), never a public
+        // address.
+        let ways = ways_to_reach(data_dir, ct, now);
+        let dial = if ways.is_empty() {
             String::new()
         } else {
             format!(
                 "  {0}→ {1}{2}",
                 c.dim,
-                sanitize_terminal_line(&ct.lan_dial),
+                sanitize_terminal_line(&ways.join(", ")),
                 c.reset
             )
         };
-        if !ct.internet_dial.is_empty() {
-            dial.push_str(&format!(
-                "  {0}→ internet {1}{2}",
-                c.dim,
-                sanitize_terminal_line(&ct.internet_dial),
-                c.reset
-            ));
-        }
 
         println!(
             "  {i}. {name:<nw$}  {tag:<tw$}  {pin}{dial}",
@@ -11399,11 +11407,14 @@ fn cmd_status_with(data_dir: &Path, technical: bool) -> Result<(), String> {
         Ok(Some(id)) => {
             println!();
             println!("{}IDENTITY \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{}", c.bold, c.reset);
-            println!(
-                "  {0}\u{25cf}{1} ready {2}(public bits only \u{2014} never a seed){3}",
-                c.green, c.reset, c.dim, c.reset
-            );
-            print_public_identity(&id);
+            println!("  {0}\u{25cf}{1} ready", c.green, c.reset);
+            // Field test E3 round 2: the key in hex and the raw invite are
+            // developer rows here (`raven whoami` shows the invite).
+            if technical {
+                print_public_identity(&id);
+            } else {
+                print_identity_short(&id);
+            }
         }
         Ok(None) => println!(
             "\n{0}\u{25cb} identity missing{1} \u{2014} run {2}ash init{3}",
@@ -11448,7 +11459,9 @@ fn cmd_status_with(data_dir: &Path, technical: bool) -> Result<(), String> {
     let queue = forward_queue_view(&data_dir.join("forward_queue.sqlite"));
 
     println!();
-    println!("{}BRIDGE \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{}", c.bold, c.reset);
+    // Field test E3 round 2: "BRIDGE", "daemon running (answers IPC)" and
+    // "forward_q" were developer words; the bridge rows stay for --verbose.
+    println!("{}CONNECTIONS \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}{}", c.bold, c.reset);
     if technical {
         kv(
             "configured",
@@ -11466,21 +11479,24 @@ fn cmd_status_with(data_dir: &Path, technical: bool) -> Result<(), String> {
             forward_pending,
             ..
         }) => {
-            kv("daemon", "running (answers IPC)");
+            kv("raven-node", "running");
             if technical {
                 kv("caps", &capabilities.join(", "));
                 kv("fwd_pending", &forward_pending.to_string());
             }
         }
-        Ok(_) => kv("daemon", "unexpected IPC response"),
+        Ok(_) => kv(
+            "raven-node",
+            "answered something else (an older or newer raven-node?)",
+        ),
         Err(e) if ipc_client::error_means_not_running(e) => kv(
-            "daemon",
-            "not running — policy only, nothing is relaying (it starts when you send; or run `ash listen`)",
+            "raven-node",
+            "not running (it starts when you send; or run `raven listen`)",
         ),
         Err(e) => kv(
-            "daemon",
+            "raven-node",
             &format!(
-                "not running or not answering — policy only, nothing is relaying ({})",
+                "not running or not answering ({})",
                 sanitize_terminal_line(e)
             ),
         ),
@@ -11530,7 +11546,9 @@ fn cmd_status_with(data_dir: &Path, technical: bool) -> Result<(), String> {
     if let Some(row) = &security.strangers {
         kv("strangers", row);
     }
-    kv("forward_q", &forward_queue_line(&queue));
+    if technical {
+        kv("forward_q", &forward_queue_line(&queue));
+    }
 
     let qpath = data_dir.join("queue.db");
     let qpath2 = data_dir.join("queue.sqlite");
@@ -13338,8 +13356,10 @@ fn internet_reach_row(
              can reach you)"
                 .into()
         }
+        // No port here: a default one may not be this profile's (field test
+        // E3 round 2: 7422 shown on a profile set up on other ports).
         Ok(IpcResponse::Status { .. }) if configured.is_empty() => {
-            format!("off (opt-in: raven node internet on --listen 0.0.0.0:{DEFAULT_INTERNET_PORT})")
+            "off (opt-in: raven node internet on)".to_string()
         }
         Ok(IpcResponse::Status { .. }) if !internet_live => format!(
             "NO \u{2014} configured ({configured}) but Internet direct is not enabled in this \
@@ -13529,7 +13549,7 @@ fn cmd_send_interactive(data_dir: &Path) {
     let (peer, prompted) = match resolve_lan_peer_parts(&ct.lan_dial, env.as_deref()) {
         Some(ResolvedLanPeer::Dial(dial)) => (dial, false),
         None => {
-            print_lan_unresolved_hint(data_dir, &ct.primary_label());
+            print_lan_unresolved_hint(data_dir, ct);
             if !stdin_is_tty() {
                 println!(
                     "{0}no LAN dial saved and stdin is not a terminal \u{2014} \
@@ -13805,7 +13825,7 @@ fn resolve_or_reuse_lan_dial_with(
             Some((ResolvedLanPeer::Dial(dial), !saved))
         }
         None => {
-            print_lan_unresolved_hint(data_dir, &c.primary_label());
+            print_lan_unresolved_hint(data_dir, c);
             None
         }
     }
@@ -14242,8 +14262,14 @@ fn plan_contact_routes_with(
         _ => None,
     };
     // Another saved route (even one this send cannot use) means a missing
-    // LAN address is not the error to report.
-    let others = inet.is_some() || p2p.is_some();
+    // LAN address is not the error to report; so does the Tor route
+    // `with_card_onion_route` adds (field test E3 round 2: after
+    // forget-address a send over Tor printed the old LAN help first).
+    let tor = choice == CarrierChoice::Auto
+        && raven_core::onion_live_enabled()
+        && c.pinned
+        && onion_route(c).is_some();
+    let others = inet.is_some() || p2p.is_some() || tor;
     let want_lan = matches!(choice, CarrierChoice::Auto | CarrierChoice::Lan);
     let lan_possible = resolve_lan_peer_parts(&c.lan_dial, env.as_deref()).is_some();
     let mut routes = Vec::new();
@@ -14358,7 +14384,7 @@ fn plan_contact_routes_with(
     }
     if let Some(route) = p2p_planned {
         routes.push(route);
-    } else if routes.is_empty() && choice == CarrierChoice::Auto && p2p.is_some() {
+    } else if routes.is_empty() && choice == CarrierChoice::Auto && p2p.is_some() && !tor {
         // Only a p2p route, and it cannot be used: say why.
         return Err(if p2p_unverified {
             unverified_contact_text_for(c, "p2p")
@@ -14380,7 +14406,19 @@ fn plan_contact_routes_with(
             )
         });
     }
+    if tor && routes.is_empty() {
+        let s = style();
+        println!("{}{}{}", s.dim, tor_only_line(&c.primary_label()), s.reset);
+    }
     Ok((routes, env_lan))
+}
+
+/// The one line a send prints when Tor is its only way to the friend.
+fn tor_only_line(name: &str) -> String {
+    format!(
+        "No LAN address saved for {}; trying Tor.",
+        sanitize_terminal_line(name)
+    )
 }
 
 /// Whether an `auto` send may plan Bluetooth nearby: this build has it and
@@ -14483,6 +14521,68 @@ fn onion_route(c: &Contact) -> Option<pair_init_lab::DialRoute> {
         carrier: pair_init_lab::DialCarrier::Onion,
         dial: raven_core::onion::dial_for(&binding.hs_id),
     })
+}
+
+/// The ways Raven has to reach contact `c`, in plain words (field test E3
+/// round 2: no command showed them): its saved LAN address (local, so shown),
+/// "internet direct" and "p2p" (never a public address or a PeerId), "Tor"
+/// (a signed onion address), then what its route hints taught, marked
+/// "learned". A LAN address that is not on a local network is not shown.
+fn ways_to_reach(data_dir: &Path, c: &Contact, now: u64) -> Vec<String> {
+    let mut ways: Vec<String> = Vec::new();
+    let lan_words = |dial: &str| match lan_dial_shown(dial) {
+        Some(at) => format!("same network (LAN) at {at}"),
+        None => "same network (LAN)".to_string(),
+    };
+    if looks_like_lan_dial(&c.lan_dial) {
+        ways.push(lan_words(c.lan_dial.trim()));
+    }
+    if !c.internet_dial.trim().is_empty() {
+        ways.push("internet direct".into());
+    }
+    if !c.p2p.trim().is_empty() {
+        ways.push("p2p".into());
+    }
+    if onion_route(c).is_some() {
+        ways.push("Tor".into());
+    }
+    let learned = parse_pub_hex(&c.pub_hex)
+        .ok()
+        .filter(|_| raven_core::route_hints::route_hints_live())
+        .map(|key| raven_core::learned_routes::learned_with_lan(data_dir, &key, now));
+    if let Some((view, lan)) = learned {
+        if let Some(port) = lan.as_ref().and_then(|l| l.port) {
+            let at = lan.as_ref().and_then(|l| {
+                l.ip.map(|ip| raven_core::lan_seen::ScopedIp::new(ip, l.zone.as_deref()).dial(port))
+            });
+            let saved = at
+                .as_deref()
+                .is_some_and(|at| c.lan_dial.trim().eq_ignore_ascii_case(at));
+            if !saved {
+                let words = at
+                    .as_deref()
+                    .map_or_else(|| "same network (LAN)".to_string(), lan_words);
+                ways.push(format!("{words}, learned"));
+            }
+        }
+        if let Some(view) = view {
+            if !view.inet.is_empty() && c.internet_dial.trim().is_empty() {
+                ways.push("internet direct, learned".into());
+            }
+            if view.peer_id.is_some() && c.p2p.trim().is_empty() {
+                ways.push("p2p, learned".into());
+            }
+        }
+    }
+    ways
+}
+
+/// A LAN dial as `raven contact show` may print it: a local-network IP
+/// address with its port (a name, or an address beyond the local network,
+/// is not printed).
+fn lan_dial_shown(dial: &str) -> Option<String> {
+    let at = dial.trim().parse::<std::net::SocketAddr>().ok()?;
+    raven_core::outbox::is_local_network_ip(at.ip()).then(|| at.to_string())
 }
 
 /// `planned` with contact `c`'s Tor onion route last (lab): for `auto` to a
@@ -16086,8 +16186,14 @@ pub fn run() {
                     println!("{}", public_whoami_card(&id, words));
                 } else if words {
                     print_own_words(&id);
-                } else {
+                } else if ext::verbose() {
                     print_public_identity(&id);
+                } else {
+                    // Field test E3 round 2: the key in hex is a developer
+                    // row (`--json` and --verbose keep it; the invite holds
+                    // it for a friend).
+                    print_identity_short(&id);
+                    print_invite(&id);
                 }
             }
             Ok(None) => {
@@ -29761,6 +29867,141 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert!(with_card_onion_route(&c, CarrierChoice::Onion, true, lan()).is_err());
     }
 
+    /// Field test E3 round 2: no command showed a contact's ways to reach
+    /// it. `raven contact show` and `contact list` name them in plain words:
+    /// a LAN address (local, so shown), "internet direct", "p2p" and "Tor",
+    /// never a public address or a PeerId; what route hints taught is
+    /// marked "learned".
+    #[test]
+    fn ways_to_reach_name_each_route_without_a_public_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let id = Identity::from_seed(&[0x5c; 32]);
+        let peer_id = raven_core::p2p_route::local_peer_id(&id);
+        let mut c = contact_with("192.168.1.20:17420", "203.0.113.7:7422");
+        c.pub_hex = hex::encode(id.public_key_bytes());
+        c.p2p = peer_id.clone();
+        let hs_id = Identity::from_seed(&[0x5d; 32]).public_key_bytes();
+        c.onion =
+            raven_core::onion::OnionBinding::sign(&id, hs_id, raven_core::onion::now_s()).to_text();
+        let now = now_ms();
+        let ways = ways_to_reach(d, &c, now);
+        assert_eq!(
+            ways,
+            [
+                "same network (LAN) at 192.168.1.20:17420",
+                "internet direct",
+                "p2p",
+                "Tor"
+            ]
+        );
+        let all = ways.join(" ");
+        for leak in ["203.0.113", &peer_id[..12]] {
+            assert!(!all.contains(leak), "{leak}: {all}");
+        }
+        // A saved LAN address beyond the local network is not printed.
+        let far = Contact {
+            lan_dial: "198.51.100.4:7420".into(),
+            internet_dial: String::new(),
+            p2p: String::new(),
+            onion: String::new(),
+            ..c.clone()
+        };
+        assert_eq!(ways_to_reach(d, &far, now), ["same network (LAN)"]);
+        // Nothing saved: what the friend's route hints told, marked learned.
+        let bare = Contact {
+            lan_dial: String::new(),
+            internet_dial: String::new(),
+            p2p: String::new(),
+            onion: String::new(),
+            ..c.clone()
+        };
+        assert!(ways_to_reach(d, &bare, now).is_empty());
+        if raven_core::route_hints::route_hints_live() {
+            let link = raven_core::route_hints::HintLink {
+                sender: id.public_key_bytes(),
+                ..raven_core::route_hints::HintLink::fixture(raven_core::OutboxCarrier::Onion, true)
+            };
+            let told = raven_core::route_hints::ValidHints {
+                generation: 5,
+                ttl_s: raven_core::route_hints::RRH1_DEFAULT_TTL_S,
+                lan_addrs: vec![raven_core::route_hints::InetDirect {
+                    flags: 0,
+                    addr: "192.168.1.21:17420".parse().unwrap(),
+                }],
+                ..Default::default()
+            };
+            raven_core::learned_routes::apply(d, &id.public_key_bytes(), &told, &link, None, now)
+                .unwrap();
+            assert_eq!(
+                ways_to_reach(d, &bare, now),
+                ["same network (LAN) at 192.168.1.21:17420, learned"]
+            );
+        }
+    }
+
+    /// Field test E3 round 2: after `forget-address` a send to a friend
+    /// reached over Tor printed the old developer LAN help ("LAN peer not
+    /// resolved ... identity ≠ IP ... iPhone Serverless LAN ..."). With a
+    /// signed onion route the plan is not refused for a missing LAN address
+    /// and asks nothing about one: Tor alone, said in one plain line. A
+    /// friend with no way at all gets plain words.
+    #[test]
+    fn a_tor_only_friend_plans_tor_without_the_lan_help() {
+        let id = Identity::from_seed(&[0x5c; 32]);
+        let mut c = contact_with("", "");
+        c.pub_hex = hex::encode(id.public_key_bytes());
+        c.pinned = true;
+        let hs_id = Identity::from_seed(&[0x5d; 32]).public_key_bytes();
+        c.onion =
+            raven_core::onion::OnionBinding::sign(&id, hs_id, raven_core::onion::now_s()).to_text();
+        let plan = |c: &Contact| {
+            plan_contact_routes_with(
+                Path::new(NO_PROFILE),
+                c,
+                CarrierChoice::Auto,
+                None,
+                false,
+                false,
+                &[],
+                &[],
+            )
+        };
+        if raven_core::onion_live_enabled() {
+            let (routes, env) = plan(&c).expect("not refused for a missing LAN address");
+            assert!(routes.is_empty() && env.is_none(), "{routes:?}");
+            let (routes, _) =
+                with_card_onion_route(&c, CarrierChoice::Auto, true, plan(&c)).unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].carrier, pair_init_lab::DialCarrier::Onion);
+        }
+        // Not verified: no Tor route, so the missing LAN address is the error.
+        c.pinned = false;
+        let err = plan(&c).unwrap_err();
+        assert!(err.contains("has no reachable lan_dial"), "{err}");
+        // The words.
+        assert_eq!(
+            tor_only_line("mac-a"),
+            "No LAN address saved for mac-a; trying Tor."
+        );
+        let lines = lan_unresolved_lines("mac-a", "raven contact set-addr @mac-a --lan HOST:PORT");
+        assert_eq!(lines[0], "No LAN address saved for mac-a.");
+        assert_eq!(
+            lines[1],
+            "Save their address once: raven contact set-addr @mac-a --lan HOST:PORT (or ask \
+             mac-a for a new card)."
+        );
+        for old in [
+            "identity",
+            "iPhone",
+            "RAVEN_PEER",
+            "raven-node run",
+            "set-dial",
+        ] {
+            assert!(!lines.join(" ").contains(old), "{old}");
+        }
+    }
+
     /// Field test E3: after `raven nearby disable` every send still tried
     /// Bluetooth, and with p2p off every send dialled an old PeerId; the
     /// words then named both as ways tried. An `auto` send plans nearby only
@@ -30087,11 +30328,10 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         };
         let up = internet_reach_row(&status(&["ipc", "internet_direct"]), "", true);
         assert!(up.starts_with("YES"), "{up}");
+        // Field test E3 round 2: no port in the hint (7422 was shown on a
+        // profile set up on other ports).
         let off = internet_reach_row(&status(&["ipc"]), "", true);
-        assert!(
-            off.starts_with("off") && off.contains("raven node internet on"),
-            "{off}"
-        );
+        assert_eq!(off, "off (opt-in: raven node internet on)");
         let held = internet_reach_row(&status(&["ipc"]), "0.0.0.0:7422", false);
         assert!(
             held.starts_with("NO") && held.contains("INTERNET_DIRECT_HOLD"),

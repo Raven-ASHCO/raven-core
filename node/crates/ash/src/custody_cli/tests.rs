@@ -327,6 +327,50 @@ fn custody_home_validation() {
     assert!(home().is_empty());
 }
 
+/// Field test E3 round 2: `raven custody status` counts your mail friends
+/// and nothing said who they are or why. `raven custody home` with no names
+/// says it, by your own names for them.
+#[test]
+fn custody_home_without_names_says_who_and_why() {
+    let dir = tmp();
+    let d = dir.path();
+    let (carol, dan) = (contact(0x31, "Carol", true), contact(0x32, "Dan", true));
+    super::super::save_contacts(d, &[carol.clone(), dan.clone()]).unwrap();
+    learned(
+        d,
+        &[
+            (&carol, Some(OFFER_WAN), Vec::new()),
+            (&dan, Some(0), Vec::new()),
+        ],
+    );
+    let local = hex::encode([0x77u8; 32]);
+    // Mailboxes off: none, and how to turn them on.
+    let off = custody_home_with(d, &local, &[]).unwrap();
+    assert_eq!(
+        off,
+        ["your mail friends: none (friend mailboxes are off: `raven custody use on`)"]
+    );
+    // Chosen by hand.
+    save_policy(
+        d,
+        &NodePolicy {
+            custody_use: Some(true),
+            custody_home: vec![carol.pub_hex.clone()],
+            ..NodePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        custody_home_with(d, &local, &[]).unwrap(),
+        ["your mail friends: Carol (chosen by you)"]
+    );
+    // Nothing changed by asking.
+    assert_eq!(
+        try_load_policy(d).unwrap().custody_home,
+        std::slice::from_ref(&carol.pub_hex)
+    );
+}
+
 /// `raven custody status`: counts only, never a name, key or address.
 #[test]
 fn custody_status_rows_counts_only() {
@@ -349,9 +393,14 @@ fn custody_status_rows_counts_only() {
         [
             "friend mailboxes   on: when a contact can't be reached, Raven leaves a sealed copy \
              with a friend you both verified",
-            "mail friends       2 (picked automatically), 1 more still collected from (up to 97 h)",
-            "offering friends   3 verified friends offer to hold your mail (1 over the internet, \
-             2 reachable from the internet)",
+            // Field test E3 round 2: neither who nor why, and "(1 over the
+            // internet, 0 reachable from the internet)" read as a
+            // contradiction.
+            "mail friends       2 picked automatically among the friends who offer to hold mail; \
+             they hold mail for you (`raven custody home` names them); 1 you used before still \
+             collected from for up to 97 h",
+            "offering friends   3 verified friends offer to hold your mail, 1 of them also when \
+             you are on different networks",
             "holding for others on: 4 sealed messages, 9000 bytes held for friends",
         ]
     );
@@ -371,8 +420,8 @@ fn custody_status_rows_counts_only() {
             "friend mailboxes   not decided yet, so off: messages that wait stay on this \
              computer (`raven custody use on` or `off`)",
             "mail friends       none",
-            "offering friends   2 verified friends offer to hold your mail (2 over the internet, \
-             0 reachable from the internet)",
+            "offering friends   2 verified friends offer to hold your mail, all also when you are \
+             on different networks",
             "holding for others off: this computer holds no mail for friends (`raven node \
              custody on` offers it)",
         ]
@@ -1035,8 +1084,8 @@ fn doctor_coverage_classes_from_contacts_announcements_and_parks() {
              expires, up to a day (7 days as a letter)",
             "  two friends in a row (1 contact): up to a day",
             "  nobody can carry it (2 contacts): it goes when you meet",
-            "  next step: ask a friend you both trust to hold mail (raven node custody on), or \
-             pin an always-on friend node as custodian",
+            "  next step: turn friend mailboxes on (raven custody use on) and ask a friend you \
+             both verified to hold mail (raven node custody on, on their computer)",
         ]
     );
     // Counts only: never a name or a key.
@@ -1259,16 +1308,19 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
     assert_eq!(
         dan[2..],
         [
-            "  mail friends Dan told you about: Erin (also takes mail another friend passes on)",
+            "  ways to reach Dan: none known yet",
+            "  Dan's mail friends (they hold mail for Dan): Erin (also takes mail another friend \
+             passes on)",
             "  mail friends you listed for Dan: Carol",
             "  offline delivery (two friends in a row): up to a day",
         ]
     );
     let bob = show("Bob", &[]).unwrap();
     assert_eq!(
-        bob[2..],
+        bob[3..],
         [
-            "  mail friends Bob told you about: Carol; 1 more that is not your verified contact",
+            "  Bob's mail friends (they hold mail for Bob): Carol; 1 more that is not your \
+             verified contact",
             "  mail friends you listed for Bob: Carol",
             "  offline delivery (a mail friend you share): the friend holds a sealed copy until \
              it expires, up to a day (7 days as a letter)",
@@ -1276,15 +1328,33 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
     );
     let hal = show("@hal", &[]).unwrap();
     assert_eq!(
-        hal[2..],
+        hal[3..],
         [
-            "  mail friends Hal told you about: none",
+            "  Hal's mail friends (they hold mail for Hal): none you know of",
             "  mail friends you listed for Hal: Frank (not used: not a verified, unblocked \
              contact)",
             "  offline delivery (nobody can carry it): it goes when you meet",
-            "  next step: ask a friend you both trust to hold mail (raven node custody on), or \
-             pin an always-on friend node as custodian",
+            "  next step: turn friend mailboxes on (raven custody use on) and ask a friend you \
+             both verified to hold mail (raven node custody on, on their computer)",
         ]
+    );
+    // Field test E3 round 2: with your own friend mailboxes on, the next
+    // step said to ask a friend to hold mail while `raven custody status`
+    // showed a mail friend: that friend holds mail for you, not for Hal.
+    save_policy(
+        dir,
+        &NodePolicy {
+            custody_use: Some(true),
+            ..try_load_policy(dir).unwrap_or_default()
+        },
+    )
+    .unwrap();
+    let hal = show("@hal", &[]).unwrap();
+    assert_eq!(
+        hal.last().unwrap(),
+        "  next step: your mail friends hold mail for you, not for Hal; mail for Hal waits with \
+         a friend only when Hal collects mail from a friend you also verified (on Hal's \
+         computer: raven custody use on)"
     );
     let gina = show("@gina", &[key(&w.gina)]).unwrap();
     // The long horizon is on (release builds since 2026-10): 7 days.
@@ -1313,11 +1383,12 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
     gates(Some(true), Some(false), Some(true));
     let dan = show("@dan", &[]).unwrap();
     assert_eq!(
-        dan[2],
-        "  mail friends Dan told you about: not in this build (friend mailboxes are off)"
+        dan[3],
+        "  Dan's mail friends (they hold mail for Dan): not in this build (friend mailboxes are \
+         off)"
     );
     assert_eq!(
-        dan[4],
+        dan[5],
         "  offline delivery (nobody can carry it): it goes when you meet"
     );
     assert!(show("@nobody", &[]).is_err());

@@ -617,7 +617,7 @@ fn status_reports_a_broken_book_and_does_not_present_policy_as_live_state() {
         out.contains("CONTACTS") && out.contains("unavailable"),
         "{out}"
     );
-    assert!(out.contains("BRIDGE") && out.contains("forward_q"), "{out}");
+    assert!(out.contains("CONNECTIONS"), "{out}");
     // No daemon is running: say so instead of claiming transports / capabilities.
     assert!(out.contains("not running"), "{out}");
     assert!(

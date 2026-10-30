@@ -547,6 +547,11 @@ pub(super) fn custody_home_with(
     local: &str,
     who: &[String],
 ) -> Result<Vec<String>, String> {
+    // No names: who they are now, and why (field test E3 round 2: `raven
+    // custody status` counts them, and nothing said who).
+    if who.is_empty() {
+        return home_list_lines(data_dir, local);
+    }
     let auto = who.len() == 1 && who[0].trim().eq_ignore_ascii_case("auto");
     if !auto && who.iter().any(|w| w.trim().eq_ignore_ascii_case("auto")) {
         return Err("`auto` stands alone: `raven custody home auto` (nothing changed)".into());
@@ -588,6 +593,59 @@ pub(super) fn custody_home_with(
         lines.push(
             "note: friend mailboxes are off: `raven custody use on` to use them.".to_string(),
         );
+    }
+    Ok(lines)
+}
+
+/// `raven custody home` with no names: your mail friends by your own names
+/// for them, why each is one (chosen by you, or picked because it offers to
+/// hold mail), and the ones you used before that are still collected from.
+fn home_list_lines(data_dir: &Path, local: &str) -> Result<Vec<String>, String> {
+    let contacts = load_contacts(data_dir)?;
+    let local: [u8; 32] = hex::decode(local.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .unwrap_or([0; 32]);
+    let policy = try_load_policy(data_dir).unwrap_or_default();
+    let now = now_ms();
+    let names = |keys: &[[u8; 32]]| -> String {
+        keys.iter()
+            .map(|k| {
+                contacts
+                    .iter()
+                    .find(|c| key_of(c).as_ref() == Some(k))
+                    .map_or_else(|| "a contact".to_string(), Contact::primary_label)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let home = custody_home::home(data_dir, &local, now);
+    let before: Vec<[u8; 32]> = custody_home::fetch_from(data_dir, &local, now)
+        .into_iter()
+        .filter(|c| !home.contains(c))
+        .collect();
+    let mut lines = vec![if policy.custody_use != Some(true) {
+        "your mail friends: none (friend mailboxes are off: `raven custody use on`)".to_string()
+    } else if home.is_empty() {
+        format!(
+            "your mail friends: none yet (Raven picks up to {MAX_HOME} among verified friends              who offer to hold mail; none does now)"
+        )
+    } else if !policy.custody_home.is_empty() {
+        format!("your mail friends: {} (chosen by you)", names(&home))
+    } else {
+        format!(
+            "your mail friends: {} (picked automatically: {} to hold mail, and you both              verified each other)",
+            names(&home),
+            if home.len() == 1 { "it offers" } else { "they offer" }
+        )
+    }];
+    if !before.is_empty() {
+        lines.push(format!(
+            "still collected from: {} (your mail friend{} before, for up to {} h)",
+            names(&before),
+            if before.len() == 1 { "" } else { "s" },
+            drain_hours()
+        ));
     }
     Ok(lines)
 }
@@ -735,35 +793,43 @@ pub(super) fn custody_status_rows(f: &CustodyFacts) -> Vec<String> {
             ),
         }
     )];
-    let mut friends = if f.consent == Some(true) {
-        format!(
-            "{} ({})",
-            f.home,
-            if f.manual {
-                "chosen by you"
-            } else {
-                "picked automatically"
-            }
-        )
-    } else {
-        "none".to_string()
+    // Field test E3 round 2: "1 (picked automatically), 1 more still
+    // collected from (up to 97 h)" said neither who nor why, and "(1 over
+    // the internet, 0 reachable from the internet)" read as a contradiction.
+    // Counts only here; `raven custody home` names them.
+    let mut friends = match (f.consent, f.home) {
+        (Some(true), 0) => "none yet (Raven picks them among verified friends who offer to hold \
+                            mail)"
+            .to_string(),
+        (Some(true), n) if f.manual => {
+            format!("{n} chosen by you, who hold mail for you (`raven custody home` names them)")
+        }
+        (Some(true), n) => format!(
+            "{n} picked automatically among the friends who offer to hold mail; they hold mail \
+             for you (`raven custody home` names them)"
+        ),
+        _ => "none".to_string(),
     };
     if f.draining > 0 {
         friends.push_str(&format!(
-            ", {} more still collected from (up to {} h)",
+            "; {} you used before still collected from for up to {} h",
             f.draining,
             drain_hours()
         ));
     }
     rows.push(format!("mail friends       {friends}"));
+    let away = match (f.offering, f.offering_wan) {
+        (0, _) => String::new(),
+        (n, wan) if wan >= n && n == 1 => ", also when you are on different networks".into(),
+        (n, wan) if wan >= n => ", all also when you are on different networks".into(),
+        (_, 0) => ", only on the same network as you".into(),
+        (_, wan) => format!(", {wan} of them also when you are on different networks"),
+    };
     rows.push(format!(
-        "offering friends   {} verified friend{} offer{} to hold your mail ({} over the \
-         internet, {} reachable from the internet)",
+        "offering friends   {} verified friend{} offer{} to hold your mail{away}",
         f.offering,
         s(f.offering),
         if f.offering == 1 { "s" } else { "" },
-        f.offering_wan,
-        f.offering_reachable
     ));
     rows.push(if f.holding_on {
         format!(
@@ -1013,8 +1079,21 @@ impl Coverage {
 }
 
 /// The next step for contacts nobody can carry mail for.
-pub(super) const OFFLINE_NEXT_STEP: &str = "ask a friend you both trust to hold mail (raven node \
-    custody on), or pin an always-on friend node as custodian";
+pub(super) const OFFLINE_NEXT_STEP: &str = "turn friend mailboxes on (raven custody use on) and \
+    ask a friend you both verified to hold mail (raven node custody on, on their computer)";
+
+/// The next step for one contact nobody can carry mail for while your own
+/// friend mailboxes are on (field test E3 round 2: `raven contact show`
+/// said "nobody can carry it" and to ask a friend to hold mail, while
+/// `raven custody status` said friend mailboxes were on with a mail friend
+/// picked automatically: that friend holds mail for you, not for them).
+pub(super) fn shared_friend_step(name: &str) -> String {
+    format!(
+        "your mail friends hold mail for you, not for {name}; mail for {name} waits with a \
+         friend only when {name} collects mail from a friend you also verified (on {name}'s \
+         computer: raven custody use on)"
+    )
+}
 
 /// The same while friend custody is held (since 2026-10 only a debug build
 /// closes it).
@@ -1315,6 +1394,16 @@ pub(super) fn contact_show_lines(
         }
     )];
     lines.push(format!("  fp {}", super::shown_fingerprint(&target)));
+    // Field test E3 round 2: no command showed how a contact is reached.
+    let ways = super::ways_to_reach(data_dir, &target, now);
+    lines.push(format!(
+        "  ways to reach {name}: {}",
+        if ways.is_empty() {
+            "none known yet".to_string()
+        } else {
+            ways.join(", ")
+        }
+    ));
     let Some(peer) = key_of(&target) else {
         return Ok(lines);
     };
@@ -1348,7 +1437,7 @@ pub(super) fn contact_show_lines(
         });
         let unknown = told.map_or(0, |t| unknown_custodians(t, &book, local, &peer));
         let mut text = if friends.is_empty() {
-            "none".to_string()
+            "none you know of".to_string()
         } else {
             friends.join(", ")
         };
@@ -1363,7 +1452,9 @@ pub(super) fn contact_show_lines(
     } else {
         "not in this build (friend mailboxes are off)".to_string()
     };
-    lines.push(format!("  mail friends {name} told you about: {told}"));
+    lines.push(format!(
+        "  {name}'s mail friends (they hold mail for {name}): {told}"
+    ));
     let listed = listed_custodians(data_dir, &peer, local).unwrap_or_default();
     if !listed.is_empty() {
         let names: Vec<String> = listed
@@ -1414,12 +1505,15 @@ pub(super) fn contact_show_lines(
         lines.push(receipts_stranded_line(&name));
     }
     if class == Coverage::Nobody {
+        let mailboxes_on = try_load_policy(data_dir).is_ok_and(|p| p.custody_use == Some(true));
         lines.push(format!(
             "  next step: {}",
-            if CustodyGates::current().live {
-                OFFLINE_NEXT_STEP
+            if !CustodyGates::current().live {
+                OFFLINE_HELD_STEP.to_string()
+            } else if mailboxes_on {
+                shared_friend_step(&name)
             } else {
-                OFFLINE_HELD_STEP
+                OFFLINE_NEXT_STEP.to_string()
             }
         ));
     }

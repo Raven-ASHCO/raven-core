@@ -1566,7 +1566,8 @@ pub(super) fn p2p_reach_row(
             )
         } else if setting.is_empty() {
             if source.is_empty() || source == "node_policy.json" {
-                format!("off (opt-in: raven node p2p on --listen {DEFAULT_P2P_PORT})")
+                // No port: a default one may not be this profile's.
+                "off (opt-in: raven node p2p on)".to_string()
             } else {
                 format!("off ({source} turns it off for the running raven-node)")
             }
@@ -1791,7 +1792,7 @@ fn upnp_row(status: &Result<IpcResponse, String>, policy: Option<bool>) -> Strin
                 .into()
         }
         (Some(true), Some(_)) => "on \u{2014} asking the router".into(),
-        (Some(true), None) => "on (applied while the libp2p host runs)".into(),
+        (Some(true), None) => "on (used while p2p runs)".into(),
     }
 }
 
@@ -2057,6 +2058,14 @@ fn nat_row(nat: &NatMappingStatus) -> String {
     )
 }
 
+/// Whether `raven status` shows the router mapping rows: they serve the p2p
+/// port, so only while p2p is set up or its host runs (field test E3 round
+/// 2: "upnp on (applied while the libp2p host runs)" with p2p off).
+fn router_rows_shown(status: &Result<IpcResponse, String>, policy: &NodePolicy) -> bool {
+    let service_on = service_p2p(status).is_some_and(|i| !i.listen_setting.is_empty());
+    !policy.p2p_listen.is_empty() || service_on || p2p_info(status).is_some()
+}
+
 /// The p2p rows of `raven status` (after the `internet` row).
 pub(super) fn print_status_rows(status: &Result<IpcResponse, String>, policy: &NodePolicy) {
     kv(
@@ -2082,8 +2091,7 @@ pub(super) fn print_status_rows(status: &Result<IpcResponse, String>, policy: &N
             kv("auto_reach", &auto_reach_row(ar));
         }
     }
-    let service_on = service_p2p(status).is_some_and(|i| !i.listen_setting.is_empty());
-    if !policy.p2p_listen.is_empty() || policy.upnp.is_some() || service_on {
+    if router_rows_shown(status, policy) {
         for (label, row) in router_mapping_rows(status, policy.upnp) {
             kv(label, &row);
         }
@@ -5637,6 +5645,24 @@ mod tests {
         );
         assert!(upnp_row(&status(None), None).starts_with("unset"));
         assert_eq!(upnp_row(&status(None), Some(false)), "off");
+        assert_eq!(
+            upnp_row(&status(None), Some(true)),
+            "on (used while p2p runs)"
+        );
+        // Field test E3 round 2: with p2p off, no router mapping row at all
+        // (the saved UPnP choice alone said "on (applied while the libp2p
+        // host runs)").
+        let saved = NodePolicy {
+            upnp: Some(true),
+            ..NodePolicy::default()
+        };
+        assert!(!router_rows_shown(&status(None), &saved));
+        assert!(router_rows_shown(&status(Some(up.clone())), &saved));
+        let set_up = NodePolicy {
+            p2p_listen: "7423".into(),
+            ..saved
+        };
+        assert!(router_rows_shown(&status(None), &set_up));
         let failed = P2pStatusInfo {
             upnp: "failed".into(),
             ..up

@@ -578,9 +578,19 @@ fn status_gives_a_plain_receiving_row_and_a_verdict_for_every_node_state() {
             .ends_with("raven-node is not running: start it with `ash listen` (it also starts by itself when you send a message)."),
         "{out}"
     );
-    // What the scripts parse is still there, and the raw OS error is not.
-    assert!(out.contains("BRIDGE") && out.contains("forward_q"), "{out}");
+    // The raw OS error is not there. Field test E3 round 2: "BRIDGE",
+    // "daemon running (answers IPC)" and "forward_q" were developer words;
+    // the queue row is a --verbose one now, the key in hex and the raw
+    // invite too.
+    assert!(
+        out.contains("CONNECTIONS") && !out.contains("BRIDGE"),
+        "{out}"
+    );
+    assert!(!out.contains("forward_q"), "{out}");
     assert!(!out.contains("os error"), "{out}");
+    for developer in ["pub_hex", "invite", "public bits only", "answers IPC"] {
+        assert!(!out.contains(developer), "{developer}: {out}");
+    }
     // Field test E3: no developer rows unless asked for (`--verbose`, or
     // RAVEN_VERBOSE=1); the same command still ends the same way.
     for technical in [
@@ -601,6 +611,8 @@ fn status_gives_a_plain_receiving_row_and_a_verdict_for_every_node_state() {
         "never silently uses FastAPI",
         "configured",
         "policy        ",
+        "forward_q",
+        "pub_hex",
     ] {
         assert!(verbose.contains(technical), "{technical}: {verbose}");
     }
@@ -626,7 +638,7 @@ fn status_gives_a_plain_receiving_row_and_a_verdict_for_every_node_state() {
         status_body(&out).ends_with("You can send and receive."),
         "{out}"
     );
-    assert!(out.contains("daemon        running (answers IPC)"), "{out}");
+    assert!(out.contains("raven-node    running\n"), "{out}");
 
     // A node without its LAN listener (busy port, outbound-only) cannot receive.
     let dir = short_dir();
@@ -2153,12 +2165,16 @@ fn whoami_shows_the_security_words_only_on_request_and_keeps_the_fingerprint_and
     let o = ash_out(dir.path(), &["whoami"], "");
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
     let out = text(&o.stdout);
+    // Field test E3 round 2: no key in hex by default (the invite holds it
+    // for a friend; --verbose and --json show it).
     let want = format!(
-        "  address       {}\n  fingerprint   {fp}\n  pub_hex       {}\n",
+        "  address       {}\n  fingerprint   {fp}\ninvite        raven:{}:{}\n",
+        bob.address(),
         bob.address(),
         pub_hex(&bob)
     );
     assert!(out.starts_with(&want), "{out}");
+    assert!(!out.contains("pub_hex"), "{out}");
     for args in [
         &["whoami"][..],
         &["status"],
@@ -2219,7 +2235,7 @@ fn a_pasted_whoami_with_its_words_line_adds_the_friend_under_the_right_name() {
         .to_string();
     let mut whoami = text(&o.stdout);
     whoami.insert_str(
-        whoami.find("  pub_hex").expect("the pub_hex line"),
+        whoami.find("invite").expect("the invite line"),
         &format!("{words_line}\n"),
     );
     assert!(whoami.contains("  words  "), "{whoami}");
