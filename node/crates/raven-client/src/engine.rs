@@ -116,6 +116,11 @@ impl Inner {
         // The CLI code prints what it does on stdout; inside an app that
         // would land in the app's own output.
         bridge::set_quiet();
+        // The node runs in this process (iOS, RAVEN_NODE_MODE=embedded).
+        #[cfg(feature = "embedded-node")]
+        if crate::embedded::mode_on() {
+            crate::embedded::install();
+        }
         Arc::new_cyclic(|me| Inner {
             me: me.clone(),
             data_dir,
@@ -200,6 +205,10 @@ impl Inner {
             "node.status" => |me, _| me.node_status_op(),
             "node.start" => |me, _| me.node_start(),
             "node.stop" => |me, _| me.node_stop(),
+            // The app's lifecycle (the embedded node: docs/IOS.md).
+            "node.pause" => |me, _| me.node_pause(),
+            "node.resume" => |me, _| me.node_resume(),
+            "mail.check" => |me, args| me.mail_check(args),
             "settings.get" => |me, _| Ok(me.settings_view().to_json()),
             "settings.set" => |me, args| me.settings_set(args),
             // Every way to reach friends (network.rs, NETWORK_PARITY.md).

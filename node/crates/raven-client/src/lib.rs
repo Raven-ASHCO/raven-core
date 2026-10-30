@@ -13,6 +13,8 @@
 //! sanitised, no panic across the boundary (it becomes `INTERNAL`).
 
 mod contacts;
+#[cfg(feature = "embedded-node")]
+mod embedded;
 mod engine;
 mod envelope;
 mod events;
@@ -31,9 +33,18 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "embedded-node")]
+pub use embedded::NODE_MODE_ENV;
 pub use envelope::code;
 pub use ffi::{raven_call, raven_free};
 pub use node::NODE_PROGRAM_ENV;
+
+// An iOS app may start no helper process: its node runs in the app.
+#[cfg(all(target_os = "ios", not(feature = "embedded-node")))]
+compile_error!(
+    "raven-client for iOS needs the `embedded-node` feature (the node runs inside the app): \
+     build it with node/scripts/ios/build_xcframework.sh"
+);
 
 /// The answer when even building an error response failed.
 const LAST_RESORT: &str = r#"{"v":1,"ok":false,"error":{"code":"INTERNAL","message":"Something went wrong inside Raven. Try again; if it keeps happening, open Details.","detail":"the response could not be built"}}"#;

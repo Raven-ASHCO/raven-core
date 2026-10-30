@@ -93,6 +93,9 @@ changes. Fields marked `?` may be missing.
 | `node.status` | – | `NodeStatus` |
 | `node.start` | – | `NodeStatus` |
 | `node.stop` | – | `NodeStatus` + `{stop, note?}` (see below) |
+| `node.pause` | – | `NodeStatus` + `{was_running}` (embedded node only: the app went to the background; see "Embedded node") |
+| `node.resume` | – | `NodeStatus` (embedded node only: the app is open again) |
+| `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms}` (embedded node only: one bounded fetch from friends, for iOS background refresh) |
 | `settings.get` | – | `Settings` |
 | `settings.set` | `{...partial Settings}` | `Settings` |
 | `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool}` (see Events) |
@@ -234,6 +237,22 @@ raven-node).
   only a raven-node this app started. `stop` says what happened: `stopped`, `still_running`, `advice`
   (`note` says how to stop it by hand), `managed` (a login service runs it; left running),
   `not_running` or `failed` (`note` has the reason).
+
+### Embedded node (iOS)
+
+On iOS (and on macOS or Linux with the engine's `embedded-node` feature and
+`RAVEN_NODE_MODE=embedded`) raven-node runs inside the app's own process:
+`node.start` and a send start it in process, its IPC is a socket pair per
+connection instead of the socket file, and `node.stop` stops it in process.
+`NodeStatus` then has `embedded: true`, `paused`, and `state` may be `paused`
+or `mail_check`. `node.pause` stops it cleanly and holds it stopped (a
+`node.start` or a send meanwhile is refused, its detail starting with
+`PAUSED`) until `node.resume`. `mail.check` collects what friends hold for
+this profile within `budget_ms` (default 25000, at most 28000), starting a
+small node for it when none runs and stopping it again; it is refused with
+`PROFILE_LOCKED` while the profile is locked. Without the embedded node the
+three answer `NOT_AVAILABLE_YET`. Architecture, lifecycle and limits:
+[`docs/IOS.md`](../../docs/IOS.md).
 
 ### Network
 

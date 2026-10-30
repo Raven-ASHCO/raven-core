@@ -180,6 +180,18 @@ pub(crate) struct WatcherState {
     pub last_poll: Option<Instant>,
 }
 
+/// Whether this engine runs its node inside the app (embedded.rs).
+pub(crate) fn embedded_mode() -> bool {
+    #[cfg(feature = "embedded-node")]
+    {
+        crate::embedded::mode_on()
+    }
+    #[cfg(not(feature = "embedded-node"))]
+    {
+        false
+    }
+}
+
 /// The raven-node program a start runs: `RAVEN_NODE_BIN` when set, else
 /// next to this program, else the CLI's lookup (next to this program, or
 /// `raven-node` on PATH when this program's path is unknown).
@@ -285,6 +297,18 @@ impl Inner {
         if let Some(ip) = raven_core::route_memory::egress_addrs().0 {
             v["address"] = ip.to_string().into();
         }
+        // Extra fields of the embedded node (the iOS app): it runs inside
+        // the app; `paused` while the app is in the background, and
+        // `mail_check` while a background mail check runs.
+        #[cfg(feature = "embedded-node")]
+        if embedded_mode() {
+            v["embedded"] = true.into();
+            let word = crate::embedded::state_word();
+            if !starting && matches!(word, "paused" | "mail_check") {
+                v["state"] = word.into();
+            }
+            v["paused"] = (word == "paused").into();
+        }
         v
     }
 
@@ -350,7 +374,13 @@ impl Inner {
                 explain::PASSPHRASE_MARK
             ));
         }
-        let program = node_program()?;
+        // Embedded: the CLI's start runs the node in this process (the
+        // hook embedded.rs installed); no program is looked for.
+        let program = if embedded_mode() {
+            PathBuf::from("raven-node")
+        } else {
+            node_program()?
+        };
         let listen = self.listen_for_start(&dir);
         self.note_probe(&before, true);
         let started = bridge::ensure_node(&dir, &program, &listen, &self.node_slot);
@@ -421,6 +451,16 @@ impl Inner {
     pub(crate) fn node_stop(&self) -> OpResult {
         let dir = self.data_dir()?.to_path_buf();
         let _gate = lock(&self.node_gate);
+        // In the app: stopped in process (its pid is the app's own: never
+        // a signal).
+        #[cfg(feature = "embedded-node")]
+        if embedded_mode() {
+            let was = crate::embedded::stop();
+            let after = probe(&dir);
+            let mut status = self.note_probe(&after, false);
+            status["stop"] = if was { "stopped" } else { "not_running" }.into();
+            return Ok(status);
+        }
         let now = probe(&dir);
         let started_by_app = lock(&self.node).started_by_app;
         let managed = detect_managed().is_some();
@@ -456,6 +496,87 @@ impl Inner {
             status["note"] = note.into();
         }
         Ok(status)
+    }
+
+    /// `node.pause` (the app goes to the background; embedded node only):
+    /// the node stops cleanly (listeners closed, Tor's circuits gone) and
+    /// stays stopped until `node.resume`; a send or `node.start` meanwhile
+    /// is refused. Extra field `was_running`.
+    pub(crate) fn node_pause(&self) -> OpResult {
+        let dir = self.data_dir()?.to_path_buf();
+        #[cfg(feature = "embedded-node")]
+        if embedded_mode() {
+            let was = {
+                let _gate = lock(&self.node_gate);
+                crate::embedded::pause(&dir)
+            };
+            let after = probe(&dir);
+            let mut status = self.note_probe(&after, false);
+            status["was_running"] = was.into();
+            return Ok(status);
+        }
+        let _ = dir;
+        Err(embedded_only_op("node.pause"))
+    }
+
+    /// `node.resume` (the app is open again): the pause ends and the node
+    /// starts as `node.start` starts it.
+    pub(crate) fn node_resume(&self) -> OpResult {
+        #[cfg(feature = "embedded-node")]
+        if embedded_mode() {
+            crate::embedded::end_pause();
+            return self.node_start();
+        }
+        Err(embedded_only_op("node.resume"))
+    }
+
+    /// `mail.check {budget_ms?}` (iOS background refresh; embedded node
+    /// only): one custody fetch from the friends who hold this profile's
+    /// mail, finished within `budget_ms` (default 25 s, at most 28 s). A
+    /// paused or stopped node is not resumed: a small node (no listener, no
+    /// Tor) runs for the check and is stopped again.
+    pub(crate) fn mail_check(&self, args: &Args) -> OpResult {
+        let budget_ms = args.opt_u64("budget_ms")?.unwrap_or(25_000);
+        #[cfg(feature = "embedded-node")]
+        if embedded_mode() {
+            self.identity()?;
+            let dir = self.data_dir()?.to_path_buf();
+            if raven_core::erase::in_progress(&dir)
+                || raven_core::privacy::lock_state(&dir).locked_by_user
+            {
+                return Err(ApiError::new(
+                    code::PROFILE_LOCKED,
+                    "Raven is locked. Open Raven and unlock it to get new messages.",
+                    "mail.check: the profile is locked or being erased",
+                ));
+            }
+            let max = crate::embedded::MAIL_CHECK_MAX_BUDGET;
+            let budget = Duration::from_millis(budget_ms).clamp(Duration::from_secs(1), max);
+            let listen = self.listen_for_start(&dir);
+            let checked = {
+                let _gate = lock(&self.node_gate);
+                crate::embedded::check_mail(&dir, &listen, budget)
+            };
+            let r = checked.map_err(|why| {
+                ApiError::new(
+                    code::NODE_NOT_RUNNING,
+                    "Raven could not check for messages now. It tries again later.",
+                    why,
+                )
+            })?;
+            // What came in shows at once (the watcher would see it at its
+            // next beat, which a background refresh may not get).
+            let _ = self.refresh(Duration::from_millis(900));
+            return Ok(json!({
+                "custody": if r.custody_live { "on" } else { "off" },
+                "started_node": r.started_node,
+                "completed": r.completed,
+                "new_messages": r.messages,
+                "elapsed_ms": r.elapsed.as_millis() as u64,
+            }));
+        }
+        let _ = budget_ms;
+        Err(embedded_only_op("mail.check"))
     }
 
     /// `events.poll`: never blocks. Keeps the watcher running (it stops
@@ -519,6 +640,16 @@ fn watch(me: Weak<Inner>) {
         }
         std::thread::sleep(TICK);
     }
+}
+
+/// The answer of a lifecycle op the program's node does not have (it runs
+/// in the app only: iOS, or `RAVEN_NODE_MODE=embedded`).
+fn embedded_only_op(op: &str) -> ApiError {
+    ApiError::new(
+        code::NOT_AVAILABLE_YET,
+        "This is for Raven's phone app, where Raven runs inside the app.",
+        format!("{op} needs the embedded node (iOS, or RAVEN_NODE_MODE=embedded)"),
+    )
 }
 
 /// How a stop is carried out.

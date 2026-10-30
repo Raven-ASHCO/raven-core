@@ -13,7 +13,18 @@ path = "src/lib.rs"
 # map over include/raven_client.h); cdylib: the Windows app (DllImport).
 crate-type = ["rlib", "staticlib", "cdylib"]
 
+[features]
+default = []
+# The node inside the app's own process (docs/IOS.md): raven-node's
+# `embedded` host instead of a raven-node program the engine starts. On iOS
+# it is the only mode (an app may start no helper process); elsewhere it is
+# used when RAVEN_NODE_MODE=embedded (tests, and an app that wants it).
+embedded-node = ["dep:raven-node", "raven-node/embedded"]
+# Tor inside the app's process too (no raven-tor-helper).
+tor-embedded = ["embedded-node", "raven-node/tor-embedded"]
+
 [dependencies]
+raven-node = { path = "../raven-node", optional = true, default-features = false }
 raven-core = { workspace = true }
 # The CLI's own code (contacts, cards, sending, outbox, node start), through
 # ash's library target and its engine bridge (crates/ash/src/engine_bridge.rs).
@@ -24,3 +35,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# The embedded node end to end (two engines, each in a process of its own,
+# no raven-node program): tests/embedded.rs.
+[[test]]
+name = "embedded"
+path = "tests/embedded.rs"
+required-features = ["embedded-node"]

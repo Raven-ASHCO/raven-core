@@ -5476,6 +5476,7 @@ dependencies = [
  "ash",
  "hex",
  "raven-core",
+ "raven-node",
  "serde",
  "serde_json",
  "tempfile",

@@ -290,6 +290,10 @@ jobs:
           # Non-default debug / experimental features that ship in debug builds.
           cargo clippy --locked -p ash -p raven-node --all-targets \
             --features ash/debug-trace-delivery,raven-node/corebluetooth -- -D warnings
+          # The node inside the app (docs/IOS.md): raven-node's embedded host
+          # and Tor in process, and the engine's embedded mode.
+          cargo clippy --locked -p raven-node -p raven-client --all-targets \
+            --features raven-node/embedded,raven-client/tor-embedded -- -D warnings
       - name: fuzz targets type-check (cargo-fuzz crate, stable)
         run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --lib --bins -- -D warnings
       - name: RustSec active dependency audit
@@ -362,7 +366,7 @@ jobs:
           set -euo pipefail
           cargo test --locked -p raven-core onion
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
-            cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
+            cargo test --locked -p raven-node --lib -- onion:: tor_race
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper
@@ -699,8 +703,8 @@ jobs:
             security::tests::nothing_is_noted_or_reported_while_the_gate_is_shut
             security::tests::status_is_reported_only_while_the_gate_is_live
           )
-          cargo test --locked --release -p raven-node --bin raven-node -- "${node_inert[@]}"
-          cargo test --locked --release -p raven-node --features nearby-radio --bin raven-node -- \
+          cargo test --locked --release -p raven-node --lib -- "${node_inert[@]}"
+          cargo test --locked --release -p raven-node --features nearby-radio --lib -- \
             "${node_inert[@]}"
       - name: build swarm
         run: cargo build --locked -p raven-swarm -p raven-node
@@ -1126,7 +1130,7 @@ jobs:
           set -euo pipefail
           cargo test --locked -p raven-core onion
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
-            cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
+            cargo test --locked -p raven-node --lib -- onion:: tor_race
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper
@@ -1154,7 +1158,7 @@ jobs:
           RAVEN_LAB_LETTER: "1"
         run: |
           set -euo pipefail
-          cargo test --locked --release -p raven-node --features nearby-radio --bin raven-node -- \
+          cargo test --locked --release -p raven-node --features nearby-radio --lib -- \
             the_lab_foreground_ttl_only_shortens_and_only_in_the_lab \
             nearby::tests::a_service_with_the_gate_closed_creates_no_radio \
             custody::tests::forward_hops_are_nobody_with_the_handoff_gate_closed \
@@ -1391,7 +1395,7 @@ jobs:
           set -euo pipefail
           cargo test --locked -p raven-core onion
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
-            cargo test --locked -p raven-node --bin raven-node -- onion:: tor_race
+            cargo test --locked -p raven-node --lib -- onion:: tor_race
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper.exe

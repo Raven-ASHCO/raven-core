@@ -68,6 +68,15 @@ so a plain `cargo build` in `node/` does not build it.
   task); on macOS and Linux the process this profile's raven-node reports; on Windows only a
   process this app started.
 
+## iOS: the node inside the app
+
+iOS lets an app start no helper process, so there the engine runs raven-node
+inside the app (feature `embedded-node`, and `tor-embedded` for Tor in
+process); `node.pause`, `node.resume` and `mail.check` follow the app's
+lifecycle. `node/scripts/ios/build_xcframework.sh` builds
+`RavenClient.xcframework`. On macOS the same mode runs with
+`RAVEN_NODE_MODE=embedded` (tests/embedded.rs). See `docs/IOS.md`.
+
 ## macOS (SwiftUI): static library and module map
 
 1. Build `libraven_client.a` for each architecture and join them:
