@@ -18,6 +18,20 @@
 #
 # A debug build honours the lab switches and the file-backed key stores
 # (tests, the simulator); a release build refuses both, as on the desktop.
+#
+# A release library keeps no build-machine path (and so no user name) in
+# its strings: the panic locations of the dependencies name their source
+# files under CARGO_HOME (~/.cargo/registry/src/...), and the C code keeps
+# __FILE__ paths. As the macOS and Windows packages do, rustc's
+# --remap-path-prefix and the C compiler's -ffile-prefix-map rewrite the
+# home folder to "~", and the checkout, the target folder, CARGO_HOME (its
+# registry sources too) and RUSTUP_HOME to /raven-core, /target, /cargo and
+# /rustup; RUSTFLAGS and CFLAGS already set are kept. Then every slice is
+# checked with `strings -a`: a "/Users/" path, the home folder or the
+# checkout in it stops the script. On by default for release, off for debug
+# (a debugger then finds the sources); RAVEN_REMAP_PATHS=0|1 overrides. The
+# flags change cargo's fingerprint, so the iOS targets are rebuilt in full
+# once.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -60,6 +74,37 @@ for t in "${TARGETS[@]}"; do
     || fail "the Rust target $t is missing: rustup target add ${TARGETS[*]}"
 done
 
+# ── Build-machine paths ──────────────────────────────────────────────────────
+REMAP="${RAVEN_REMAP_PATHS:-}"
+if [[ -z "$REMAP" ]]; then
+  if [[ "$PROFILE" == release ]]; then REMAP=1; else REMAP=0; fi
+fi
+[[ "$REMAP" == 0 || "$REMAP" == 1 ]] || fail "RAVEN_REMAP_PATHS must be 0 or 1"
+ROOT_REAL="$(cd "$ROOT" && pwd -P)"
+mkdir -p "$TARGET_DIR"
+TARGET_REAL="$(cd "$TARGET_DIR" && pwd -P)"
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+RUSTUP_HOME_DIR="${RUSTUP_HOME:-$HOME/.rustup}"
+if [[ "$REMAP" == 1 ]]; then
+  case "$HOME$ROOT$ROOT_REAL$TARGET_DIR$TARGET_REAL$CARGO_HOME_DIR$RUSTUP_HOME_DIR" in
+    *[[:space:]]*) fail "a path has a space (HOME, the checkout, the target folder, CARGO_HOME, RUSTUP_HOME): RUSTFLAGS cannot carry it; RAVEN_REMAP_PATHS=0 builds without the rewrite" ;;
+  esac
+  # The last matching prefix wins (rustc and clang alike): the home folder
+  # first, then the more precise folders inside or outside it.
+  remaps=("$HOME=~" "$ROOT=/raven-core" "$ROOT_REAL=/raven-core" "$TARGET_DIR=/target"
+    "$TARGET_REAL=/target" "$CARGO_HOME_DIR=/cargo" "$CARGO_HOME_DIR/registry/src=/cargo/registry/src"
+    "$RUSTUP_HOME_DIR=/rustup")
+  rust_remap=""
+  c_remap=""
+  for m in "${remaps[@]}"; do
+    rust_remap+=" --remap-path-prefix=$m"
+    c_remap+=" -ffile-prefix-map=$m"
+  done
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${rust_remap# }"
+  export CFLAGS="${CFLAGS:+$CFLAGS }${c_remap# }"
+  export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }${c_remap# }"
+fi
+
 # ── Build ────────────────────────────────────────────────────────────────────
 cd "$NODE"
 for t in "${TARGETS[@]}"; do
@@ -98,6 +143,37 @@ for t in "${TARGETS[@]}"; do
 done
 xcodebuild -create-xcframework "${args[@]}" -output "$OUT/RavenClient.xcframework" >/dev/null
 rm -rf "$stage"
+
+# ── No build-machine path in what ships ─────────────────────────────────────
+# Every slice's strings: no macOS home folder at all ("/Users/"), and none of
+# this build's folders.
+if [[ "$REMAP" == 1 ]]; then
+  leaked=0
+  found_strings="$(mktemp "${TMPDIR:-/tmp}/raven-xcf-strings.XXXXXX")"
+  while IFS= read -r slice; do
+    # Read once into a file: grep -q on a pipe would end strings early,
+    # and under pipefail a found path would read as not found.
+    strings -a "$slice" >"$found_strings"
+    n="$(grep -cF "/Users/" "$found_strings" || true)"
+    if [[ "$n" != 0 ]]; then
+      echo "build_xcframework: ${slice#"$OUT"/} has $n strings with a /Users/ path, for example:" >&2
+      grep -F "/Users/" "$found_strings" | head -n 3 | sed 's/^/  /' >&2 || true
+      leaked=1
+    fi
+    for path in "$HOME/" "$ROOT_REAL/" "$TARGET_REAL/" "$CARGO_HOME_DIR/" "$RUSTUP_HOME_DIR/"; do
+      if [[ "$(grep -cF -- "$path" "$found_strings" || true)" != 0 ]]; then
+        echo "build_xcframework: ${slice#"$OUT"/} names the build folder $path" >&2
+        leaked=1
+      fi
+    done
+  done < <(find "$OUT/RavenClient.xcframework" -name 'libraven_client.a')
+  rm -f "$found_strings"
+  if [[ "$leaked" != 0 ]]; then
+    rm -rf "$OUT/RavenClient.xcframework"
+    fail "build-machine paths left in the library (above): the XCFramework was removed"
+  fi
+  echo "build_xcframework: no build-machine path in any slice (strings -a: 0 with /Users/)"
+fi
 echo "build_xcframework: $OUT/RavenClient.xcframework"
 for t in "${TARGETS[@]}"; do
   lib="$TARGET_DIR/$t/$PROFILE_DIR/libraven_client.a"

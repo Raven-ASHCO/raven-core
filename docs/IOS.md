@@ -354,7 +354,13 @@ simulator (section 10). The build script stops with what to do when Xcode,
 its license, the iOS SDK or a Rust target is missing. It builds the static library only (`cargo rustc
 --crate-type staticlib`) and packages `RavenClient.xcframework`
 (`ios-arm64` and `ios-arm64-simulator`) with `raven_client.h` and a module
-map (`import RavenClient`).
+map (`import RavenClient`). A release build keeps no build-machine path
+in the library: as the macOS and Windows packages do, it rewrites the home
+folder, the checkout, the target folder, `CARGO_HOME` and `RUSTUP_HOME` in
+panic locations and C file names (`--remap-path-prefix`,
+`-ffile-prefix-map`), and stops if `strings -a` of a slice still finds a
+`/Users/` path (`RAVEN_REMAP_PATHS=0|1` overrides; debug builds keep their
+paths for the debugger).
 
 C code built for iOS with Xcode's clang (all build): `ring` and `aws-lc-sys`
 (rustls and QUIC for the p2p host), `libsqlite3-sys` (Raven's SQLite),

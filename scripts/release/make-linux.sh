@@ -29,8 +29,9 @@
 #      (scripts/release/cargo_config_guard.sh).
 #   2. The symbols are stripped, and every program is checked: an ELF for
 #      this architecture, and no build-machine path in it (the home folder,
-#      the user name as a folder, the repository, the target folder,
-#      CARGO_HOME, RUSTUP_HOME). The build stops if one is found.
+#      the user name as a folder under /home, any /Users/ path, the
+#      repository, the target folder, CARGO_HOME, RUSTUP_HOME). The build
+#      stops if one is found.
 #   3. The folder raven-linux-<arch>-<version>/: bin/ (the three programs),
 #      install.sh and uninstall.sh (per user: ~/.local/bin and a systemd user
 #      service, as docs/INSTALL_Linux.md; install.sh runs
@@ -177,7 +178,8 @@ for f in "$WORK"/bin/*; do
   magic="$(head -c 4 "$f" | od -An -c | tr -d ' \n')"
   if [[ "$magic" == '177ELF' ]]; then
     if [[ "$ON_LINUX" == 1 ]]; then
-      objdump -f "$f" | grep -qi "architecture: .*$OBJDUMP_ARCH" \
+      header="$(objdump -f "$f")"
+      grep -qi "architecture: .*$OBJDUMP_ARCH" <<<"$header" \
         || die "$(basename "$f") is not an $ARCH program"
       glibc_needs+="$(objdump -T "$f" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//')"$'\n'
     fi
@@ -191,15 +193,17 @@ done
 GLIBC="$(printf '%s' "$glibc_needs" | grep -E '^[0-9]' | sort -V 2>/dev/null | tail -n 1 || true)"
 [[ -n "$GLIBC" ]] || GLIBC=unknown
 # No build-machine path in any program: the home folder and the user name as
-# a folder, and the folders the build used (each with its slash, so only a
-# path inside it counts).
+# a folder (/home/<user>/), any /Users/ path, and the folders the build used
+# (each with its slash, so only a path inside it counts).
 leaks=("$HOME/" "/home/${USER:-$(id -un)}/" "$REPO/" "$CARGO_HOME_DIR/" "$RUSTUP_HOME_DIR/")
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   leaks+=("$CARGO_TARGET_DIR/")
 fi
 found=0
 for f in "$WORK"/bin/*; do
-  for leak in "${leaks[@]}"; do
+  # No macOS home folder at all either (a checkout a Lima VM mounts from the
+  # Mac lives under /Users/).
+  for leak in "${leaks[@]}" "/Users/"; do
     [[ ${#leak} -ge 5 ]] || continue
     if LC_ALL=C grep -aqF -- "$leak" "$f"; then
       echo "make-linux: $(basename "$f") names a build-machine path: $leak" >&2
@@ -259,7 +263,7 @@ chmod 644 "$WORK/SHA256SUMS"
 
 TAR="$OUT/$NAME.tar.gz"
 rm -f "$TAR" "$TAR.sha256"
-if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+if [[ "$(tar --version 2>/dev/null || true)" == *"GNU tar"* ]]; then
   tar -C "$OUT" --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$EPOCH" \
     --format=gnu -cf - "$NAME" | gzip -9 -n >"$TAR"
 else

@@ -3,8 +3,9 @@
 # and nothing installed: stand-ins for the three programs are packaged with
 # --from (on any OS), then the archive is checked: its name, every file in
 # it and nothing else, its .sha256, SHA256SUMS inside, the README filled in,
-# the scripts' syntax; and a program that names a build-machine path, or is
-# not a program, is refused. The installer is never run.
+# the scripts' syntax; and a program that names a build-machine path (the
+# home folder, any /Users/ path), or is not a program, is refused. The
+# installer is never run.
 #
 #   scripts/release/make-linux-selftest.sh
 set -euo pipefail
@@ -85,6 +86,17 @@ if RAVEN_LINUX_SELFTEST=1 RAVEN_LINUX_ARCH=x86_64 bash "$MAKE" --from "$T/leaky"
 fi
 grep -q "build-machine path" "$T/leak.log" || fail "the refusal does not say why: $(cat "$T/leak.log")"
 [[ ! -e "$T/out3/$NAME.tar.gz" ]] || fail "an archive was written after the refusal"
+
+# So is one with a macOS home folder in it, whoever builds (a checkout a
+# Lima VM mounts from the Mac).
+mkdir -p "$T/macleak"
+cp "$T/bins/"* "$T/macleak/"
+# (the path is put together here, so this file names no home folder)
+printf 'src at %s/builder/src/raven-core/node/x.rs\n' "/Users" >>"$T/macleak/raven"
+if RAVEN_LINUX_SELFTEST=1 RAVEN_LINUX_ARCH=x86_64 bash "$MAKE" --from "$T/macleak" --out "$T/out6" >"$T/mac.log" 2>&1; then
+  fail "a program naming /Users/ was packaged"
+fi
+grep -q "names a build-machine path: /Users/" "$T/mac.log" || fail "the /Users/ refusal does not say why: $(cat "$T/mac.log")"
 
 # Outside the self-test, a file that is no Linux program is refused.
 if RAVEN_LINUX_ARCH=x86_64 bash "$MAKE" --from "$T/bins" --out "$T/out4" >"$T/elf.log" 2>&1; then
