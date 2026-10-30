@@ -775,12 +775,24 @@ fn note_send_dial<T, E>(
     expected_pub_hex: &str,
     outcome: &Result<Result<T, String>, E>,
 ) {
+    note_send_dial_after(carrier, dial, expected_pub_hex, outcome, Duration::MAX);
+}
+
+/// [`note_send_dial`] for a dial that ended after `took` (a short Tor miss:
+/// [`crate::delivery_paths::ONION_SHORT_MISS`]).
+fn note_send_dial_after<T, E>(
+    carrier: raven_core::OutboxCarrier,
+    dial: &str,
+    expected_pub_hex: &str,
+    outcome: &Result<Result<T, String>, E>,
+    took: Duration,
+) {
     let Some(peer) = parse_hex_array::<32>(expected_pub_hex) else {
         return;
     };
     match outcome {
         Ok(Err(e)) if silent_failure(e) => {
-            crate::delivery_paths::route_failed(&peer, carrier, dial, e);
+            crate::delivery_paths::route_failed_after(&peer, carrier, dial, e, took);
         }
         Err(_) => crate::delivery_paths::route_failed(&peer, carrier, dial, "timed out"),
         // An answer, or a Raven that refused us: that route is not down.
@@ -1196,12 +1208,14 @@ async fn handle_onion_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
         crate::learning::DialMeta::default(),
     );
     let within = raven_core::onion::ONION_DIAL_DEADLINE + Duration::from_secs(5);
+    let started = std::time::Instant::now();
     let outcome = tokio::time::timeout(within, work).await;
-    note_send_dial(
+    note_send_dial_after(
         raven_core::OutboxCarrier::Onion,
         &onion_dial,
         &expected_pub_hex,
         &outcome,
+        started.elapsed(),
     );
     match outcome {
         Ok(Ok(replies)) => IpcResponse::OnionDialResult {

@@ -843,6 +843,14 @@ pub(crate) const ROUTE_FAIL_FRESH: Duration = Duration::from_secs(120);
 /// Routes remembered per contact (the newest).
 const FAILED_ROUTES_MAX: usize = 8;
 
+/// A send's Tor dial that failed this fast, Tor saying the friend's onion
+/// service could not be reached, is a miss, not a sign that Tor cannot reach
+/// the friend: the first one on a route is not news to the next send (field
+/// test E3 round 2: a check that failed after 5.2 s made the next send, 5 s
+/// later, queue without a dial, while the outbox's Tor dial seconds later
+/// worked). A second one, or a slower one, is.
+pub(crate) const ONION_SHORT_MISS: Duration = Duration::from_secs(12);
+
 /// One route's last failed dial.
 #[derive(Clone, Debug)]
 struct FailedRoute {
@@ -850,6 +858,9 @@ struct FailedRoute {
     dial: String,
     at: Instant,
     error: String,
+    /// The route's only fresh failure, a short Tor miss
+    /// ([`ONION_SHORT_MISS`]): kept, but no reason to leave Tor out.
+    short_miss: bool,
 }
 
 /// Per contact, its routes whose last dial (a `raven send`'s, through IPC)
@@ -862,9 +873,17 @@ struct RouteFails {
 }
 
 impl RouteFails {
-    fn failed(&mut self, contact: [u8; 32], route: FailedRoute) {
+    fn failed(&mut self, contact: [u8; 32], mut route: FailedRoute) {
         let at = route.at;
         let mut routes = self.by.remove(&contact).map(|(_, r)| r).unwrap_or_default();
+        // A short Tor miss right after another failure of that route is a
+        // second failure: news.
+        let again = routes.iter().any(|r| {
+            r.carrier == route.carrier
+                && r.dial == route.dial
+                && at.saturating_duration_since(r.at) <= ROUTE_FAIL_FRESH
+        });
+        route.short_miss &= !again;
         routes.retain(|r| !(r.carrier == route.carrier && r.dial == route.dial));
         routes.push(route);
         if routes.len() > FAILED_ROUTES_MAX {
@@ -913,6 +932,7 @@ impl RouteFails {
                         dial: r.dial.clone(),
                         age_s: now.saturating_duration_since(r.at).as_secs(),
                         error: r.error.clone(),
+                        short_miss: r.short_miss,
                     })
                     .collect()
             })
@@ -932,11 +952,28 @@ fn with_fails<T>(f: impl FnOnce(&mut RouteFails) -> T) -> T {
 /// A send's dial (IPC) to `contact` over `carrier` at `dial` failed with
 /// `error`.
 pub(crate) fn route_failed(contact: &[u8; 32], carrier: OutboxCarrier, dial: &str, error: &str) {
+    route_failed_after(contact, carrier, dial, error, Duration::MAX);
+}
+
+/// [`route_failed`] for a dial that ended after `took`: a Tor one that
+/// failed within [`ONION_SHORT_MISS`], Tor saying the friend's onion
+/// service could not be reached, is a short miss.
+pub(crate) fn route_failed_after(
+    contact: &[u8; 32],
+    carrier: OutboxCarrier,
+    dial: &str,
+    error: &str,
+    took: Duration,
+) {
+    let short_miss = carrier == OutboxCarrier::Onion
+        && took < ONION_SHORT_MISS
+        && crate::outbox::dial_error_code(error) == crate::outbox::code::ONION_UNREACHABLE;
     let route = FailedRoute {
         carrier,
         dial: dial.trim().to_string(),
         at: Instant::now(),
         error: error.chars().take(300).collect(),
+        short_miss,
     };
     with_fails(|f| f.failed(*contact, route));
 }
@@ -1030,7 +1067,7 @@ pub(crate) fn onion_dial_started(contact: &[u8; 32]) -> OnionDialMark {
 pub(crate) fn tor_tried_lately(contact: &[u8; 32]) -> bool {
     let failed = failed_routes(contact)
         .iter()
-        .any(|f| f.carrier == OutboxCarrier::Onion.label());
+        .any(|f| f.carrier == OutboxCarrier::Onion.label() && !f.short_miss);
     failed
         || (with_onion_dials(|d| d.contains_key(contact))
             && !with_tor_reached(|r| r.within(contact, Instant::now(), ROUTE_FAIL_FRESH)))
@@ -1088,6 +1125,8 @@ pub(crate) struct FreshFailure {
     pub(crate) dial: String,
     pub(crate) age_s: u64,
     pub(crate) error: String,
+    /// A single short Tor miss ([`ONION_SHORT_MISS`]).
+    pub(crate) short_miss: bool,
 }
 
 /// `contact`'s routes whose last dial failed within [`ROUTE_FAIL_FRESH`],
@@ -1113,6 +1152,8 @@ fn failures_by_index(
 ) -> Vec<raven_core::ipc::RouteFailure> {
     fresh
         .into_iter()
+        // A single short Tor miss is no reason for a send to leave Tor out.
+        .filter(|f| !f.short_miss)
         .filter_map(|f| {
             let i = routes
                 .iter()
@@ -1194,6 +1235,7 @@ pub(crate) mod tests {
                 dial: "192.168.1.20:7420".into(),
                 age_s: 4,
                 error: "LAN dial to 192.168.1.20:7420 failed: connection refused".into(),
+                short_miss: false,
             },
             FreshFailure {
                 carrier: "onion".into(),
@@ -1201,12 +1243,23 @@ pub(crate) mod tests {
                 age_s: 9,
                 error: "ONION_UNREACHABLE: the contact's onion service did not answer over Tor"
                     .into(),
+                short_miss: false,
             },
             FreshFailure {
                 carrier: "p2p_dial".into(),
                 dial: "/ip4/203.0.113.9/tcp/7423".into(),
                 age_s: 1,
                 error: "unrelated".into(),
+                short_miss: false,
+            },
+            // A single short Tor miss: not news to a send.
+            FreshFailure {
+                carrier: "onion".into(),
+                dial: format!("onion:{}", "ef".repeat(32)),
+                age_s: 2,
+                error: "ONION_UNREACHABLE: the contact's onion service did not answer over Tor"
+                    .into(),
+                short_miss: true,
             },
         ];
         let routes = vec![
@@ -1217,6 +1270,10 @@ pub(crate) mod tests {
             raven_core::ipc::ReachRoute {
                 carrier: "lan_dial".into(),
                 dial: " 192.168.1.20:7420 ".into(),
+            },
+            raven_core::ipc::ReachRoute {
+                carrier: "onion".into(),
+                dial: format!("onion:{}", "ef".repeat(32)),
             },
         ];
         let got = failures_by_index(fresh, &routes);
@@ -2071,6 +2128,60 @@ mod failed_route_tests {
         assert!(!reached.within(&friend, now, ROUTE_FAIL_FRESH));
     }
 
+    /// Field test E3 round 2: a send's Tor check failed after 5.2 s (Tor
+    /// said the onion service could not be reached), and the next send, 5 s
+    /// later, queued without a dial while the outbox's Tor dial seconds
+    /// later worked. A single short Tor miss is kept but is no reason to
+    /// leave Tor out; a second one, or a slow one, is.
+    #[test]
+    fn a_single_short_tor_miss_is_not_news_to_the_next_send() {
+        let tor = OutboxCarrier::Onion;
+        let miss = "ONION_UNREACHABLE: the contact's onion service did not answer over Tor \
+                    (rendezvous failed)";
+        let route = format!("onion:{}", "a1".repeat(32));
+        let asked = [raven_core::ipc::ReachRoute {
+            carrier: tor.label().into(),
+            dial: route.clone(),
+        }];
+        // One short miss: kept, not reported, Tor not "tried lately".
+        let friend = [0xA1; 32];
+        route_failed_after(&friend, tor, &route, miss, Duration::from_millis(5_200));
+        assert_eq!(failed_routes(&friend).len(), 1);
+        assert!(failed_routes(&friend)[0].short_miss);
+        assert!(reach_failures(&friend, &asked).is_empty());
+        assert!(!tor_tried_lately(&friend));
+        // A second one on that route: news.
+        route_failed_after(&friend, tor, &route, miss, Duration::from_millis(4_000));
+        assert!(!failed_routes(&friend)[0].short_miss);
+        assert_eq!(reach_failures(&friend, &asked).len(), 1);
+        assert!(tor_tried_lately(&friend));
+        // A slow one (Tor's full wait), a timeout, or another error: news.
+        for (who, error, took) in [
+            (0xA2, miss, ONION_SHORT_MISS),
+            (0xA3, "timed out", Duration::from_secs(1)),
+            (
+                0xA4,
+                "ONION_NOT_READY: Tor is not ready",
+                Duration::from_secs(1),
+            ),
+        ] {
+            let contact = [who; 32];
+            route_failed_after(&contact, tor, &route, error, took);
+            assert!(!failed_routes(&contact)[0].short_miss, "{error}");
+            assert_eq!(reach_failures(&contact, &asked).len(), 1, "{error}");
+        }
+        // Only Tor misses can be short.
+        let lan = [0xA5; 32];
+        route_failed_after(
+            &lan,
+            OutboxCarrier::Lan,
+            "192.0.2.5:7420",
+            miss,
+            Duration::ZERO,
+        );
+        assert!(!failed_routes(&lan)[0].short_miss);
+    }
+
     #[test]
     fn failed_routes_are_fresh_per_route_and_go_when_the_contact_answers() {
         let contact = [0xF1; 32];
@@ -2170,6 +2281,7 @@ mod failed_route_tests {
                 dial: "x:1".into(),
                 at: long_ago,
                 error: String::new(),
+                short_miss: false,
             },
         );
         assert!(fails.fresh(&contact, Instant::now()).is_empty());

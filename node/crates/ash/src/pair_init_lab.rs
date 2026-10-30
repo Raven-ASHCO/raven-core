@@ -416,6 +416,20 @@ fn ipc_carrier_dial_reply_within(
     frames: &[Vec<u8>],
     timeout: Duration,
 ) -> Result<DialReply, String> {
+    let req = dial_request(data_dir, carrier, dial, expected_pub_hex, frames)?;
+    let wait = ipc_dial_wait(carrier, timeout, frames.is_empty());
+    ipc_dial_answer(data_dir, carrier, dial, &req, wait, frames.is_empty())
+}
+
+/// The IPC dial request for raven-node, or why there is none (no IPC on this
+/// computer, a route that is not one).
+fn dial_request(
+    data_dir: &Path,
+    carrier: DialCarrier,
+    dial: &str,
+    expected_pub_hex: &str,
+    frames: &[Vec<u8>],
+) -> Result<IpcRequest, String> {
     use base64::Engine;
     let ep = ipc_endpoint(data_dir);
     if !ep.transport_available() {
@@ -444,7 +458,7 @@ fn ipc_carrier_dial_reply_within(
         .iter()
         .map(|f| base64::engine::general_purpose::STANDARD.encode(f))
         .collect();
-    let req = match carrier {
+    Ok(match carrier {
         DialCarrier::Lan => IpcRequest::LanDial {
             v: IPC_VERSION,
             lan_dial: dial.to_string(),
@@ -475,12 +489,24 @@ fn ipc_carrier_dial_reply_within(
             expected_pub_hex: expected_pub_hex.to_string(),
             frames_b64,
         },
-    };
-    let timeout = ipc_dial_wait(carrier, timeout, frames.is_empty());
+    })
+}
+
+/// [`ipc_carrier_dial_reply_within`]'s request `req`, answered within
+/// `timeout` (the IPC wait itself: [`ipc_dial_wait`] or what is left of
+/// it); `probe`: a frame-less check, whose cut-short wait says so.
+fn ipc_dial_answer(
+    data_dir: &Path,
+    carrier: DialCarrier,
+    dial: &str,
+    req: &IpcRequest,
+    timeout: Duration,
+    probe: bool,
+) -> Result<DialReply, String> {
     // Retry only the connect (daemon just auto-started / restarting); a request
     // that was written is never replayed.
-    let answer = super::ipc_client::ipc_request_retrying_connect(data_dir, &req, timeout);
-    if timeout < DIAL_IPC_TIMEOUT && frames.is_empty() {
+    let answer = super::ipc_client::ipc_request_retrying_connect(data_dir, req, timeout);
+    if timeout < DIAL_IPC_TIMEOUT && probe {
         if let Err(e) = &answer {
             if super::ipc_client::error_means_no_answer(e) {
                 return Err(format!(
@@ -1131,21 +1157,72 @@ fn route_prober(
             return Err(e);
         }
         let route = routes.get(i).ok_or("no such route")?;
-        ipc_carrier_dial_patient_within(
-            &data_dir,
-            route.carrier,
-            &route.dial,
-            &peer_pub_hex,
-            &[],
-            probe_timeout,
-        )
-        .and_then(|replies| {
+        let check = |wait: Duration| {
+            let req = dial_request(&data_dir, route.carrier, &route.dial, &peer_pub_hex, &[])?;
+            retry_while_peer_sheds_load(PROBE_ATTEMPTS, PROBE_BACKOFF, std::thread::sleep, || {
+                ipc_dial_answer(&data_dir, route.carrier, &route.dial, &req, wait, true)
+            })
+            .map(|r| r.frames)
+        };
+        let wait = ipc_dial_wait(route.carrier, probe_timeout, true);
+        let checked = if route.carrier == DialCarrier::Onion {
+            onion_check_again(wait, ONION_CHECK_AGAIN_WITHIN, check)
+        } else {
+            check(wait)
+        };
+        checked.and_then(|replies| {
             replies
                 .iter()
                 .find_map(|f| parse_peer_offer(f).ok())
                 .ok_or_else(|| "peer did not return an RLB1 bundle".to_string())
         })
     })
+}
+
+/// A send's Tor check that Tor answered "unreachable" this fast gets one
+/// more try within the send's Tor wait (field test E3 round 2: a check
+/// ended after 5.2 s, both of the Tor helper's connects having failed at
+/// once, and the message was queued with 20 s of the send's 25 s Tor wait
+/// left; raven-node's outbox reached the friend over Tor seconds later).
+const ONION_CHECK_AGAIN_WITHIN: Duration = Duration::from_secs(12);
+/// The least of the send's Tor wait a second check needs (a rendezvous over
+/// a fresh descriptor takes several seconds).
+const ONION_CHECK_AGAIN_MIN_LEFT: Duration = Duration::from_secs(10);
+
+/// A Tor check (`check(wait)`: raven-node's frame-less dial, answered
+/// within `wait`) that failed within `again_within` with Tor's
+/// "unreachable" is made once more with what is left of `wait`. Any other
+/// failure (a refusal, Tor not ready on this computer, the wait cut short)
+/// is final; so is one with less than [`ONION_CHECK_AGAIN_MIN_LEFT`] left.
+fn onion_check_again<T>(
+    wait: Duration,
+    again_within: Duration,
+    mut check: impl FnMut(Duration) -> Result<T, String>,
+) -> Result<T, String> {
+    let started = Instant::now();
+    match check(wait) {
+        Err(e) if tor_missed(&e) && started.elapsed() < again_within => {
+            let left = wait.saturating_sub(started.elapsed());
+            if left < ONION_CHECK_AGAIN_MIN_LEFT {
+                return Err(e);
+            }
+            if super::ext::verbose() {
+                eprintln!(
+                    "{C_DIM}Tor did not reach them at the first try ({:.1} s); trying once \
+                     more{C_RESET}",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            check(left)
+        }
+        other => other,
+    }
+}
+
+/// Tor said the friend's onion service could not be reached (not a
+/// refusal, not Tor missing here, not a send's own short wait).
+fn tor_missed(e: &str) -> bool {
+    e.contains("ONION_UNREACHABLE") && !e.starts_with(TOR_BUSY) && !is_peer_refusal(e)
 }
 
 /// How long each direct route of a send's race waits after the one before
@@ -1403,9 +1480,14 @@ fn recent_failures_with(
         .enumerate()
         .map(|(i, route)| match known.known_error(i) {
             Some(e) => Some((e.to_string(), 0)),
-            None if route.carrier == DialCarrier::Onion && tor_busy && !stopped => {
-                Some(failure_of(route).unwrap_or_else(|| (TOR_BUSY.to_string(), 0)))
-            }
+            // The outbox carries an earlier message to the friend over Tor:
+            // this one waits with it, whatever Tor's last failure said (field
+            // test E3 round 2: "every way failed 5 s ago" while the outbox
+            // was delivering over Tor).
+            None if route.carrier == DialCarrier::Onion && tor_busy && !stopped => Some((
+                TOR_BUSY.to_string(),
+                failure_of(route).map_or(0, |(_, age)| age),
+            )),
             None if route.carrier == DialCarrier::Onion && !stopped => None,
             None => failed
                 .iter()
@@ -4445,6 +4527,56 @@ mod tests {
         assert_eq!((got, tries), (Err(refused), 2));
     }
 
+    /// Field test E3 round 2: a send's Tor check ended after 5.2 s with
+    /// Tor's "unreachable" and the message was queued, with 20 s of the
+    /// send's Tor wait left; the outbox reached the friend over Tor seconds
+    /// later. A quick miss is checked once more with what is left of the
+    /// wait; a slow one, a refusal, Tor not ready here or a short wait left
+    /// is final.
+    #[test]
+    fn a_quick_tor_miss_is_checked_once_more_within_the_send_wait() {
+        let run = |plan: Vec<Result<u8, &str>>, wait: Duration, within: Duration| {
+            let mut plan = plan.into_iter();
+            let mut waits = Vec::new();
+            let got = onion_check_again(wait, within, |w| {
+                waits.push(w);
+                plan.next()
+                    .expect("a planned check")
+                    .map_err(str::to_string)
+            });
+            (got, waits)
+        };
+        let miss = "ONION_UNREACHABLE: the contact's onion service did not answer over Tor \
+                    (rendezvous failed)";
+        let wait = ONION_SEND_BUDGET;
+        let soon = ONION_CHECK_AGAIN_WITHIN;
+        assert_eq!(run(vec![Ok(1)], wait, soon), (Ok(1), vec![wait]));
+        let (got, waits) = run(vec![Err(miss), Ok(2)], wait, soon);
+        assert_eq!(got, Ok(2));
+        assert_eq!(waits.len(), 2);
+        assert!(waits[1] <= wait && waits[1] + Duration::from_secs(1) > wait);
+        let (got, waits) = run(vec![Err(miss), Err(miss)], wait, soon);
+        assert_eq!((got, waits.len()), (Err(miss.to_string()), 2));
+        // A slow miss: final.
+        let (_, waits) = run(vec![Err(miss)], wait, Duration::ZERO);
+        assert_eq!(waits.len(), 1);
+        // Too little of the wait left for another rendezvous: final.
+        let (_, waits) = run(vec![Err(miss)], ONION_CHECK_AGAIN_MIN_LEFT, soon);
+        assert_eq!(waits.len(), 1);
+        // Not a miss: a refusal, Tor not ready here, the wait cut short, the
+        // outbox already on Tor.
+        let refused = format!("ipc: {PEER_REFUSED_CODE}: closed");
+        for other in [
+            refused.as_str(),
+            "ONION_NOT_READY: Tor is not ready on this computer yet",
+            "onion_dial Tor: no answer within 25s (the probe was cut short; nothing was sent)",
+            TOR_BUSY,
+        ] {
+            let (got, waits) = run(vec![Err(other)], wait, soon);
+            assert_eq!((got, waits.len()), (Err(other.to_string()), 1), "{other}");
+        }
+    }
+
     /// E2 r9 #2: a queueable send skips its probes only when every one of
     /// its routes failed lately (the dial as sent); a new route, or one
     /// without a failure, probes them all.
@@ -4514,7 +4646,7 @@ mod tests {
         // first): left out of this send's race, with its failure or, while
         // its dial still runs, as busy; quick queue when the rest failed.
         let busy = recent_failures_with(&routes, &away, true, Some(30), &plan, here);
-        assert_eq!(busy[2], Some(("no answer".to_string(), 4)));
+        assert_eq!(busy[2], Some((TOR_BUSY.to_string(), 4)));
         assert!(every_route_failed(&routes, &busy, &plan).is_some());
         let running = recent_failures_with(&routes, &away[..2], true, Some(30), &plan, here);
         assert_eq!(running[2], Some((TOR_BUSY.to_string(), 0)));
@@ -4531,8 +4663,16 @@ mod tests {
             "Raven is already trying to reach Bob over Tor with an earlier message; this one \
              waits with it"
         );
+        // Field test E3 round 2: the outbox was delivering the earlier
+        // message over Tor; the send said "every way failed 5 s ago".
         assert_eq!(
             not_dialled_line("Bob", &busy, 20),
+            "Raven is already trying to reach Bob over Tor with an earlier message; this one \
+             waits with it"
+        );
+        let idle_all = recent_failures_with(&routes, &all, false, Some(30), &plan, here);
+        assert_eq!(
+            not_dialled_line("Bob", &idle_all, 20),
             "every way to Bob failed 20 s ago; not tried again now"
         );
         // Not busy: Tor is probed whatever failed.
