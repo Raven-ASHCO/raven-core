@@ -16,6 +16,12 @@
 # the nearby search's UDP 7420 on local networks only; it never changes the
 # firewall itself.
 #
+# RAVEN_PREBUILT_DIR=<folder> installs the programs in that folder (raven,
+# raven-node and raven-tor-helper, as a Linux package from
+# scripts/release/make-linux.sh carries them in bin/) instead of building them:
+# the package's install.sh runs this script that way. Nothing is built then,
+# and cargo is not needed.
+#
 # RAVEN_INSTALL_RENDER_ONLY=1 builds, writes and starts nothing: it asks the
 # raven-node already in RAVEN_BIN_DIR for the LAN default, prints LAN_LISTEN=
 # and the unit (stdout) and the LAN lines of the install (stderr), and exits
@@ -115,6 +121,24 @@ case "$TOR_HELPER" in
   0|1) ;;
   *) echo "RAVEN_INSTALL_TOR_HELPER must be 1 (install raven-tor-helper, the Tor onion carrier's helper) or 0" >&2; exit 1 ;;
 esac
+# Programs built already (a release package): checked now, before anything
+# is written.
+PREBUILT="${RAVEN_PREBUILT_DIR:-}"
+if [[ -n "$PREBUILT" && "$RENDER_ONLY" != 1 ]]; then
+  prebuilt_needed=(raven raven-node)
+  if [[ "$TOR_HELPER" == 1 ]]; then
+    prebuilt_needed+=(raven-tor-helper)
+  fi
+  for f in "${prebuilt_needed[@]}"; do
+    if [[ ! -f "$PREBUILT/$f" || ! -x "$PREBUILT/$f" ]]; then
+      echo "RAVEN_PREBUILT_DIR has no program $f ($PREBUILT/$f): nothing was installed" >&2
+      if [[ "$f" == raven-tor-helper ]]; then
+        echo "(RAVEN_INSTALL_TOR_HELPER=0 installs Raven without Tor)" >&2
+      fi
+      exit 1
+    fi
+  done
+fi
 # auto / auto:PORT / IP:PORT / [IPv6]:PORT / [IPv6%zone]:PORT characters only;
 # raven-node validates the rest. The address itself is resolved after the
 # binaries are installed (lan_default below); RAVEN_LAN_LISTEN is checked now,
@@ -311,20 +335,28 @@ keystore_unit_lines() {
 }
 # Render-only builds and copies nothing: it asks the raven-node already in BIN_DIR.
 if [[ "$RENDER_ONLY" != 1 ]]; then
-  # --locked: build exactly the audited Cargo.lock. `tor` adds the
-  # raven-tor-helper binary (raven-node itself never links Arti).
-  build_features=()
-  if [[ "$TOR_HELPER" == 1 ]]; then
-    build_features=(--features raven-node/tor)
+  if [[ -n "$PREBUILT" ]]; then
+    # A release package's programs: nothing to build.
+    FROM="$PREBUILT"
+    FROM_RAVEN="$PREBUILT/raven"
+  else
+    # --locked: build exactly the audited Cargo.lock. `tor` adds the
+    # raven-tor-helper binary (raven-node itself never links Arti).
+    build_features=()
+    if [[ "$TOR_HELPER" == 1 ]]; then
+      build_features=(--features raven-node/tor)
+    fi
+    cargo build --locked -p raven-node -p ash --release --manifest-path "$ROOT/Cargo.toml" \
+      ${build_features[@]+"${build_features[@]}"}
+    TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+    FROM="$TARGET/release"
+    FROM_RAVEN="$TARGET/release/ash"
   fi
-  cargo build --locked -p raven-node -p ash --release --manifest-path "$ROOT/Cargo.toml" \
-    ${build_features[@]+"${build_features[@]}"}
-  TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
-  install -m 755 "$TARGET/release/raven-node" "$BIN_DIR/raven-node"
-  install -m 755 "$TARGET/release/ash" "$BIN_DIR/raven"
+  install -m 755 "$FROM/raven-node" "$BIN_DIR/raven-node"
+  install -m 755 "$FROM_RAVEN" "$BIN_DIR/raven"
   # The Tor helper sits next to raven-node, where raven-node looks for it.
   if [[ "$TOR_HELPER" == 1 ]]; then
-    install -m 755 "$TARGET/release/raven-tor-helper" "$BIN_DIR/raven-tor-helper"
+    install -m 755 "$FROM/raven-tor-helper" "$BIN_DIR/raven-tor-helper"
   elif [[ -e "$BIN_DIR/raven-tor-helper" ]]; then
     rm -f "$BIN_DIR/raven-tor-helper"
     echo "removed ${BIN_DIR}/raven-tor-helper (RAVEN_INSTALL_TOR_HELPER=0)"

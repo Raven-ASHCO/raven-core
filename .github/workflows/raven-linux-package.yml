@@ -1,0 +1,43 @@
+# The Linux package for x86_64 (scripts/release/make-linux.sh), on Ubuntu
+# 24.04, run by hand: raven-linux-x86_64-<version>.tar.gz and its .sha256 as
+# an artifact. The aarch64 package is made the same way on an aarch64 Ubuntu
+# 24.04 (docs/INSTALL_Linux.md, "Make the Linux package"). Nothing is
+# published from here, and no Raven program is run.
+name: Raven Linux package
+
+on:
+  workflow_dispatch:
+
+# Least privilege, actions pinned to full commit SHAs (as the other
+# workflows).
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.98.0"
+
+jobs:
+  linux-x86_64:
+    name: raven-linux-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends build-essential pkg-config cmake perl
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Packaging self-test
+        run: bash scripts/release/make-linux-selftest.sh
+      - name: Package
+        run: bash scripts/release/make-linux.sh --out dist --target-dir "$RUNNER_TEMP/target-linux-package"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: raven-linux-x86_64
+          path: |
+            dist/raven-linux-x86_64-*.tar.gz
+            dist/raven-linux-x86_64-*.tar.gz.sha256
+          if-no-files-found: error

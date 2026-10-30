@@ -1,8 +1,12 @@
 # Install Raven Serverless (Linux)
 
+Two ways: the Linux package (`raven-linux-<arch>-<version>.tar.gz`, x86_64 and
+aarch64; downloads are not published yet, so for now you make it yourself, see
+[Make the Linux package](#make-the-linux-package)), or a build from source.
+Both set Raven up the same way: the programs in `~/.local/bin`, your profile in
+`~/.raven`, and `raven-node` as a systemd user service, with no root.
 `node/scripts/install.sh` is **not** a production installer. It fails closed
-and does not put binaries on `PATH`. Use the release-build steps below
-(`scripts/install/linux_systemd_user.sh`). Do not `curl | bash` a convenience
+and does not put binaries on `PATH`. Do not `curl | bash` a convenience
 script.
 
 > **Where your keys live.** With an unlocked desktop keyring (GNOME Keyring /
@@ -36,6 +40,29 @@ script.
   (below), or with systemd `LoadCredential=raven-keystore-passphrase:<file>`.
 - Force the vault on a desktop with `RAVEN_KEYSTORE_BACKEND=vault` before the
   first `raven init` of a profile.
+
+## From the Linux package
+
+```bash
+sha256sum -c raven-linux-x86_64-0.1.1.tar.gz.sha256   # the file published next to it
+tar xzf raven-linux-x86_64-0.1.1.tar.gz
+cd raven-linux-x86_64-0.1.1
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+raven doctor
+```
+
+The package holds `bin/raven`, `bin/raven-node` and `bin/raven-tor-helper`,
+`install.sh` (it runs this guide's installer, shipped as
+`lib/linux_systemd_user.sh`, with the package's programs:
+`RAVEN_PREBUILT_DIR`), `uninstall.sh` (removes the programs and the service;
+your profile stays: run `raven erase` first to delete it), a short README,
+the changelog, LICENSE, NOTICE, BUILD-INFO.txt and SHA256SUMS. Every option
+of the installer below works with `install.sh` too (for example
+`RAVEN_LAN_LISTEN=auto ./install.sh`). Its programs need a glibc as new as
+that of the system it was built on (BUILD-INFO.txt and README.txt say which)
+and systemd user services. It is not signed: compare the archive with its
+`.sha256` from where you downloaded it.
 
 **Toolchain:** install Rust with [rustup](https://rustup.rs) (current stable);
 distro-packaged compilers are usually too old (rustc 1.83.0 fails at dependency
@@ -941,6 +968,33 @@ feature on Linux (a debug build with the feature `nearby-radio`, `RAVEN_LAB_TEST
   device subscribed to its service (sizes and timing, never content).
 
 Details: [`NEARBY.md`](NEARBY.md) section 6.
+
+## Make the Linux package
+
+On the Linux the package is for (x86_64 or aarch64; Ubuntu 24.04 is what it is
+made on: its glibc, 2.39, is then the oldest the programs run with), from a
+checkout of this repository:
+
+```bash
+sudo apt-get install -y build-essential pkg-config cmake perl git curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0
+. "$HOME/.cargo/env"
+bash scripts/release/make-linux-selftest.sh   # the packaging alone, nothing built
+bash scripts/release/make-linux.sh            # dist/raven-linux-<arch>-<version>.tar.gz and .sha256
+```
+
+`make-linux.sh` builds `raven`, `raven-node` and `raven-tor-helper`
+(`cargo build --release --locked -p ash -p raven-node --features raven-node/tor`;
+no Bluetooth), rewrites the build machine's paths in them (the home folder,
+the checkout, the target folder, `CARGO_HOME`, `RUSTUP_HOME`) as the macOS and
+Windows packages do, strips them, and stops if a program still names one of
+those paths, is not an ELF for this architecture, or a cargo configuration
+outside the source would change the build. `--target-dir DIR` keeps its build
+apart from your usual one (the path flags make cargo rebuild everything);
+`--from DIR` packages programs built already. The archive is reproducible
+with GNU tar (sorted names, owner 0, the commit's time). CI makes the x86_64
+package by hand (`.github/workflows/raven-linux-package.yml`). Nothing in it
+runs a Raven program.
 
 ## Unsigned tarball
 
