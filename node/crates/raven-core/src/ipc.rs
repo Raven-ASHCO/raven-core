@@ -2055,6 +2055,11 @@ pub fn decode_response(frame: &[u8]) -> Result<IpcResponse, String> {
 
 pub(crate) const SOCKET_FILE_NAME: &str = "raven-node.sock";
 
+/// The endpoint of a raven-node embedded in this process (a socket pair per
+/// connection instead of the socket file; docs/IOS.md).
+#[cfg(unix)]
+pub mod inproc;
+
 /// Longest path `bind`/`connect` accept for an `AF_UNIX` socket: `sizeof
 /// (sun_path)` minus the NUL (104 on macOS/BSD, 108 elsewhere).
 #[cfg(unix)]

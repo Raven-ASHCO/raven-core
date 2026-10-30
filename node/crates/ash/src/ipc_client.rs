@@ -67,6 +67,9 @@ pub fn ipc_request_timeout(
     req: &IpcRequest,
     timeout: Duration,
 ) -> Result<IpcResponse, String> {
+    if let Some(answer) = in_process(data_dir, req, timeout, Duration::ZERO) {
+        return answer;
+    }
     let endpoint = ipc_endpoint(data_dir);
     connect_and_transact(&endpoint, req, timeout, Duration::ZERO)
 }
@@ -79,8 +82,58 @@ pub fn ipc_request_retrying_connect(
     req: &IpcRequest,
     timeout: Duration,
 ) -> Result<IpcResponse, String> {
+    if let Some(answer) = in_process(data_dir, req, timeout, IPC_CONNECT_RETRY_BUDGET) {
+        return answer;
+    }
     let endpoint = ipc_endpoint(data_dir);
     connect_and_transact(&endpoint, req, timeout, IPC_CONNECT_RETRY_BUDGET)
+}
+
+/// The request to a raven-node embedded in this process
+/// ([`raven_core::ipc::inproc`]: a socket pair instead of the socket file;
+/// the same frames, the same server). `None`: none is registered for
+/// `data_dir` and this process may use the socket file, as before. A node
+/// that is busy or stopping is tried again within `connect_budget`, as a
+/// refused socket connect is.
+#[cfg(unix)]
+fn in_process(
+    data_dir: &Path,
+    req: &IpcRequest,
+    timeout: Duration,
+    connect_budget: Duration,
+) -> Option<Result<IpcResponse, String>> {
+    use raven_core::ipc::inproc;
+    if !inproc::embedded_only() && !inproc::is_registered(data_dir) {
+        return None;
+    }
+    let target = "the raven-node in this app";
+    let connected = connect_with_retry(connect_budget, || {
+        inproc::connect(data_dir).unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the embedded raven-node stopped",
+            ))
+        })
+    });
+    Some(
+        connected
+            .map_err(|e| ipc_connect_error(&e, target))
+            .and_then(|mut stream| {
+                let _ = stream.set_read_timeout(Some(timeout));
+                let _ = stream.set_write_timeout(Some(timeout));
+                transact(&mut stream, req)
+            }),
+    )
+}
+
+#[cfg(not(unix))]
+fn in_process(
+    _data_dir: &Path,
+    _req: &IpcRequest,
+    _timeout: Duration,
+    _connect_budget: Duration,
+) -> Option<Result<IpcResponse, String>> {
+    None
 }
 
 // Learning connectivity (Phase 6a). `raven send` asks for the probe order
