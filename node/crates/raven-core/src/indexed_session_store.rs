@@ -166,6 +166,7 @@ const BINDING_DIGEST_DOMAIN: &[u8] = b"rvn1/indexed-session/binding/v1";
 const PLATFORM_SERVICE: &str = "app.raven.node.atsam-indexed-session";
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     windows,
     all(target_os = "linux", target_env = "gnu")
 )))]
@@ -1160,6 +1161,7 @@ impl ProtectedSessionBackend for VaultSessionBackend {
 
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     windows,
     all(target_os = "linux", target_env = "gnu")
 )))]
@@ -1170,7 +1172,7 @@ fn unsupported_protected_store_error() -> IndexedSessionStoreError {
 /// This data dir's prefix of every per-session keychain / Secret Service
 /// account (`<namespace>:<hex(record_key)>`).
 fn session_namespace(data_dir: &Path) -> String {
-    let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let canonical = crate::paths::profile_binding_path(data_dir);
     let mut hasher = Sha256::new();
     hasher.update(b"raven/indexed-session-store/v1/");
     hasher.update(canonical.to_string_lossy().as_bytes());
@@ -1240,11 +1242,11 @@ fn protected_backend(
     if force_locked_file_session_backend()? {
         return Ok(Arc::new(LockedFileSessionBackend::new(data_dir)?));
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     let vault = crate::keystore_select::uses_vault(data_dir, true)
         .map_err(IndexedSessionStoreError::ProtectedStore)?;
     // macOS: a Raven passphrase (Lock v2, P6.40) moved them into the vault.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     let vault = crate::keystore_select::has_passphrase(data_dir)
         .map_err(IndexedSessionStoreError::ProtectedStore)?;
     #[cfg(unix)]
@@ -1257,7 +1259,11 @@ fn protected_backend(
 }
 
 struct PlatformProtectedSessionBackend {
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     namespace: String,
     #[cfg(windows)]
     secret_dir: PathBuf,
@@ -1266,13 +1272,18 @@ struct PlatformProtectedSessionBackend {
 impl PlatformProtectedSessionBackend {
     #[cfg(any(
         target_os = "macos",
+        target_os = "ios",
         windows,
         all(target_os = "linux", target_env = "gnu")
     ))]
     fn new(data_dir: &Path) -> Result<Self, IndexedSessionStoreError> {
         std::fs::create_dir_all(data_dir)
             .map_err(|error| IndexedSessionStoreError::ProtectedStore(error.to_string()))?;
-        #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
         let namespace = session_namespace(data_dir);
 
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -1304,7 +1315,11 @@ impl PlatformProtectedSessionBackend {
         }
 
         Ok(Self {
-            #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                all(target_os = "linux", target_env = "gnu")
+            ))]
             namespace,
             #[cfg(windows)]
             secret_dir: data_dir.join("indexed-session-secrets"),
@@ -1313,6 +1328,7 @@ impl PlatformProtectedSessionBackend {
 
     #[cfg(not(any(
         target_os = "macos",
+        target_os = "ios",
         windows,
         all(target_os = "linux", target_env = "gnu")
     )))]
@@ -1320,7 +1336,11 @@ impl PlatformProtectedSessionBackend {
         Err(unsupported_protected_store_error())
     }
 
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     fn scoped_account(&self, account: &str) -> String {
         format!("{}:{account}", self.namespace)
     }
@@ -1331,6 +1351,7 @@ impl PlatformProtectedSessionBackend {
 /// object. Every operation fails closed; this is not a file-backed fallback.
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     windows,
     all(target_os = "linux", target_env = "gnu")
 )))]
@@ -1348,11 +1369,11 @@ impl ProtectedSessionBackend for PlatformProtectedSessionBackend {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl ProtectedSessionBackend for PlatformProtectedSessionBackend {
     fn get(&self, account: &str) -> Result<Option<Vec<u8>>, IndexedSessionStoreError> {
+        use crate::apple_keychain::get_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
-        use security_framework::passwords::get_generic_password;
         let scoped = self.scoped_account(account);
         match guarded(KeychainWhat::SessionSecret, || {
             get_generic_password(PLATFORM_SERVICE, &scoped)
@@ -1366,8 +1387,8 @@ impl ProtectedSessionBackend for PlatformProtectedSessionBackend {
     }
 
     fn put(&self, account: &str, value: &[u8]) -> Result<(), IndexedSessionStoreError> {
+        use crate::apple_keychain::set_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
-        use security_framework::passwords::set_generic_password;
         let scoped = self.scoped_account(account);
         #[cfg(test)]
         crate::macos_keychain::track_new_test_item(PLATFORM_SERVICE, &scoped);
@@ -1380,8 +1401,8 @@ impl ProtectedSessionBackend for PlatformProtectedSessionBackend {
     }
 
     fn delete(&self, account: &str) -> Result<(), IndexedSessionStoreError> {
+        use crate::apple_keychain::delete_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
-        use security_framework::passwords::delete_generic_password;
         let scoped = self.scoped_account(account);
         match guarded(KeychainWhat::SessionSecret, || {
             delete_generic_password(PLATFORM_SERVICE, &scoped)
@@ -7974,6 +7995,7 @@ mod tests {
 
     #[cfg(not(any(
         target_os = "macos",
+        target_os = "ios",
         windows,
         all(target_os = "linux", target_env = "gnu")
     )))]

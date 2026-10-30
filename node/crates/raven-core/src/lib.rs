@@ -11,6 +11,9 @@ pub mod agent_sign;
 pub mod alias_record;
 pub mod app_channel;
 pub mod app_store;
+/// The keychain calls of the secret stores on macOS and iOS.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) mod apple_keychain;
 pub mod arrivals;
 pub mod async_letter;
 pub mod at_rest;

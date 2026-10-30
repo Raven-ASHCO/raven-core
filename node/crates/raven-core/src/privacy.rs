@@ -1727,6 +1727,9 @@ pub fn keys_open_to_login_text() -> &'static str {
     if cfg!(target_os = "macos") {
         "On this computer, your Raven keys are in your login keychain. Anyone who can log in as \
          you can open them. Lock your screen too, or set a Raven passphrase (Settings)."
+    } else if cfg!(target_os = "ios") {
+        "On this phone, your Raven keys are in its keychain, open once the phone was unlocked \
+         after it started. Use a passcode on the phone."
     } else if cfg!(windows) {
         "On this computer, your Raven keys are protected by your Windows account. Anyone who \
          can log in as you can open them. Lock your screen too."

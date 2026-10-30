@@ -61,6 +61,9 @@ pub enum IdentityStoreBackend {
     /// Passphrase vault (`keystore.vault`, entry `identity-seed`): non-macOS
     /// Unix without a reachable Secret Service.
     PassphraseVault,
+    /// The iOS data-protection keychain (`crate::apple_keychain`: after the
+    /// first unlock, this device only, never synchronized).
+    IosKeychain,
 }
 
 impl IdentityStoreBackend {
@@ -71,6 +74,7 @@ impl IdentityStoreBackend {
             Self::LinuxSecretService => "linux-secret-service",
             Self::LockedFile => "locked-file",
             Self::PassphraseVault => "passphrase-vault",
+            Self::IosKeychain => "ios-keychain",
         }
     }
 
@@ -81,6 +85,7 @@ impl IdentityStoreBackend {
             "linux-secret-service" => Some(Self::LinuxSecretService),
             "locked-file" => Some(Self::LockedFile),
             "passphrase-vault" => Some(Self::PassphraseVault),
+            "ios-keychain" => Some(Self::IosKeychain),
             _ => None,
         }
     }
@@ -92,6 +97,7 @@ impl IdentityStoreBackend {
             Self::LinuxSecretService => 3,
             Self::LockedFile => 4,
             Self::PassphraseVault => 5,
+            Self::IosKeychain => 6,
         }
     }
 
@@ -102,6 +108,7 @@ impl IdentityStoreBackend {
             3 => Some(Self::LinuxSecretService),
             4 => Some(Self::LockedFile),
             5 => Some(Self::PassphraseVault),
+            6 => Some(Self::IosKeychain),
             _ => None,
         }
     }
@@ -183,7 +190,7 @@ fn binding_path(data_dir: &Path) -> PathBuf {
 
 fn account_for_data_dir(data_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
-    let canon = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let canon = crate::paths::profile_binding_path(data_dir);
     let mut h = Sha256::new();
     h.update(b"raven/identity-store/v1/");
     h.update(canon.to_string_lossy().as_bytes());
@@ -600,7 +607,11 @@ fn locked_file_backend_enabled() -> Result<bool, IdentityStoreError> {
 }
 
 #[cfg_attr(
-    not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))),
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )),
     allow(dead_code)
 )]
 fn wipe_seed_file(path: &Path) -> Result<(), IdentityStoreError> {
@@ -638,7 +649,11 @@ fn wipe_seed_file(path: &Path) -> Result<(), IdentityStoreError> {
 /// legacy file the user made read-only is made owner-writable first (it is
 /// Raven's own file and is about to be deleted).
 #[cfg_attr(
-    not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))),
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )),
     allow(dead_code)
 )]
 fn scrub_seed_file_in_place(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
@@ -664,7 +679,11 @@ fn scrub_seed_file_in_place(path: &Path, metadata: &std::fs::Metadata) -> std::i
 
 #[cfg(unix)]
 #[cfg_attr(
-    not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))),
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )),
     allow(dead_code)
 )]
 fn make_owner_writable(path: &Path, _metadata: &std::fs::Metadata) -> std::io::Result<()> {
@@ -736,7 +755,11 @@ fn read_raw_seed_file(path: &Path) -> Result<Option<Vec<u8>>, IdentityStoreError
 }
 
 #[cfg_attr(
-    not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))),
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )),
     allow(dead_code)
 )]
 fn reconcile_secure_and_raw_seed(
@@ -762,7 +785,29 @@ fn reconcile_secure_and_raw_seed(
     wipe_seed_file(path)
 }
 
-// --- macOS Keychain ---------------------------------------------------------
+// --- macOS and iOS Keychain -------------------------------------------------
+
+/// This system's keychain backend: the login keychain on macOS, the
+/// data-protection keychain on iOS (`crate::apple_keychain`).
+#[cfg(target_os = "macos")]
+const APPLE_KEYCHAIN: IdentityStoreBackend = IdentityStoreBackend::MacosKeychain;
+#[cfg(target_os = "ios")]
+const APPLE_KEYCHAIN: IdentityStoreBackend = IdentityStoreBackend::IosKeychain;
+
+/// A marker that names another system's backend.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const MARKER_NOT_HERE: &str = if cfg!(target_os = "ios") {
+    "identity backend marker is not valid on iOS"
+} else {
+    "identity backend marker is not valid on macOS"
+};
+
+/// iOS: add-only, as on macOS (an existing item is never overwritten).
+#[cfg(target_os = "ios")]
+fn keychain_set(account: &str, seed: &[u8; 32]) -> Result<(), IdentityStoreError> {
+    crate::apple_keychain::add_generic_password(KEYCHAIN_SERVICE, account, seed)
+        .map_err(|e| IdentityStoreError::SecureStore(format!("keychain add: {e}")))
+}
 
 #[cfg(target_os = "macos")]
 fn keychain_set(account: &str, seed: &[u8; 32]) -> Result<(), IdentityStoreError> {
@@ -781,11 +826,11 @@ fn keychain_set(account: &str, seed: &[u8; 32]) -> Result<(), IdentityStoreError
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn keychain_get(account: &str) -> Result<Option<[u8; 32]>, IdentityStoreError> {
+    use crate::apple_keychain::get_generic_password;
     use crate::macos_keychain::{guarded, KeychainWhat};
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
-    use security_framework::passwords::get_generic_password;
     use security_framework_sys::base::errSecItemNotFound;
     use zeroize::Zeroizing;
 
@@ -833,16 +878,19 @@ fn keychain_get(account: &str) -> Result<Option<[u8; 32]>, IdentityStoreError> {
     })
 }
 
-#[cfg(all(target_os = "macos", test))]
+#[cfg(all(any(target_os = "macos", target_os = "ios"), test))]
 fn keychain_status_is_proven_absent(status: i32) -> bool {
     use security_framework_sys::base::errSecItemNotFound;
     status == errSecItemNotFound
 }
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-helpers")))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "ios"),
+    any(test, feature = "test-helpers")
+))]
 fn keychain_delete(account: &str) {
+    use crate::apple_keychain::delete_generic_password;
     use crate::macos_keychain::{guarded, KeychainWhat};
-    use security_framework::passwords::delete_generic_password;
     let _ = guarded(KeychainWhat::IdentitySeed, || {
         delete_generic_password(KEYCHAIN_SERVICE, account)
     });
@@ -1179,12 +1227,12 @@ fn store_seed(
         return Ok(IdentityStoreBackend::LockedFile);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         keychain_set(&account, seed)?;
         wipe_seed_file(&path)?;
-        write_marker(data_dir, IdentityStoreBackend::MacosKeychain)?;
-        return Ok(IdentityStoreBackend::MacosKeychain);
+        write_marker(data_dir, APPLE_KEYCHAIN)?;
+        return Ok(APPLE_KEYCHAIN);
     }
 
     #[cfg(windows)]
@@ -1221,6 +1269,7 @@ fn store_seed(
     #[cfg(all(
         unix,
         not(target_os = "macos"),
+        not(target_os = "ios"),
         not(all(target_os = "linux", target_env = "gnu"))
     ))]
     {
@@ -1344,7 +1393,7 @@ fn load_vault_seed_with_migrate(
 /// Keychain *with* an existing item often surfaces as `SecureStore`
 /// (search hits, then `get_generic_password` fails), which would fork a
 /// locked-file identity beside the Keychain root.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn locked_file_after_keychain_probe(
     result: Result<Option<[u8; 32]>, IdentityStoreError>,
 ) -> Result<(), IdentityStoreError> {
@@ -1360,7 +1409,7 @@ fn locked_file_after_keychain_probe(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn refuse_locked_file_if_keychain_not_proven_absent(
     account: &str,
 ) -> Result<(), IdentityStoreError> {
@@ -1459,7 +1508,7 @@ fn load_seed_with_migrate(
                 // Ok(None) or session-bus connect-fail. SecureStore is not
                 // absence (locked item with a file seed would fork).
                 if marker.is_none() {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "ios"))]
                     refuse_locked_file_if_keychain_not_proven_absent(&account)?;
                     #[cfg(all(target_os = "linux", target_env = "gnu"))]
                     refuse_locked_file_if_secret_service_not_proven_absent(&account)?;
@@ -1480,7 +1529,7 @@ fn load_seed_with_migrate(
                 // *connect* failure is treated as no store (headless ubuntu).
                 // require_proven_first_install still refuses non-empty profiles.
                 if marker.is_none() {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "ios"))]
                     refuse_locked_file_if_keychain_not_proven_absent(&account)?;
                     #[cfg(all(target_os = "linux", target_env = "gnu"))]
                     refuse_locked_file_if_secret_service_not_proven_absent(&account)?;
@@ -1496,7 +1545,7 @@ fn load_seed_with_migrate(
         ));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         // A Raven passphrase (Lock v2, P6.40, `raven_passphrase`) moved this
         // profile's seed into the passphrase vault.
@@ -1504,16 +1553,14 @@ fn load_seed_with_migrate(
             let vault = crate::keystore_vault::Vault::for_data_dir(data_dir);
             return load_vault_seed_with_migrate(data_dir, &vault, &path, marker);
         }
-        if marker.is_some() && marker != Some(IdentityStoreBackend::MacosKeychain) {
-            return Err(IdentityStoreError::Continuity(
-                "identity backend marker is not valid on macOS",
-            ));
+        if marker.is_some() && marker != Some(APPLE_KEYCHAIN) {
+            return Err(IdentityStoreError::Continuity(MARKER_NOT_HERE));
         }
         if let Some(seed) = keychain_get(&account)? {
             reconcile_secure_and_raw_seed(&path, &seed)?;
-            return Ok(Some((seed, IdentityStoreBackend::MacosKeychain)));
+            return Ok(Some((seed, APPLE_KEYCHAIN)));
         }
-        if marker == Some(IdentityStoreBackend::MacosKeychain) {
+        if marker == Some(APPLE_KEYCHAIN) {
             return Err(IdentityStoreError::Continuity(
                 "recorded Keychain identity is missing",
             ));
@@ -1637,6 +1684,7 @@ fn load_seed_with_migrate(
     #[cfg(all(
         unix,
         not(target_os = "macos"),
+        not(target_os = "ios"),
         not(all(target_os = "linux", target_env = "gnu"))
     ))]
     {
@@ -1682,7 +1730,7 @@ pub fn load_identity(data_dir: &Path) -> Result<Option<Identity>, IdentityStoreE
 /// Only a first `init` still asks for the *new* passphrase under the lock (the
 /// vault does not exist yet; documented in docs/design/2026-10-linux-keystore.md).
 fn preload_vault_key_before_locks(data_dir: &Path) -> Result<(), IdentityStoreError> {
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     {
         let vault_profile = matches!(
             crate::keystore_select::recorded_backend(data_dir),
@@ -1696,7 +1744,7 @@ fn preload_vault_key_before_locks(data_dir: &Path) -> Result<(), IdentityStoreEr
                 .map_err(vault_error)?;
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if !locked_file_backend_requested()
         && read_marker_checked(data_dir)? == Some(IdentityStoreBackend::PassphraseVault)
     {
@@ -1858,6 +1906,7 @@ fn backend_consistency_with(
                     | IdentityStoreBackend::WindowsDpapiFile
                     | IdentityStoreBackend::LinuxSecretService
                     | IdentityStoreBackend::PassphraseVault
+                    | IdentityStoreBackend::IosKeychain
             )
         ) {
             ok = false;
@@ -1938,7 +1987,7 @@ pub fn store_status(data_dir: &Path) -> Result<IdentityStoreStatus, IdentityStor
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn test_cleanup(data_dir: &Path) {
     let account = account_for_data_dir(data_dir);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     keychain_delete(&account);
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     secret_service_delete(&account);
@@ -2148,7 +2197,7 @@ mod tests {
             assert!(!is_legacy_plaintext(&bytes));
         }
 
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
         {
             if path.exists() {
                 let meta = std::fs::metadata(&path).unwrap();
@@ -2442,7 +2491,7 @@ mod tests {
         test_cleanup(dir);
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     #[test]
     fn locked_file_permissions_are_0600_when_used() {
         test_enable_locked_file_identity_backend();

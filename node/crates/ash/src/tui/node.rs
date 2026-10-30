@@ -64,7 +64,7 @@ pub(super) const LOG_VIEW_LINES: usize = 40;
 const LAUNCH_AGENT: &str = "Library/LaunchAgents/com.raven.raven-node.plist";
 const SYSTEMD_UNIT: &str = "systemd/user/raven-node.service";
 /// The passphrase file PASSFILE's steps make, under the home folder.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
 const PASSPHRASE_FILE: &str = ".config/raven/keystore-passphrase";
 
 /// Where raven-node stands, from its own Status.
@@ -602,7 +602,7 @@ pub(super) fn started_by_app(
 /// systemd credential (`$CREDENTIALS_DIRECTORY/raven-keystore-passphrase`).
 /// A profile whose keystore can't be told (`uses_vault` failed) is not held
 /// back here: the start's own error says so.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
 pub(super) fn needs_passphrase_file(
     uses_vault: Result<bool, String>,
     passphrase_file: Option<&OsStr>,
@@ -646,7 +646,7 @@ pub(super) struct Vault {
 /// has the vault; it may ask Secret Service (with a timeout), so it runs on
 /// the node worker.
 pub(super) fn vault_check(data_dir: &Path) -> Vault {
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     {
         let uses_vault = bridge::uses_vault(data_dir);
         let profile = matches!(uses_vault, Ok(true));
@@ -668,7 +668,7 @@ pub(super) fn vault_check(data_dir: &Path) -> Vault {
                 .flatten(),
         }
     }
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
     {
         let _ = data_dir;
         Vault::default()
@@ -677,7 +677,7 @@ pub(super) fn vault_check(data_dir: &Path) -> Vault {
 
 /// Where PASSFILE says to save the passphrase (INSTALL_Linux.md):
 /// `~/.config/raven/keystore-passphrase`. Only an absolute HOME counts.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
 pub(super) fn passphrase_file(home: Option<&OsStr>) -> Option<PathBuf> {
     let home = Path::new(home?);
     home.is_absolute().then(|| home.join(PASSPHRASE_FILE))
@@ -1700,7 +1700,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
     #[test]
     fn no_vault_here() {
         assert_eq!(vault_check(Path::new("unused")), Vault::default());

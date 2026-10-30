@@ -35,6 +35,16 @@ argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "ze
 security-framework = "2"
 security-framework-sys = "2"
 
+# iOS: the data-protection keychain (src/apple_keychain.rs: items readable
+# after the first unlock, this device only, never synchronized). The same
+# crates as macOS; core-foundation and core-foundation-sys are
+# security-framework's own, already in Cargo.lock: no new crate.
+[target.'cfg(target_os = "ios")'.dependencies]
+security-framework = "2"
+security-framework-sys = "2"
+core-foundation = "0.9"
+core-foundation-sys = "0.8"
+
 # Free space on the profile's disk (`disk_space`): statfs / statvfs; the
 # network interfaces (`netifs`): getifaddrs.
 [target.'cfg(unix)'.dependencies]

@@ -611,11 +611,11 @@ impl Controller {
     /// recording); it may ask Secret Service, with a timeout, so it runs on
     /// the store worker.
     pub(super) fn creation_prompts(&self) -> bool {
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
         {
             matches!(bridge::uses_vault(&self.data_dir), Ok(true))
         }
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
         {
             false
         }
@@ -2767,7 +2767,7 @@ mod tests {
         let before = entries(dir.path());
         let _ = controller.creation_prompts();
         assert_eq!(entries(dir.path()), before);
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
         assert!(!controller.creation_prompts());
 
         // WZ-3's Yes: the vault check, then the identity, then its first jobs.

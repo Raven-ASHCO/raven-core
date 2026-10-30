@@ -9,7 +9,7 @@
 //! [`resolve`].
 
 use std::path::Path;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 use std::time::Duration;
 
 /// Non-secret marker naming the profile's keystore.
@@ -17,7 +17,7 @@ pub const KEYSTORE_MARKER_NAME: &str = "keystore.backend";
 /// Explicit choice for a new profile: `vault` or `secret-service`.
 pub const KEYSTORE_BACKEND_ENV: &str = "RAVEN_KEYSTORE_BACKEND";
 /// How long the Secret Service probe may take before the vault is chosen.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 const LEGACY_IDENTITY_MARKER: &str = "identity.backend";
@@ -95,9 +95,9 @@ pub fn recorded_backend(data_dir: &Path) -> Result<Option<KeystoreBackend>, Stri
 /// only the marker says so (a vault file alone is not enough); every other
 /// Unix: [`recorded_backend`]. Records nothing, never probes.
 pub fn has_passphrase(data_dir: &Path) -> Result<bool, String> {
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     let backend = recorded_backend(data_dir)?;
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
     let backend = read_marker(data_dir)?;
     Ok(backend == Some(KeystoreBackend::PassphraseVault))
 }
@@ -205,6 +205,7 @@ const SECRET_SERVICE_SUPPORTED: bool = true;
 #[cfg(all(
     unix,
     not(target_os = "macos"),
+    not(target_os = "ios"),
     not(all(target_os = "linux", target_env = "gnu"))
 ))]
 const SECRET_SERVICE_SUPPORTED: bool = false;
@@ -212,7 +213,7 @@ const SECRET_SERVICE_SUPPORTED: bool = false;
 /// Production entry point for the non-macOS Unix stores. A recorded choice is
 /// cached per data dir for the life of the process (the Secret Service calls
 /// themselves still fail closed if the keyring goes away later).
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 pub fn resolve(data_dir: &Path, record: bool) -> Result<KeystoreBackend, String> {
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -239,7 +240,7 @@ pub fn resolve(data_dir: &Path, record: bool) -> Result<KeystoreBackend, String>
 }
 
 /// Whether this profile's secrets live in the passphrase vault.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 pub fn uses_vault(data_dir: &Path, record: bool) -> Result<bool, String> {
     Ok(resolve(data_dir, record)? == KeystoreBackend::PassphraseVault)
 }
@@ -280,6 +281,7 @@ pub fn secret_service_reachable(timeout: Duration) -> bool {
 #[cfg(all(
     unix,
     not(target_os = "macos"),
+    not(target_os = "ios"),
     not(all(target_os = "linux", target_env = "gnu"))
 ))]
 pub fn secret_service_reachable(_timeout: Duration) -> bool {

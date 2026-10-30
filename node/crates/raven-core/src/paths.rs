@@ -229,6 +229,33 @@ fn nonempty(p: Option<PathBuf>) -> Option<PathBuf> {
     p.filter(|p| !p.as_os_str().is_empty())
 }
 
+/// The spelling of a profile folder that its keychain items and sealed
+/// files are bound to (the identity's keychain account and binding, the
+/// session and prekey accounts, the chat-history key's account and every
+/// AAD derived from it).
+///
+/// Everywhere but iOS: the canonical path (symlinks resolved), as before;
+/// the folder as given when it cannot be resolved.
+///
+/// iOS: the path below the app's container (its `HOME`), under a fixed
+/// prefix. iOS moves an app's container to a new path when the app is
+/// reinstalled or updated, and a binding to the absolute path would then
+/// make the profile unreadable; inside the container the profile keeps its
+/// place. Outside the container (no app does that): the canonical path.
+pub fn profile_binding_path(data_dir: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    #[cfg(target_os = "ios")]
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| std::fs::canonicalize(home).ok())
+    {
+        if let Ok(inside) = canonical.strip_prefix(&home) {
+            return Path::new("ios-app-container").join(inside);
+        }
+    }
+    canonical
+}
+
 /// Refuse the unresolved-profile placeholder before anything is created.
 ///
 /// Entry points that resolved their profile through the infallible resolvers
@@ -962,6 +989,35 @@ pub(crate) mod scrub_test {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Off iOS a profile's keys stay bound to its canonical path, exactly
+    /// as before `profile_binding_path` existed.
+    #[cfg(not(target_os = "ios"))]
+    #[test]
+    fn the_binding_path_is_the_canonical_path_off_ios() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            profile_binding_path(dir.path()),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+        let missing = dir.path().join("not-yet");
+        assert_eq!(profile_binding_path(&missing), missing);
+    }
+
+    /// iOS: a profile inside the app's container is bound to its place in
+    /// the container, which survives the container moving.
+    #[cfg(target_os = "ios")]
+    #[test]
+    fn the_binding_path_is_container_relative_on_ios() {
+        let home = std::fs::canonicalize(std::env::var_os("HOME").expect("HOME")).unwrap();
+        let dir = tempfile::tempdir_in(&home).unwrap();
+        let inside = std::fs::canonicalize(dir.path()).unwrap();
+        let rel = inside.strip_prefix(&home).unwrap();
+        assert_eq!(
+            profile_binding_path(dir.path()),
+            Path::new("ios-app-container").join(rel)
+        );
+    }
 
     #[test]
     fn raven_env_wins_over_ash_and_home() {

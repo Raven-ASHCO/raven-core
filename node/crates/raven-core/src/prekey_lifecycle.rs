@@ -105,6 +105,7 @@ const CLAIM_ID_DOMAIN: &[u8] = b"rvn1/prekey-lifecycle/claim/v1";
 const PLATFORM_SERVICE: &str = "app.raven.node.prekey-lifecycle";
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     windows,
     all(target_os = "linux", target_env = "gnu")
 )))]
@@ -598,6 +599,7 @@ struct PlatformProtectedPrekeyBackend {
 impl PlatformProtectedPrekeyBackend {
     #[cfg(any(
         target_os = "macos",
+        target_os = "ios",
         windows,
         all(target_os = "linux", target_env = "gnu")
     ))]
@@ -620,6 +622,7 @@ impl PlatformProtectedPrekeyBackend {
 
     #[cfg(not(any(
         target_os = "macos",
+        target_os = "ios",
         windows,
         all(target_os = "linux", target_env = "gnu")
     )))]
@@ -636,6 +639,7 @@ impl PlatformProtectedPrekeyBackend {
 
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     windows,
     all(target_os = "linux", target_env = "gnu")
 )))]
@@ -657,14 +661,14 @@ impl ProtectedPrekeyBackend for PlatformProtectedPrekeyBackend {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl ProtectedPrekeyBackend for PlatformProtectedPrekeyBackend {
     fn get(&self, account: &str) -> Result<Option<Vec<u8>>, PrekeyLifecycleError> {
         if let Some(path) = &self.locked_file {
             return locked_file_get(path);
         }
+        use crate::apple_keychain::get_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
-        use security_framework::passwords::get_generic_password;
         match guarded(KeychainWhat::PrekeyState, || {
             get_generic_password(PLATFORM_SERVICE, account)
         }) {
@@ -678,8 +682,8 @@ impl ProtectedPrekeyBackend for PlatformProtectedPrekeyBackend {
         if let Some(path) = &self.locked_file {
             return locked_file_put(path, value);
         }
+        use crate::apple_keychain::set_generic_password;
         use crate::macos_keychain::{guarded, KeychainWhat};
-        use security_framework::passwords::set_generic_password;
         #[cfg(test)]
         crate::macos_keychain::track_new_test_item(PLATFORM_SERVICE, account);
         guarded(KeychainWhat::PrekeyState, || {
@@ -961,10 +965,10 @@ impl PrekeyLifecycleActor {
         // Non-macOS Unix: the profile's recorded keystore decides between
         // Secret Service (below) and the passphrase vault. The debug
         // locked-file lab override keeps precedence, unchanged.
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
         let vault = || crate::keystore_select::uses_vault(data_dir, true);
         // macOS: a Raven passphrase (Lock v2, P6.40) moved it into the vault.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let vault = || crate::keystore_select::has_passphrase(data_dir);
         #[cfg(unix)]
         if !force_locked_file_prekey_backend()?
@@ -1922,7 +1926,7 @@ fn claim_id(
 
 /// This data dir's account of the prekey state (one per data dir).
 fn prekey_account(data_dir: &Path) -> String {
-    let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let canonical = crate::paths::profile_binding_path(data_dir);
     hex::encode(hash_parts(&[
         b"raven/prekey-lifecycle/account/v1",
         canonical.to_string_lossy().as_bytes(),

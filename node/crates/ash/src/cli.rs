@@ -9596,14 +9596,14 @@ const LOCKED_NEXT: &str = "Run `raven unlock` to start it again. If Raven is ope
 /// the passphrase. A keychain or DPAPI profile stays open to anyone logged
 /// in as the user. Nothing is recorded.
 fn profile_uses_vault(data_dir: &Path) -> bool {
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
     {
         matches!(
             raven_core::keystore_select::uses_vault(data_dir, false),
             Ok(true)
         )
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         matches!(
             raven_core::keystore_select::has_passphrase(data_dir),

@@ -294,7 +294,7 @@ impl KeystoreItem {
 
     /// What it is, in words, for the report.
     pub fn describe(&self, data_dir: &Path) -> String {
-        let store = if cfg!(target_os = "macos") {
+        let store = if cfg!(any(target_os = "macos", target_os = "ios")) {
             "the keychain"
         } else {
             "the Secret Service"
@@ -382,7 +382,7 @@ fn platform_keystore_in_use(data_dir: &Path) -> bool {
             return false;
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         let _ = data_dir;
         true
@@ -394,7 +394,11 @@ fn platform_keystore_in_use(data_dir: &Path) -> bool {
             Ok(true)
         )
     }
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     {
         let _ = data_dir;
         false
@@ -464,6 +468,7 @@ pub(crate) fn plan_with(dir: &Path, platform: bool) -> Result<ErasePlan, String>
         // read (the keychain too since review C-deletion-erase-1).
         if cfg!(any(
             target_os = "macos",
+            target_os = "ios",
             all(target_os = "linux", target_env = "gnu")
         )) {
             plan.keystore.push(KeystoreItem::PlatformPrefix {
@@ -1055,7 +1060,7 @@ pub(crate) fn remove_empty_dir(path: &Path) -> Result<bool, String> {
 
 /// Deletes one generic password of this profile (every copy, should there be
 /// more than one): Ok(true) when one was there. Not found is not an error.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn platform_delete(role: KeyRole, service: &str, account: &str) -> Result<bool, String> {
     let mut deleted = false;
     for _ in 0..8 {
@@ -1068,11 +1073,11 @@ fn platform_delete(role: KeyRole, service: &str, account: &str) -> Result<bool, 
 }
 
 /// errSecItemNotFound: the only status that proves no such item exists.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
 
 /// What a keychain call for `role` is about, for the wait hint.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn keychain_what(role: KeyRole) -> crate::macos_keychain::KeychainWhat {
     use crate::macos_keychain::KeychainWhat;
     match role {
@@ -1084,10 +1089,10 @@ fn keychain_what(role: KeyRole) -> crate::macos_keychain::KeychainWhat {
 }
 
 /// One keychain delete, inside the access-dialog guard.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn keychain_delete_item(role: KeyRole, service: &str, account: &str) -> Result<bool, String> {
+    use crate::apple_keychain::delete_generic_password;
     use crate::macos_keychain::guarded;
-    use security_framework::passwords::delete_generic_password;
     match guarded(keychain_what(role), || {
         delete_generic_password(service, account)
     }) {
@@ -1102,7 +1107,7 @@ fn keychain_delete_item(role: KeyRole, service: &str, account: &str) -> Result<b
 /// Ok(true) when any was there. It finds an item whose head was never
 /// recorded, and every one when the store's record keys can't be read
 /// (review C-deletion-erase-1).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn platform_delete_prefix(role: KeyRole, service: &str, prefix: &str) -> Result<bool, String> {
     let mut deleted = false;
     for account in keychain_accounts(role, service)? {
@@ -1116,7 +1121,7 @@ fn platform_delete_prefix(role: KeyRole, service: &str, prefix: &str) -> Result<
 /// The account of every generic password of `service`, inside the
 /// access-dialog guard. Attributes only: no secret is read, so no item asks
 /// for access (owner row R34.6 records it).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn keychain_accounts(role: KeyRole, service: &str) -> Result<Vec<String>, String> {
     use crate::macos_keychain::guarded;
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
@@ -1197,12 +1202,20 @@ fn secret_service_delete(
 }
 
 /// No OS keystore here: nothing is planned for one (keys live in files).
-#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(target_os = "linux", target_env = "gnu")
+)))]
 fn platform_delete(_role: KeyRole, _service: &str, _account: &str) -> Result<bool, String> {
     Err("no OS keystore on this system".to_owned())
 }
 
-#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(target_os = "linux", target_env = "gnu")
+)))]
 fn platform_delete_prefix(_role: KeyRole, _service: &str, _prefix: &str) -> Result<bool, String> {
     Ok(false)
 }

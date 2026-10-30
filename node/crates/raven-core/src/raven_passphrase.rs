@@ -52,6 +52,9 @@ pub const LAB_FILES: &str = "This profile keeps its keys in the lab's files \
 /// Windows keeps the keys in files only the user's account opens (DPAPI).
 pub const NOT_ON_WINDOWS: &str = "A Raven passphrase is not available on Windows yet. Your \
      Raven keys are protected by your Windows account.";
+/// iOS keeps the keys in the data-protection keychain (the phone's passcode).
+pub const NOT_ON_IOS: &str = "A Raven passphrase is not available on iPhone and iPad: \
+     the phone's own passcode protects Raven's keys there.";
 /// A GNU/Linux profile with its keys in the desktop keyring.
 pub const KEYRING_PROFILE: &str = "This profile keeps its keys in your desktop keyring. A \
      Raven passphrase is chosen when a profile is made (RAVEN_KEYSTORE_BACKEND=vault).";
@@ -161,7 +164,14 @@ fn offer_on_this_system(_data_dir: &Path) -> Offer {
     Offer::No(NOT_ON_WINDOWS)
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+/// iOS: the phone's own passcode protects the keychain items (after the
+/// first unlock); a Raven passphrase is not offered there (docs/IOS.md).
+#[cfg(target_os = "ios")]
+fn offer_on_this_system(_data_dir: &Path) -> Offer {
+    Offer::No(NOT_ON_IOS)
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 fn offer_on_this_system(data_dir: &Path) -> Offer {
     if crate::keystore_select::has_passphrase(data_dir).unwrap_or(false) {
         Offer::Change

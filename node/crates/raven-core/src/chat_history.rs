@@ -1386,7 +1386,7 @@ fn replace_file(temporary: &Path, destination: &Path) -> Result<(), ChatHistoryE
 
 #[cfg(any(test, unix, windows))]
 fn scoped_aad(data_dir: &Path, domain: &[u8]) -> [u8; 32] {
-    let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let canonical = crate::paths::profile_binding_path(data_dir);
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(b"/");
@@ -1398,21 +1398,33 @@ fn scoped_aad(data_dir: &Path, domain: &[u8]) -> [u8; 32] {
 // Only the OS-keystore `history_account` (macOS / GNU Linux) calls this; the other
 // targets compile it for the unit-test build alone, where it is unused.
 #[cfg_attr(
-    not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))),
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )),
     allow(dead_code)
 )]
 fn history_scope(data_dir: &Path) -> [u8; 32] {
     scoped_aad(data_dir, HISTORY_AAD_DOMAIN)
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(target_os = "linux", target_env = "gnu")
+))]
 fn history_account(data_dir: &Path) -> String {
     hex::encode(history_scope(data_dir))
 }
 
 #[cfg(all(
     test,
-    any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )
 ))]
 pub(crate) fn history_account_for_tests(data_dir: &Path) -> String {
     history_account(data_dir)
@@ -1479,10 +1491,10 @@ fn aead_unprotect(
         .map_err(|_| ChatHistoryError::AuthenticationFailed)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn platform_get_key(data_dir: &Path) -> Result<Option<Zeroizing<[u8; 32]>>, ChatHistoryError> {
+    use crate::apple_keychain::get_generic_password;
     use crate::macos_keychain::{guarded, KeychainWhat};
-    use security_framework::passwords::get_generic_password;
     let account = history_account(data_dir);
     match guarded(KeychainWhat::ChatHistoryKey, || {
         get_generic_password(HISTORY_KEY_SERVICE, &account)
@@ -1500,6 +1512,20 @@ fn platform_get_key(data_dir: &Path) -> Result<Option<Zeroizing<[u8; 32]>>, Chat
         Err(error) if error.code() == -25_300 => Ok(None),
         Err(error) => Err(ChatHistoryError::ProtectedStoreUnavailable(format!(
             "keychain read failed: {error}"
+        ))),
+    }
+}
+
+/// iOS: add-only in the data-protection keychain, as on macOS.
+#[cfg(target_os = "ios")]
+fn platform_add_key(data_dir: &Path, key: &[u8; 32]) -> Result<bool, ChatHistoryError> {
+    const ERR_SEC_DUPLICATE_ITEM: i32 = -25_299;
+    let account = history_account(data_dir);
+    match crate::apple_keychain::add_generic_password(HISTORY_KEY_SERVICE, &account, key) {
+        Ok(()) => Ok(true),
+        Err(error) if error.code() == ERR_SEC_DUPLICATE_ITEM => Ok(false),
+        Err(error) => Err(ChatHistoryError::ProtectedStoreUnavailable(format!(
+            "keychain add failed: {error}"
         ))),
     }
 }
@@ -1672,7 +1698,7 @@ fn chat_history_lab_key_allowed() -> bool {
 /// the login Keychain.
 #[cfg(unix)]
 fn lab_history_key(data_dir: &Path) -> Zeroizing<[u8; 32]> {
-    let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let canonical = crate::paths::profile_binding_path(data_dir);
     let mut hasher = Sha256::new();
     hasher.update(b"raven/chat-history/test-lab-key/v1");
     hasher.update(canonical.to_string_lossy().as_bytes());
@@ -1691,10 +1717,18 @@ trait ProtectedKeyStore {
     fn add(&self, data_dir: &Path, key: &[u8; 32]) -> Result<bool, ChatHistoryError>;
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(target_os = "linux", target_env = "gnu")
+))]
 struct PlatformKeyStore;
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    all(target_os = "linux", target_env = "gnu")
+))]
 impl ProtectedKeyStore for PlatformKeyStore {
     fn get(&self, data_dir: &Path) -> Result<Option<Zeroizing<[u8; 32]>>, ChatHistoryError> {
         platform_get_key(data_dir)
@@ -1803,7 +1837,7 @@ fn load_vault_history_key(
 /// Release (non-lab) non-macOS Unix: does this profile keep its history key
 /// in the passphrase vault? The debug locked-file lab path and unit tests
 /// keep their existing behaviour (Secret Service, else the derived lab key).
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 fn vault_history_key_selected(data_dir: &Path, record: bool) -> Result<bool, ChatHistoryError> {
     if chat_history_lab_key_allowed() {
         return Ok(false);
@@ -1812,10 +1846,10 @@ fn vault_history_key_selected(data_dir: &Path, record: bool) -> Result<bool, Cha
         .map_err(ChatHistoryError::ProtectedStoreUnavailable)
 }
 
-/// macOS: a profile with a Raven passphrase (Lock v2, P6.40) keeps its
-/// history key in the passphrase vault; its marker says so (never recorded
-/// here). The lab key took the branch before this.
-#[cfg(target_os = "macos")]
+/// macOS (and iOS): a profile with a Raven passphrase (Lock v2, P6.40)
+/// keeps its history key in the passphrase vault; its marker says so (never
+/// recorded here). The lab key took the branch before this.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn vault_history_key_selected(data_dir: &Path, _record: bool) -> Result<bool, ChatHistoryError> {
     crate::keystore_select::has_passphrase(data_dir)
         .map_err(ChatHistoryError::ProtectedStoreUnavailable)
@@ -1835,7 +1869,7 @@ fn load_platform_key(
     // on an unanswered access prompt. The explicit debug lab override (and
     // unit tests) therefore skip the Keychain entirely, the same way the
     // identity, prekey and session backends honour their locked-file override.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if chat_history_lab_key_allowed() {
         return Ok(lab_history_key(data_dir));
     }
@@ -1845,7 +1879,11 @@ fn load_platform_key(
         };
         return load_vault_history_key(&store, data_dir, create);
     }
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     {
         match platform_get_key(data_dir) {
             Ok(Some(key)) => return Ok(key),
@@ -1865,7 +1903,11 @@ fn load_platform_key(
     }
     // musl / other Unix without a Secret Service client: only the debug lab
     // key remains here (release builds took the vault branch above).
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     {
         let _ = create;
         if chat_history_lab_key_allowed() {
@@ -1897,7 +1939,7 @@ fn platform_key_exists(data_dir: &Path) -> Result<bool, ChatHistoryError> {
         return Ok(false);
     }
     // The lab key is not a protected key and never blocks legacy import.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if chat_history_lab_key_allowed() {
         return Ok(false);
     }
@@ -1907,7 +1949,11 @@ fn platform_key_exists(data_dir: &Path) -> Result<bool, ChatHistoryError> {
         };
         return Ok(store.get(data_dir)?.is_some());
     }
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     {
         match platform_get_key(data_dir) {
             Ok(key) => Ok(key.is_some()),
@@ -1920,7 +1966,11 @@ fn platform_key_exists(data_dir: &Path) -> Result<bool, ChatHistoryError> {
             }
         }
     }
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     {
         let _ = data_dir;
         Ok(false)

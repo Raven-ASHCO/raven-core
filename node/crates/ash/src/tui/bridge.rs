@@ -1331,9 +1331,9 @@ pub(super) use super::super::node_control::{
 pub(super) use super::super::node_control::kill_term;
 // The vault: where a program without a terminal finds the passphrase (Unix
 // other than macOS has it).
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 pub(super) use raven_core::keystore_vault::PASSPHRASE_FILE_ENV;
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
 pub(super) use raven_core::keystore_vault::SYSTEMD_CREDENTIAL_NAME;
 
 /// The passphrase file this computer keeps for this vault profile, if one
@@ -1342,7 +1342,7 @@ pub(super) use raven_core::keystore_vault::SYSTEMD_CREDENTIAL_NAME;
 /// one Raven's own login item hands raven-node, then PASSFILE's default.
 /// Reads only; Raven's login item only where this build reads login items.
 /// Node worker only.
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+#[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
 pub(super) fn saved_passphrase_file(data_dir: &Path) -> Option<PathBuf> {
     let login = super::super::node_control::LoginEnv::current().ok();
     super::super::profile_passphrase_file(data_dir, login.as_ref(), &|name| std::env::var_os(name))
@@ -1412,7 +1412,7 @@ pub(super) fn error_means_no_answer(err: &str) -> bool {
 /// Whether the profile keeps its keys in the passphrase vault (Unix without
 /// a system keychain). Nothing is recorded: a profile with no identity gets
 /// no keystore marker from it.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
 pub(super) fn uses_vault(data_dir: &Path) -> Result<bool, String> {
     raven_core::keystore_select::uses_vault(data_dir, false)
 }
