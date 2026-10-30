@@ -2485,6 +2485,16 @@ fn learned_routes_into(
     // the same rule.
     let lan = lan
         .filter(|l| l.local_tag.is_none() || l.on_network(here().as_deref()))
+        // LAN_ADDR (route hints spec §16): an address a verified contact
+        // told over another link is dialled only for a verified contact and
+        // only while it is on one of this computer's own networks (never
+        // one learned this way that is not).
+        .filter(|l| {
+            !l.told
+                || (contact.pinned
+                    && l.ip
+                        .is_some_and(|ip| crate::netifs::on_our_networks(ip) == Some(true)))
+        })
         .map(|mut l| {
             if l.ip.is_some_and(|ip| {
                 crate::lan_seen::shared_with_another(data_dir, Some(peer_device), ip, now_ms)
@@ -2506,6 +2516,8 @@ fn learned_routes_into(
                     _ => None,
                 }
             })
+            // A LAN_ADDR the contact told is its own address too.
+            .chain(l.ip.filter(|_| l.told).map(|ip| ip.to_canonical()))
             .collect()
     });
     let rrh1_lan =
@@ -6360,6 +6372,52 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// Route hints spec §16 (field test E3, owner decision 2026-10-30): a
+    /// LAN address a verified contact told over Tor is dialled only while it
+    /// is on one of this computer's own networks, and never for a contact
+    /// that is not verified (now).
+    #[test]
+    fn a_lan_address_told_over_tor_is_dialled_only_on_our_own_networks() {
+        let at = |ip: std::net::IpAddr| std::net::SocketAddr::new(ip, 7421);
+        let told_at = |generation: u64, ip: std::net::IpAddr| {
+            let mut v = hints(generation);
+            v.lan_addrs = vec![crate::route_hints::InetDirect {
+                flags: 0,
+                addr: at(ip),
+            }];
+            v
+        };
+        // This computer's own address on a network (loopback without one).
+        let here = crate::netifs::lan_addresses_for_friends()
+            .into_iter()
+            .map(|a| a.ip)
+            .find(std::net::IpAddr::is_ipv4)
+            .unwrap_or(std::net::Ipv4Addr::LOCALHOST.into());
+        for pinned in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
+            let bob = [9u8; 32];
+            told(d, &bob, OutboxCarrier::Onion, None, None, &told_at(5, here));
+            let got = learned_on(d, &bob, contact(&[], pinned));
+            if pinned {
+                assert_eq!(got.routes, [lan(&at(here).to_string())]);
+            } else {
+                assert!(got.routes.is_empty(), "{:?}", got.routes);
+            }
+            // An address on none of this computer's networks is never
+            // dialled, verified or not.
+            let away = ["10.254.253.9", "172.31.254.9", "192.168.254.9"]
+                .iter()
+                .map(|s| s.parse::<std::net::IpAddr>().unwrap())
+                .find(|ip| crate::netifs::on_our_networks(*ip) == Some(false));
+            if let Some(away) = away {
+                told(d, &bob, OutboxCarrier::Onion, None, None, &told_at(6, away));
+                let got = learned_on(d, &bob, contact(&[], pinned));
+                assert!(got.routes.is_empty(), "{away}: {:?}", got.routes);
+            }
+        }
     }
 
     /// The s04 unit: a contact restarts its LAN listener on another port and

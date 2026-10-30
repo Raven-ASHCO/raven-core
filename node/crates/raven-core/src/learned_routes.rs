@@ -231,8 +231,11 @@ struct StoredInet {
     confirmed: bool,
 }
 
-/// The per-link LAN part: only frames that came over a LAN link change it.
-/// Past its expiry it is kept for dialling ([`LanPart::kept_part`]).
+/// The LAN part: a LAN link's (its peer IP and the LAN port it was told),
+/// or one the contact told over another link (LAN_ADDR, spec §16:
+/// `told`). Only frames over a LAN link, or ones carrying LAN_ADDR, change
+/// it (§5.3). Past its expiry it is kept for dialling
+/// ([`LanPart::kept_part`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LanPart {
     generation: u64,
@@ -252,6 +255,12 @@ struct LanPart {
     /// same-LAN direct addresses) was learned: the network it belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     local_tag: Option<String>,
+    /// Learned from the contact's own word over another link (LAN_ADDR,
+    /// spec §16), not from a LAN link's peer IP: `lan_ip` and `lan_port`
+    /// are the address it told, dialled only while that is on one of this
+    /// computer's own networks.
+    #[serde(default, skip_serializing_if = "is_false")]
+    told: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -339,6 +348,11 @@ pub struct LearnedLan {
     pub local_direct: Vec<ViaAddr>,
     /// The network it was learned on ([`crate::route_memory::egress_tag`]).
     pub local_tag: Option<String>,
+    /// The contact told this address over another link (LAN_ADDR, spec
+    /// §16): its own word, from its authenticated link. A planner dials it
+    /// only for a verified contact and only while it is on one of this
+    /// computer's own networks ([`crate::netifs::on_our_networks`]).
+    pub told: bool,
     pub received_at_ms: u64,
 }
 
@@ -596,6 +610,7 @@ impl LanPart {
             zone: ip.as_ref().and_then(|ip| ip.zone().map(str::to_owned)),
             local_direct,
             local_tag: self.local_tag.clone(),
+            told: self.told,
             received_at_ms: self.received_at_ms,
         }
     }
@@ -811,19 +826,52 @@ fn merge(
                 .peer_ip
                 .map(|ip| ScopedIp::new(ip, link.peer_zone).to_string())
                 .unwrap_or_default(),
-            local_tag: local_tag.filter(|_| !local_direct.is_empty() || v.lan_port.is_some()),
+            local_tag: local_tag
+                .clone()
+                .filter(|_| !local_direct.is_empty() || v.lan_port.is_some()),
             local_direct,
+            told: false,
         }),
     };
+    // LAN_ADDR (spec §16): the LAN part a verified contact told over another
+    // link, its first address (the caller kept only ones on this computer's
+    // own networks). The address is the contact's word, so it is marked.
+    let mut fresh = fresh;
+    if link.carrier != OutboxCarrier::Lan {
+        fresh.lan = v.lan_addrs.first().map(|e| LanPart {
+            generation: v.generation,
+            received_at_ms: now_ms,
+            expires_at_ms: expires,
+            lan_port: Some(e.addr.port()).filter(|p| *p != 0),
+            lan_ip: e.addr.ip().to_canonical().to_string(),
+            local_direct: Vec::new(),
+            local_tag: local_tag.clone(),
+            told: true,
+        });
+    }
+    // A newer snapshot over another link without one withdraws a told LAN
+    // part (the contact left that network, or hides its IP now); a LAN
+    // link's part only a LAN link changes.
+    let withdraws = |held: &LanPart| {
+        fresh.lan.is_none()
+            && link.carrier != OutboxCarrier::Lan
+            && held.told
+            && v.generation > held.generation
+    };
     // No entry, or an expired one: any frame replaces it. The LAN part an
-    // expired one kept (P3.C1) stays unless this frame came over a LAN link:
-    // only those change the LAN part.
+    // expired one kept (P3.C1) stays unless this frame came over a LAN link
+    // or told a LAN address (§16), the only ones that change the LAN part,
+    // or withdraws a told one.
     let old = match old {
         Some(old) if old.live(now_ms) => old,
         expired => {
+            let kept = expired
+                .as_ref()
+                .and_then(|e| e.lan.clone())
+                .filter(|l| !withdraws(l));
             let mut fresh = fresh;
             if fresh.lan.is_none() {
-                fresh.lan = expired.as_ref().and_then(|e| e.lan.clone());
+                fresh.lan = kept;
             }
             let applied = changed(expired.as_ref(), &fresh).unwrap_or(Applied::Refreshed);
             return (fresh, applied);
@@ -889,11 +937,28 @@ fn merge(
     }
 
     let mut lan_stale = true;
+    if old.lan.as_ref().is_some_and(withdraws) {
+        lan_stale = false;
+        entry.lan = None;
+        wrote = true;
+    }
     if let Some(part) = fresh.lan {
         // A LAN part past its expiry (kept for dialling) is no generation to
         // hold: any LAN frame replaces it.
         match old.lan.as_ref().filter(|held| held.live(now_ms)) {
             Some(held) if v.generation < held.generation => {}
+            // §16: a LAN link's part at least as new as the snapshot that
+            // told an address over another link stays (the link's own peer
+            // IP beats the contact's word); a LAN link's frame replaces a
+            // told part of its generation or older.
+            Some(held) if part.told && !held.told && v.generation == held.generation => {
+                lan_stale = false;
+            }
+            Some(held) if !part.told && held.told => {
+                lan_stale = false;
+                entry.lan = Some(part);
+                wrote = true;
+            }
             // The same snapshot over a link to another of the sender's
             // addresses (its IPv6 one, its Wi-Fi beside its cable) that adds
             // nothing to the held part: that stays as it is (E2 night: a
@@ -980,6 +1045,7 @@ fn same_lan(a: &LanPart, b: &LanPart) -> bool {
         && a.lan_ip == b.lan_ip
         && a.local_direct == b.local_direct
         && a.local_tag == b.local_tag
+        && a.told == b.told
 }
 
 /// [`Applied::Changed`] when what a planner reads differs between `old` (no
@@ -1939,6 +2005,7 @@ mod tests {
                 zone: None,
                 local_direct: Vec::new(),
                 local_tag: None,
+                told: false,
                 received_at_ms: T0,
             }),
         };
@@ -2122,6 +2189,94 @@ mod tests {
         let l = v.lan.unwrap();
         assert_eq!((l.port, l.ip), (Some(7531), Some(ip("192.168.7.20"))));
         assert_eq!(l.local_direct.len(), 1);
+    }
+
+    /// `frame(generation)` with the LAN_ADDR entry `addr` (spec §16).
+    fn told_lan(generation: u64, addr: &str) -> RouteHints {
+        RouteHints {
+            lan_addrs: vec![crate::route_hints::InetDirect {
+                flags: 0,
+                addr: addr.parse().unwrap(),
+            }],
+            ..frame(generation)
+        }
+    }
+
+    /// Route hints spec §16 (field test E3, owner decision 2026-10-30): a
+    /// LAN address a verified contact told over Tor becomes its LAN part,
+    /// marked as told. A LAN link's part of the same generation replaces it
+    /// and is not replaced by it; a newer told one replaces that; a newer
+    /// snapshot over another link without one withdraws a told part (never
+    /// a LAN link's: `a_newer_p2p_frame_keeps_the_lan_part`); an older one
+    /// touches nothing. On disk a LAN link's part carries no `told` key, as
+    /// before.
+    #[test]
+    fn a_lan_address_told_over_tor_is_the_lan_part_until_a_lan_link_says_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (tor, lan) = (link(OutboxCarrier::Onion), link(OutboxCarrier::Lan));
+        let part = |now: u64| view(d, now).lan.expect("a LAN part");
+        let told = told_lan(5, "192.168.7.21:7421");
+        assert_eq!(put(d, &told, &tor, T0), BOTH_C);
+        let l = part(T0);
+        assert_eq!(
+            (l.ip, l.port, l.told, l.local_direct.len()),
+            (Some(ip("192.168.7.21")), Some(7421), true, 0)
+        );
+        let on_disk = |d: &Path| -> serde_json::Value {
+            serde_json::from_slice::<serde_json::Value>(&read(d)).unwrap()[0]["lan"]["told"].clone()
+        };
+        assert_eq!(on_disk(d), json!(true));
+        assert_eq!(put(d, &told, &tor, T0 + MIN), Applied::Unchanged);
+        // The LAN link's own part (its peer IP, its port) replaces it.
+        assert_eq!(put(d, &frame(5), &lan, T0 + 2 * MIN), LAN);
+        let l = part(T0 + 2 * MIN);
+        assert_eq!(
+            (l.ip, l.port, l.told),
+            (Some(ip("192.168.7.20")), Some(7531), false)
+        );
+        assert_eq!(on_disk(d), serde_json::Value::Null, "no `told` key");
+        // The same snapshot told over Tor again: the LAN link's part stays.
+        assert_eq!(put(d, &told, &tor, T0 + 3 * MIN), Applied::Unchanged);
+        assert!(!part(T0 + 3 * MIN).told);
+        // A newer one (the contact's listener moved) replaces it.
+        assert_eq!(
+            put(d, &told_lan(6, "192.168.7.21:7422"), &tor, T0 + 4 * MIN),
+            LAN
+        );
+        let l = part(T0 + 4 * MIN);
+        assert_eq!((l.port, l.told), (Some(7422), true));
+        // An older one touches nothing.
+        assert_eq!(
+            put(d, &told_lan(4, "192.168.7.22:7423"), &tor, T0 + 5 * MIN),
+            Applied::Stale
+        );
+        assert_eq!(part(T0 + 5 * MIN).port, Some(7422));
+        // A newer snapshot without one (the contact hides its IP now, or
+        // left this network) withdraws it.
+        assert_eq!(put(d, &frame(7), &tor, T0 + 6 * MIN), LAN);
+        assert_eq!(view(d, T0 + 6 * MIN).lan, None);
+        // Never on a LAN link: there the link's peer IP is the LAN part's.
+        let on_lan = validate(&told_lan(8, "192.168.7.21:7421"), &lan);
+        assert!(on_lan.lan_addrs.is_empty());
+    }
+
+    /// §16: a told LAN part kept past its expiry (P3.C1) is withdrawn by a
+    /// newer snapshot without one too, and kept by one that has it.
+    #[test]
+    fn an_expired_told_lan_part_is_withdrawn_by_a_newer_snapshot_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let tor = link(OutboxCarrier::Onion);
+        put(d, &told_lan(5, "192.168.7.21:7421"), &tor, T0);
+        let later = T0 + TTL_MS + MIN;
+        let kept = learned_with_lan(d, &sender(), later).1.expect("kept");
+        assert!(kept.told);
+        put(d, &told_lan(6, "192.168.7.21:7421"), &tor, later);
+        assert!(learned_with_lan(d, &sender(), later).1.unwrap().told);
+        let much_later = later + TTL_MS + MIN;
+        put(d, &frame(7), &tor, much_later);
+        assert_eq!(learned_with_lan(d, &sender(), much_later).1, None);
     }
 
     #[test]
@@ -2516,6 +2671,7 @@ mod tests {
                 zone: None,
                 local_direct: Vec::new(),
                 local_tag: tag,
+                told: false,
                 received_at_ms: T0,
             }
         );
