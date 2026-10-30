@@ -2289,7 +2289,7 @@ mod tests {
                 "│         └──────────────────────────────────────────────────────────┘         │",
                 "│                    ││                                                        │",
                 "│                    ││                                                        │",
-                "│                    ││ You - just now  | Sending...                           │",
+                "│                    ││ You - just now  | Connecting...                        │",
             ],
         );
         assert!(moving(&app).is_some(), "its spinner turns");
@@ -3343,7 +3343,7 @@ mod tests {
                 "│         └──────────────────────────────────────────────────────────┘         │",
                 "│                    ││                                                        │",
                 "│                    ││                                                        │",
-                "│                    ││ You - just now  | Sending...                           │",
+                "│                    ││ You - just now  | Connecting...                        │",
             ],
         );
         assert!(moving(&app).is_some(), "its spinner turns");

@@ -3415,13 +3415,15 @@ mod tests {
         send_hi(app);
     }
 
+    /// Its send runs and its row is written: the message itself goes.
     fn sending(app: &mut App) {
         send_hi(app);
+        queued_row(app);
     }
 
+    /// Its send runs, no row yet: still reaching the friend.
     fn connecting(app: &mut App) {
         send_hi(app);
-        queued_row(app);
     }
 
     /// raven-node lists it, so its deadline is known (a day off).
@@ -3563,7 +3565,7 @@ mod tests {
             (
                 "waiting to send",
                 &[
-                    "You - just now  | Sending...",
+                    "You - just now  | Connecting...",
                     "  first",
                     "  ~ Waiting to send",
                 ],
@@ -3740,7 +3742,7 @@ mod tests {
         let look = testkit::simple_mono();
         // Delivered types itself, a character every 45 ms (Calm), the sent
         // mark for the first two.
-        let mut app = in_state(look, "sending");
+        let mut app = in_state(look, "connecting");
         delivered_now(&mut app);
         let t = app.now();
         let frames: Vec<String> = [0, 45, 90, 135, 200, 360, 405, 1_000]
@@ -3773,7 +3775,7 @@ mod tests {
             length: live::ROUTE_TIME
         }));
         // Not sent: the mark off and on, twice, in a second; then still.
-        let mut app = in_state(look, "sending");
+        let mut app = in_state(look, "connecting");
         let refused = testkit::not_sent_outcome(1);
         testkit::send(&mut app, testkit::sent(1, SendResult::Failed(refused)));
         let t = app.now();
@@ -3797,7 +3799,7 @@ mod tests {
             motion: Motion::Reduced,
             ..look
         };
-        let mut app = in_state(reduced, "sending");
+        let mut app = in_state(reduced, "connecting");
         delivered_now(&mut app);
         assert_eq!(
             newest_message(&app, app.now())[0],
@@ -3828,7 +3830,7 @@ mod tests {
         );
     }
 
-    /// The send of `in_state(.., "sending")` answered: delivered.
+    /// The send of `in_state(.., "connecting")` answered: delivered.
     fn delivered_now(app: &mut App) {
         let to = testkit::delivered_to("192.168.1.11:7420");
         testkit::send(app, testkit::sent(1, to));
@@ -4182,7 +4184,7 @@ mod tests {
             theme: theme::Theme::calm(&theme::DARK, theme::Depth::True),
             ..testkit::simple_mono()
         };
-        let mut app = in_state(look, "sending");
+        let mut app = in_state(look, "connecting");
         delivered_now(&mut app);
         let t = app.now();
         let cell = |at: Instant, text: &str| {
@@ -4526,7 +4528,7 @@ mod tests {
     #[test]
     fn a_message_travels_out_and_its_receipt_back() {
         let still = format!("You *{}* Friend 1", "-".repeat(26));
-        let mut app = in_state(testkit::simple_mono(), "sending");
+        let mut app = in_state(testkit::simple_mono(), "connecting");
         let t = app.now();
         // While the send runs, '>' goes out: start, middle, end, around.
         let out: Vec<String> = [0, 400, 750, 800]
@@ -4569,7 +4571,7 @@ mod tests {
             motion: Motion::Reduced,
             ..testkit::simple_mono()
         };
-        let mut app = in_state(reduced, "sending");
+        let mut app = in_state(reduced, "connecting");
         let t = app.now();
         assert_eq!(route_at(&app, t + MS(400))[0], still);
         delivered_now(&mut app);
@@ -4735,7 +4737,7 @@ mod tests {
                 .trim_end()
                 .to_owned()
         };
-        let mut app = in_state_at(testkit::simple_mono(), (120, 30), "sending");
+        let mut app = in_state_at(testkit::simple_mono(), (120, 30), "connecting");
         assert_eq!(ticker(&app, app.now()), "Sending to Friend 1...");
         testkit::tick(&mut app, MS(1_400));
         delivered_now(&mut app);
@@ -4758,7 +4760,7 @@ mod tests {
         );
         assert_eq!(ticker(&app, app.now()), "New message from Friend 1");
         // At 80 columns the activity line stays and the words get shorter.
-        let mut app = in_state_at(testkit::simple_mono(), (80, 24), "sending");
+        let mut app = in_state_at(testkit::simple_mono(), (80, 24), "connecting");
         testkit::tick(&mut app, MS(1_400));
         delivered_now(&mut app);
         assert_eq!(

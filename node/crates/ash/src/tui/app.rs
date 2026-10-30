@@ -12965,20 +12965,22 @@ mod tests {
             Some(""),
             "the draft went"
         );
-        assert_eq!(ticks(&app), [Tick::Sending]);
+        // Connecting first, then Sending once its row is written (field
+        // test E3: the other way round read wrong).
+        assert_eq!(ticks(&app), [Tick::Connecting]);
         assert!(
             app.jobs_in_flight().holds_classic(),
             "QUIT and C wait for it"
         );
         // A second one waits behind it.
         let (two, _) = testkit::type_and_send(&mut app, "two").expect("a send");
-        assert_eq!(ticks(&app), [Tick::Sending, Tick::WaitingToSend]);
+        assert_eq!(ticks(&app), [Tick::Connecting, Tick::WaitingToSend]);
         // The first was delivered; the second's job runs now.
         testkit::send(
             &mut app,
             testkit::sent(one, testkit::delivered_to("192.168.1.11:7420")),
         );
-        assert_eq!(ticks(&app), [Tick::Delivered, Tick::Sending]);
+        assert_eq!(ticks(&app), [Tick::Delivered, Tick::Connecting]);
         // Their rows come: the second's is written while it dials.
         let rows = [
             (1, testkit::row(1, true, "delivered", 0, "one")),
@@ -12990,7 +12992,7 @@ mod tests {
             2,
             "each send has its row now"
         );
-        assert_eq!(ticks(&app), [Tick::Delivered, Tick::Connecting]);
+        assert_eq!(ticks(&app), [Tick::Delivered, Tick::Sending]);
         // Its friend did not answer: queued, and raven-node keeps trying. The
         // poller lists that friend's outbox soon, and often while it waits.
         let cmds = testkit::send(

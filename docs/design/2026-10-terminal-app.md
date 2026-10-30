@@ -263,7 +263,7 @@ dial; never said when the interfaces can't be read.
 
 | Fancy | Simple | Label |
 |---|---|---|
-| spinner | spinner | `Waiting to send` (behind another send) · `Sending…` · `Connecting…` |
+| spinner | spinner | `Waiting to send` (behind another send) · `Connecting…` (reaching the friend) · `Sending…` (its row is written, the message goes) |
 | `◷` | `~` | `Waiting: Raven keeps trying (next try in …)` · `Waiting: goes out with your next message` · `Waiting: not being retried (Raven's background program isn't running)` · `On hold: <reason>` |
 | `✓` | `v` | `Sent, not confirmed yet`: it left this computer; their Raven hasn't confirmed it |
 | `✓✓` | `vv` | `Delivered`: their Raven confirmed it. Never taken back |

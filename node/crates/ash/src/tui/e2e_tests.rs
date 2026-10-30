@@ -487,12 +487,12 @@ fn two_profiles_add_verify_and_message_each_other() {
     bob.press(KeyCode::Esc);
     assert_eq!(bob.app.screen(), &Screen::Home);
 
-    // 6. Alice opens the chat and sends: Sending, then Delivered.
+    // 6. Alice opens the chat and sends: Connecting, then Delivered.
     alice.press(KeyCode::Enter);
     assert_eq!(alice.app.open_friend(), Some(b_me.pub_hex.as_str()));
     let cmds = alice.compose("hello bob");
     let bob_key = b_me.pub_hex.as_str();
-    assert_eq!(alice.tick(bob_key, "hello bob").0, Tick::Sending);
+    assert_eq!(alice.tick(bob_key, "hello bob").0, Tick::Connecting);
     alice.carry_out(cmds);
     assert_eq!(alice.tick(bob_key, "hello bob").0, Tick::Delivered);
     let sent = &alice.app.sends()[0];

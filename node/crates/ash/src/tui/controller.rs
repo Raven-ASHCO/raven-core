@@ -3094,7 +3094,7 @@ mod tests {
             }
             let cmds = testkit::press(&mut app, KeyCode::Enter);
             assert!(
-                screen(&app).contains("You - just now | Sending..."),
+                screen(&app).contains("You - just now | Connecting..."),
                 "{}",
                 screen(&app)
             );

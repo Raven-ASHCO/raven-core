@@ -316,9 +316,10 @@ pub(super) enum Tick {
         code: String,
     },
     Waiting(Waiting),
-    /// Its row is written and its send is dialling.
+    /// Its send runs and is still reaching the friend: no row yet.
     Connecting,
-    /// Its send runs, no row yet.
+    /// Its row is written and its send is dialling: the message itself is
+    /// on its way.
     Sending,
     /// Behind another send.
     WaitingToSend,
@@ -345,9 +346,11 @@ pub(super) enum Waiting {
 /// 2. Ended: the history says failed, expired or cancelled;
 /// 3. Sent: the outbox lists it as sent, or the send said so;
 /// 4. On hold: the outbox holds it;
-/// 5. while its own send runs, Connecting once its row is written (the row
-///    says queued then: the send is working on it), else Sending; behind
-///    another send, Waiting to send;
+/// 5. while its own send runs, Connecting until its row is written, then
+///    Sending (the row says queued then: the send is working on it); behind
+///    another send, Waiting to send. Field test E3: the two came the other
+///    way round ("Sending…" for half a second, then "Connecting…" while the
+///    message itself went);
 /// 6. Waiting: the outbox or the history says queued, or the send did;
 /// 7. Not sent: the send said so and no row is its own.
 ///
@@ -374,8 +377,8 @@ pub(super) fn tick(s: &Sources) -> Option<Tick> {
         });
     }
     match s.job {
-        JobState::Running if s.history.is_some() => return Some(Tick::Connecting),
-        JobState::Running => return Some(Tick::Sending),
+        JobState::Running if s.history.is_some() => return Some(Tick::Sending),
+        JobState::Running => return Some(Tick::Connecting),
         JobState::Queued => return Some(Tick::WaitingToSend),
         JobState::Done => {}
     }
@@ -647,9 +650,9 @@ mod tests {
             // Its own send at work: the row it wrote says queued meanwhile.
             (
                 sources(Some("queued"), Some(&outbox_queued), None, Running),
-                Some(Tick::Connecting),
+                Some(Tick::Sending),
             ),
-            (sources(None, None, None, Running), Some(Tick::Sending)),
+            (sources(None, None, None, Running), Some(Tick::Connecting)),
             (sources(None, None, None, Queued), Some(Tick::WaitingToSend)),
             // Waiting, from any of three sources.
             (
