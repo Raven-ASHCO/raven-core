@@ -21,6 +21,7 @@ mod events;
 mod explain;
 mod ffi;
 mod groups;
+mod handoff;
 mod identity;
 mod messages;
 mod network;

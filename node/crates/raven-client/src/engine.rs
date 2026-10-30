@@ -206,6 +206,7 @@ impl Inner {
             "messages.delete" => |me, args| me.messages_delete(args),
             "messages.details" => |me, args| me.messages_details(args),
             "messages.mark_read" => |me, args| me.messages_mark_read(args),
+            "messages.handoff" => |me, args| me.messages_handoff(args),
             "node.status" => |me, _| me.node_status_op(),
             "node.start" => |me, _| me.node_start(),
             "node.stop" => |me, _| me.node_stop(),

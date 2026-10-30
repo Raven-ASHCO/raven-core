@@ -845,6 +845,14 @@ pub fn outbox_retry_kick(data_dir: &Path, peer_hex: &str) -> bool {
     super::pair_init_lab::outbox_retry_kick(data_dir, Some(&peer))
 }
 
+/// `raven outbox hand-off` for every friend (pair_init_lab.rs
+/// `outbox_hand_off_kick`): raven-node tries what waits now and leaves
+/// sealed copies of what it could not deliver with a friend at once,
+/// without the minute it otherwise waits. False when no node takes it.
+pub fn outbox_hand_off(data_dir: &Path) -> bool {
+    super::pair_init_lab::outbox_hand_off_kick(data_dir, None)
+}
+
 /// Every friend raven-node's fetch pass asks for this profile's mail
 /// (raven-core's `custody_client::fetch_targets`): friends listed by hand
 /// for a contact (`contact set-addr --custodian`), the mail friends
