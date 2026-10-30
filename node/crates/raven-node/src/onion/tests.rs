@@ -1263,7 +1263,7 @@ async fn the_arti_patch_tells_the_helper_instead_of_exiting() {
 /// progress bar reads it from the engine's `network.status`).
 #[test]
 fn the_status_line_needs_no_lab_switch() {
-    assert!(raven_core::ONION_PRODUCTION_ENABLED);
+    const { assert!(raven_core::ONION_PRODUCTION_ENABLED) };
     if raven_core::onion_live_enabled() {
         let line = status_text().expect("the gate is open: Status has the Tor line");
         assert!(line.starts_with("Tor: "), "{line}");
