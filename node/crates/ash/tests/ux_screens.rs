@@ -2138,8 +2138,12 @@ fn hide_ip_commands_say_what_they_do_and_status_shows_the_row() {
     assert_eq!(code(&o), 1, "{}", text(&o.stdout));
 }
 
+/// Field test E3 (major): `raven status` printed the profile's 10
+/// security words, and status is what people paste into bug reports. The
+/// words belong to the verify flow: `raven whoami --words` shows them on
+/// request; `whoami`, `status`, `doctor` and `whoami --json` never do.
 #[test]
-fn whoami_shows_the_security_words_and_keeps_the_fingerprint_and_card() {
+fn whoami_shows_the_security_words_only_on_request_and_keeps_the_fingerprint_and_card() {
     let dir = short_dir();
     plant_identity_seed(dir.path(), 0x42);
     let bob = Identity::from_seed(&[0x42; 32]);
@@ -2149,16 +2153,35 @@ fn whoami_shows_the_security_words_and_keeps_the_fingerprint_and_card() {
     let o = ash_out(dir.path(), &["whoami"], "");
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
     let out = text(&o.stdout);
-    // The words line sits right under the fingerprint line, which is as it was.
     let want = format!(
-        "  address       {}\n  fingerprint   {fp}\n  words         {}\n  pub_hex       {}\n",
+        "  address       {}\n  fingerprint   {fp}\n  pub_hex       {}\n",
         bob.address(),
-        words.join(" "),
         pub_hex(&bob)
     );
     assert!(out.starts_with(&want), "{out}");
+    for args in [
+        &["whoami"][..],
+        &["status"],
+        &["doctor"],
+        &["whoami", "--json"],
+    ] {
+        let o = ash_out(dir.path(), args, "");
+        let all = format!("{}{}", text(&o.stdout), text(&o.stderr));
+        // One word may be an ordinary English word; the ten in a row are
+        // the leak.
+        assert!(!all.contains(&words.join(" ")), "{args:?}: {all}");
+        assert!(!all.contains("security_words"), "{args:?}: {all}");
+    }
+    let o = ash_out(dir.path(), &["whoami", "--words"], "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(
+        out.starts_with(&format!("  words         {}\n", words.join(" "))),
+        "{out}"
+    );
+    assert!(out.contains("Don't send them with your invite"), "{out}");
 
-    let o = ash_out(dir.path(), &["whoami", "--json"], "");
+    let o = ash_out(dir.path(), &["whoami", "--json", "--words"], "");
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
     let json: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(json["fingerprint"], fp.as_str());
@@ -2186,8 +2209,19 @@ fn a_pasted_whoami_with_its_words_line_adds_the_friend_under_the_right_name() {
     // Bob's whole `ash whoami` output, pasted into Alice's guided add.
     let bob_dir = short_dir();
     plant_identity_seed(bob_dir.path(), 0x42);
+    // An older Raven's whoami block had a words line: pasted whole, it is
+    // still skipped as a leftover.
     let o = ash_out(bob_dir.path(), &["whoami"], "");
-    let whoami = text(&o.stdout);
+    let words_line = text(&ash_out(bob_dir.path(), &["whoami", "--words"], "").stdout)
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+    let mut whoami = text(&o.stdout);
+    whoami.insert_str(
+        whoami.find("  pub_hex").expect("the pub_hex line"),
+        &format!("{words_line}\n"),
+    );
     assert!(whoami.contains("  words  "), "{whoami}");
 
     let dir = short_dir();

@@ -33,8 +33,10 @@ documentation.)
 
 - **The terminal app** (`raven` with no arguments): the first-run screen 'Your security words',
   and the verify screen, under 'Your words: read these to *name*'.
-- **`raven whoami`**: the `words` line, under `fingerprint`. `raven whoami --json` has them as
-  `security_words`.
+- **`raven whoami --words`**: the `words` line. `raven whoami --json --words` has them as
+  `security_words`. Plain `raven whoami`, `raven status` and `raven doctor` never show them: that
+  output gets pasted into messages and bug reports, and words that travel with the key prove
+  nothing.
 - **In a chat** (`raven send --contact <name> --chat`): `/verify` shows your words and the command
   that checks your friend's.
 
@@ -45,8 +47,8 @@ on that path could replace the key with their own. Your friend's voice, or your 
 you, is a second path that person does not control. If the words your friend reads match the key
 you saved, it is really their key.
 
-Words that arrived in the same message as the invite (a pasted `whoami` block has a `words` line)
-came with the key, so they prove nothing. Only words you hear from your friend count.
+Words that arrived in the same message as the invite (a pasted `whoami` block of an older Raven had
+a `words` line) came with the key, so they prove nothing. Only words you hear from your friend count.
 
 ## How to compare
 
@@ -122,8 +124,8 @@ reasons:
 
 What to do:
 
-- Ask your friend to run `raven whoami` and read the `words` line again, slowly, from their own
-  screen.
+- Ask your friend to run `raven whoami --words` and read the `words` line again, slowly, from their
+  own screen.
 - If the words still differ, get a fresh invite from them by another way (in person is best), and
   add them again: remove the old entry first (`X` on their page, or `raven contact remove`).
 - Never "fix" a mismatch with words copied from a message.

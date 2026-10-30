@@ -385,12 +385,19 @@ struct Cli {
 enum Commands {
     /// Create local identity (prints address + pub hex + fingerprint only).
     Init,
-    /// Show public identity bits for data dir (never a seed).
+    /// Show public identity bits for data dir (never a seed). Your security
+    /// words only with --words.
     Whoami {
         /// Machine-readable public card only (`address` / `fingerprint` / `pub_hex`).
         /// NON-RELEASE O6 M1 bind helper. No private key fields.
         #[arg(long, default_value_t = false, conflicts_with = "card")]
         json: bool,
+        /// Show your 10 security words, to read aloud to a friend who checks
+        /// your key (`raven contact verify` on their side). They are never in
+        /// the default output, `raven status` or anything else you might
+        /// paste: words that travel with your invite prove nothing.
+        #[arg(long, default_value_t = false, conflicts_with_all = ["card", "peer_id"])]
+        words: bool,
         /// Print one copy-pasteable contact card line (address, key, fingerprint
         /// and the addresses you pass). Your friend imports it with
         /// `raven contact add --card '<line>'`.
@@ -2315,13 +2322,18 @@ fn require_identity_before_state(data_dir: &Path, what: &str) -> Result<(), Stri
     }
 }
 
+/// This profile's public identity lines (`raven whoami`, `raven status`,
+/// `raven doctor`, the first run, the tutorial): address, the old-style code,
+/// key and invite. Never the security words (field test E3: `raven status`
+/// printed them, and status is what people paste into bug reports): they
+/// belong to the verify flow, read aloud, and show only on request
+/// ([`print_own_words`], `raven whoami --words`).
 fn print_public_identity(id: &Identity) {
     kv("address", &id.address());
     kv(
         "fingerprint",
         &device_fingerprint_v1(&id.public_key_bytes()),
     );
-    kv("words", &words_text(&id.public_key_bytes()));
     kv("pub_hex", &hex::encode(id.public_key_bytes()));
     println!(
         "{0}invite{1}        {2}raven:{3}:{4}{5}",
@@ -2334,18 +2346,33 @@ fn print_public_identity(id: &Identity) {
     );
 }
 
+/// `raven whoami --words`: this profile's security words, and how to use
+/// them (read aloud, never pasted with the invite).
+fn print_own_words(id: &Identity) {
+    kv("words", &words_text(&id.public_key_bytes()));
+    println!(
+        "{C_DIM}Read all 10 to your friend on a call or in person; they type them in \
+         `raven contact verify`. Don't send them with your invite: words that come with the key \
+         prove nothing.{C_RESET}"
+    );
+}
+
 /// Public whoami card for O6 M1 same-RVN1 bind (ADR 0004 D3).
 /// Public material only — MUST NOT include seed / private_key / plaintext.
-fn public_whoami_card(id: &Identity) -> serde_json::Value {
-    serde_json::json!({
+/// The security words only when asked for (`--json --words`).
+fn public_whoami_card(id: &Identity, words: bool) -> serde_json::Value {
+    let mut card = serde_json::json!({
         "address": id.address(),
         "fingerprint": device_fingerprint_v1(&id.public_key_bytes()),
         "pub_hex": hex::encode(id.public_key_bytes()),
-        "security_words": {
+    });
+    if words {
+        card["security_words"] = serde_json::json!({
             "version": 1,
             "words": security_words::words_v1(&id.public_key_bytes()),
-        },
-    })
+        });
+    }
+    card
 }
 
 /// A key's security words as their canonical text: the 10 words in lower
@@ -15976,6 +16003,7 @@ pub fn run() {
         }
         Some(Commands::Whoami {
             json,
+            words,
             card,
             inet,
             lan,
@@ -15996,7 +16024,9 @@ pub fn run() {
                         compat,
                     ));
                 } else if json {
-                    println!("{}", public_whoami_card(&id));
+                    println!("{}", public_whoami_card(&id, words));
+                } else if words {
+                    print_own_words(&id);
                 } else {
                     print_public_identity(&id);
                 }
@@ -18273,7 +18303,7 @@ mod tests {
     #[test]
     fn public_whoami_card_has_no_private_key_material() {
         let id = Identity::from_seed(&[0x11; 32]);
-        let card = public_whoami_card(&id);
+        let card = public_whoami_card(&id, true);
         let raw = card.to_string();
         let lower = raw.to_ascii_lowercase();
         for bad in ["seed", "private_key", "plaintext", "recovery"] {
@@ -18300,13 +18330,17 @@ mod tests {
         assert_eq!(words.join(" "), words_text(&id.public_key_bytes()));
         assert_eq!(words.len(), security_words::WORDS);
         assert_eq!(card.as_object().map(|o| o.len()), Some(4));
+        // Field test E3: only when asked for (`--json --words`).
+        let plain = public_whoami_card(&id, false);
+        assert!(plain.get("security_words").is_none(), "{plain}");
+        assert_eq!(plain.as_object().map(|o| o.len()), Some(3));
     }
 
     #[test]
     fn public_whoami_card_is_user_identity_pin_not_device_ed_pub() {
         let user = Identity::from_seed(&[0x11; 32]);
         let device = Identity::from_seed(&[0x22; 32]);
-        let card = public_whoami_card(&user);
+        let card = public_whoami_card(&user, false);
         let obj = card.as_object().expect("object");
         assert_eq!(card["address"].as_str().unwrap(), user.address());
         assert_eq!(
