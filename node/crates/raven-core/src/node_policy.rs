@@ -2455,6 +2455,40 @@ mod tests {
         assert_eq!((closed.custody_use, closed.custody_home.len()), (None, 0));
     }
 
+    /// Field test E3: win-c's custody consents read as off under 0.1.0. A
+    /// node_policy.json as the E1 builds wrote it (the three-machine test's
+    /// 2026-10-25 code, every field it had, consents on) loads unchanged in
+    /// this build: the consents stay on, and a save keeps them. (win-c's had
+    /// been turned off by the kit's own S5A clean-up step, `raven node
+    /// custody off` and `raven custody use off`, on 2026-10-28.)
+    #[test]
+    fn an_e1_policy_keeps_its_custody_consents() {
+        let dir = tempdir().unwrap();
+        let dd = dir.path();
+        let e1 = r#"{
+          "bridge": true, "store": true, "relay": false, "endpoint": true,
+          "auto_policy": false, "internet_listen": "0.0.0.0:17422",
+          "p2p_listen": "17423", "p2p_relays": [], "p2p_proxy": "",
+          "upnp": false, "v6_pinhole": false, "peer_rotation": false,
+          "custody": true, "custody_handoff": true, "custody_use": true,
+          "custody_home": [], "hide_ip": false, "relay_offer": true,
+          "relay_auto": true, "relay_port": 17427, "relay_also_443": false,
+          "relay_external": [], "lan_off": false, "lan_verified_only": false,
+          "nearby": false, "nearby_background_mail": false, "learning": false,
+          "security_auto_rekey": false, "security_silent_to_strangers": "off",
+          "auto_lock_on_sleep": false, "update_carry_for_friends": false,
+          "update_serve": false, "lan_listen_port": 17420, "send_hold": []
+        }"#;
+        std::fs::write(policy_path(dd), e1).unwrap();
+        let loaded = try_load_policy(dd).expect("an E1 policy reads");
+        assert!(loaded.custody && loaded.custody_handoff);
+        assert_eq!(loaded.custody_use, Some(true));
+        assert_eq!(load_policy(dd), loaded, "not the fail-closed policy");
+        save_policy(dd, &loaded).unwrap();
+        let again = try_load_policy(dd).unwrap();
+        assert_eq!(again, loaded, "a save keeps every consent");
+    }
+
     /// Phase 5 P5.17: multi-hop custody consent is off unless set, omitted
     /// from the file while off (older files and readers see the same keys),
     /// round-trips without touching the other settings, and an unreadable
