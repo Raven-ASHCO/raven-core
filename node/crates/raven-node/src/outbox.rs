@@ -2429,46 +2429,36 @@ impl PeerReport {
         self
     }
 
-    /// `raven-node outbox: delivered N (p2p_dial, <path>)`, one per path,
-    /// for the objects a p2p link delivered on this attempt, and
-    /// `raven-node outbox: delivered N (nearby_dial)` for a nearby pipe's
-    /// (counts only, no path token; LAN and Internet deliveries log
-    /// nothing, as before).
-    fn p2p_delivered_lines(&self) -> Vec<String> {
-        let mut by_path: BTreeMap<&'static str, usize> = BTreeMap::new();
-        let mut nearby = 0usize;
+    /// `raven-node outbox: delivered N (<carrier>[, <path>]); contact #ab12`,
+    /// one per carrier and path, for the objects this attempt delivered to
+    /// `peer`: counts, the carrier and a p2p link's path only, and the
+    /// contact's short tag of this run (never its key or an address). Field
+    /// test E3 round 2: a delivery over Tor or the LAN logged nothing, so
+    /// only the route hint lines showed that a message went.
+    fn delivered_lines(&self, peer: &[u8; 32]) -> Vec<String> {
+        let mut by_way: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
         for (digest, outcome) in &self.outcomes {
-            match outcome {
-                Outcome::Delivered {
-                    carrier: Some(OutboxCarrier::P2p),
-                } => {
-                    let path = self.paths.get(digest).map_or("", |p| p.label());
-                    *by_path.entry(path).or_default() += 1;
-                }
-                Outcome::Delivered {
-                    carrier: Some(OutboxCarrier::Nearby),
-                } => nearby += 1,
-                _ => {}
-            }
+            let Outcome::Delivered { carrier } = outcome else {
+                continue;
+            };
+            let label = carrier.map_or("delivered", |c| c.label());
+            let path = match carrier {
+                Some(OutboxCarrier::P2p) => self.paths.get(digest).map_or("", |p| p.label()),
+                _ => "",
+            };
+            *by_way.entry((label, path)).or_default() += 1;
         }
-        let mut lines: Vec<String> = by_path
+        let tag = netutil::link_tag(peer);
+        by_way
             .into_iter()
-            .map(|(path, n)| {
-                let carrier = OutboxCarrier::P2p.label();
+            .map(|((carrier, path), n)| {
                 if path.is_empty() {
-                    format!("raven-node outbox: delivered {n} ({carrier})")
+                    format!("raven-node outbox: delivered {n} ({carrier}); contact {tag}")
                 } else {
-                    format!("raven-node outbox: delivered {n} ({carrier}, {path})")
+                    format!("raven-node outbox: delivered {n} ({carrier}, {path}); contact {tag}")
                 }
             })
-            .collect();
-        if nearby > 0 {
-            lines.push(format!(
-                "raven-node outbox: delivered {nearby} ({})",
-                OutboxCarrier::Nearby.label()
-            ));
-        }
-        lines
+            .collect()
     }
 }
 
@@ -6628,7 +6618,7 @@ async fn run_loop(ctx: Arc<AttemptCtx>) -> Result<(), String> {
                         ..PeerReport::default()
                     }
                 });
-                let delivered = report.p2p_delivered_lines();
+                let delivered = report.delivered_lines(&peer);
                 let ob = outbox();
                 let woke = lock(&ob.inner).apply(&peer, report, Instant::now(), now_ms());
                 for line in delivered {
@@ -14112,7 +14102,7 @@ mod tests {
             let mut work = inner.take_due(Instant::now() + RETRY_MAX * 2);
             let work = work.remove(0);
             let report = attempt_peer(&ctx, &work.peer, &work.entries, &work.acks);
-            let lines = report.p2p_delivered_lines();
+            let lines = report.delivered_lines(&work.peer);
             let seen = (report.outcomes.clone(), report.paths.clone());
             inner.apply(&work.peer, report, Instant::now(), now_ms());
             (seen, lines)
@@ -14138,9 +14128,12 @@ mod tests {
             }
         );
         assert_eq!(paths.get(&digest), Some(&DeliveryPath::Relayed));
+        let tag = netutil::link_tag(&rig.bob_pub);
         assert_eq!(
             lines,
-            ["raven-node outbox: delivered 1 (p2p_dial, relayed)"]
+            [format!(
+                "raven-node outbox: delivered 1 (p2p_dial, relayed); contact {tag}"
+            )]
         );
         assert_eq!(rig.dialled(), [l.clone(), p.clone()]);
         let shown = item(&inner, &first);
@@ -14160,7 +14153,16 @@ mod tests {
                 carrier: Some(OutboxCarrier::Lan)
             })
         );
-        assert!(paths.is_empty() && lines.is_empty(), "{paths:?} {lines:?}");
+        // A LAN delivery records no path, and its line names no address
+        // (field test E3 round 2: it logged nothing at all).
+        assert!(paths.is_empty(), "{paths:?}");
+        assert_eq!(
+            lines,
+            [format!(
+                "raven-node outbox: delivered 1 (lan_dial); contact {tag}"
+            )]
+        );
+        assert!(!lines[0].contains("192.168"), "{lines:?}");
         let shown = item(&inner, &second);
         assert_eq!(
             (shown.carrier.as_str(), shown.path.as_str()),
@@ -14297,8 +14299,11 @@ mod tests {
             }
         );
         assert_eq!(
-            report.p2p_delivered_lines(),
-            ["raven-node outbox: delivered 1 (nearby_dial)"]
+            report.delivered_lines(&rig.bob_pub),
+            [format!(
+                "raven-node outbox: delivered 1 (nearby_dial); contact {}",
+                netutil::link_tag(&rig.bob_pub)
+            )]
         );
         assert_eq!(rig.dialled()[6..], [n]);
         assert_eq!(rig.bob_inbox(), ["nearby"]);
