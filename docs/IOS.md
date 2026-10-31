@@ -119,7 +119,9 @@ signal: its pid is the app's own).
    `raven_call`. When the app says Raven is asleep (Lock v2, its gate
    live), call `lock.now` first: with the node not started yet the lock is
    held in the process, so nothing below loads a key and `node.start`
-   starts the node locked (`lock.unlock` after Face ID opens it). Then
+   starts the node locked. `lock.unlock` after Face ID opens it; with the
+   node not started yet (the app starts none while asleep), the unlock
+   starts it first. Then
    `profile.state`, and `identity.create` for a new profile; `node.start`
    (or `node.resume` after a pause). Start an
    `NWPathMonitor` and call `network.path` with the current kind of network

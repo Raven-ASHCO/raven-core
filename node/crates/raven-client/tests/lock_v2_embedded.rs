@@ -2,7 +2,8 @@
 //! while it says asleep. `lock.now` with the embedded node stopped holds
 //! the lock in the process: the engine loads no key and queues no event,
 //! and the next `node.start` (or a `node.resume` after a pause) starts the
-//! node locked, a keychain profile too; `lock.unlock` then opens both. Lab
+//! node locked, a keychain profile too; `lock.unlock` then opens both. An
+//! unlock with the node still stopped or paused starts it first. Lab
 //! switches for this test binary only: `RAVEN_LAB_TEST_A=1` and
 //! `RAVEN_LAB_LOCAL_PROTECTION=1`. The node listens on 127.0.0.1, any free
 //! port; there is no raven-node program to find.
@@ -37,13 +38,19 @@ fn a_lock_while_the_embedded_node_is_stopped_starts_it_locked() {
     let poll = common::ok(&c, "events.poll", json!({"after_seq": 0}));
     assert_eq!(poll["locked"], true, "{poll}");
     assert_eq!(common::err(&c, "identity.me", json!({})), "PROFILE_LOCKED");
-    // No node to unlock yet: it says to start Raven first.
-    assert_eq!(
-        common::err(&c, "lock.unlock", json!({})),
-        "NODE_NOT_RUNNING"
-    );
+    // The wake after Face ID, with no node yet (the iPhone app starts none
+    // while asleep): the unlock starts the node locked, then opens it.
+    let opened = common::ok(&c, "lock.unlock", json!({}));
+    assert_eq!(opened["locked"], false, "{opened}");
+    let st = common::ok(&c, "node.status", json!({}));
+    assert_eq!(st["running"], true, "{st}");
+    assert_eq!(st["embedded"], true, "{st}");
+    assert!(common::ok(&c, "identity.me", json!({}))["address"].is_string());
 
-    // The start finds the lock: the node runs locked.
+    // Stopped and locked again: the start finds the lock, the node runs
+    // locked.
+    common::ok(&c, "node.stop", json!({}));
+    assert_eq!(common::ok(&c, "lock.now", json!({}))["locked"], true);
     let st = common::ok(&c, "node.start", json!({}));
     assert_eq!(st["running"], true, "{st}");
     assert_eq!(st["embedded"], true, "{st}");
@@ -62,5 +69,13 @@ fn a_lock_while_the_embedded_node_is_stopped_starts_it_locked() {
     assert_eq!(st["running"], true, "{st}");
     assert_eq!(common::ok(&c, "lock.state", json!({}))["locked"], true);
     assert_eq!(common::ok(&c, "lock.unlock", json!({}))["locked"], false);
+
+    // Paused and locked, then unlocked before any resume: the pause ends
+    // and the node runs open.
+    common::ok(&c, "node.pause", json!({}));
+    assert_eq!(common::ok(&c, "lock.now", json!({}))["locked"], true);
+    assert_eq!(common::ok(&c, "lock.unlock", json!({}))["locked"], false);
+    assert_eq!(common::ok(&c, "node.status", json!({}))["running"], true);
+    assert!(common::ok(&c, "identity.me", json!({}))["address"].is_string());
     common::ok(&c, "node.stop", json!({}));
 }

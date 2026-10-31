@@ -2036,13 +2036,14 @@ impl Inner {
             return Err(crate::engine::not_in_the_app("lock.unlock", "raven unlock"));
         }
         let pass = secret_arg(args, "passphrase")?;
+        // The app's own node, stopped or paused while this process holds
+        // the lock (the iPhone app's wake after a launch while asleep: it
+        // starts no node before): the pause ends and the node starts
+        // locked, so the unlock below reaches it.
+        #[cfg(feature = "embedded-node")]
         if self.lock_held_here(&dir).is_some() {
-            return Err(ApiError::new(
-                code::NODE_NOT_RUNNING,
-                "Start Raven first: it starts locked, then unlock it.",
-                "lock.unlock: the app's node is stopped or paused; node.start or node.resume \
-                 starts it locked",
-            ));
+            crate::embedded::end_pause();
+            self.node_start()?;
         }
         match bridge::unlock(&dir, pass.as_deref().map(|p| &p[..])) {
             bridge::Unlocked::Opened(lines) => {

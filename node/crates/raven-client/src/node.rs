@@ -913,17 +913,40 @@ pub(crate) fn detect_managed() -> Option<Managed> {
 /// marker or vault file), never the choice a new profile would get: a
 /// profile whose keys are elsewhere (the debug build's lab `locked-file`
 /// stores record no keystore) is never held back, and nothing is probed.
+/// With Lock v2 live nothing is held back either: raven-node starts such a
+/// profile locked (its `lock::start`, P6.40) and `lock.unlock` opens it, as
+/// on the iPhone, whose vault never has a file.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn vault_needs_passphrase_file(dir: &Path) -> bool {
-    use raven_core::keystore_vault::{PASSPHRASE_FILE_ENV, SYSTEMD_CREDENTIAL_NAME};
-    if !matches!(raven_core::keystore_select::has_passphrase(dir), Ok(true)) {
+    use raven_core::keystore_vault::PASSPHRASE_FILE_ENV;
+    needs_passphrase_file(
+        matches!(raven_core::keystore_select::has_passphrase(dir), Ok(true)),
+        crate::network::lock_v2_live(),
+        std::env::var_os(PASSPHRASE_FILE_ENV).as_deref(),
+        std::env::var_os("CREDENTIALS_DIRECTORY").as_deref(),
+        |path| path.exists(),
+    )
+}
+
+/// The decision of [`vault_needs_passphrase_file`]: a vault profile while
+/// Lock v2 is shut, with neither a passphrase file nor a systemd credential.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn needs_passphrase_file(
+    vault: bool,
+    lock_v2_live: bool,
+    passphrase_file: Option<&std::ffi::OsStr>,
+    credentials_dir: Option<&std::ffi::OsStr>,
+    exists: impl Fn(&Path) -> bool,
+) -> bool {
+    use raven_core::keystore_vault::SYSTEMD_CREDENTIAL_NAME;
+    if !vault || lock_v2_live {
         return false;
     }
-    if std::env::var_os(PASSPHRASE_FILE_ENV).is_some_and(|f| !f.is_empty()) {
+    if passphrase_file.is_some_and(|file| !file.is_empty()) {
         return false;
     }
-    match std::env::var_os("CREDENTIALS_DIRECTORY").filter(|d| !d.is_empty()) {
-        Some(creds) => !Path::new(&creds).join(SYSTEMD_CREDENTIAL_NAME).exists(),
+    match credentials_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => !exists(&Path::new(dir).join(SYSTEMD_CREDENTIAL_NAME)),
         None => true,
     }
 }
@@ -937,6 +960,41 @@ fn vault_needs_passphrase_file(_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use raven_core::ipc::IPC_VERSION;
+
+    #[test]
+    fn with_lock_v2_live_a_vault_without_a_file_starts_locked_instead_of_refused() {
+        use std::ffi::OsStr;
+        let none = |_: &Path| false;
+        // Lock v2 shut: raven-node could not unlock it, so no start.
+        assert!(needs_passphrase_file(true, false, None, None, none));
+        // Lock v2 live: raven-node starts it locked and `lock.unlock` opens
+        // it (the iPhone app's vault, which never has a file).
+        assert!(!needs_passphrase_file(true, true, None, None, none));
+        // A file or a systemd credential unlocks it; a keychain profile
+        // is never held back.
+        assert!(!needs_passphrase_file(
+            true,
+            false,
+            Some(OsStr::new("/k")),
+            None,
+            none
+        ));
+        assert!(!needs_passphrase_file(
+            true,
+            false,
+            None,
+            Some(OsStr::new("/c")),
+            |_| true
+        ));
+        assert!(needs_passphrase_file(
+            true,
+            false,
+            Some(OsStr::new("")),
+            Some(OsStr::new("/c")),
+            none
+        ));
+        assert!(!needs_passphrase_file(false, false, None, None, none));
+    }
 
     fn status(
         pid: Option<u32>,

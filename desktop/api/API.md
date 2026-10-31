@@ -461,8 +461,9 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   while it is stopped or paused, with the gate live: `lock.now` then holds the lock in the process
   (the engine and the node load no key), and the next `node.start` or `node.resume` starts the node
   locked, a keychain profile too: the iPhone app's launch while it says asleep calls `lock.now`
-  first. `lock.unlock` needs the node running (`NODE_NOT_RUNNING`: start it first; it starts
-  locked). `updates.status` is `raven update status`; installing stays in the
+  first. `lock.unlock` with that node still stopped or paused ends the pause and starts it
+  (locked) first, then opens it, so the wake after Face ID needs no `node.start` of its own.
+  `updates.status` is `raven update status`; installing stays in the
   CLI (`raven update install`).
 - **While Lock v2 holds the profile** the engine holds no key either. It learns of a lock from
   `lock.now`, `lock.state`, `profile.state` and the node's own status (the watcher's beat, a
