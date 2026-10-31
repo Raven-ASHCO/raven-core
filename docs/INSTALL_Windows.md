@@ -55,16 +55,22 @@ unsigned) is signed and `LAN_AUTO_LISTEN_PRODUCTION_ENABLED` flips, that is
 `auto` means `0.0.0.0:7420` from any source (contacts only), which is also
 what a bare `raven-node.exe service` without `--lan-listen` binds: always pass
 an explicit address when you start it by hand. Pass `-LanListen auto` or
-`-LanListen <LAN-IP>:7420` to choose. For a LAN listen the helper prints two
-firewall rules to run in an elevated PowerShell (it never changes the
-firewall itself), for the Private profile only, never Public:
+`-LanListen <LAN-IP>:<PORT>` to choose: `<PORT>` is this profile's LAN port,
+7420 unless the profile picked a port of its own when it was created (a build
+with the random LAN port on). The helper creates the profile first (`raven.exe
+init`) and its lines name the port; `raven-node.exe lan-default --data-dir
+<profile>` prints it too, and `auto` follows it by itself. For a LAN listen
+the helper prints two firewall rules to run in an elevated PowerShell (it
+never changes the firewall itself), for the Private profile only, never
+Public:
 
 ```powershell
 New-NetFirewallRule -DisplayName "Raven LAN" -Direction Inbound -Program "$env:LOCALAPPDATA\RavenNode\raven-node.exe" -Protocol TCP -LocalPort 7420 -Profile Private
 New-NetFirewallRule -DisplayName "Raven LAN search" -Direction Inbound -Program "$env:LOCALAPPDATA\RavenNode\raven-node.exe" -Protocol UDP -LocalPort 7420 -Profile Private
 ```
 
-With `-LanListen auto:PORT` the TCP rule names that port; the nearby search
+The TCP rule names the profile's port (7420 above; the helper prints the one
+your profile uses), or the port of `-LanListen auto:PORT`; the nearby search
 stays on UDP 7420.
 
 On a link with no Internet (a hotspot or a cable), Windows may file the

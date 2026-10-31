@@ -460,8 +460,9 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
         .map_err(netutil::closed_before_peer_identity)?;
     let (caps, pk) = verify_peer_hello(&raw, &theirs)?;
     if pk != *expected {
-        // Another identity at this contact's address (S13).
-        crate::security::address_impostor(expected, link.carrier, None);
+        // Another identity at this contact's address (S13): counted once a
+        // day per answering key (its hello verified for that key).
+        crate::security::address_impostor_by(expected, link.carrier, None, &pk);
         return Err("internet hello identity mismatch".into());
     }
     // Both hellos through: PAD1 from the next frame on when both offered it.
@@ -2928,13 +2929,18 @@ mod tests {
 
     // ── PAD1 link padding (Phase 6b P6.34) ─────────────────────────────
 
-    /// P6.34 on all three flavours of the link (Internet direct, p2p,
-    /// nearby), each order: old dialer and old listener (the baseline), old
-    /// and new, new and old, new and new. A real listener and a scripted
-    /// dialer whose end is tapped: hellos, RLB1 both ways, then the
-    /// dialer's RLB1 again. Every message after the hellos is a PAD1 bucket
-    /// plus the tag when both hellos carried bit 9, and the baseline's
-    /// lengths otherwise; the hellos are never padded.
+    /// P6.34 on all four flavours of the link (Internet direct, p2p,
+    /// nearby, and Tor's onion link, whose Noise static is its own), each
+    /// order: old dialer and old listener (the baseline), old and new, new
+    /// and old, new and new. A real listener and a scripted dialer whose end
+    /// is tapped: hellos, RLB1 both ways, then the dialer's RLB1 again.
+    /// Every message after the hellos is a PAD1 bucket plus the tag when both
+    /// hellos carried bit 9, and the baseline's lengths otherwise (sizes
+    /// unchanged with an old side: a 0.1.0 peer is this build with the gate
+    /// shut); the hellos are never padded. An old listener is this build
+    /// with the gate shut by its debug close (`PaddingForTest::set(false)`),
+    /// so the mixed orders stay mixed after the flip; an old dialer offers
+    /// no bit 9.
     #[tokio::test]
     async fn pad1_sizes_on_the_wire_for_each_order_and_link() {
         use crate::link::wire::{is_padded, Tap};
@@ -2944,7 +2950,7 @@ mod tests {
         let _hints = crate::hints::LiveForTest::set(false);
         let resp_dir = tempfile::tempdir().unwrap();
         write_contacts(resp_dir.path(), &[&alice()]);
-        for link in [INTERNET_LINK, P2P_LINK, NEARBY_LINK] {
+        for link in [INTERNET_LINK, P2P_LINK, NEARBY_LINK, ONION_LINK] {
             let mut baseline = None;
             for (dialer_new, listener_new) in
                 [(false, false), (false, true), (true, false), (true, true)]

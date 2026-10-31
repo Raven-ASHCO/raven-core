@@ -136,18 +136,25 @@ explicit address when you start it by hand. To choose:
 
 ```bash
 RAVEN_LAN_LISTEN=auto bash scripts/install/linux_systemd_user.sh
-RAVEN_LAN_LISTEN=<this-host-LAN-IP>:7420 bash scripts/install/linux_systemd_user.sh
+RAVEN_LAN_LISTEN=<this-host-LAN-IP>:<PORT> bash scripts/install/linux_systemd_user.sh
 ```
 
-The installer prints the firewall lines and never runs them. Open TCP 7420
-(the port of `auto:PORT` if you chose one), and for nearby search UDP 7420
+`<PORT>` is this profile's LAN port: 7420, unless the profile picked a port of
+its own when it was created (a build with the random LAN port on). The
+installer creates the profile first and its lines name the port;
+`raven-node lan-default --data-dir <profile>` prints it too, and `auto` follows
+it by itself.
+
+The installer prints the firewall lines and never runs them. Open TCP on the
+profile's port (7420 in the example below; the port of `auto:PORT` if you
+chose one), and for nearby search UDP 7420
 (always 7420), to your local networks only: 192.168.0.0/16, 10.0.0.0/8,
 172.16.0.0/12, 169.254.0.0/16 (a cable between two laptops), fe80::/10 and
 fc00::/7. For example:
 
 ```bash
-sudo ufw allow from 192.168.0.0/16 to any port 7420 proto tcp
-sudo ufw allow from 192.168.0.0/16 to any port 7420 proto udp
+sudo ufw allow from 192.168.0.0/16 to any port 7420 proto tcp   # the profile's TCP port
+sudo ufw allow from 192.168.0.0/16 to any port 7420 proto udp   # nearby search, always 7420
 # or firewalld, in your network's zone (firewall-cmd --get-active-zones shows it):
 # firewall-cmd --zone=<that zone> --add-port=7420/tcp --add-port=7420/udp
 ```

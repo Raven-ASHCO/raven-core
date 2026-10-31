@@ -466,13 +466,23 @@ pub const THRESHOLDS: &[(SecKind, Threshold)] = &[
     (SecKind::KnockReplay, row(Severity::Suspicious, 4)),
     (SecKind::ObjectAuthFail, SUSPICIOUS_ALERT_AT_3),
     (SecKind::ObjectSigFail, SUSPICIOUS_ALERT_AT_3),
-    (SecKind::ObjectReplay, SUSPICIOUS_ALERT_AT_3),
+    // Suspicious only, never an Alert: a contact's own state gone back (a
+    // restored backup, the same profile on two computers) repeats indices
+    // with every new message and retry, which took this to an Alert within
+    // minutes in ordinary use (false-positive pass, 2026-10-31). Only the
+    // contact's key can make these; the text says the restore first.
+    (SecKind::ObjectReplay, SUSPICIOUS),
     (SecKind::IndexJump, NOTICE),
     (SecKind::SessionUnknown, NOTICE),
     (SecKind::BindingMismatch, ALERT),
     (SecKind::RevokedDeviceUsed, ALERT),
-    (SecKind::KeyChangeAttempt, ALERT),
-    (SecKind::PrekeyRollback, SUSPICIOUS),
+    // A warning, not an Alert: Raven refused the other key and kept the
+    // verified one, and the common cause is a friend's new key after a
+    // reinstall, or two friends with one name (false-positive pass).
+    (SecKind::KeyChangeAttempt, SUSPICIOUS),
+    // A Notice: Raven kept the newer key, and the cause in ordinary use is a
+    // friend's restored backup, offered again on every dial for weeks.
+    (SecKind::PrekeyRollback, NOTICE),
     (
         SecKind::AddressImpostor,
         Threshold {
@@ -492,7 +502,16 @@ pub const THRESHOLDS: &[(SecKind, Threshold)] = &[
     (SecKind::DepositorFlood, NOTICE),
     (SecKind::DepositorBadObject, SUSPICIOUS),
     (SecKind::RelayNoReceipt, NOTICE),
-    (SecKind::RelayLinkBroken, SUSPICIOUS),
+    // A relay sees only encrypted bytes: it can cut a link, which a sleeping
+    // laptop or a relay's own circuit limits do too, not change one. A
+    // warning only when it keeps happening (false-positive pass).
+    (
+        SecKind::RelayLinkBroken,
+        Threshold {
+            suspicious: per_subject(3, HOUR_MS),
+            ..NOTICE
+        },
+    ),
     (SecKind::LetterBad, SUSPICIOUS),
     (SecKind::HandoffRefused, NOTICE),
     (SecKind::KnockFail, row(Severity::Notice, 1)),
@@ -1456,7 +1475,6 @@ mod tests {
         for k in [
             SecKind::ObjectAuthFail,
             SecKind::ObjectSigFail,
-            SecKind::ObjectReplay,
             SecKind::CustodianBadObject,
         ] {
             assert_eq!(threshold(k), SUSPICIOUS_ALERT_AT_3, "{k:?}");
@@ -1464,11 +1482,21 @@ mod tests {
         for k in [
             SecKind::BindingMismatch,
             SecKind::RevokedDeviceUsed,
-            SecKind::KeyChangeAttempt,
             SecKind::LocalRollback,
         ] {
             assert_eq!(threshold(k).base, Severity::Alert, "{k:?}");
         }
+        // The false-positive pass (2026-10-31, before the events flip):
+        // what ordinary use raises (a friend's restored backup or new key, a
+        // relay's cut) is never an Alert, and a cut relay link a warning only
+        // at 3 an hour.
+        assert_eq!(threshold(SecKind::ObjectReplay), SUSPICIOUS);
+        assert_eq!(threshold(SecKind::KeyChangeAttempt), SUSPICIOUS);
+        assert_eq!(threshold(SecKind::PrekeyRollback), NOTICE);
+        let relay = threshold(SecKind::RelayLinkBroken);
+        assert_eq!(relay.base, Severity::Notice);
+        assert_eq!(relay.suspicious, per_subject(3, HOUR_MS));
+        assert_eq!(relay.alert, None);
         // R1 strikes: handshake 1, malformed 2, refusals 1, p2p gate 1,
         // beacon or knock replay 4, radio knock failure 1; nothing else.
         let strikes: Vec<(SecKind, u32)> = SecKind::ALL

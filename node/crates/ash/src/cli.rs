@@ -3427,6 +3427,9 @@ fn cmd_whoami_card(
         ));
     }
     println!("{card}");
+    if let Some(note) = card_lan_port_note(&lan, own_card_lan_port(data_dir, daemon.as_ref())) {
+        eprintln!("{note}");
+    }
     let wss = match (version, p2p.as_ref()) {
         (CardVersion::V3, _) | (_, None) => 0,
         (_, Some(route)) => card_v2_vias(&route.via).1,
@@ -3444,6 +3447,65 @@ fn cmd_whoami_card(
         );
     }
     Ok(())
+}
+
+/// The LAN port friends on the network reach this profile on, for the check
+/// of a card's `--lan` ([`card_lan_port_note`]): the running raven-node's
+/// LAN listener (where it is bound now; an older one: its `--lan-listen`),
+/// else the port a service started for this profile takes
+/// (`RAVEN_SERVICE_LAN_LISTEN`, else the profile's own: Phase 6b P6.36, else
+/// 7420). `None` while the running one does not listen on the LAN, or on a
+/// port no friend could be told (0).
+fn own_card_lan_port(data_dir: &Path, daemon: Option<&Result<IpcResponse, String>>) -> Option<u16> {
+    let port_of = |listen: &str| -> Option<u16> {
+        match raven_core::paths::parse_lan_listen(listen) {
+            Ok(raven_core::paths::LanListen::Auto { port }) => Some(port),
+            _ => listen
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse().ok()),
+        }
+        .filter(|&port| port != 0)
+    };
+    if let Some(Ok(IpcResponse::Status {
+        lan, lan_listen, ..
+    })) = daemon
+    {
+        match lan {
+            Some(lan) if lan.mode == raven_core::ipc::LAN_MODE_OFF => return None,
+            Some(lan) => {
+                if let Some(at) = lan.listen.first() {
+                    return port_of(at);
+                }
+            }
+            None => {
+                if let Some(at) = lan_listen {
+                    return port_of(at);
+                }
+            }
+        }
+    }
+    port_of(
+        &ext::service_lan_listen_env()
+            .unwrap_or_else(|| ext::default_service_lan_listen_for(data_dir)),
+    )
+}
+
+/// What `raven whoami --card --lan HOST:PORT` adds on stderr when PORT is
+/// not the one this profile listens on (`own`, [`own_card_lan_port`]):
+/// friends would dial a port nobody answers. A profile made while the
+/// random-port gate is live listens on a port of its own (Phase 6b P6.36),
+/// where habit and older guides say 7420. The card is printed as asked.
+fn card_lan_port_note(lan: &str, own: Option<u16>) -> Option<String> {
+    let typed: u16 = lan.rsplit_once(':')?.1.parse().ok()?;
+    let own = own?;
+    (typed != own).then(|| {
+        format!(
+            "note: --lan names port {typed}, but this profile listens for friends on its network \
+             on port {own}: friends who dial {} may not reach you (`raven status` shows where \
+             Raven listens; the card was printed as asked)",
+            sanitize_terminal_line(lan)
+        )
+    })
 }
 
 /// Said once a `raven-card/3` is saved: it held no address of its owner.
@@ -25873,6 +25935,94 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                 assert!(!text.contains(never), "{never:?} in: {text}");
             }
         }
+    }
+
+    /// Phase 6b P6.36 (before the random-port flip): `raven whoami --card
+    /// --lan HOST:PORT` notes on stderr a PORT that is not the one this
+    /// profile listens on. With the gate opened by its lab switch a profile
+    /// that picked 43210 is noted for a typed 7420 (habit and older guides)
+    /// and not for 43210; with the gate shut (the debug close, so the test
+    /// stays meaningful after the flip) the same profile listens on 7420. A
+    /// running raven-node's bound port wins over the saved one; one with LAN
+    /// off gives no port, and so no note.
+    #[test]
+    fn a_card_lan_port_other_than_the_profiles_own_is_noted() {
+        use raven_core::ipc::{LanStatus, LAN_MODE_FIXED, LAN_MODE_OFF};
+        use raven_core::security_gate::{set_lab_for_this_thread, SecGate};
+        // The pure rule.
+        assert_eq!(card_lan_port_note("192.168.1.20:7420", Some(7420)), None);
+        assert_eq!(card_lan_port_note("", Some(43_210)), None);
+        assert_eq!(card_lan_port_note("192.168.1.20:7420", None), None);
+        let note = card_lan_port_note("192.168.1.20:7420", Some(43_210)).unwrap();
+        for want in [
+            "--lan names port 7420",
+            "listens for friends on its network on port 43210",
+            "friends who dial 192.168.1.20:7420 may not reach you",
+            "`raven status` shows where Raven listens",
+        ] {
+            assert!(note.contains(want), "{want:?} missing from: {note}");
+        }
+        assert!(card_lan_port_note("[fe80::1%en0]:43210", Some(43_210)).is_none());
+        assert!(card_lan_port_note("mac-mini.local:7420", Some(43_210)).is_some());
+
+        // The profile's own port, without a running raven-node.
+        let picked = tempfile::tempdir().unwrap();
+        raven_core::node_policy::update_policy(picked.path(), |p| p.lan_listen_port = Some(43_210))
+            .unwrap();
+        let env_set = ext::service_lan_listen_env().is_some();
+        set_lab_for_this_thread(SecGate::RandomPort, Some(false));
+        if !env_set {
+            assert_eq!(
+                own_card_lan_port(picked.path(), None),
+                Some(DEFAULT_LAN_PORT)
+            );
+        }
+        if cfg!(debug_assertions) && !env_set {
+            set_lab_for_this_thread(SecGate::RandomPort, Some(true));
+            assert_eq!(own_card_lan_port(picked.path(), None), Some(43_210));
+            let fresh = tempfile::tempdir().unwrap();
+            assert_eq!(
+                own_card_lan_port(fresh.path(), None),
+                Some(DEFAULT_LAN_PORT)
+            );
+            let typed =
+                card_lan_port_note("192.168.1.20:7420", own_card_lan_port(picked.path(), None));
+            assert!(typed.is_some_and(|n| n.contains("port 43210")));
+        }
+        // A running raven-node: where it is bound, whatever the profile says.
+        let status = |lan: Option<LanStatus>, lan_listen: Option<&str>| {
+            let mut s = status_ok();
+            if let Ok(IpcResponse::Status {
+                lan: l,
+                lan_listen: at,
+                ..
+            }) = &mut s
+            {
+                *l = lan;
+                *at = lan_listen.map(str::to_owned);
+            }
+            s
+        };
+        let bound = status(
+            Some(LanStatus {
+                mode: LAN_MODE_FIXED.into(),
+                listen: vec!["0.0.0.0:45001".into(), "[::]:45001".into()],
+                ..LanStatus::default()
+            }),
+            None,
+        );
+        assert_eq!(own_card_lan_port(picked.path(), Some(&bound)), Some(45_001));
+        let off = status(
+            Some(LanStatus {
+                mode: LAN_MODE_OFF.into(),
+                ..LanStatus::default()
+            }),
+            None,
+        );
+        assert_eq!(own_card_lan_port(picked.path(), Some(&off)), None);
+        let older = status(None, Some("192.168.1.20:7425"));
+        assert_eq!(own_card_lan_port(picked.path(), Some(&older)), Some(7425));
+        set_lab_for_this_thread(SecGate::RandomPort, None);
     }
 
     /// Field test E3: after `raven node internet off` (or `p2p off`, ...)

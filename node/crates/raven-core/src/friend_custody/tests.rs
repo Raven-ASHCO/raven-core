@@ -473,6 +473,78 @@ fn deposit_fetch_release_end_to_end() {
     assert_eq!(items(&c.fetch(&c.bob, &[[0x11; 16]], None)), 0);
 }
 
+/// PAD1 §5 (Phase 6b, before the padding flip): the largest deposit a sender
+/// builds, an RSO1 of [`MAX_RFC1_SEND_RSO1`] bytes, goes in a DEPOSIT frame
+/// of exactly 65,511 bytes, the longest frame PAD1 wraps: wrapped (the
+/// 65,519 bucket) and unwrapped as a padded link does, the custodian stores
+/// it, and its FETCH_ITEM to the recipient wraps too. [`rfc1_rso1`] never
+/// builds one byte more: an envelope that would need it is refused before
+/// anything is sent. An older sender's RSO1 up to [`MAX_RFC1_RSO1`] still
+/// decodes at a custodian (a link that does not pad), but no padded link
+/// could carry its DEPOSIT.
+#[test]
+fn the_largest_deposit_a_sender_builds_crosses_a_padded_link() {
+    use crate::link_padding::{unwrap, wrap, PAD1_MAX_INNER};
+    let _g = Gates::set(true, false);
+    let c = Carol::new();
+    // An envelope whose RSO1 is exactly the send limit.
+    let sized = |extra: usize| {
+        let mut env = envelope(&c.alice, 0x61);
+        env.message_ciphertext =
+            opaque_indexed_body_for_tests(RelayableKind::Message, &vec![0x61; 1_000 + extra]);
+        env.sign_with(&c.alice);
+        env
+    };
+    let base = sized(0).pack().len();
+    let env = sized(MAX_RFC1_SEND_ENVELOPE - base);
+    assert_eq!(env.pack().len(), MAX_RFC1_SEND_ENVELOPE);
+    let rso1 = rfc1_rso1([0x61; 16], &env.pack()).unwrap();
+    assert_eq!(rso1.len(), MAX_RFC1_SEND_RSO1);
+    let frame = encode_request(
+        &[7; 8],
+        &Rfc1Request::Deposit {
+            recipient: c.bob.public_key_bytes(),
+            rso1: rso1.clone(),
+        },
+    );
+    assert_eq!(frame.len(), PAD1_MAX_INNER);
+    let padded = wrap(&frame).unwrap();
+    assert_eq!(padded.len(), crate::lan_noise::MAX_TRANSPORT_PLAINTEXT);
+    let carried = unwrap(&padded).unwrap().to_vec();
+    assert_eq!(carried, frame);
+    match decode_request(&carried) {
+        Ok(RequestDecode::Request(_, Rfc1Request::Deposit { rso1: got, .. })) => {
+            assert_eq!(got, rso1);
+            assert_eq!(c.deposit(&c.alice, &c.bob, got), CustodyCode::Ok);
+        }
+        other => panic!("{other:?}"),
+    }
+    let replies = c.fetch(&c.bob, &[[0x61; 16]], None);
+    assert_eq!(items(&replies), 1);
+    for reply in &replies {
+        assert!(wrap(&encode_reply(&[8; 8], reply)).is_ok(), "{reply:?}");
+    }
+    // One byte more is never built by a sender.
+    let over = sized(MAX_RFC1_SEND_ENVELOPE - base + 1);
+    assert_eq!(
+        rfc1_rso1([0x62; 16], &over.pack()),
+        Err("RFC1_RSO1_TOO_LARGE".to_string())
+    );
+    // An older sender's largest still decodes, but cannot be padded.
+    let older = encode_request(
+        &[9; 8],
+        &Rfc1Request::Deposit {
+            recipient: c.bob.public_key_bytes(),
+            rso1: vec![0x63; MAX_RFC1_RSO1],
+        },
+    );
+    assert!(matches!(
+        decode_request(&older),
+        Ok(RequestDecode::Request(_, Rfc1Request::Deposit { .. }))
+    ));
+    assert!(wrap(&older).is_err());
+}
+
 #[test]
 fn deposit_admission_rules() {
     let _g = Gates::set(true, false);

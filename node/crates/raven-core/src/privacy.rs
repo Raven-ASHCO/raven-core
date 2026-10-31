@@ -976,7 +976,7 @@ fn settle_quarantined(data_dir: &Path) -> Result<u16, AtRestError> {
             continue;
         }
         let keys = at_rest::keys_cached(data_dir)?;
-        let ours = at_rest::open(&keys, *kind, &raw)
+        let ours = at_rest::open_quiet(&keys, *kind, &raw)
             .is_ok_and(|plain| serde_json::from_slice::<serde_json::Value>(&plain).is_ok());
         if !ours {
             continue;
@@ -2489,7 +2489,7 @@ pub fn verify_copy(data_dir: &Path, path: &Path) -> Result<CopyCheck, String> {
             return Ok(CopyCheck::DoesNotOpen);
         };
         let keys = at_rest::keys_cached(data_dir).map_err(|e| e.to_string())?;
-        return Ok(opens(at_rest::open(&keys, kind, &raw).is_ok()));
+        return Ok(opens(at_rest::open_quiet(&keys, kind, &raw).is_ok()));
     }
     let first = raw.iter().copied().find(|b| !b.is_ascii_whitespace());
     Ok(if matches!(first, Some(b'{' | b'[')) {

@@ -6,7 +6,8 @@
 #   LAN amendment) is open, and 127.0.0.1:7420 (this PC only) until then; a profile that picked a
 #   LAN port of its own (Phase 6b, a random port for new profiles) gets that port instead
 #   (`raven-node lan-default --data-dir`: auto:PORT, 127.0.0.1:PORT; auto:PORT goes into the task as
-#   a plain auto, which follows the profile's port at every start). Pass e.g.
+#   a plain auto, which follows the profile's port at every start): the installer creates the
+#   profile first (`raven init`) and then asks, as macos_launchd.sh does. Pass e.g.
 #   -LanListen 192.168.1.20:7420, [::]:7420 or auto to choose; `raven lan off` closes LAN later.
 #   For auto the installer prints two Private-profile firewall rules (TCP on its port, and UDP 7420
 #   for the nearby search) to run elevated; it never changes the firewall itself.
@@ -253,14 +254,21 @@ if (-not $renderOnly) {
     } else {
         Install-Binary "$target\release\raven-tor-helper.exe" $torExe
     }
+
+    # Identity + prekey must exist before the LAN default below, as on macOS and Linux: a new
+    # profile picks its LAN port here (Phase 6b, while that gate is live), so the task and the
+    # firewall rules printed below name the port the profile listens on, never a fixed 7420 it
+    # does not use. An existing profile is left as it is. Render-only creates nothing.
+    & (Join-Path $BinDir "raven.exe") --data-dir $DataDir init
+    if ($LASTEXITCODE -ne 0) { throw "raven init failed for $DataDir" }
 }
 
 # The LAN address follows the build (hold B12): the installed raven-node.exe prints auto once
 # LAN_AUTO_LISTEN_PRODUCTION_ENABLED is on, else 127.0.0.1:7420, each on the port this profile
-# picked where it picked one (`lan-default --data-dir`, Phase 6b; a profile the task creates at its
-# first start picks it then, and a plain auto follows it). One without `--data-dir` (an older
-# build) is asked again without it; one that fails, is missing or prints anything else (an older
-# build without `lan-default`) keeps 127.0.0.1:7420. -LanListen wins.
+# picked where it picked one (`lan-default --data-dir`, Phase 6b; `raven init` above created the
+# profile, so a new one has picked it by now). One without `--data-dir` (an older build) is asked
+# again without it; one that fails, is missing or prints anything else (an older build without
+# `lan-default`) keeps 127.0.0.1:7420. -LanListen wins.
 $lanDefault = "127.0.0.1:7420"
 $savedPreference = $ErrorActionPreference
 try {

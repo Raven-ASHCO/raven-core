@@ -1148,9 +1148,18 @@ async fn initiator_session_pinned<S: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(netutil::closed_before_peer_identity)?;
     verify_bind(&bind, &remote_static, Some(expected)).map_err(|e| {
-        // Another identity bound at this contact's address (S13).
+        // Another identity bound at this contact's address (S13): counted
+        // once a day per answering key (its bind verified for that key).
         if e == LanNoiseError::BindMismatch {
-            impostor();
+            match verify_bind(&bind, &remote_static, None) {
+                Ok(answering) => crate::security::address_impostor_by(
+                    expected,
+                    raven_core::OutboxCarrier::Lan,
+                    peer_ip,
+                    &answering,
+                ),
+                Err(_) => impostor(),
+            }
         }
         e.to_string()
     })?;

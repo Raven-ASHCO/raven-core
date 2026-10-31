@@ -137,10 +137,14 @@ pub(crate) fn notice(
         _ => String::new(),
     };
     let (headline, did, todo, act): (String, &str, String, Act) = match kind {
+        // The harmless cause first (false-positive pass, 2026-10-31): on one
+        // network this is most often faulty equipment, not a person.
         SecKind::LinkTagFail if severity >= Severity::Alert => (
-            format!("Someone on this network keeps changing data between you and {name}"),
+            format!("Data between you and {name} keeps arriving changed on this network"),
             "Raven noticed each time and threw it away. Nothing was read.",
-            "Use another network or a hotspot you control.".into(),
+            "A faulty router, cable or network adapter can do this; so can someone on this \
+             network. Use another network or a hotspot you control."
+                .into(),
             Act::OtherNetwork,
         ),
         SecKind::LinkTagFail => (
@@ -986,10 +990,11 @@ mod tests {
                 Some(ACTION_PATH_DEMOTED)
             ),
             [
-                "Someone on this network keeps changing data between you and Sara",
+                "Data between you and Sara keeps arriving changed on this network",
                 "Raven noticed each time and threw it away. Nothing was read. It tries Sara's \
                  other routes first for a while.",
-                "Use another network or a hotspot you control.",
+                "A faulty router, cable or network adapter can do this; so can someone on this \
+                 network. Use another network or a hotspot you control.",
             ]
         );
         assert_eq!(

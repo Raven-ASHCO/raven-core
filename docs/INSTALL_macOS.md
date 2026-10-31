@@ -76,13 +76,19 @@ explicit address when you start it by hand, as in Option B. To choose:
 
 ```bash
 RAVEN_LAN_LISTEN=auto bash scripts/install/macos_launchd.sh
-RAVEN_LAN_LISTEN=<this-Mac-LAN-IP>:7420 bash scripts/install/macos_launchd.sh
+RAVEN_LAN_LISTEN=<this-Mac-LAN-IP>:<PORT> bash scripts/install/macos_launchd.sh
 ```
+
+`<PORT>` is this profile's LAN port: 7420, unless the profile picked a port of
+its own when it was created (a build with the random LAN port on). The
+installer creates the profile first and its lines name the port;
+`raven-node lan-default --data-dir <profile>` prints it too, and `auto` follows
+it by itself.
 
 For a LAN listen the installer prints what to allow and never changes the
 firewall: if the macOS Application Firewall is on, allow `raven-node` yourself
-(the `socketfilterfw` lines under "Internet direct" below); that covers TCP
-7420 and, for nearby search, UDP 7420. If macOS asks for Local Network access
+(the `socketfilterfw` lines under "Internet direct" below); that covers the
+profile's TCP port and, for nearby search, UDP 7420. If macOS asks for Local Network access
 for `raven-node`, allow it. For some seconds after a new `raven-node` starts
 (after an update or a rebuild) macOS may still refuse its first connections on
 the local network ("No route to host"); for its first 30 seconds raven-node

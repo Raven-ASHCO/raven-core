@@ -219,13 +219,13 @@ responses (R1-R9) are Phase 6b design A's and run only while the responses gate 
 | 11 | SEC_KNOCK_REPLAY (design B) | Network | Suspicious | NET row | R1 strike 4 |
 | 20 | SEC_OBJECT_AUTH_FAIL | Contact | Suspicious; Alert at 3 per 24 h | banner | R2 re-key |
 | 21 | SEC_OBJECT_SIG_FAIL | Contact (direct link only) | Suspicious; Alert at 3 per 24 h | banner | none |
-| 22 | SEC_OBJECT_REPLAY | Contact | Suspicious; Alert at 3 per 24 h | banner | R2 re-key |
+| 22 | SEC_OBJECT_REPLAY | Contact | Suspicious (never an Alert: a contact's restored backup repeats it with every message and retry) | friend page | R2 re-key |
 | 23 | SEC_INDEX_JUMP | Contact | Notice | none | R2 when 3 per hour |
 | 24 | SEC_SESSION_UNKNOWN | Contact | Notice | none | existing session reset |
 | 25 | SEC_BINDING_MISMATCH | Contact | Alert at 1 | banner | none |
 | 26 | SEC_REVOKED_DEVICE_USED | Contact | Alert at 1 | banner | none |
-| 27 | SEC_KEY_CHANGE_ATTEMPT | Contact (local import) | Alert at 1 | banner | none (pin kept, as today) |
-| 28 | SEC_PREKEY_ROLLBACK | Contact | Suspicious | friend page | none |
+| 27 | SEC_KEY_CHANGE_ATTEMPT | Contact (local import) | Suspicious (the other key was refused; a friend's new key after a reinstall is the common cause) | friend page | none (pin kept, as today) |
+| 28 | SEC_PREKEY_ROLLBACK | Contact | Notice (the newer key is kept; a friend's restored backup is the common cause) | none | none |
 | 29 | SEC_ADDRESS_IMPOSTOR | Contact + network | Notice; Suspicious at 3 per 24 h | friend page | R5 forget that address |
 | 30 | SEC_CAPABILITY_DOWNGRADE | Contact | Notice (route hints, updates); Suspicious (padding, knock); Alert (session profile) | by level | R9 |
 | 31 | SEC_CONTACT_MALFORMED | Contact | Notice | none | none |
@@ -238,8 +238,8 @@ responses (R1-R9) are Phase 6b design A's and run only while the responses gate 
 | 42 | SEC_CUSTODIAN_REPLAY | Carrier (custodian) | Notice | none | none |
 | 43 | SEC_DEPOSITOR_FLOOD | Contact (as depositor) | Notice | none | existing quotas |
 | 44 | SEC_DEPOSITOR_BAD_OBJECT | Contact (as depositor) | Suspicious | friend page | R7 |
-| 45 | SEC_RELAY_NO_RECEIPT | Carrier (relay) | Notice; Suspicious at more than half of 10 dials | NET row | R8 |
-| 46 | SEC_RELAY_LINK_BROKEN | Carrier (relay) | Suspicious | NET row | R8 |
+| 45 | SEC_RELAY_NO_RECEIPT | Carrier (relay) | Notice; Suspicious at more than half of 10 dials, to two contacts or more (a dial that lost the outbox race is not counted) | NET row | R8 |
+| 46 | SEC_RELAY_LINK_BROKEN | Carrier (relay) | Notice; Suspicious at 3 per relay per hour | NET row at Suspicious | R8 |
 | 47 | SEC_LETTER_BAD (Phase 5 letters) | Carrier, or Contact when the signature verified | Suspicious | friend page | R6 |
 | 48 | SEC_HANDOFF_REFUSED (Phase 5 handoff) | Carrier | Notice | none | none |
 | 49 | SEC_KNOCK_FAIL (Phase 5 nearby RNK1) | Network (radio) | Notice | none | none (P6.26: a pipe's key is its contact's, so a stranger replaying a contact's token must not earn that contact a ban) |

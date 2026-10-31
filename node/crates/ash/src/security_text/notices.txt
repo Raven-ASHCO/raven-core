@@ -1,7 +1,7 @@
 SEC_LINK_TAG_FAIL (1), alert
-  Someone on this network keeps changing data between you and Sara
+  Data between you and Sara keeps arriving changed on this network
   Raven noticed each time and threw it away. Nothing was read.
-  Use another network or a hotspot you control.
+  A faulty router, cable or network adapter can do this; so can someone on this network. Use another network or a hotspot you control.
   [other_network]
 SEC_LINK_TAG_FAIL (1), warning and notice
   Data between you and Sara was changed on the way

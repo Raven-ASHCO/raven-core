@@ -1638,6 +1638,11 @@ PRIVACY_OLD_BIN = os.environ.get('RAVEN_FAULT_PRIVACY_OLD_BIN', '')
 PADDING = os.environ.get('RAVEN_FAULT_PADDING') == '1'
 PADDING_OLD_BIN = os.environ.get('RAVEN_FAULT_PADDING_OLD_BIN', '')
 PAD_ENV = dict(ENV_NO_HINTS, RAVEN_LAB_TEST_A='1', RAVEN_LAB_LINK_PADDING='1')
+# The side without padding: this build with the gate shut by its debug close
+# (RAVEN_LAB_LINK_PADDING=0, no Lab Test A needed), so it stays the side
+# without once LINK_PADDING_PRODUCTION_ENABLED is set; an older build given
+# with RAVEN_FAULT_PADDING_OLD_BIN ignores the 0.
+PAD_OFF_ENV = dict(ENV_NO_HINTS, RAVEN_LAB_LINK_PADDING='0')
 # Phase 6b P6.35: the RLK1 link knock is held (LINK_KNOCK_PRODUCTION_ENABLED
 # false). RAVEN_FAULT_KNOCK=1 selects s115's knock phases, whose nodes run
 # with the noise pins (M0, RAVEN_LAB_NOISE_PIN=1) and, the knocking ones, the
@@ -1655,6 +1660,10 @@ KNOCK_ENV = dict(M0_ENV, RAVEN_LAB_LINK_KNOCK='1')
 RANDOM_PORT = os.environ.get('RAVEN_FAULT_RANDOM_PORT') == '1'
 PORT_HINTS_ENV = without_beacon(dict(ENV_NO_HINTS, RAVEN_LAB_ROUTE_HINTS='1'))
 RANDOM_PORT_ENV = dict(PORT_HINTS_ENV, RAVEN_LAB_TEST_A='1', RAVEN_LAB_RANDOM_PORT='1')
+# s04r's profile made before the gate (it keeps 7420): this build with the
+# gate shut by its debug close (RAVEN_LAB_RANDOM_PORT=0), so it stays such a
+# profile once LISTEN_PORT_RANDOM_PRODUCTION_ENABLED is set.
+PORT_OLD_ENV = dict(PORT_HINTS_ENV, RAVEN_LAB_RANDOM_PORT='0')
 # Phase 6b P6.40: Lock now v2 is held (LOCAL_PROTECTION_PRODUCTION_ENABLED
 # false). RAVEN_FAULT_LOCK_V2=1 selects s116, whose locking side (its node
 # and its ash) runs with the debug switch RAVEN_LAB_LOCAL_PROTECTION=1 and
@@ -2610,7 +2619,7 @@ def s04r_random_port_learned(root: Path) -> dict:
     new.init()
     port = picked_lan_port(new)
     said_new = node_lan_default(new, RANDOM_PORT_ENV)
-    old = Node('old', sub, PORT_HINTS_ENV)
+    old = Node('old', sub, PORT_OLD_ENV)
     old.init()
     before = picked_lan_port(old)
     again = old.ash('init', extra_env=dict(RAVEN_LAB_TEST_A='1', RAVEN_LAB_RANDOM_PORT='1'))
@@ -12894,8 +12903,9 @@ def s115_pad1_mixed_builds(root: Path) -> dict:
     frame-less probe offers nothing and is not padded), and at least one
     such connection each way. (mixed) A padding node and one without, both
     ways round: with RAVEN_FAULT_PADDING_OLD_BIN=<dir with a pre-6b ash and
-    raven-node> the other runs that build, else this build without the
-    switch (what an older build sends, spec §7): every message once, nothing
+    raven-node> the other runs that build, else this build with the gate
+    shut by its debug close (PAD_OFF_ENV, what an older build sends, spec
+    §7; still shut after the flip): every message once, nothing
     padded (the listener's bind stays 96 bytes). Neither log of any pair has
     a padding refusal, a dispatcher refusal or a failed handshake. (off,
     with the older build only) Two nodes of this build without the switch
@@ -12922,7 +12932,7 @@ def s115_pad1_mixed_builds(root: Path) -> dict:
         for padder in ('a', 'b'):
             sub = root / f'mixed-{padder}-pads'
             sub.mkdir()
-            envs = tuple(PAD_ENV if n == padder else ENV_NO_HINTS for n in ('a', 'b'))
+            envs = tuple(PAD_ENV if n == padder else PAD_OFF_ENV for n in ('a', 'b'))
             bins = tuple('' if n == padder else PADDING_OLD_BIN for n in ('a', 'b'))
             a, b, pa, pb = pad1_pair(sub, envs, bins)
             done = pad1_exchange(a, b, f'mixed-{padder}')
@@ -12937,7 +12947,7 @@ def s115_pad1_mixed_builds(root: Path) -> dict:
             for name, bin_dir in (('this', ''), ('old', PADDING_OLD_BIN)):
                 sub = root / f'off-{name}'
                 sub.mkdir()
-                a, b, pa, pb = pad1_pair(sub, (ENV_NO_HINTS, ENV_NO_HINTS), (bin_dir, bin_dir))
+                a, b, pa, pb = pad1_pair(sub, (PAD_OFF_ENV, PAD_OFF_ENV), (bin_dir, bin_dir))
                 done = pad1_exchange(a, b, 'off')
                 for n in (a, b):
                     n.stop()

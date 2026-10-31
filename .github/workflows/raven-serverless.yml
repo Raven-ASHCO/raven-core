@@ -1543,9 +1543,16 @@ jobs:
             }
             # Phase 3 P3.7: the LAN default follows `raven-node lan-default`; a
             # release build holds auto (LAN_AUTO_LISTEN_PRODUCTION_ENABLED, B12),
-            # so the install stays on this PC.
-            if ($lines -notcontains "lan-listen=127.0.0.1:7420") { throw "the release install did not print lan-listen=127.0.0.1:7420 (the B12 gate is closed)" }
-            Write-Host "ok lan-listen=127.0.0.1:7420 (release build, gate closed)"
+            # so the install stays on this PC. Phase 6b P6.36: the installer
+            # creates the profile first (`raven init`), so the address is on the
+            # port that profile listens on: 7420 while the random-port gate is
+            # shut, its own port once LISTEN_PORT_RANDOM_PRODUCTION_ENABLED is set.
+            $null = & (Join-Path $binDir "raven.exe") --data-dir $dataDir whoami --json
+            if ($LASTEXITCODE -ne 0) { throw "the install did not create the profile (raven init) before asking for the LAN default" }
+            $want = @(& (Join-Path $binDir "raven-node.exe") lan-default --data-dir $dataDir)
+            if (($want.Count -ne 1) -or ([string]$want[0] -notlike "127.0.0.1:*")) { throw "lan-default --data-dir printed '$want', expected 127.0.0.1:PORT (the B12 gate is closed)" }
+            if ($lines -notcontains "lan-listen=$($want[0])") { throw "the release install did not print lan-listen=$($want[0]) (the profile's port, B12 closed)" }
+            Write-Host "ok lan-listen=$($want[0]) (release build, gate closed, the profile's port)"
           } finally {
             if (Test-Path -LiteralPath $root) {
               Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
@@ -1595,6 +1602,48 @@ jobs:
               Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
             }
           }
+      # Phase 6b P6.36 (a random LAN port for new profiles, lab switch in the debug build):
+      # a profile the debug build made with RAVEN_LAB_RANDOM_PORT=1 picked a port of its
+      # own, so render-only gives the task a plain auto (raven-node follows the profile's
+      # port at every start) and the TCP firewall rule names that port, never 7420 (the
+      # nearby search keeps UDP 7420). Once LISTEN_PORT_RANDOM_PRODUCTION_ENABLED is set,
+      # the release install above takes the same path with no switch.
+      - name: windows_service.ps1 random LAN port (render-only, debug lab)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = "scripts/install/windows_service.ps1"
+          if (-not (Test-Path $script)) { throw "missing $script" }
+          $root = Join-Path $env:RUNNER_TEMP "raven-windows-service-random-port"
+          $dataDir = Join-Path $root "data"
+          $env:RAVEN_LAB_TEST_A = "1"
+          $env:RAVEN_LAB_RANDOM_PORT = "1"
+          $env:RAVEN_LAB_LAN_AUTO = "1"
+          try {
+            New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+            & "target\debug\ash.exe" --data-dir $dataDir init | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "debug ash init failed" }
+            $printed = [string](@(& "target\debug\raven-node.exe" lan-default --data-dir $dataDir)[0])
+            if ($printed -notmatch '^auto:([0-9]+)$') { throw "lan-default --data-dir printed '$printed', expected auto:PORT" }
+            $port = $Matches[1]
+            if ($port -eq "7420") { throw "the new profile kept 7420 with the random-port switch on" }
+            $env:RAVEN_INSTALL_RENDER_ONLY = "1"
+            $lines = @(& (Resolve-Path $script) -DataDir $dataDir -BinDir "target\debug" 6>&1 | ForEach-Object { "$_" })
+            $lines | ForEach-Object { Write-Host $_ }
+            if ($lines -notcontains "lan-listen=auto") { throw "render-only did not give the task a plain auto" }
+            if (-not ($lines | Where-Object { $_ -like "*-Protocol TCP -LocalPort $port -Profile Private" })) { throw "no TCP firewall rule for the profile's port $port" }
+            if (-not ($lines | Where-Object { $_ -like '*-Protocol UDP -LocalPort 7420 -Profile Private' })) { throw "no UDP 7420 rule for the nearby search" }
+            if ($lines | Where-Object { $_ -like '*-Protocol TCP -LocalPort 7420 *' }) { throw "a TCP 7420 rule for a profile that listens on $port" }
+            Write-Host "random LAN port OK (task auto, TCP rule on $port, UDP 7420 for the search)"
+          } finally {
+            Remove-Item Env:\RAVEN_INSTALL_RENDER_ONLY -ErrorAction SilentlyContinue
+            Remove-Item Env:\RAVEN_LAB_TEST_A -ErrorAction SilentlyContinue
+            Remove-Item Env:\RAVEN_LAB_RANDOM_PORT -ErrorAction SilentlyContinue
+            Remove-Item Env:\RAVEN_LAB_LAN_AUTO -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $root) {
+              Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
       # Upgrade path + task settings of the logon-task installer (never exercised by the
       # -SkipScheduledTask run above):
       #  * a running CLI session holds ash.exe open: Windows refuses to overwrite a running
@@ -1629,8 +1678,11 @@ jobs:
             # -InternetListen is opt-in and lands on the task's command line verbatim.
             $taskArgs = [string]$task.Actions[0].Arguments
             if ($taskArgs -notmatch '--internet-listen 127\.0\.0\.1:7422') { throw "task arguments lack --internet-listen: $taskArgs" }
-            # P3.7: no -LanListen = `raven-node lan-default` of this release build (gate closed).
-            if ($taskArgs -notmatch '--lan-listen 127\.0\.0\.1:7420 ') { throw "task arguments lack --lan-listen 127.0.0.1:7420: $taskArgs" }
+            # P3.7: no -LanListen = `raven-node lan-default` of this release build (gate closed),
+            # on the port of the profile the installer created (P6.36: 7420 while the
+            # random-port gate is shut).
+            $want = [string](@(& (Join-Path $binDir "raven-node.exe") lan-default --data-dir $dataDir)[0])
+            if (-not $taskArgs.Contains("--lan-listen $want ")) { throw "task arguments lack --lan-listen ${want}: $taskArgs" }
             $limit = [string]$task.Settings.ExecutionTimeLimit
             if ($limit -ne "PT0S") { throw "ExecutionTimeLimit is '$limit', expected PT0S (no limit)" }
             if ($task.Settings.StartWhenAvailable -ne $true) { throw "StartWhenAvailable is not set" }

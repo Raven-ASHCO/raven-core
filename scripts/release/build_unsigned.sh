@@ -56,11 +56,15 @@ See docs/SIGNING_NOTARIZATION_CHECKLIST.md for operator signing steps.
 Quick start:
   ./bin/ash --data-dir ./raven-data init
   ./bin/ash --data-dir ./raven-data doctor
-  ./bin/raven-node service --data-dir ./raven-data --lan-listen 127.0.0.1:7420
+  ./bin/raven-node lan-default --data-dir ./raven-data
+  ./bin/raven-node service --data-dir ./raven-data --lan-listen 127.0.0.1:PORT
 
-LAN exposure is opt-in: the bare service default is 0.0.0.0:7420 (every
-interface), so always pass an explicit address; use
---lan-listen <this-host-LAN-IP>:7420 to accept LAN peers. See docs/INSTALL_*.md.
+PORT is this profile's LAN port, the one \`raven-node lan-default --data-dir\`
+prints (127.0.0.1:PORT): 7420, or a port a new profile picked for itself.
+LAN exposure is opt-in: the bare service default (auto) can listen on every
+interface (0.0.0.0) on that port, so always pass an explicit address; use
+--lan-listen <this-host-LAN-IP>:PORT to accept LAN peers. See
+docs/INSTALL_*.md.
 EOF
 
 (

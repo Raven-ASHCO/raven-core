@@ -1206,7 +1206,9 @@ fn refuse_relay_folder(data_dir: &Path, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The friend relay's port may not be one Raven itself listens on.
+/// The friend relay's port may not be one Raven itself listens on: the
+/// default LAN port, the LAN port this profile picked (Phase 6b P6.36,
+/// while that gate is live), the p2p port or another of Raven's own.
 fn check_offer_port(port: u16, policy: &NodePolicy) -> Result<(), String> {
     let lan = raven_core::DEFAULT_LAN_LISTEN
         .parse::<std::net::SocketAddr>()
@@ -1217,6 +1219,7 @@ fn check_offer_port(port: u16, policy: &NodePolicy) -> Result<(), String> {
         .flatten()
         .and_then(|l| listen_port(&l));
     let own = Some(port) == lan
+        || Some(port) == policy.lan_listen_port_chosen()
         || Some(port) == p2p
         || (raven_core::paths::RESERVED_RAVEN_PORTS.contains(&port) && port != FRIEND_RELAY_PORT);
     if port == 0 || own {
@@ -11013,5 +11016,34 @@ mod tests {
             Ok(R::Auto { state: OnOff::Off })
         ));
         assert!(relay(&["relay", "auto"]).is_err());
+    }
+
+    /// Phase 6b P6.36 (before the random-port flip): the friend relay's
+    /// `--port` may not be the LAN port this profile picked, which its
+    /// LAN listener holds once the gate is live (opened here by its lab
+    /// switch); with the gate shut (the debug close, so this stays a test of
+    /// the shut gate after the flip) that port is free for the relay, and
+    /// 7420 is refused either way.
+    #[test]
+    fn the_relay_port_is_not_the_profiles_own_lan_port() {
+        use raven_core::security_gate::{set_lab_for_this_thread, SecGate};
+        let policy = NodePolicy {
+            lan_listen_port: Some(43_210),
+            ..NodePolicy::default()
+        };
+        set_lab_for_this_thread(SecGate::RandomPort, Some(false));
+        assert_eq!(check_offer_port(43_210, &policy), Ok(()));
+        assert!(check_offer_port(7420, &policy).is_err());
+        if cfg!(debug_assertions) {
+            set_lab_for_this_thread(SecGate::RandomPort, Some(true));
+            let e = check_offer_port(43_210, &policy).unwrap_err();
+            assert!(
+                e.starts_with("--port 43210: the relay needs a port of its own"),
+                "{e}"
+            );
+            assert!(check_offer_port(7420, &policy).is_err());
+            assert_eq!(check_offer_port(FRIEND_RELAY_PORT, &policy), Ok(()));
+        }
+        set_lab_for_this_thread(SecGate::RandomPort, None);
     }
 }

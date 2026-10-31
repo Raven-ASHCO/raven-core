@@ -9603,10 +9603,12 @@ fn c86_check(proxy: &RecordingProxy, link: C86Link, padded: bool, label: &str) -
 /// message after the handshake on every connection is a bucket plus the
 /// tag, but the LAN dialer's bind and the Internet hellos (and a LAN
 /// frame-less probe, which offers nothing). (2) C pads and D does not (this
-/// build with the switch off, which is what an older build sends), both
-/// ways round on both carriers: each message exactly once, no padded
-/// message on any connection (the LAN listener's bind stays 96 bytes), and
-/// neither log has a link padding refusal or a frame the dispatcher refused.
+/// build with the gate shut by its debug close, `RAVEN_LAB_LINK_PADDING=0`,
+/// which is what an older build such as 0.1.0 sends, and stays shut after
+/// the flip), both ways round on both carriers: each message exactly once,
+/// no padded message on any connection (the LAN listener's bind stays 96
+/// bytes), and neither log has a link padding refusal or a frame the
+/// dispatcher refused.
 #[test]
 #[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
 fn c86_pad1_between_new_nodes_and_mixed_pairs() {
@@ -9615,13 +9617,13 @@ fn c86_pad1_between_new_nodes_and_mixed_pairs() {
     }
     let _net = shared_host_network();
     let root = tempfile::tempdir().unwrap();
+    // The side without padding is this build with the gate shut by its
+    // debug close (`=0`): what an older build sends, and still shut once
+    // LINK_PADDING_PRODUCTION_ENABLED is set (a debug build's `0` closes an
+    // open gate), so (2) stays a mixed pair after the flip.
     let node = |name: &'static str, pads: bool| {
         let p = Profile::create_with(root.path(), name, true);
-        if pads {
-            p.with_lab_env("RAVEN_LAB_LINK_PADDING", "1")
-        } else {
-            p
-        }
+        p.with_lab_env("RAVEN_LAB_LINK_PADDING", if pads { "1" } else { "0" })
     };
     let to_proxy = |dial: &str| RecordingProxy::start_split(dial.parse().unwrap());
     let exchange = |a: &Profile, b: &Profile, padded: bool, label: &str| {

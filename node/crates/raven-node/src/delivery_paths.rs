@@ -31,8 +31,9 @@
 //! receipt back ([`relayed_dial`]). A relayed dial without one, while the
 //! same contact's receipt came over another path within an hour, is
 //! `SEC_RELAY_NO_RECEIPT` about that relay; Suspicious when more than half
-//! of its last 10 such dials went that way. Relays by PeerId only, in
-//! memory, bounded, and only while the events gate is live.
+//! of its last 10 such dials went that way, to more than one contact.
+//! Relays by PeerId only, in memory, bounded, and only while the events
+//! gate is live.
 //!
 //! For `raven status`'s plain words about this network (Phase 3 P3.C6):
 //! which contacts had an authenticated LAN link with this node lately, and
@@ -421,14 +422,19 @@ struct RelayRow {
 }
 
 impl RelayRow {
-    /// More than half of its last [`RELAY_WINDOW`] dials lost their receipt.
+    /// More than half of its last [`RELAY_WINDOW`] dials lost their receipt,
+    /// to at least two contacts: one contact's own trouble (a slow keychain,
+    /// clock skew, a laptop going to sleep, a receipt that missed the wait
+    /// before Tor or the LAN brought it) is not the relay's doing, and alone
+    /// it made a friend's relay a warning in an ordinary evening
+    /// (false-positive pass, 2026-10-31).
     fn suspicious(&self) -> bool {
-        let lost = self
+        let lost: Vec<&RelayDial> = self
             .recent
             .iter()
             .filter(|d| d.outcome == RelayDialOutcome::Lost)
-            .count();
-        lost * 2 > RELAY_WINDOW
+            .collect();
+        lost.len() * 2 > RELAY_WINDOW && lost.iter().any(|d| d.contact != lost[0].contact)
     }
 }
 
@@ -1944,18 +1950,20 @@ pub(crate) mod tests {
         assert!(w.dial(bob, r2, false, min(100)).is_empty());
         assert!(w.receipt(bob, None, min(161)).is_empty());
         assert!(w.receipt(alice, None, min(161)).is_empty());
-        // Suspicious once more than half of r1's last 10 lost theirs: three
-        // so far, two more are still a Notice, the sixth is Suspicious.
-        for m in [162, 163] {
+        // Suspicious once more than half of r1's last 10 lost theirs, to
+        // more than one contact: three so far, and three more of Alice's are
+        // still a Notice (one contact's own trouble, false-positive pass
+        // 2026-10-31); Bob's then makes it Suspicious.
+        for m in [162, 163, 164] {
             assert_eq!(w.dial(alice, r1, false, min(m)), lost(r1, false));
         }
-        assert_eq!(w.dial(alice, r1, false, min(164)), lost(r1, true));
-        assert_eq!(w.counts(r1), Some((7, 1)));
+        assert_eq!(w.dial(bob, r1, false, min(165)), lost(r1, true));
+        assert_eq!(w.counts(r1), Some((8, 1)));
         // Receipts through r1 push the old losses out of its window.
-        for m in 165..170 {
+        for m in 166..171 {
             assert!(w.dial(alice, r1, true, min(m)).is_empty());
         }
-        assert_eq!(w.dial(alice, r1, false, min(171)), lost(r1, false));
+        assert_eq!(w.dial(alice, r1, false, min(172)), lost(r1, false));
         // Bounded.
         for n in 0..=MAX_RELAYS as u16 {
             w.dial(alice, &n.to_be_bytes(), true, min(200));

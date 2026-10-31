@@ -61,6 +61,18 @@ const _: () =
     assert!(crate::lan_noise::MAX_LAN_ENDPOINT_TEXT + 26 + 16 + 86 + 64 <= MAX_RHW1_ENVELOPE);
 const _: () = assert!(MAX_RHW1_RSO1 == 65_461 && MAX_RHW1_ENVELOPE == 65_402);
 const _: () = assert!(MAX_RHW1_ENVELOPE <= crate::friend_custody::MAX_RFC1_ENVELOPE);
+/// The largest RSO1 an origin hands off in a FORWARD: its HANDOFF frame
+/// (RFC1 header + RHW1) is at most the longest PAD1 inner frame
+/// ([`crate::link_padding::PAD1_MAX_INNER`]), so it crosses a link that pads
+/// (`RAVEN_LINK_PADDING_V1.md` §5), and so does the DELIVER the first
+/// custodian makes of it. A custodian still takes up to [`MAX_RHW1_RSO1`].
+pub const MAX_RHW1_SEND_RSO1: usize =
+    crate::link_padding::PAD1_MAX_INNER - RFC1_HEADER_LEN - RHW1_FIXED_LEN;
+/// The envelope of the largest RSO1 an origin hands off.
+pub const MAX_RHW1_SEND_ENVELOPE: usize = MAX_RHW1_SEND_RSO1 - RSO1_FIXED_LEN;
+const _: () = assert!(MAX_RHW1_SEND_RSO1 == 65_453 && MAX_RHW1_SEND_ENVELOPE == 65_394);
+const _: () =
+    assert!(crate::lan_noise::MAX_LAN_ENDPOINT_TEXT + 26 + 16 + 86 + 64 <= MAX_RHW1_SEND_ENVELOPE);
 
 /// TAGS: `count u8 (1..=32)` entries per frame.
 pub const MAX_TAG_ENTRIES: usize = 32;

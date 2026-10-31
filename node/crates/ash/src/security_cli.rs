@@ -1027,7 +1027,13 @@ pub(super) fn app_read(data_dir: &Path) -> Result<AppRead, String> {
     };
     let clock = Clock::now();
     let view = view_of(&opened, &Book::read(data_dir))?;
-    let week = week_counts(ledger, clock.now_ms);
+    let raised: Vec<(SecKind, String)> = view
+        .shown
+        .iter()
+        .filter(|s| s.alert.severity >= Severity::Suspicious)
+        .filter_map(|s| friend_key(&s.alert).map(|k| (s.alert.kind, hex::encode(k))))
+        .collect();
+    let week = week_counts(ledger, clock.now_ms, &raised);
     Ok(app_read_of(view, week, &clock))
 }
 
@@ -1085,9 +1091,21 @@ fn app_details(s: &Shown) -> Vec<(&'static str, String)> {
     rows
 }
 
-/// The events about each contact (any kind and role but a relay) the last
-/// [`EXPLAIN_DAYS`] counted, by key in lower-case hex, sorted.
-fn week_counts(ledger: &SecurityLedger, now: u64) -> Vec<(String, u64)> {
+/// The events about each contact (any role but a relay) the last
+/// [`EXPLAIN_DAYS`] counted, by key in lower-case hex, sorted: the kinds
+/// that are a warning or an alert from the first one, and a Notice kind
+/// only while a row of it about that contact rose to a warning or an alert
+/// (`raised`: kind and key of the open rows that did). A Notice kind on its
+/// own (clock skew, a message over a session Raven no longer has, a full
+/// mailbox, an old address answered by someone else) is only counted, as
+/// `raven security` does ("smaller notices"): the friend page's "N problems
+/// ... Compare words again" in the warning colour made ordinary clock skew
+/// or a reinstall look like an attack (false-positive pass, 2026-10-31).
+fn week_counts(
+    ledger: &SecurityLedger,
+    now: u64,
+    raised: &[(SecKind, String)],
+) -> Vec<(String, u64)> {
     let since = (now / DAY_MS).saturating_sub(EXPLAIN_DAYS - 1);
     let mut week: Vec<(String, u64)> = Vec::new();
     for count in ledger.counts(since).unwrap_or_default() {
@@ -1099,6 +1117,13 @@ fn week_counts(ledger: &SecurityLedger, now: u64) -> Vec<(String, u64)> {
             }) => hex::encode(key),
             _ => continue,
         };
+        let warns = raven_core::security_events::threshold(count.kind).base >= Severity::Suspicious
+            || raised
+                .iter()
+                .any(|(kind, k)| *kind == count.kind && *k == key);
+        if !warns {
+            continue;
+        }
         match week.iter_mut().find(|(k, _)| *k == key) {
             Some((_, n)) => *n = n.saturating_add(count.n),
             None => week.push((key, count.n)),

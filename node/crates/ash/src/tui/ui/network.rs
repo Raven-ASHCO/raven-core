@@ -69,20 +69,25 @@ const ABOUT: &str = "About this Raven";
 const NET_ADDRESSES: usize = 3;
 
 /// This computer: where the background program listens, if it does.
-/// LOCAL_ONLY follows 'Receiving on this computer only (<ip>): '.
-const LOCAL_ONLY: &str = "friends on your network can't reach you. If Raven was installed to \
-                          start at login, its installer listens only on this computer by \
-                          default. To change that, reinstall with \
-                          RAVEN_LAN_LISTEN=0.0.0.0:7420, or stop it and open Raven again.";
+/// LOCAL_ONLY's two parts follow 'Receiving on this computer only (<ip>): '
+/// and go around the setting to reinstall with ([`every_address`]: every
+/// address on the port this profile listens on, its own where it picked one,
+/// Phase 6b P6.36), never a fixed 7420 it may not use.
+const LOCAL_ONLY: (&str, &str) = (
+    "friends on your network can't reach you. If Raven was installed to start at login, its \
+     installer listens only on this computer by default. To change that, reinstall with ",
+    ", or stop it and open Raven again.",
+);
 const RECEIVE_OFF: &str = "Receiving is off (Settings).";
 const SEND_ONLY: &str = "Sending only, not receiving.";
-/// ADDRESS_NOT_HERE's two parts go around the address it is set to listen
-/// on, cut to ADDRESS_CELLS.
-const ADDRESS_NOT_HERE: (&str, &str) = (
+/// ADDRESS_NOT_HERE's three parts go around the address it is set to listen
+/// on, cut to ADDRESS_CELLS, and the setting to reinstall with
+/// ([`every_address`], as LOCAL_ONLY's).
+const ADDRESS_NOT_HERE: (&str, &str, &str) = (
     "Not receiving: Raven is set to listen on ",
     ", which isn't on this computer now (did you change networks?). It starts listening by \
-     itself when that address is back. To listen on every network instead, reinstall with \
-     RAVEN_LAN_LISTEN=0.0.0.0:7420.",
+     itself when that address is back. To listen on every network instead, reinstall with ",
+    ".",
 );
 const ADDRESS_CELLS: u16 = 48;
 /// `raven status` says the same on no network (P3.C6).
@@ -495,6 +500,20 @@ fn address_row(app: &App) -> String {
 /// state, the receive setting and this computer's networks. Each with the
 /// mark the header chip has. On no network at all that comes first, and
 /// the program's own row follows only when it needs a word of its own.
+/// The setting that reinstalls the login service on every address of this
+/// profile's port ([`App::firewall_port`]: the one it listens on, its own
+/// where it picked one): what LOCAL_ONLY and ADDRESS_NOT_HERE end with.
+/// windows_service.ps1 takes it as `-LanListen`, the other installers as
+/// RAVEN_LAN_LISTEN (`raven status` says the same, cli.rs).
+fn every_address(app: &App) -> String {
+    let all = format!("0.0.0.0:{}", app.firewall_port());
+    if app.on_windows() {
+        format!("-LanListen {all}")
+    } else {
+        format!("RAVEN_LAN_LISTEN={all}")
+    }
+}
+
 fn listener_rows(app: &App, width: u16, now: Instant) -> Vec<Line<'static>> {
     let look = app.look();
     let (g, t) = (&look.glyphs, &look.theme);
@@ -539,7 +558,12 @@ fn listener_rows(app: &App, width: u16, now: Instant) -> Vec<Line<'static>> {
             let host = local_host(node.listen.as_deref());
             (
                 Span::raw(g.dot_half),
-                format!("Receiving on this computer only ({host}): {LOCAL_ONLY}"),
+                format!(
+                    "Receiving on this computer only ({host}): {}{}{}",
+                    LOCAL_ONLY.0,
+                    every_address(app),
+                    LOCAL_ONLY.1
+                ),
                 Style::default(),
             )
         }
@@ -550,11 +574,11 @@ fn listener_rows(app: &App, width: u16, now: Instant) -> Vec<Line<'static>> {
         ),
         NodeState::SendOnly => match node.bind_failure() {
             Some(BindFailure::AddrNotHere { wanted }) => {
-                let (before, after) = ADDRESS_NOT_HERE;
+                let (before, after, end) = ADDRESS_NOT_HERE;
                 let wanted = display::one_line(wanted, ADDRESS_CELLS, ellipsis);
                 (
                     Span::styled(g.dot_off, t.secondary),
-                    format!("{before}{wanted}{after}"),
+                    format!("{before}{wanted}{after}{}{end}", every_address(app)),
                     Style::default(),
                 )
             }
@@ -2321,6 +2345,44 @@ mod tests {
             );
             testkit::assert_rows(&rows[3..7], want);
         }
+    }
+
+    /// Phase 6b P6.36 (before the random-port flip): the advice to listen on
+    /// every network names this profile's own port (one it picked, 43210
+    /// here), never a fixed 7420 it does not use; in the Windows copy as
+    /// windows_service.ps1's `-LanListen`. The same for the address that is
+    /// not on this computer now.
+    #[test]
+    fn the_advice_to_listen_everywhere_names_the_profiles_own_port() {
+        let mut app = settled(
+            (80, 24),
+            testkit::session(Receive::On),
+            up(4242, "127.0.0.1:43210"),
+            1,
+        );
+        app.set_service_port_for_tests(43_210);
+        open_net(&mut app);
+        let text = testkit::screen_text(&testkit::render(&app, 80, 24));
+        assert!(
+            text.contains("RAVEN_LAN_LISTEN=0.0.0.0:43210, or stop it"),
+            "{text}"
+        );
+        assert!(!text.contains("7420"), "{text}");
+        app.set_windows_for_tests(true);
+        let text = testkit::screen_text(&testkit::render(&app, 80, 24));
+        assert!(
+            text.contains("reinstall with -LanListen 0.0.0.0:43210, or stop it"),
+            "{text}"
+        );
+        assert!(!text.contains("RAVEN_LAN_LISTEN"), "{text}");
+
+        let mut away = settled((80, 24), testkit::session(Receive::On), send_only(4242), 1);
+        away.set_service_port_for_tests(43_210);
+        testkit::send(&mut away, bind_failed("192.168.1.20:43210", NOT_HERE));
+        open_net(&mut away);
+        let text = testkit::screen_text(&testkit::render(&away, 80, 24));
+        assert!(text.contains("RAVEN_LAN_LISTEN=0.0.0.0:43210."), "{text}");
+        assert!(!text.contains("7420"), "{text}");
     }
 
     /// NET's header row.

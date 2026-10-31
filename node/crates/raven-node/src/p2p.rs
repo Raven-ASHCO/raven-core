@@ -3117,8 +3117,13 @@ pub(crate) async fn dial_with_path_meta(
             net,
         );
     }
-    // Phase 6b S21: what a relayed link brought back, about its relay.
-    if path == Some(DeliveryPath::Relayed) {
+    // Phase 6b S21: what a relayed link brought back, about its relay. Not
+    // a dial that lost an outbox race (another carrier won it before this
+    // one wrote a frame): it sent nothing, so no receipt was owed.
+    let race_lost = replies
+        .as_ref()
+        .is_err_and(|e| e.contains(crate::onion::race::RACE_LOST));
+    if path == Some(DeliveryPath::Relayed) && !race_lost {
         let via: Vec<Vec<u8>> = through.iter().map(|r| r.to_bytes()).collect();
         crate::delivery_paths::relayed_dial(
             &expected,

@@ -117,6 +117,26 @@ pub(crate) const MIN_RFC1_RSO1: usize = RSO1_FIXED_LEN + crate::envelope::PREFIX
 /// always fits custody.
 const _: () =
     assert!(crate::lan_noise::MAX_LAN_ENDPOINT_TEXT + 26 + 16 + 86 + 64 <= MAX_RFC1_ENVELOPE);
+/// The largest RSO1 a sender deposits ([`rfc1_rso1`]): its DEPOSIT frame
+/// (`50 + n` bytes) is at most the longest PAD1 inner frame
+/// ([`crate::link_padding::PAD1_MAX_INNER`], 65,511 bytes), so it crosses a
+/// link that pads (`RAVEN_LINK_PADDING_V1.md` §5: on a padded link the
+/// sender uses 65,511 as the limit). The sender keeps it on every link: it
+/// cannot know which link a deposit will take, and no Raven message comes
+/// near either limit (the assert below). A custodian still takes up to
+/// [`MAX_RFC1_RSO1`], what an older sender may deposit over a link that
+/// does not pad; its FETCH_ITEM (`18 + n` bytes) fits one PAD1 frame either
+/// way.
+pub const MAX_RFC1_SEND_RSO1: usize = crate::link_padding::PAD1_MAX_INNER - 50;
+/// The envelope of the largest RSO1 a sender deposits ([`MAX_RFC1_SEND_RSO1`]).
+pub const MAX_RFC1_SEND_ENVELOPE: usize = MAX_RFC1_SEND_RSO1 - RSO1_FIXED_LEN;
+const _: () = assert!(
+    MAX_RFC1_SEND_RSO1 == 65_461
+        && MAX_RFC1_SEND_RSO1 <= MAX_RFC1_RSO1
+        && RFC1_HEADER_LEN + 4 + MAX_RFC1_RSO1 <= crate::link_padding::PAD1_MAX_INNER
+);
+const _: () =
+    assert!(crate::lan_noise::MAX_LAN_ENDPOINT_TEXT + 26 + 16 + 86 + 64 <= MAX_RFC1_SEND_ENVELOPE);
 
 pub const MAX_FETCH_TAGS: usize = 32;
 pub const MAX_RELEASE_DIGESTS: usize = 32;
@@ -749,7 +769,10 @@ pub fn check_rfc1_rso1(rso1: &[u8]) -> Result<(StoreObject, Envelope), &'static 
     Ok((object, env))
 }
 
-/// Build the RSO1 a sender deposits for `packed_envelope` under `store_tag`.
+/// Build the RSO1 a sender deposits for `packed_envelope` under `store_tag`:
+/// at most [`MAX_RFC1_SEND_RSO1`] bytes, so its DEPOSIT crosses a padded
+/// link too (one a custodian would take but no padded link could carry is
+/// refused here, before it is ever sent).
 pub fn rfc1_rso1(store_tag: [u8; 16], packed_envelope: &[u8]) -> Result<Vec<u8>, String> {
     let env = Envelope::unpack(packed_envelope).ok_or_else(|| "not RVN1".to_string())?;
     let object = StoreObject {
@@ -763,6 +786,9 @@ pub fn rfc1_rso1(store_tag: [u8; 16], packed_envelope: &[u8]) -> Result<Vec<u8>,
     };
     let rso1 = object.pack()?;
     check_rfc1_rso1(&rso1).map_err(str::to_string)?;
+    if rso1.len() > MAX_RFC1_SEND_RSO1 {
+        return Err("RFC1_RSO1_TOO_LARGE".to_string());
+    }
     Ok(rso1)
 }
 

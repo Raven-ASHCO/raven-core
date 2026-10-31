@@ -1667,7 +1667,8 @@ pub(super) enum IdentityStart {
 /// (`RAVEN_SERVICE_LAN_LISTEN`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ListenOverride {
-    /// Nobody: ext.rs's default, every address on port 7420 (OD-4).
+    /// Nobody: ext.rs's default, every address on the profile's port (7420
+    /// unless it picked its own, Phase 6b P6.36; OD-4).
     None,
     /// The user set it: the app leaves it alone.
     User,
@@ -3780,7 +3781,7 @@ impl App {
 
     /// The port FW names: the one the node this app started listens on, or
     /// the one it listens on unless the user chose another (ext.rs's default,
-    /// every address on port 7420: OD-4).
+    /// every address on the profile's port: OD-4, Phase 6b P6.36).
     pub(super) fn firewall_port(&self) -> u16 {
         match self.node.state {
             NodeState::Listening { port: Some(port) } => port,

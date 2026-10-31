@@ -2109,6 +2109,93 @@ fn cards_carry_no_unsigned_routes_outside_the_lab() {
     );
 }
 
+/// Phase 6b P6.36 (before the random-port flip), with the gate opened by its
+/// lab switch (`RAVEN_LAB_TEST_A=1 RAVEN_LAB_RANDOM_PORT=1`, debug builds):
+/// `raven init`, which every installer runs first, makes a profile that picks
+/// a LAN port of its own; `raven-node lan-default --data-dir`, which the
+/// installers ask next, answers on that port; and `raven whoami --card --lan
+/// HOST:7420` (habit, older guides) notes that friends would dial a port
+/// nobody answers, while `--lan HOST:<its port>` prints the card alone. With
+/// the gate shut by its debug close (`RAVEN_LAB_RANDOM_PORT=0`, which stays a
+/// close after the flip) a new profile keeps 7420 and nothing is noted.
+#[test]
+fn a_new_profile_with_the_random_port_gets_its_own_port_everywhere() {
+    if !cfg!(debug_assertions) {
+        return; // a release build: the switch cannot open the gate
+    }
+    let with = |c: &mut Command, switch: &str| {
+        c.env("RAVEN_LAB_TEST_A", "1")
+            .env("RAVEN_LAB_RANDOM_PORT", switch)
+            .env_remove("RAVEN_LAB_LAN_AUTO")
+            .env_remove("RAVEN_SERVICE_LAN_LISTEN");
+    };
+    let card_note = |dir: &Path, switch: &str, lan: &str| {
+        let mut c = ash(dir);
+        c.args(["whoami", "--card", "--lan", lan]);
+        with(&mut c, switch);
+        let o = run(c, "");
+        assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+        assert!(
+            text(&o.stdout).contains(&format!(" lan={lan}")),
+            "{}",
+            text(&o.stdout)
+        );
+        text(&o.stderr)
+    };
+    let picked = short_dir();
+    let mut c = ash(picked.path());
+    c.arg("init");
+    with(&mut c, "1");
+    let o = run(c, "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    let port = raven_core::node_policy::try_load_policy(picked.path())
+        .unwrap()
+        .lan_listen_port
+        .expect("a new profile picks its LAN port while the gate is live");
+    assert!(raven_core::node_policy::lan_port_pickable(port), "{port}");
+    let node = Path::new(env!("CARGO_BIN_EXE_ash")).with_file_name("raven-node");
+    if node.exists() {
+        let mut c = Command::new(&node);
+        c.args(["lan-default", "--data-dir"]).arg(picked.path());
+        with(&mut c, "1");
+        let o = run(c, "");
+        assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+        assert_eq!(text(&o.stdout).trim(), format!("127.0.0.1:{port}"));
+        // The debug close: the same profile, the gate shut, the default port.
+        let mut c = Command::new(&node);
+        c.args(["lan-default", "--data-dir"]).arg(picked.path());
+        with(&mut c, "0");
+        let o = run(c, "");
+        assert_eq!(text(&o.stdout).trim(), "127.0.0.1:7420");
+    }
+    let note = card_note(picked.path(), "1", "192.168.1.20:7420");
+    assert!(
+        note.contains(&format!(
+            "note: --lan names port 7420, but this profile listens for friends on its network on \
+             port {port}"
+        )),
+        "{note}"
+    );
+    let own = format!("192.168.1.20:{port}");
+    assert!(!card_note(picked.path(), "1", &own).contains("note:"));
+
+    let kept = short_dir();
+    let mut c = ash(kept.path());
+    c.arg("init");
+    with(&mut c, "0");
+    let o = run(c, "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    assert_eq!(
+        raven_core::node_policy::try_load_policy(kept.path())
+            .unwrap()
+            .lan_listen_port,
+        None
+    );
+    assert!(!card_note(kept.path(), "0", "192.168.1.20:7420").contains("note:"));
+    assert!(card_note(kept.path(), "0", &own)
+        .contains("listens for friends on its network on port 7420"));
+}
+
 /// `raven contact hide-ip` and `raven node hide-ip` say what they change,
 /// and `raven status` shows it (no row while nothing is hidden and the route
 /// hints switch is off, so today's status is unchanged).
@@ -3572,7 +3659,10 @@ fn security_notices_in_the_cli() {
     };
     let headline = "An invite had a different key from the Alice you verified";
     let list = out(sec(&["security"], true));
-    assert!(list.contains(&format!("1. ! {headline} (")), "{list}");
+    // A warning (`-`), not an Alert, since the false-positive pass
+    // (2026-10-31): Raven refused the other key, and a friend's new key
+    // after a reinstall is the common cause.
+    assert!(list.contains(&format!("1. - {headline} (")), "{list}");
     for line in [
         "Raven kept the old key.",
         "If Alice really has a new key (a new computer or a reinstall), compare security words \
@@ -3590,7 +3680,7 @@ fn security_notices_in_the_cli() {
     assert_eq!(alerts.len(), 1, "{json}");
     assert_eq!(alerts[0]["kind"], "SEC_KEY_CHANGE_ATTEMPT");
     assert_eq!(alerts[0]["code"], 27);
-    assert_eq!(alerts[0]["severity"], "alert");
+    assert_eq!(alerts[0]["severity"], "suspicious");
     assert_eq!(alerts[0]["state"], "seen", "the list was read");
     assert_eq!(alerts[0]["about"]["name"], "Alice");
     assert_eq!(alerts[0]["about"]["verified"], true);
@@ -3601,7 +3691,7 @@ fn security_notices_in_the_cli() {
         "SEC_KEY_CHANGE_ATTEMPT (27)",
         &format!("Alice (verified friend, key {})", &pub_hex(&alice)[..8]),
         "Per day         today 1",
-        "How serious     alert",
+        "How serious     warning",
     ] {
         assert!(explain.contains(line), "{line:?} missing: {explain}");
     }
@@ -3630,7 +3720,7 @@ fn security_notices_in_the_cli() {
             .nth(1)
             .unwrap_or_else(|| panic!("no SECURITY section: {status}"));
         for line in [
-            &format!("  ! {headline} ("),
+            &format!("  - {headline} ("),
             "    raven contact verify --petname Alice",
             "  Strangers refused in the last hour: 37 (they learned nothing about you)",
             "  Details: raven security",

@@ -124,7 +124,7 @@ use raven_core::security_ledger::{LedgerError, SecurityLedger};
 use raven_core::session_renewal;
 use raven_swarm::gate::{AdmitHook, AuthenticatedHook, GateHandle, RefusalHook, RefusalKind};
 
-use crate::netutil::{ReplyWait, PEER_CLOSED};
+use crate::netutil::ReplyWait;
 
 const MINUTE_MS: u64 = 60_000;
 const HOUR_MS: u64 = 60 * MINUTE_MS;
@@ -295,6 +295,49 @@ pub(crate) fn address_impostor(expected: &[u8; 32], carrier: OutboxCarrier, at: 
     }
 }
 
+/// Another identity, `answering`, bound at `expected`'s address (a LAN bind
+/// or an Internet hello that names someone else, signed by that key):
+/// [`address_impostor`], counted once a day per contact and answering key
+/// ([`first_answer_today`]). In ordinary use it is one other key again and
+/// again: the friend's old address now held by another Raven user who has
+/// you as a contact (DHCP gave it out), or the friend's own new key after a
+/// reinstall. Each dial and retry counted, that reached Suspicious (3 a day)
+/// within minutes (false-positive pass, 2026-10-31); three different keys
+/// at one friend's address in a day still do. The dial stops as before.
+pub(crate) fn address_impostor_by(
+    expected: &[u8; 32],
+    carrier: OutboxCarrier,
+    at: Option<IpAddr>,
+    answering: &[u8; 32],
+) {
+    if live() && first_answer_today(expected, answering, now_ms()) {
+        address_impostor(expected, carrier, at);
+    }
+}
+
+/// The answering keys counted for each contact ([`address_impostor_by`]):
+/// contact, answering key, when. Memory only, at most [`MAX_IMPOSTOR_KEYS`] (the
+/// oldest goes); never written anywhere, and gone with the process.
+static IMPOSTOR_KEYS: Mutex<Vec<AnswerSeen>> = Mutex::new(Vec::new());
+/// Contact, answering key, when ([`IMPOSTOR_KEYS`]).
+type AnswerSeen = ([u8; 32], [u8; 32], u64);
+const MAX_IMPOSTOR_KEYS: usize = 256;
+
+/// `answering` was not counted at `contact`'s address in the day before
+/// `now_ms` (it is from now on).
+fn first_answer_today(contact: &[u8; 32], answering: &[u8; 32], now_ms: u64) -> bool {
+    let mut seen = lock(&IMPOSTOR_KEYS);
+    seen.retain(|&(_, _, at)| at.abs_diff(now_ms) < DAY_MS);
+    if seen.iter().any(|(c, k, _)| (c, k) == (contact, answering)) {
+        return false;
+    }
+    if seen.len() >= MAX_IMPOSTOR_KEYS {
+        seen.remove(0);
+    }
+    seen.push((*contact, *answering, now_ms));
+    true
+}
+
 /// A contact's LAN beacon query, link knock or Bluetooth token matched only
 /// with the pair's static root while this node expects the contact to use
 /// their pair seed (Phase 6b P6.38, design B §5, `SEC_PAIR_SEED_ROOT`): a
@@ -362,16 +405,20 @@ pub(crate) fn link_features(
 }
 
 /// Did a relayed p2p link break inside (`error`, as the link returned it)?
-/// A Noise failure, garbage where a frame belongs, a reply that failed its
-/// tag, or the stream cut once both hellos were verified. Not the contact's
-/// own refusal (`LINK_NOT_ACCEPTED`) and not a hang-up during the handshake
-/// (a busy contact sheds load that way too).
+/// A Noise failure, garbage where a frame belongs, or a reply that failed
+/// its tag. Not the contact's own refusal (`LINK_NOT_ACCEPTED`), not a
+/// hang-up during the handshake (a busy contact sheds load that way too),
+/// and not the stream cut after the hellos (`PEER_CLOSED`): a relay's
+/// circuit limits (5 minutes or 2 MiB on a friend's relay), a laptop that
+/// sleeps, a contact whose deadline ran out on a slow relay or that refused
+/// our offer all end a link that way in ordinary use, and it made
+/// SEC_RELAY_LINK_BROKEN a warning at first sight (false-positive pass,
+/// 2026-10-31).
 pub(crate) fn link_broke(error: &str) -> bool {
     [
         LINK_TAG_FAILED,
         NOISE_HANDSHAKE_FAILED,
         INTERNET_FRAME_LENGTH,
-        PEER_CLOSED,
     ]
     .contains(&error)
         || (error.contains("_DIAL_BAD_REPLY") && error.contains(LINK_TAG_FAILED))

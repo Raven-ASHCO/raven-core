@@ -2841,6 +2841,46 @@ mod tests {
         );
     }
 
+    /// Phase 6b P6.36 (before the random-port flip): with the random-port
+    /// gate opened by its lab switch, a profile that picked a port of its
+    /// own (43210) shows that port while no node runs; with the gate shut
+    /// (the debug close, so this stays a test of the shut gate after the
+    /// flip) the same profile shows 7420, as it listens there.
+    #[test]
+    fn the_view_shows_the_port_the_profile_picked() {
+        use raven_core::security_gate::{set_lab_for_this_thread, SecGate};
+        let profile = tempfile::tempdir().unwrap();
+        raven_core::node_policy::update_policy(profile.path(), |p| {
+            p.lan_listen_port = Some(43_210)
+        })
+        .unwrap();
+        let quiet = NetFacts {
+            status: Err("not running".into()),
+            policy: raven_core::node_policy::try_load_policy(profile.path()).ok(),
+            lan: bridge::LanView {
+                setting: "on",
+                meeting_until_ms: None,
+                verified_only: false,
+                row: String::new(),
+                beacon_row: None,
+            },
+            nearby: bridge::NearbyView {
+                state: "held",
+                saved: None,
+                info: None,
+                rows: Vec::new(),
+            },
+            carry: bridge::CarryView::default(),
+        };
+        set_lab_for_this_thread(SecGate::RandomPort, Some(false));
+        assert_eq!(network_view(profile.path(), &quiet)["port"], 7420);
+        if cfg!(debug_assertions) {
+            set_lab_for_this_thread(SecGate::RandomPort, Some(true));
+            assert_eq!(network_view(profile.path(), &quiet)["port"], 43_210);
+        }
+        set_lab_for_this_thread(SecGate::RandomPort, None);
+    }
+
     /// (f) A release build holds every way but LAN direct whatever lab
     /// switch is set: `preview` in `network.status`, NOT_AVAILABLE_YET from
     /// `network.set`, no switch listed. CI's release step and the local

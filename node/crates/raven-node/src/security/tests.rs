@@ -17,6 +17,7 @@ use raven_core::security_events::{BIND_BAD_SIGNATURE, LAN_FRAME_LENGTH, LAN_HAND
 use raven_core::security_ledger::ledger_path;
 
 use super::*;
+use crate::netutil::PEER_CLOSED;
 
 thread_local! {
     static CAPTURE: RefCell<Option<Vec<SecEvent>>> = const { RefCell::new(None) };
@@ -269,6 +270,56 @@ fn an_impostor_is_noted_about_the_contact_whose_address_it_was() {
     assert_eq!(ev.network, network_now());
 }
 
+/// The false-positive pass (2026-10-31, before the events flip): one other
+/// key answering at a friend's address again and again (the address now
+/// held by another Raven user, or the friend's own new key after a
+/// reinstall) is counted once a day, however often the outbox dials and
+/// retries, so it stays a Notice; three different keys at that address in
+/// a day still reach Suspicious. Another contact's count is its own.
+#[test]
+fn one_other_key_at_a_friends_address_is_counted_once_a_day() {
+    use raven_core::security_events::{threshold, Severity};
+    let Some(capture) = Capture::start() else {
+        return;
+    };
+    let (friend, other) = (key(0x62), key(0x63));
+    for _ in 0..20 {
+        address_impostor_by(&friend, OutboxCarrier::Lan, None, &key(0xA1));
+        address_impostor_by(&friend, OutboxCarrier::Internet, None, &key(0xA1));
+    }
+    let about = |who: [u8; 32]| {
+        capture
+            .events()
+            .iter()
+            .filter(|e| e.kind == SecKind::AddressImpostor && e.who == contact(who))
+            .count()
+    };
+    assert_eq!(about(friend), 1);
+    address_impostor_by(&other, OutboxCarrier::Lan, None, &key(0xA1));
+    assert_eq!(about(other), 1, "another contact's count is its own");
+    for answering in [0xA2, 0xA3] {
+        address_impostor_by(&friend, OutboxCarrier::Lan, None, &key(answering));
+    }
+    assert_eq!(about(friend), 3);
+    let rule = threshold(SecKind::AddressImpostor);
+    assert_eq!(rule.base, Severity::Notice);
+    assert_eq!(rule.suspicious.map(|r| r.at), Some(3));
+    // Gate shut (the debug close): nothing is counted, nothing remembered.
+    drop(capture);
+    security_gate::set_lab_for_this_thread(SecGate::Events, Some(false));
+    address_impostor_by(&key(0x64), OutboxCarrier::Lan, None, &key(0xA4));
+    security_gate::set_lab_for_this_thread(SecGate::Events, None);
+    let Some(capture) = Capture::start() else {
+        return;
+    };
+    address_impostor_by(&key(0x64), OutboxCarrier::Lan, None, &key(0xA4));
+    assert_eq!(
+        capture.events().len(),
+        1,
+        "first counted once the gate is live"
+    );
+}
+
 /// S5: the p2p peer gate's hook notes the remote's source, never a peer;
 /// a relayed link that broke inside is about its relays' digests.
 #[test]
@@ -304,13 +355,16 @@ fn the_p2p_gate_notes_sources_and_broken_relayed_links_their_relays() {
         LINK_TAG_FAILED,
         NOISE_HANDSHAKE_FAILED,
         INTERNET_FRAME_LENGTH,
-        PEER_CLOSED,
         "P2P_DIAL_BAD_REPLY: the peer's reply could not be read (noise transport failed); \
          the frames were sent, delivery is unconfirmed and a retry is safe",
     ] {
         assert!(link_broke(broke), "{broke}");
     }
+    // A cut after the hellos is no break inside: a relay's circuit limits,
+    // a sleeping laptop or a contact's deadline end links that way too
+    // (false-positive pass, 2026-10-31).
     for not in [
+        PEER_CLOSED,
         crate::netutil::LINK_NOT_ACCEPTED,
         "P2P_DIAL_PEER_CLOSED: the peer closed the connection without replying; the frames \
          were sent, delivery is unconfirmed and a retry is safe",

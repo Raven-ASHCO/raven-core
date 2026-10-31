@@ -5499,8 +5499,8 @@ fn deposit_with_custodians(
         custodian_routes, custody_batch, deposit_chunks, CustodyItem, ItemAnswer, PlanStep,
         CUSTODY_MIN_REMAINING_MS,
     };
-    use raven_core::custody_handoff::MAX_RHW1_ENVELOPE;
-    use raven_core::friend_custody::{rfc1_rso1, CustodyCode, MAX_RFC1_ENVELOPE};
+    use raven_core::custody_handoff::MAX_RHW1_SEND_ENVELOPE;
+    use raven_core::friend_custody::{rfc1_rso1, CustodyCode, MAX_RFC1_SEND_ENVELOPE};
     let data_dir = ctx.data_dir.as_path();
     let steps = custody_steps(ctx, peer, custodians, wall);
     if steps.is_empty() {
@@ -5520,8 +5520,10 @@ fn deposit_with_custodians(
         /// Whether a FORWARD may carry it: validity and size (§3.5).
         forwardable: bool,
     }
+    // The send limits keep every DEPOSIT and HANDOFF within one PAD1 frame
+    // (PAD1 §5), so each crosses a padded link too.
     let forwardable = |bytes: &[u8], expires_at: u64| {
-        bytes.len() <= MAX_RHW1_ENVELOPE
+        bytes.len() <= MAX_RHW1_SEND_ENVELOPE
             && expires_at.saturating_sub(wall) >= FORWARD_MIN_REMAINING_MS
     };
     let hex32 = |h: &String| -> Option<[u8; 32]> {
@@ -5568,7 +5570,7 @@ fn deposit_with_custodians(
         let Some(record) = records.get(&c.message_id) else {
             continue;
         };
-        if c.bytes.len() > MAX_RFC1_ENVELOPE {
+        if c.bytes.len() > MAX_RFC1_SEND_ENVELOPE {
             continue;
         }
         let Ok(tag) = store.outbound_store_tag_for_object(&c.key, &c.bytes, wall) else {

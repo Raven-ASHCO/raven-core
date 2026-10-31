@@ -236,6 +236,12 @@ not go out at once:
 
 ## 5. Firewalls on a local-only link
 
+The TCP rules below use 7420, the LAN port of a profile that did not pick one
+of its own. A profile that picked its own port when it was created (a build
+with the random LAN port on) listens there instead: put that port in the TCP
+rules (`raven status` shows where Raven listens). Nearby search is always UDP
+7420.
+
 - **macOS**. See whether the firewall is on; when it is, allow raven-node
   (installed in `~/.local/bin` by the install script). Allow the "Local
   Network" prompt for raven-node if macOS shows it.

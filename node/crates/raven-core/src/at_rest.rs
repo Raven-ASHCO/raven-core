@@ -1544,6 +1544,23 @@ pub fn open(k: &MetaKeys, kind: Kind, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>
     open_file(k, kind, bytes).inspect_err(sense_tampered)
 }
 
+/// [`open`] that notes nothing: for bytes that are not this profile's live
+/// state, where a failure is no sign that anyone changed Raven's data. The
+/// `.corrupt` copies an older build moved aside, which may be sealed under
+/// a key this profile no longer has (privacy's `settle_quarantined`, at
+/// every start); a copy the person names to `raven privacy status
+/// --verify-copy`; the read-back of a file just written (a disk that gives
+/// back other bytes fails the write, it is not tampering). Noting those as
+/// `SEC_LOCAL_ROLLBACK` (an Alert) raised it at every start for one old copy
+/// (false-positive pass, 2026-10-31).
+pub(crate) fn open_quiet(
+    k: &MetaKeys,
+    kind: Kind,
+    bytes: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AtRestError> {
+    open_file(k, kind, bytes)
+}
+
 /// Phase 6b (design C sensing point C1, S23): sealed bytes that fail
 /// authentication under the loaded keys were changed outside Raven, noted
 /// about this computer through
@@ -2153,7 +2170,7 @@ pub(crate) fn seal_verified_held(
     replace_verified(path, &sealed, |written| {
         #[cfg(test)]
         let written = &tests::seal_fault(written);
-        if open(&keys, kind, written)?[..] == plaintext[..] {
+        if open_quiet(&keys, kind, written)?[..] == plaintext[..] {
             Ok(())
         } else {
             Err(AtRestError::Tampered { kind: kind.code() })

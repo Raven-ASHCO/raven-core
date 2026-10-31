@@ -405,6 +405,74 @@ mod tests {
         assert!(a.seal(&vec![0x7e; MAX_TRANSPORT_PLAINTEXT]).is_ok());
     }
 
+    /// PAD1 §5 (before the padding flip): the largest custody frames a
+    /// sender makes cross a padded link. A DEPOSIT of the largest RSO1 a
+    /// sender builds (`MAX_RFC1_SEND_RSO1`) and a HANDOFF FORWARD of the
+    /// largest one an origin hands off (`MAX_RHW1_SEND_RSO1`) are 65,511
+    /// bytes, the longest PAD1 inner frame: each goes out in the 65,519
+    /// bucket and the custodian reads the same request. The custodian's
+    /// FETCH_ITEM of the largest RSO1 it takes (an older sender's
+    /// `MAX_RFC1_RSO1`) fits too. Only that older sender's own DEPOSIT, 8
+    /// bytes longer, cannot be padded: no sender of this build makes one.
+    #[test]
+    fn the_largest_custody_frames_cross_a_padded_link() {
+        use raven_core::custody_handoff::{Rhw1, MAX_RHW1_SEND_RSO1};
+        use raven_core::friend_custody::{
+            decode_reply, decode_request, encode_reply, encode_request, RequestDecode, Rfc1Reply,
+            Rfc1Request, MAX_RFC1_RSO1, MAX_RFC1_SEND_RSO1,
+        };
+        let (mut sender, mut custodian) = ciphers(PadState::agreed(true), PadState::agreed(true));
+        let deposit = encode_request(
+            &[0xD0, 0, 0, 0, 0, 0, 0, 1],
+            &Rfc1Request::Deposit {
+                recipient: [0xB0; 32],
+                rso1: vec![0x44; MAX_RFC1_SEND_RSO1],
+            },
+        );
+        let forward = encode_request(
+            &[0xD0, 0, 0, 0, 0, 0, 0, 2],
+            &Rfc1Request::Handoff {
+                record: Rhw1::forward([0xE0; 32], vec![0x45; MAX_RHW1_SEND_RSO1]),
+            },
+        );
+        for frame in [&deposit, &forward] {
+            assert_eq!(frame.len(), PAD1_MAX_INNER);
+            let ct = sender.seal(frame).unwrap();
+            assert_eq!(ct.len(), MAX_TRANSPORT_PLAINTEXT + 16, "the 65,519 bucket");
+            assert_eq!(&custodian.open(&ct).unwrap(), frame);
+        }
+        match decode_request(&deposit) {
+            Ok(RequestDecode::Request(_, Rfc1Request::Deposit { rso1, .. })) => {
+                assert_eq!(rso1.len(), MAX_RFC1_SEND_RSO1)
+            }
+            other => panic!("{other:?}"),
+        }
+        let item = encode_reply(
+            &[0xF0, 0, 0, 0, 0, 0, 0, 1],
+            &Rfc1Reply::FetchItem {
+                rso1: vec![0x46; MAX_RFC1_RSO1],
+            },
+        );
+        let ct = custodian.seal(&item).unwrap();
+        assert_eq!(sender.open(&ct).unwrap(), item);
+        assert!(matches!(
+            decode_reply(&item),
+            Ok((_, Rfc1Reply::FetchItem { rso1 })) if rso1.len() == MAX_RFC1_RSO1
+        ));
+        let older = encode_request(
+            &[0xD0, 0, 0, 0, 0, 0, 0, 3],
+            &Rfc1Request::Deposit {
+                recipient: [0xB0; 32],
+                rso1: vec![0x44; MAX_RFC1_RSO1],
+            },
+        );
+        assert_eq!(older.len(), PAD1_MAX_INNER + 8);
+        assert!(sender
+            .seal(&older)
+            .unwrap_err()
+            .starts_with(PAD1_UNSENDABLE));
+    }
+
     /// The offer follows the gate: PAD1 only while padding is live (this
     /// thread's lab override), never in a release build.
     #[test]
@@ -419,6 +487,7 @@ mod tests {
             OutboxCarrier::Internet,
             OutboxCarrier::P2p,
             OutboxCarrier::Nearby,
+            OutboxCarrier::Onion,
         ] {
             assert_eq!(
                 offers(carrier).contains(LinkFeatures::PAD1),

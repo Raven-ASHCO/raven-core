@@ -6257,6 +6257,31 @@ mod lifecycle_tests {
         assert!(!raven_core::node_policy::policy_path(fresh.path()).exists());
     }
 
+    /// Phase 6b P6.36 (before the random-port flip): with the gate opened by
+    /// its lab switch, `lan-default --data-dir` of a profile that picked
+    /// 43210 answers on 43210, both while `auto` is held and once it is
+    /// live; with the gate shut (the debug close, so this stays a test of the
+    /// shut gate after the flip) the same profile gets the default port.
+    #[test]
+    fn lan_default_follows_a_picked_port_while_the_gate_is_live() {
+        use raven_core::security_gate::{set_lab_for_this_thread, SecGate};
+        let picked = tempfile::tempdir().unwrap();
+        raven_core::node_policy::update_policy(picked.path(), |p| p.lan_listen_port = Some(43_210))
+            .unwrap();
+        let port = || raven_core::node_policy::profile_lan_port(picked.path());
+        set_lab_for_this_thread(SecGate::RandomPort, Some(false));
+        assert_eq!(port(), None);
+        assert_eq!(lan_default(false, port()), "127.0.0.1:7420");
+        assert_eq!(lan_default(true, port()), "auto");
+        if cfg!(debug_assertions) {
+            set_lab_for_this_thread(SecGate::RandomPort, Some(true));
+            assert_eq!(port(), Some(43_210));
+            assert_eq!(lan_default(false, port()), "127.0.0.1:43210");
+            assert_eq!(lan_default(true, port()), "auto:43210");
+        }
+        set_lab_for_this_thread(SecGate::RandomPort, None);
+    }
+
     /// P5.27: `ble-status` names the nearby gate and backend and says it
     /// opened no radio (the retired CoreBluetooth lines are gone).
     #[test]
