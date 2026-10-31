@@ -171,6 +171,15 @@ pub(crate) trait Radio: Send {
     ) -> Result<(), String>;
     /// Passive scanning where the OS allows (RNL1 §3).
     fn set_scanning(&mut self, on: bool) -> Result<(), String>;
+    /// Scan only for `only` from now on (empty: every advert): what an iOS
+    /// app in the background must name to see anything (Task 2 design
+    /// §3.5). Local: it never goes on the air. Only the in-process iOS radio
+    /// uses it; for every other backend, the macOS helper included, it
+    /// changes nothing.
+    fn set_scan_filter(&mut self, only: &[[u8; 16]]) -> Result<(), String> {
+        let _ = only;
+        Ok(())
+    }
     /// Connect to `addr` and subscribe to `service`'s characteristic. The
     /// connection completes as `Connected` or `Disconnected` of the id
     /// returned.
@@ -319,6 +328,11 @@ pub(crate) const NO_BACKEND: &str = "no backend in this build";
 /// helper starts: not installed, did not start or answer, ended, or speaks
 /// another protocol version (`super::apple`).
 pub(crate) const HELPER_REASON: &str = "the nearby helper";
+/// How every reason the iOS in-process radio gives about itself starts: an
+/// internal error on its queue, an app build without the usage description
+/// (`super::apple::inproc`). The same class as the helper's (Task 2 Q8: no
+/// new radio state).
+pub(crate) const INPROC_REASON: &str = "the nearby radio";
 /// BlueZ is not on the system bus: bluetoothd stopped or disabled
 /// (`super::bluez`).
 pub(crate) const BLUEZ_NOT_RUNNING: &str = "BlueZ is not running (no org.bluez on the system bus)";
@@ -331,13 +345,14 @@ pub(crate) const NO_SYSTEM_BUS: &str = "no D-Bus system bus";
 /// What an `Unsupported` radio `why` means for the user, as
 /// [`raven_core::ipc::NEARBY_RADIO_STATES`] names it: `no_backend` (this
 /// build has no Bluetooth backend), `helper_unavailable` (the macOS helper is
-/// missing, outdated or did not run), `service_down` (BlueZ or the system
+/// missing, outdated or did not run; the iOS in-process radio stopped or
+/// cannot start in this app build), `service_down` (BlueZ or the system
 /// bus is not running), else `unsupported` (no adapter, no Bluetooth LE, a
 /// role or an error of the operating system).
 pub(crate) fn unsupported_kind(why: &str) -> &'static str {
     if why == NO_BACKEND {
         "no_backend"
-    } else if why.starts_with(HELPER_REASON) {
+    } else if why.starts_with(HELPER_REASON) || why.starts_with(INPROC_REASON) {
         "helper_unavailable"
     } else if why == BLUEZ_NOT_RUNNING || why == BLUEZ_STOPPED || why.starts_with(NO_SYSTEM_BUS) {
         "service_down"
@@ -349,7 +364,8 @@ pub(crate) fn unsupported_kind(why: &str) -> &'static str {
 /// The backend [`platform_radio`] would use in this process, without
 /// creating anything (`raven-node ble-status`, the service's log line):
 /// `ether_hub` (a debug lab run with `RAVEN_LAB_NEARBY_ETHER`), else this
-/// build's platform backend (`bluez`, `winrt`, `apple`), else `none`.
+/// build's platform backend (`bluez`, `winrt`, `apple`, `apple_in_app`),
+/// else `none`.
 pub(crate) fn backend_name() -> &'static str {
     #[cfg(debug_assertions)]
     if matches!(super::ether_hub::lab_ether(), Ok(Some(_))) {
@@ -368,6 +384,9 @@ pub(crate) fn backend_name() -> &'static str {
     if cfg!(all(target_os = "macos", feature = "nearby-radio")) {
         return "apple";
     }
+    if cfg!(all(target_os = "ios", feature = "nearby-radio")) {
+        return "apple_in_app";
+    }
     "none"
 }
 
@@ -378,8 +397,9 @@ pub(crate) fn backend_name() -> &'static str {
 /// 2. the platform backend of this build, with feature `nearby-radio`:
 ///    BlueZ on glibc Linux ([`super::bluez`]; its default adapter), WinRT on
 ///    Windows ([`super::winrt`]; the default adapter), CoreBluetooth on
-///    macOS through the RavenNearby.app helper ([`super::apple`]); a musl
-///    static build has none;
+///    macOS through the RavenNearby.app helper ([`super::apple`]), and on iOS
+///    in the app's own process (`super::apple::inproc`); a musl static
+///    build has none;
 /// 3. otherwise `Unsupported("no backend in this build")`.
 ///
 /// Called by the nearby engine only once the gate is open and the user
@@ -415,10 +435,17 @@ fn platform_backend(tx: mpsc::Sender<RadioEvent>) -> Result<Box<dyn Radio>, Radi
     super::apple::open(tx).map(|r| Box::new(r) as Box<dyn Radio>)
 }
 
+/// CoreBluetooth in the app's own process (iOS forbids helper processes).
+#[cfg(all(target_os = "ios", feature = "nearby-radio"))]
+fn platform_backend(tx: mpsc::Sender<RadioEvent>) -> Result<Box<dyn Radio>, RadioState> {
+    super::apple::inproc::open(tx).map(|r| Box::new(r) as Box<dyn Radio>)
+}
+
 #[cfg(not(any(
     all(target_os = "linux", target_env = "gnu", feature = "nearby-radio"),
     all(windows, feature = "nearby-radio"),
-    all(target_os = "macos", feature = "nearby-radio")
+    all(target_os = "macos", feature = "nearby-radio"),
+    all(target_os = "ios", feature = "nearby-radio")
 )))]
 fn platform_backend(tx: mpsc::Sender<RadioEvent>) -> Result<Box<dyn Radio>, RadioState> {
     drop(tx);
@@ -518,6 +545,10 @@ mod tests {
         }
         if cfg!(all(target_os = "macos", feature = "nearby-radio")) {
             assert_eq!(backend_name(), "apple");
+            return;
+        }
+        if cfg!(all(target_os = "ios", feature = "nearby-radio")) {
+            assert_eq!(backend_name(), "apple_in_app");
             return;
         }
         assert_eq!(backend_name(), "none");

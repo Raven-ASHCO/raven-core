@@ -98,7 +98,7 @@ changes. Fields marked `?` may be missing.
 | `node.status` | – | `NodeStatus` |
 | `node.start` | – | `NodeStatus` |
 | `node.stop` | – | `NodeStatus` + `{stop, note?}` (see below) |
-| `node.pause` | – | `NodeStatus` + `{was_running}` (embedded node only: the app went to the background; see "Embedded node") |
+| `node.pause` | `{nearby?: "keep" \| "stop"}` | `NodeStatus` + `{was_running, nearby: "kept" \| "stopped", note?}` (embedded node only: the app went to the background; `nearby: "keep"` keeps Bluetooth nearby in a small background node; see "Embedded node") |
 | `node.resume` | – | `NodeStatus` (embedded node only: the app is open again) |
 | `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms, names: [name]}` (embedded node only: one bounded fetch from friends, for iOS background refresh; `names`: the friends it asked, by your names for them) |
 | `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}` (embedded node only: the kind of network the device uses, from the iOS app's `NWPathMonitor`; with `tor_wifi_only` on, Tor stays off on `cellular`) |
@@ -112,6 +112,10 @@ changes. Fields marked `?` may be missing.
 | `network.status` | – | `NetworkStatus` (every way to reach friends; see Network) |
 | `network.set` | `{...settings, agreed?}` | `{changes: [Change], restart_needed: bool, status: NetworkStatus}` |
 | `network.check` | `{router?: bool}` | `{summary: [{key, label, value}], next_step, rows: [CheckRow], router?: [CheckRow], technical: [line]}` |
+| `nearby.status` | – | `NearbyStatus` (Bluetooth nearby now; see "Bluetooth nearby") |
+| `nearby.contact` | `{address, advertise: bool, for_min?: 30..1440}` | `{address, advertising, until_ms?, status: NearbyStatus}` (`raven nearby on <friend> [--for]` / `off <friend>`; verified friends only) |
+| `nearby.stop_all` | – | `{status: NearbyStatus}` (`raven nearby off`: advertising stops for every friend) |
+| `nearby.permission` | – | `{permission: "not_determined" \| "restricted" \| "denied" \| "allowed"}` (iPhone and iPad only: read without a prompt) |
 | `contacts.routes` | `{address}` | `ContactRoutes` |
 | `contacts.set_routes` | `{address, internet?, p2p?, via?: [..], clear?: [..], custodians?: [address], hide_ip?}` | `{contact: Contact, routes: ContactRoutes}` |
 | `security.status` | – | `SecurityStatus` (`raven security`, read-only) |
@@ -310,10 +314,17 @@ On iOS (and on macOS or Linux with the engine's `embedded-node` feature and
 `RAVEN_NODE_MODE=embedded`) raven-node runs inside the app's own process:
 `node.start` and a send start it in process, its IPC is a socket pair per
 connection instead of the socket file, and `node.stop` stops it in process.
-`NodeStatus` then has `embedded: true`, `paused`, and `state` may be `paused`
-or `mail_check`. `node.pause` stops it cleanly and holds it stopped (a
+`NodeStatus` then has `embedded: true`, `paused`, and `state` may be `paused`,
+`mail_check` or `background`. `node.pause` stops it cleanly and holds it stopped (a
 `node.start` or a send meanwhile is refused, its detail starting with
-`PAUSED`) until `node.resume`. `mail.check` collects what friends hold for
+`PAUSED`) until `node.resume`. With `nearby: "keep"` (an app built with the
+`bluetooth-central` and `bluetooth-peripheral` background modes) it then starts a small
+background node (`state: background`, `paused: true`): IPC, the outbox, collecting from and
+passing on for friends, and Bluetooth nearby, scanning only for the friends it names (iOS requires
+that in the background); no listener, p2p or Tor. A `node.start` or a send meanwhile reaches that
+node (no full node starts). The answer says `nearby: "kept"`, or `"stopped"` with a
+`note` when that node did not start (the pause holds all the same). `node.resume` replaces it
+with the full node. `mail.check` collects what friends hold for
 this profile within `budget_ms` (default 25000, at most 28000), starting a
 small node for it when none runs and stopping it again; it is refused with
 `PROFILE_LOCKED` while the profile is locked. Without the embedded node the
@@ -384,6 +395,7 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   | `port_mapping` | bool | `raven node upnp on\|off` | restart |
   | `proxy` | `"auto"`, `"off"` or `"http://host:port"` (never a user name or password) | `raven node proxy` | restart |
   | `nearby` | bool | `raven nearby enable\|disable` | now |
+  | `nearby_background_mail` | bool | `raven nearby background-mail on --yes` / `off` (never turns `nearby` itself on) | now |
   | `carry_for_friends` | bool | `raven node custody on --yes` / `off` | now |
   | `friends_carry_mine` | bool | `raven custody use on --yes` / `off` | now |
   | `handoff` | bool | `raven node custody handoff on\|off` | now |
@@ -398,15 +410,16 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   names `tor_wifi_only`) and nothing changes. `NetworkStatus.tor_wifi_only` is the saved choice.
 
   Turning a held way on is `NOT_AVAILABLE_YET`; turning anything off is always allowed.
-  `carry_for_friends`, `friends_carry_mine` and `handoff` turned on need the person's yes to what
-  they mean: show `NetworkStatus.texts.<setting>` first and pass `agreed: true`, else the answer is
-  `CONSENT_NEEDED`. Each `Change` says in plain words what it does (`effect`); `restart_needed` is
+  `carry_for_friends`, `friends_carry_mine`, `handoff` and `nearby_background_mail` turned on need
+  the person's yes to what they mean: show `NetworkStatus.texts.<setting>` first and pass
+  `agreed: true`, else the answer is `CONSENT_NEEDED`. Each `Change` says in plain words what it
+  does (`effect`); `restart_needed` is
   true when a running raven-node applies a change only when it starts again (the app may offer
   `node.stop` then `node.start`). A failure after some changes names them in `detail`.
 - **One consent rule in all three apps.** A consent sheet comes before exactly the settings the
   engine answers with `CONSENT_NEEDED` without `agreed: true`: `carry_for_friends`,
-  `friends_carry_mine` and `handoff`, turned on. The sheet says what it does, what it costs
-  (bandwidth, disk, being online), what others can see and what they can't
+  `friends_carry_mine`, `handoff` and `nearby_background_mail`, turned on. The sheet says what it
+  does, what it costs (bandwidth, disk, being online), what others can see and what they can't
   (`network.consent.<setting>.*` in `strings.en.json`) and shows the engine's own words
   (`texts.<setting>`); `agreed: true` is sent only after the person confirms, and "Not now" sends
   nothing. No other setting gets a sheet: lending friends a relay (`relay_for_friends`) shows its
@@ -482,6 +495,34 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   breaks a rule, or an op this profile does not offer now (a set where one is set, a remove without
   one), is `BAD_REQUEST` with the reason in `message`. A forgotten Raven passphrase cannot be
   recovered: the apps say so before a set.
+
+### Bluetooth nearby
+
+The terminal Raven's `raven nearby` in the app (Task 2; `docs/NEARBY.md`). `network.set {nearby}`
+turns it on or off and `network.set {nearby_background_mail}` (its own consent) lets it advertise
+while mail waits; `network.status.nearby` keeps its summary. The nearby ops:
+
+- **`nearby.status`**: `NearbyStatus`, what `raven nearby status` shows, read from the running
+  raven-node (counts and states only), with the texts the app shows.
+- **`nearby.contact {address, advertise, for_min?}`**: advertise for one verified friend now
+  (`raven nearby on <friend> [--for 30m]`), for `for_min` minutes (30 to 1440) or until asked to stop
+  (or raven-node restarts); `advertise: false` stops it (`raven nearby off <friend>`). A friend who
+  is not verified is `NEARBY_BAD_REQUEST`; an unknown address `NOT_A_CONTACT`. A send already
+  tells raven-node that you work with that friend (and with the friends who could carry their
+  mail): no op is needed for that.
+- **`nearby.stop_all`**: `raven nearby off` with no friend.
+- **`nearby.permission`** (iPhone and iPad): the app's Bluetooth permission, read without a
+  prompt, so the app can explain before iOS asks (iOS asks once, after `network.set {nearby:
+  true}`); elsewhere, and in an app build without `NSBluetoothAlwaysUsageDescription` (nothing is
+  read then), `NOT_ON_THIS_SYSTEM`.
+
+While this build holds nearby (`network.status` way `nearby` `preview`) `nearby.contact` and
+`nearby.stop_all` answer `NOT_AVAILABLE_YET` and change nothing; `nearby.status` says `held`.
+Without a running raven-node they answer `NODE_NOT_RUNNING`; raven-node's own refusals keep its
+codes: `NEARBY_NOT_RUNNING` (nearby is off, or has no radio), `NEARBY_BAD_REQUEST`,
+`NEARBY_POLICY` (its setting could not be saved). On iOS the radio runs in the app's own process
+(no helper): an app without `NSBluetoothAlwaysUsageDescription` reads radio
+`helper_unavailable` and never crashes; the iOS Simulator has no Bluetooth (`unsupported`).
 
 ### Types
 
@@ -574,7 +615,7 @@ NetworkStatus { build: "release" | "dev", node: "running" | "not_running",
              contact said it leaves your mail with; mail_friends counts only your mail friends.
              tor_wifi_only: see network.set; path: what the phone app last reported)
             lab_switches: [..],
-            texts: { carry_for_friends, friends_carry_mine, handoff },
+            texts: { carry_for_friends, friends_carry_mine, handoff, nearby_background_mail },
             tor?: { phase: "ready" | "publishing" | "unreachable" | "starting" | "restarting" | "blocked"
                            | "could_not_start" | "not_built" | "off" | "too_old" | "off_mobile_data"
                            | "unknown",
@@ -584,6 +625,27 @@ NetworkStatus { build: "release" | "dev", node: "running" | "not_running",
             Carrier ids: lan, lan_beacon, internet, port_mapping, p2p, friend_relay, websocket, proxy,
             custody, letters, handoff, route_hints, nearby, tor. Protection ids: random_port,
             link_knock, link_padding, lock_v2, security_events, updates_from_friends.
+NearbyStatus { state: "held" | "node_held" | "not_running" | "live", enabled, background_mail,
+            radio: "powered_on" | "off" | "unauthorized" | "unsupported" | "no_backend"
+                   | "helper_unavailable" | "service_down" | "local_state",
+            permission?: "not_determined" | "restricted" | "denied" | "allowed",
+            roles: ["central", "peripheral"], address_privacy: "random" | "public" | "unknown",
+            advertising: bool, rotating: 0..2, in_range, connected,
+            frames_tx, frames_rx, bytes_tx, bytes_rx, knock_silenced,
+            background: "foreground_only" | "background",
+            advertising_for: [{ address, name, until_ms? }],
+            rows: [{ label, value }],
+            texts: { nearby, nearby_background_mail, background?, after_swipe? } }
+            (state as NetworkStatus.nearby; the counts and states are raven-node's, never a key,
+             token or Bluetooth address. permission: iPhone and iPad only. background: whether
+             nearby keeps working while the app is in the background: always on a desktop, on
+             iOS only after node.pause {nearby: "keep"}. advertising_for: only the friends this
+             app asked nearby.contact to advertise for, by your names for them, while their time
+             runs (raven-node forgets them when it restarts); a friend's advert chosen by the
+             outbox or background mail is not listed. texts: the consent shown before
+             network.set {nearby: true} (on iOS the iPhone's words) and before
+             nearby_background_mail; on iOS the background row and the words after the app was
+             swiped away)
 Carrier   { id, name, state: "on" | "off" | "preview" | "lab" | "not_on_this_os", reason,
             lab: bool, gate: "<NAME>_PRODUCTION_ENABLED", lab_switches: ["RAVEN_LAB_..."],
             can_set: bool, setting?: bool, running?: bool, detail? }
@@ -700,7 +762,9 @@ A `receipt` comes only after Raven verified the friend's signed receipt, and alw
 `CONSENT_NEEDED` (`network.set` needs `agreed: true`), `PASSPHRASE_WRONG`, `PASSPHRASE_NEEDED` and
 `UNLOCK_WAIT` (`lock.unlock`; `PASSPHRASE_WRONG` also for a wrong `old` of the passphrase ops), and
 `NOT_ON_THIS_SYSTEM` (`lock.set_passphrase` / `lock.remove_passphrase` where a Raven passphrase does
-not apply). Each comes with a plain-English `message` that names one next step; the technical text
+not apply, and `nearby.permission` outside iOS), and for the nearby ops `NEARBY_NOT_RUNNING`,
+`NEARBY_BAD_REQUEST` and `NEARBY_POLICY` (see "Bluetooth nearby"). Each comes with a
+plain-English `message` that names one next step; the technical text
 goes in `detail`.
 
 Groups add `GROUP_NOT_FOUND`, `GROUP_NOT_ADMIN` (only the admin adds and removes),
@@ -719,8 +783,8 @@ is your friend); a member who is not a friend is `NOT_A_CONTACT`, a message over
 
 Every app also has a `MockRaven` that implements this contract in memory with the demo friends Ali
 (verified, in touch), Mina (one waiting message) and Rena (not verified), and replays the demo events
-of the design mockups. The mocks have no groups yet (no app has group screens yet; a mock
-that adds them follows "Groups" above). Its network answers are a release build's: LAN direct on, every other way
+of the design mockups. The mocks have no groups and no `nearby.*` ops yet (no app has group or
+nearby screens yet; a mock that adds them follows "Groups" and "Bluetooth nearby" above). Its network answers are a release build's: LAN direct on, every other way
 `preview` (Bluetooth nearby `not_on_this_os` where the OS has no backend), `network.set` refusing to
 turn a held way on with `NOT_AVAILABLE_YET` and keeping the bridge/store/relay flags, LAN and hide
 IP it was given; Ali's routes are a LAN address, Mina's none; no security notice; Lock v2 and

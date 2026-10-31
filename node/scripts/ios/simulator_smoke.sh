@@ -47,9 +47,13 @@ cat >"$work/ent.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+# CoreBluetooth, Foundation and libobjc: what a library built with
+# FEATURES="... nearby-embedded" needs (Bluetooth nearby in process); linked
+# always, which costs a library without it nothing.
 xcrun --sdk iphonesimulator clang -target arm64-apple-ios16.0-simulator -O1 \
   -I "$SLICE/Headers" "$NODE/scripts/ios/smoke/raven_smoke.c" "$SLICE/libraven_client.a" \
   -framework Security -framework SystemConfiguration -framework CoreFoundation -liconv \
+  -framework CoreBluetooth -framework Foundation -lobjc \
   -Wl,-sectcreate,__TEXT,__entitlements,"$work/ent.plist" -o "$work/raven_smoke"
 codesign -f -s - "$work/raven_smoke" >/dev/null 2>&1
 home="$(xcrun simctl getenv "$UDID" HOME)"

@@ -1,8 +1,11 @@
-//! The helper's state machine: everything raven-nearby-helper decides,
-//! with no CoreBluetooth in it, so it is tested on every platform the
-//! helper builds on. `cb` (macOS) feeds it CoreBluetooth's callbacks and
-//! raven-node's commands, carries out its [`Os`] calls, and writes the
-//! lines it queues ([`Machine::take_out`]) to stdout.
+//! The nearby radio's state machine: everything raven-nearby-helper
+//! (macOS) and the in-process radio of the iOS app decide, with no
+//! CoreBluetooth in it, so it is tested on every platform the helper builds
+//! on. `cb` feeds it CoreBluetooth's callbacks and raven-node's commands and
+//! carries out its [`Os`] calls; the lines it queues ([`Machine::take_out`])
+//! go to the helper's stdout, or in process straight to raven-node's
+//! `on_line` (`super::inproc`). One source for both: the helper includes
+//! this file with `#[path]`, as it includes `proto.rs`.
 //!
 //! **Peripheral.** One primary service `T` per published token, with one
 //! characteristic `C(T)`: WriteWithoutResponse | Write | Notify, no Read,
@@ -31,11 +34,17 @@
 //! CoreBluetooth drops every connection, service and advert: each
 //! connection gets its `disconnected`, and what raven-node still wants is
 //! set up again when the power comes back.
+//!
+//! **Scan filter** (iOS in the background, Task 2 design §3.5): a
+//! `scan_filter` command names the only service UUIDs to scan for
+//! ([`Os::scan_filter`]); raven-node's macOS radio never sends it, and the
+//! macOS helper's CoreBluetooth side ignores it (every advert is scanned for,
+//! as before).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crate::proto::{self, FromHelper, Power, Side, ToHelper};
+use super::proto::{self, FromHelper, Power, Side, ToHelper};
 
 /// How long a connect may take to come up (raven-node gives up sooner).
 pub(crate) const CONNECT_BUDGET: Duration = Duration::from_secs(20);
@@ -59,11 +68,33 @@ pub(crate) const MAX_CONNS: usize = 16;
 /// Frames one connection may queue (raven-node's window is 16): more is a
 /// fault, and the connection ends.
 pub(crate) const QUEUE: usize = 32;
-/// Why the helper gets no radio when macOS refuses Bluetooth to it.
-pub(crate) const NOT_ALLOWED: &str = "macOS has not allowed Bluetooth for RavenNearby: allow it \
-     in System Settings > Privacy & Security > Bluetooth";
-/// Why the helper gets no radio on a Mac without Bluetooth LE.
-pub(crate) const NO_LE: &str = "this Mac has no Bluetooth LE";
+/// Why the radio is refused by the system: on macOS to the helper
+/// (RavenNearby), on iOS to the app itself. A function of the system, so
+/// both texts are tested on any host.
+pub(crate) const fn not_allowed_text(ios: bool) -> &'static str {
+    if ios {
+        "iOS has not allowed Bluetooth for Raven: allow it in Settings > Privacy & Security > \
+         Bluetooth"
+    } else {
+        "macOS has not allowed Bluetooth for RavenNearby: allow it in System Settings > Privacy \
+         & Security > Bluetooth"
+    }
+}
+
+/// Why there is no radio on a computer or device without Bluetooth LE (the
+/// iOS Simulator reports this: it has no Bluetooth).
+pub(crate) const fn no_le_text(ios: bool) -> &'static str {
+    if ios {
+        "this device has no Bluetooth LE"
+    } else {
+        "this Mac has no Bluetooth LE"
+    }
+}
+
+/// Why this system refuses Bluetooth ([`not_allowed_text`]).
+pub(crate) const NOT_ALLOWED: &str = not_allowed_text(cfg!(target_os = "ios"));
+/// Why this computer or device has no radio ([`no_le_text`]).
+pub(crate) const NO_LE: &str = no_le_text(cfg!(target_os = "ios"));
 
 /// The Bluetooth base UUID's last 12 bytes: a 16- or 32-bit UUID written
 /// long, never an RNB1 token (whose byte 6 starts with the version nibble
@@ -154,6 +185,12 @@ pub(crate) trait Os {
     /// a refusal comes back as [`Machine::advertising`].
     fn advertise(&mut self, t: Option<[u8; 16]>);
     fn scan(&mut self, on: bool);
+    /// Scan only for `only` from now on (empty: for every advert), the scan
+    /// under way included. Only the iOS app's radio honours it; by default
+    /// (the macOS helper) it changes nothing.
+    fn scan_filter(&mut self, only: &[[u8; 16]]) {
+        let _ = only;
+    }
     /// Connect to `dev` (a device [`Machine::discovered`] kept) and
     /// subscribe to characteristic `c` of service `t`: then
     /// [`Machine::central_up`] or [`Machine::central_down`]. False: `dev`
@@ -332,6 +369,19 @@ impl<O: Os> Machine<O> {
                 self.advert = advert;
             }
             ToHelper::Scan { on } => self.want_scan = on,
+            ToHelper::ScanFilter { uuids } => {
+                if uuids.len() > proto::MAX_FILTER {
+                    return;
+                }
+                let Some(only) = uuids
+                    .iter()
+                    .map(|u| proto::uuid_from(u))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
+                self.os.scan_filter(&only);
+            }
             ToHelper::Connect {
                 conn,
                 dev,

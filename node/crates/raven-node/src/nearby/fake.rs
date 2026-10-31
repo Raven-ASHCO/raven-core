@@ -24,6 +24,9 @@
 //!   [`Ether::arm_faults`] arms them again, counted from then.
 //!   `disconnect`, a withdrawn service or a dropped radio cuts a link too:
 //!   both sides get `Disconnected`.
+//! - **Scan filter** ([`Radio::set_scan_filter`], as iOS scans in the
+//!   background): a radio with one sees only the adverts whose token it
+//!   names ([`Ether::scan_filter`] reads it back).
 //! - **Power** ([`Ether::set_power`]): a radio switched off gets
 //!   `State(PoweredOff)` and loses its links; it neither sees adverts nor is
 //!   seen, and connects to or from it fail, until it is switched on again
@@ -156,6 +159,8 @@ struct Slot {
     name: String,
     events: EventTx,
     scanning: bool,
+    /// The only tokens it sees (empty: every advert).
+    filter: Vec<[u8; 16]>,
     services: Vec<[u8; 16]>,
     advert: Option<[u8; 16]>,
     /// Switched on ([`Ether::set_power`]).
@@ -254,6 +259,7 @@ impl Ether {
                 name: name.to_owned(),
                 events: events.clone(),
                 scanning: false,
+                filter: Vec::new(),
                 services: Vec::new(),
                 advert: None,
                 powered: true,
@@ -270,6 +276,17 @@ impl Ether {
     /// Every token that went on air, in order.
     pub(crate) fn adverts(&self) -> Vec<AdvertRecord> {
         lock(&self.inner).adverts.clone()
+    }
+
+    /// The scan filter of the radio named `name` now (empty: none).
+    #[cfg(test)]
+    pub(crate) fn scan_filter(&self, name: &str) -> Vec<[u8; 16]> {
+        lock(&self.inner)
+            .radios
+            .values()
+            .find(|s| s.name == name)
+            .map(|s| s.filter.clone())
+            .unwrap_or_default()
     }
 
     /// Frames that crossed the ether (delivered or lost).
@@ -392,7 +409,10 @@ async fn advertise(ether: Weak<Mutex<EtherState>>) {
             .filter_map(|(&id, s)| s.advert.map(|t| (id, t)))
             .collect();
         for (&id, s) in st.radios.iter().filter(|(_, s)| s.scanning && s.powered) {
-            for &(from, t) in adverts.iter().filter(|(from, _)| *from != id) {
+            for &(from, t) in adverts
+                .iter()
+                .filter(|(from, t)| *from != id && (s.filter.is_empty() || s.filter.contains(t)))
+            {
                 let _ = s.events.emit(RadioEvent::Seen {
                     addr: addr_of(from),
                     uuids: vec![t],
@@ -563,6 +583,13 @@ impl Radio for FakeRadio {
         let mut st = lock(&self.ether.inner);
         let slot = st.radios.get_mut(&self.id).ok_or("radio gone")?;
         slot.scanning = on;
+        Ok(())
+    }
+
+    fn set_scan_filter(&mut self, only: &[[u8; 16]]) -> Result<(), String> {
+        let mut st = lock(&self.ether.inner);
+        let slot = st.radios.get_mut(&self.id).ok_or("radio gone")?;
+        slot.filter = only.to_vec();
         Ok(())
     }
 

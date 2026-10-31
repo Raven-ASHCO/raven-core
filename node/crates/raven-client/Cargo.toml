@@ -22,6 +22,10 @@ default = []
 embedded-node = ["dep:raven-node", "raven-node/embedded"]
 # Tor inside the app's process too (no raven-tor-helper).
 tor-embedded = ["embedded-node", "raven-node/tor-embedded"]
+# Bluetooth nearby inside the app's process too (iOS: CoreBluetooth on the
+# node's own queue, raven-node src/nearby/apple/inproc.rs; no helper app).
+# Held at runtime by the nearby gate as everywhere.
+nearby-embedded = ["embedded-node", "raven-node/nearby-radio"]
 
 [dependencies]
 raven-node = { path = "../raven-node", optional = true, default-features = false }

@@ -225,11 +225,13 @@ pub(crate) fn lab_switches_seen() -> Vec<String> {
 
 /// Bluetooth nearby has a radio backend for this operating system
 /// (raven-node: BlueZ on glibc Linux, WinRT on Windows, CoreBluetooth
-/// through the RavenNearby helper on macOS).
+/// through the RavenNearby helper on macOS, and on iOS CoreBluetooth in the
+/// app's own process with the feature `nearby-embedded`).
 const NEARBY_ON_THIS_OS: bool = cfg!(any(
     target_os = "macos",
     windows,
-    all(target_os = "linux", target_env = "gnu")
+    all(target_os = "linux", target_env = "gnu"),
+    all(target_os = "ios", feature = "nearby-embedded")
 ));
 
 /// The debug lab switch that lets raven-node's radio go on the air from the
@@ -280,10 +282,13 @@ fn name_of(id: &str) -> &'static str {
 
 /// The plain sentence for a way held in this build.
 const PREVIEW_REASON: &str = "Not in this version of Raven yet.";
-/// Bluetooth nearby on Windows and Linux: release builds have it on macOS
-/// only (2026-10).
-const NEARBY_MACOS_ONLY_REASON: &str =
-    "Not in this version of Raven on this computer: Bluetooth nearby is on macOS only so far.";
+/// Bluetooth nearby on Windows, Linux and iOS: release builds have it on
+/// macOS only (2026-10; iOS waits for its device rows, Task 2 design §3.6).
+const NEARBY_MACOS_ONLY_REASON: &str = if cfg!(target_os = "ios") {
+    "Not in this version of Raven on this device yet: Bluetooth nearby is on the Mac only so far."
+} else {
+    "Not in this version of Raven on this computer: Bluetooth nearby is on macOS only so far."
+};
 /// The plain sentence for a way on only through a lab switch.
 const LAB_REASON: &str = "On for testing only: a developer build's lab switch turned it on.";
 /// The plain sentence for a way the running raven-node uses while the saved
@@ -854,6 +859,7 @@ pub(crate) fn network_view(dir: &Path, facts: &NetFacts) -> Value {
             "carry_for_friends": bridge::CARRY_FOR_FRIENDS_CONSENT,
             "friends_carry_mine": bridge::FRIENDS_CARRY_MINE_CONSENT,
             "handoff": bridge::HANDOFF_CONSENT,
+            "nearby_background_mail": bridge::NEARBY_BACKGROUND_MAIL_CONSENT,
         },
     });
     if !p.internet_listen.is_empty() {
@@ -902,13 +908,14 @@ struct Change {
 }
 
 /// The settings `network.set` takes, in the order it applies them.
-const SETTINGS: [&str; 18] = [
+const SETTINGS: [&str; 19] = [
     "lan",
     "internet",
     "p2p",
     "port_mapping",
     "proxy",
     "nearby",
+    "nearby_background_mail",
     "carry_for_friends",
     "friends_carry_mine",
     "handoff",
@@ -931,7 +938,7 @@ fn gate_for_setting(setting: &str) -> Option<&'static str> {
         "internet" => Some("internet"),
         "p2p" | "port_mapping" => Some("p2p"),
         "proxy" => Some("proxy"),
-        "nearby" => Some("nearby"),
+        "nearby" | "nearby_background_mail" => Some("nearby"),
         "carry_for_friends" | "friends_carry_mine" => Some("custody"),
         "handoff" => Some("handoff"),
         "relay_for_friends" => Some("friend_relay"),
@@ -947,6 +954,7 @@ fn cli_of(setting: &str) -> &'static str {
         "port_mapping" => "raven node upnp on",
         "proxy" => "raven node proxy",
         "nearby" => "raven nearby enable",
+        "nearby_background_mail" => "raven nearby background-mail on",
         "carry_for_friends" => "raven node custody on",
         "friends_carry_mine" => "raven custody use on",
         "handoff" => "raven node custody handoff on",
@@ -994,7 +1002,7 @@ fn held(setting: &str) -> ApiError {
 fn needs_consent(setting: &str) -> bool {
     matches!(
         setting,
-        "carry_for_friends" | "friends_carry_mine" | "handoff"
+        "carry_for_friends" | "friends_carry_mine" | "handoff" | "nearby_background_mail"
     )
 }
 
@@ -1289,6 +1297,18 @@ impl Inner {
                         .into()
                 } else {
                     "Raven stops using Bluetooth.".into()
+                };
+            }
+            "nearby_background_mail" => {
+                change.lines = bridge::nearby_background_set(dir, on).map_err(failed)?;
+                change.effect = if on {
+                    "While mail waits for a verified friend (or this device keeps mail for one), \
+                     Bluetooth nearby also advertises for them on its own, not only while you \
+                     send. Nearby devices can see that this device advertises. It works only \
+                     while nearby itself is on."
+                        .into()
+                } else {
+                    "Bluetooth nearby advertises only while you send.".into()
                 };
             }
             "carry_for_friends" => {

@@ -39,7 +39,16 @@ pub mod code {
     pub const UNLOCK_WAIT: &str = "UNLOCK_WAIT";
     /// `lock.set_passphrase` / `lock.remove_passphrase`: not on this system
     /// or for this profile (Windows, iPhone, a desktop-keyring profile).
+    /// `nearby.permission` outside iOS.
     pub const NOT_ON_THIS_SYSTEM: &str = "NOT_ON_THIS_SYSTEM";
+    /// The nearby ops (raven-node's stable codes, `raven nearby`): nearby
+    /// does not run in raven-node (turned off, or no radio).
+    pub const NEARBY_NOT_RUNNING: &str = "NEARBY_NOT_RUNNING";
+    /// raven-node could not save a nearby setting.
+    pub const NEARBY_POLICY: &str = "NEARBY_POLICY";
+    /// A nearby request raven-node (or the engine) does not take: a friend
+    /// who is not verified, an unknown action.
+    pub const NEARBY_BAD_REQUEST: &str = "NEARBY_BAD_REQUEST";
 }
 
 /// The default sentence for each code (desktop/design/strings.en.json words
@@ -85,6 +94,13 @@ pub fn default_message(code: &str) -> &'static str {
         code::PASSPHRASE_NEEDED => "Type your Raven passphrase to unlock.",
         code::UNLOCK_WAIT => "Too many wrong passphrases. Wait a little, then try again.",
         code::NOT_ON_THIS_SYSTEM => "This isn't available on this system. Nothing was changed.",
+        code::NEARBY_NOT_RUNNING => "Bluetooth nearby isn't running. Turn it on in Network first.",
+        code::NEARBY_POLICY => {
+            "Raven couldn't save the Bluetooth nearby setting. Open Details to see why."
+        }
+        code::NEARBY_BAD_REQUEST => {
+            "Raven couldn't do that over Bluetooth nearby. Open Details to see why."
+        }
         code::BAD_REQUEST => {
             "Raven didn't understand what this app asked. Update Raven; if it keeps happening, \
              open Details."

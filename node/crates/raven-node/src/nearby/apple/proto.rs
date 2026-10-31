@@ -24,6 +24,15 @@
 //! `unauthorized` when its bundle has no Bluetooth usage description) and
 //! exits.
 //!
+//! **In process** (the iOS app, `super::inproc`): the same values cross as
+//! they are, with no line and no JSON: the radio's commands are posted to
+//! the radio's queue, and what the machine says goes straight to
+//! raven-node's `on_line`. One command exists only there: `scan_filter`
+//! (the service UUIDs a background scan may name, Task 2 design §3.5), which
+//! raven-node's macOS radio never sends, so the helper's protocol stays
+//! [`VERSION`] 1 (a helper of 0.1.x would skip it as a line it does not
+//! parse).
+//!
 //! This file is also compiled into raven-nearby-helper (`#[path]`), so it
 //! uses only std, serde, serde_json, base64 and hex.
 
@@ -48,6 +57,9 @@ pub(crate) const MAX_FRAME: usize = 512;
 pub(crate) const MIN_TX: usize = 20;
 /// Connection numbers on the wire are below this.
 pub(crate) const CONN_LIMIT: u64 = 1 << 32;
+/// Service UUIDs one `scan_filter` may name (in process only: a background
+/// filter of at most 32 contacts times 10 epochs, Task 2 design §3.5).
+pub(crate) const MAX_FILTER: usize = 320;
 
 /// A GATT service `T` and its one characteristic `C(T)` (RNL1 §4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +81,11 @@ pub(crate) enum ToHelper {
     },
     Scan {
         on: bool,
+    },
+    /// Scan only for these service UUIDs (empty: for every advert). In
+    /// process only (see the module doc).
+    ScanFilter {
+        uuids: Vec<String>,
     },
     /// Connect to `dev` and subscribe to `characteristic` of `service`.
     Connect {

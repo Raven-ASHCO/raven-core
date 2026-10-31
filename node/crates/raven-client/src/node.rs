@@ -306,16 +306,18 @@ impl Inner {
             v["address"] = ip.to_string().into();
         }
         // Extra fields of the embedded node (the iOS app): it runs inside
-        // the app; `paused` while the app is in the background, and
-        // `mail_check` while a background mail check runs.
+        // the app; `paused` while the app is in the background,
+        // `mail_check` while a background mail check runs, and `background`
+        // while the small node that keeps Bluetooth nearby runs (paused all
+        // the same).
         #[cfg(feature = "embedded-node")]
         if embedded_mode() {
             v["embedded"] = true.into();
             let word = crate::embedded::state_word();
-            if !starting && matches!(word, "paused" | "mail_check") {
+            if !starting && matches!(word, "paused" | "mail_check" | "background") {
                 v["state"] = word.into();
             }
-            v["paused"] = (word == "paused").into();
+            v["paused"] = matches!(word, "paused" | "background").into();
         }
         v
     }
@@ -521,20 +523,52 @@ impl Inner {
     /// the node stops cleanly (listeners closed, Tor's circuits gone) and
     /// stays stopped until `node.resume`; a send or `node.start` meanwhile
     /// is refused. Extra field `was_running`.
-    pub(crate) fn node_pause(&self) -> OpResult {
+    pub(crate) fn node_pause(&self, args: &Args) -> OpResult {
+        let keep = match args.opt_str("nearby")? {
+            None | Some("stop") => false,
+            Some("keep") => true,
+            Some(other) => {
+                return Err(ApiError::bad_request(format!(
+                    "node.pause nearby must be \"keep\" or \"stop\", not {other:?}"
+                )))
+            }
+        };
         let dir = self.data_dir()?.to_path_buf();
         #[cfg(feature = "embedded-node")]
         if embedded_mode() {
-            let was = {
+            let listen = self.listen_for_start(&dir);
+            let (was, kept) = {
                 let _gate = lock(&self.node_gate);
-                crate::embedded::pause(&dir)
+                if keep {
+                    match crate::embedded::pause_keeping_nearby(&dir, &listen) {
+                        Ok(was) => (was, Ok(())),
+                        // Paused all the same: the background node did not
+                        // start (the full node may still be finishing).
+                        Err(why) => (true, Err(why)),
+                    }
+                } else {
+                    (crate::embedded::pause(&dir), Ok(()))
+                }
             };
             let after = probe(&dir);
             let mut status = self.note_probe(&after, false);
             status["was_running"] = was.into();
+            status["nearby"] = if keep && kept.is_ok() {
+                "kept"
+            } else {
+                "stopped"
+            }
+            .into();
+            if let Err(why) = kept {
+                status["note"] = format!(
+                    "Bluetooth nearby stopped while Raven is in the background: the background \
+                     node did not start ({why})"
+                )
+                .into();
+            }
             return Ok(status);
         }
-        let _ = dir;
+        let _ = (dir, keep);
         Err(embedded_only_op("node.pause"))
     }
 

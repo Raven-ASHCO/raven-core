@@ -4,7 +4,7 @@
 //! (`NEARBY_PRODUCTION_ENABLED=false`).
 //!
 //! - [`radio`]: the seam every Bluetooth LE backend implements (BlueZ on
-//!   linux-gnu, WinRT on Windows and CoreBluetooth on macOS, feature
+//!   linux-gnu, WinRT on Windows and CoreBluetooth on macOS and iOS, feature
 //!   `nearby-radio`), and the one place that picks a backend.
 //! - [`pipe`]: the RNP1 pipe driver: one task per pipe that came UP, two
 //!   byte channels as `tokio::io::duplex` pairs with credit backpressure.
@@ -18,10 +18,12 @@
 //!   management socket's READ_INFO for the address-privacy bit.
 //! - `winrt` (Windows with `nearby-radio`; its pure part in every test
 //!   build): the WinRT backend over windows 0.62.2.
-//! - `apple` (macOS with `nearby-radio`; its pure part in every test
-//!   build): the CoreBluetooth backend, run in the `raven-nearby-helper`
-//!   process of RavenNearby.app (objc2-core-bluetooth 0.3.2, owner decision
-//!   O5-10), and the line protocol raven-node speaks with it.
+//! - `apple` (macOS and iOS with `nearby-radio`; its pure part in every
+//!   test build): the CoreBluetooth backend, run in the `raven-nearby-helper`
+//!   process of RavenNearby.app on macOS (objc2-core-bluetooth 0.3.2, owner
+//!   decision O5-10) and the line protocol raven-node speaks with it, and on
+//!   iOS the same machine and glue inside the app's own process
+//!   (`apple::inproc`, Task 2).
 //!
 //! This module is the rest of the node's way in:
 //! - [`run`], the service task (`raven-node service`). With the gate closed
@@ -65,7 +67,10 @@ use crate::pair_seed::KeyUse;
 use engine::{EngineHandle, Host, KeyStamp};
 use radio::RadioState;
 
-#[cfg(any(test, all(target_os = "macos", feature = "nearby-radio")))]
+#[cfg(any(
+    test,
+    all(any(target_os = "macos", target_os = "ios"), feature = "nearby-radio")
+))]
 pub(crate) mod apple;
 #[cfg(any(
     test,
@@ -254,7 +259,10 @@ impl Drop for Running {
 }
 
 /// The supervised service task (`raven-node service`; see the module doc).
-pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
+/// `background_life`: the service of an iOS app's background node (Task 2
+/// Phase B), whose engine is a background life (its scan filter,
+/// [`engine::spawn`]).
+pub(crate) async fn run(data_dir: PathBuf, background_life: bool) -> Result<(), String> {
     if !raven_core::nearby_live_enabled() {
         // Closed for the life of the process (lab switches are read at
         // start): nothing is read, no identity, no radio.
@@ -268,14 +276,14 @@ pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
     let mut refused: Option<String> = None;
     loop {
         let dd = data_dir.clone();
-        let (on, background) =
+        let (on, background_mail) =
             tokio::task::spawn_blocking(move || raven_core::node_policy::nearby_settings(&dd))
                 .await
                 .unwrap_or((false, false));
         {
             let mut status = lock(&svc.status);
             status.enabled = on;
-            status.background = background;
+            status.background = background_mail;
         }
         if running
             .engine
@@ -286,27 +294,37 @@ pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
             running.stop().await;
         }
         match (&running.engine, on) {
-            (Some((handle, _)), true) => handle.set_background_mail(background),
+            (Some((handle, _)), true) => handle.set_background_mail(background_mail),
             (Some(_), false) => {
                 running.stop().await;
                 eprintln!("raven-node nearby: stopped");
             }
-            (None, true) => match start(&data_dir, &mut identity, &admission, background).await {
-                Ok(started) => {
-                    lock(&svc.status).radio = None;
-                    refused = None;
-                    eprintln!("raven-node nearby: started ({})", radio::backend_name());
-                    running.engine = Some(started);
-                }
-                Err(why) => {
-                    let line = why.to_string();
-                    if refused.as_ref() != Some(&line) {
-                        eprintln!("raven-node nearby: not started: {line}");
-                        refused = Some(line);
+            (None, true) => {
+                match start(
+                    &data_dir,
+                    &mut identity,
+                    &admission,
+                    background_mail,
+                    background_life,
+                )
+                .await
+                {
+                    Ok(started) => {
+                        lock(&svc.status).radio = None;
+                        refused = None;
+                        eprintln!("raven-node nearby: started ({})", radio::backend_name());
+                        running.engine = Some(started);
                     }
-                    lock(&svc.status).radio = Some(why.state_name());
+                    Err(why) => {
+                        let line = why.to_string();
+                        if refused.as_ref() != Some(&line) {
+                            eprintln!("raven-node nearby: not started: {line}");
+                            refused = Some(line);
+                        }
+                        lock(&svc.status).radio = Some(why.state_name());
+                    }
                 }
-            },
+            }
             (None, false) => {}
         }
         let ended = async {
@@ -361,12 +379,13 @@ impl std::fmt::Display for StartError {
 }
 
 /// The identity (loaded once, as the listeners do), the radio and the
-/// engine.
+/// engine (a background life when `background`).
 async fn start(
     data_dir: &Path,
     identity: &mut Option<Arc<Identity>>,
     admission: &Arc<Admission>,
     background_mail: bool,
+    background: bool,
 ) -> Result<(EngineHandle, JoinHandle<()>), StartError> {
     let id = match identity.clone() {
         Some(id) => id,
@@ -393,12 +412,54 @@ async fn start(
         identity: Arc::clone(&id),
         admission: Arc::clone(admission),
     });
-    let (handle, task) = engine::spawn(radio, rx, host, id.public_key_bytes(), background_mail);
+    let (handle, task) = engine::spawn(
+        radio,
+        rx,
+        host,
+        id.public_key_bytes(),
+        background_mail,
+        background,
+    );
     set_current(Some(handle.clone()));
     Ok((handle, task))
 }
 
 // ── The engine's host in raven-node ─────────────────────────────────────────
+
+/// Contacts a background scan filter remembers of each kind (Task 2 Q5).
+const REMEMBERED: usize = engine::FILTER_CONTACTS;
+
+/// What this process remembers for a background life's scan filter across
+/// engines (the iOS app's full node stops before its background node
+/// starts): the contacts whose pipe came up last, newest first, and those
+/// `raven nearby on` named and `off` did not undo since. In memory only,
+/// keys only, at most [`REMEMBERED`] of each.
+#[derive(Default)]
+struct Remembered {
+    pipes: Vec<[u8; 32]>,
+    on: Vec<[u8; 32]>,
+}
+
+impl Remembered {
+    fn piped(&mut self, peer: [u8; 32]) {
+        self.pipes.retain(|p| *p != peer);
+        self.pipes.insert(0, peer);
+        self.pipes.truncate(REMEMBERED);
+    }
+
+    fn on(&mut self, peer: [u8; 32], on: bool) {
+        self.on.retain(|p| *p != peer);
+        if on {
+            self.on.insert(0, peer);
+            self.on.truncate(REMEMBERED);
+        }
+    }
+}
+
+fn remembered() -> &'static Mutex<Remembered> {
+    static MEMORY: OnceLock<Mutex<Remembered>> = OnceLock::new();
+    MEMORY.get_or_init(Mutex::default)
+}
 
 /// `raven-node service`'s: its profile, the outbox, custody and the
 /// Internet direct responder.
@@ -426,24 +487,36 @@ impl Host for NodeHost {
     }
 
     fn has_work(&self) -> BoxFuture<'static, Vec<[u8; 32]>> {
-        let waiting = crate::outbox::waiting_peers(engine::MAX_KEYS);
-        let dd = self.data_dir.clone();
+        work_for(
+            self.data_dir.clone(),
+            self.identity.public_key_bytes(),
+            crate::outbox::waiting_peers(engine::MAX_KEYS),
+        )
+    }
+
+    /// Task 2 Q5: the work (outbox, held, mail friends), then the contacts
+    /// with a recent pipe and those `raven nearby on` named, as this process
+    /// remembers them across engines ([`Remembered`]: the full node's engine
+    /// is gone when the background node starts).
+    fn filter_contacts(&self) -> BoxFuture<'static, Vec<[u8; 32]>> {
+        let work = self.has_work();
         Box::pin(async move {
-            let held = if raven_core::custody_gate::CustodyGates::current().live {
-                // The gates are read here, not in the blocking pool.
-                let letters = raven_core::friend_custody::letter_ops_served();
-                let hops = crate::custody::forward_hops();
-                internet_direct::blocking(move || Ok(held_work(&dd, letters, hops)))
-                    .await
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
+            let (recent, on) = {
+                let r = lock(remembered());
+                (r.pipes.clone(), r.on.clone())
             };
-            work_set(waiting, held)
+            let mut out = work.await;
+            for peer in recent.into_iter().chain(on) {
+                if !out.contains(&peer) {
+                    out.push(peer);
+                }
+            }
+            out
         })
     }
 
     fn pipe_up(&self, peer: &[u8; 32]) {
+        lock(remembered()).piped(*peer);
         // What waits for the contact goes now, over the pipe first
         // (`route_connected`); a custodian is fetched from at once, and
         // (P5.33) what waits for the contacts it may carry mail for goes
@@ -557,12 +630,81 @@ fn held_work(dd: &Path, letters: bool, hops: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
     held
 }
 
+/// [`NodeHost::has_work`] once the outbox named `waiting` (cutoff addendum
+/// F11d, field finding S17): `waiting`, then while the custody gates are
+/// live the recipients this node holds mail for ([`held_work`]) and the
+/// mail friends of `waiting` ([`mail_friends`]), read with one book on the
+/// blocking pool ([`work_set`]).
+fn work_for(
+    dd: PathBuf,
+    local: [u8; 32],
+    waiting: Vec<[u8; 32]>,
+) -> BoxFuture<'static, Vec<[u8; 32]>> {
+    Box::pin(async move {
+        // The gates are read here, not in the blocking pool.
+        if !raven_core::custody_gate::CustodyGates::current().live {
+            return work_set(waiting, Vec::new(), Vec::new());
+        }
+        let letters = raven_core::friend_custody::letter_ops_served();
+        let hops = crate::custody::forward_hops();
+        let carry = crate::learning::carry_live();
+        let asked = waiting.clone();
+        let (held, friends) = internet_direct::blocking(move || {
+            let now = raven_core::clock::now_ms();
+            Ok((
+                held_work(&dd, letters, hops),
+                mail_friends(&dd, &local, &asked, carry, now),
+            ))
+        })
+        .await
+        .unwrap_or_default();
+        work_set(waiting, held, friends)
+    })
+}
+
+/// Blocking: the mail friends of `waiting` (field finding S17): the deposit
+/// custodians of each contact something waits for, the ones the outbox
+/// would leave its mail with ([`raven_core::custody_client::deposit_custodians`],
+/// or while carry choice is live, `carry`, every candidate it picks from,
+/// as [`crate::custody::kick_carried`] reads them), from one read of the
+/// book. A mail friend is a contact like any other here: advertising for it
+/// lets the pipe come up on which the deposit goes (`Host::pipe_up`, then
+/// `custody::kick_carried`). The caller checks the custody gates.
+fn mail_friends(
+    dd: &Path,
+    local: &[u8; 32],
+    waiting: &[[u8; 32]],
+    carry: bool,
+    now: u64,
+) -> Vec<[u8; 32]> {
+    let lists = if carry {
+        raven_core::custody_client::custodian_candidates_for(dd, local, waiting, now)
+    } else {
+        raven_core::custody_client::deposit_custodians_for(dd, local, waiting, now)
+    };
+    friends_of(waiting, lists)
+}
+
+/// [`mail_friends`] from the custodian lists of `waiting` (in its order):
+/// flattened, in order, each once, never a contact of `waiting` itself
+/// (that one is work already).
+fn friends_of(waiting: &[[u8; 32]], lists: Vec<Vec<([u8; 32], Option<u8>)>>) -> Vec<[u8; 32]> {
+    let mut out: Vec<[u8; 32]> = Vec::new();
+    for (custodian, _) in lists.into_iter().flatten() {
+        if !waiting.contains(&custodian) && !out.contains(&custodian) {
+            out.push(custodian);
+        }
+    }
+    out
+}
+
 /// The contacts something waits for (cutoff addendum F11d): the outbox's
 /// (objects and owed ACKs, oldest first), then the recipients a custodian
-/// holds mail for, each once.
-fn work_set(waiting: Vec<[u8; 32]>, held: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
+/// holds mail for, then the mail friends of the outbox's contacts (S17:
+/// [`mail_friends`]), each once, at most [`engine::MAX_KEYS`].
+fn work_set(waiting: Vec<[u8; 32]>, held: Vec<[u8; 32]>, friends: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
     let mut out: Vec<[u8; 32]> = Vec::new();
-    for peer in waiting.into_iter().chain(held) {
+    for peer in waiting.into_iter().chain(held).chain(friends) {
         if out.len() == engine::MAX_KEYS {
             break;
         }
@@ -818,9 +960,22 @@ pub(crate) fn control(
             }
             policy_changed();
         }
-        "on" => engine()?.on(peer()?, ttl_secs.map(|s| Duration::from_secs(u64::from(s)))),
-        "off" => engine()?.off(peer()?),
-        "foreground" => engine()?.foreground(peer()?, foreground_ttl()),
+        "on" => {
+            let (engine, peer) = (engine()?, peer()?);
+            engine.on(peer, ttl_secs.map(|s| Duration::from_secs(u64::from(s))));
+            lock(remembered()).on(peer, true);
+        }
+        "off" => {
+            let (engine, peer) = (engine()?, peer()?);
+            engine.off(peer);
+            lock(remembered()).on(peer, false);
+        }
+        "foreground" => {
+            let (engine, peer) = (engine()?, peer()?);
+            let ttl = foreground_ttl();
+            engine.foreground(peer, ttl);
+            foreground_mail_friends(data_dir, &engine, peer, ttl);
+        }
         "status" => {}
         _ => {
             return Err((
@@ -833,6 +988,33 @@ pub(crate) fn control(
         }
     }
     Ok(status_info(data_dir))
+}
+
+/// A send's foreground reaches the mail friends of `peer` too (field
+/// finding S17): each gets the same foreground, so the rotation takes one
+/// once the outbox's deposit with it over nearby failed (`want`, in
+/// [`dial_on`]): RNL1 §3 (a), user work and still queued work, for the mail
+/// friend. Without that a sender with Bluetooth only never advertises for
+/// the friend that could carry its mail, and the friend, with no work for
+/// the sender, never advertises for it. Only while the custody gates are
+/// live (read here, not in the blocking pool); the book is read on the
+/// blocking pool, so the IPC answer does not wait for it (the CLI's
+/// foreground is best effort within 800 ms).
+fn foreground_mail_friends(data_dir: &Path, engine: &EngineHandle, peer: [u8; 32], ttl: Duration) {
+    if !raven_core::custody_gate::CustodyGates::current().live {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let carry = crate::learning::carry_live();
+    let (dd, engine) = (data_dir.to_path_buf(), engine.clone());
+    runtime.spawn_blocking(move || {
+        let now = raven_core::clock::now_ms();
+        for friend in mail_friends(&dd, &engine.me(), &[peer], carry, now) {
+            engine.foreground(friend, ttl);
+        }
+    });
 }
 
 /// The nearby carrier for IPC `Status`: `None` while the gate is closed (a
@@ -879,7 +1061,7 @@ mod tests {
     async fn a_service_with_the_gate_closed_creates_no_radio() {
         let dir = tempfile::tempdir().unwrap();
         let before = RADIO_STARTS.load(Ordering::Relaxed);
-        let task = tokio::spawn(run(dir.path().to_path_buf()));
+        let task = tokio::spawn(run(dir.path().to_path_buf(), false));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!task.is_finished(), "the service task never ends by itself");
         assert_eq!(RADIO_STARTS.load(Ordering::Relaxed), before, "no radio");
@@ -1009,11 +1191,108 @@ mod tests {
         }
     }
 
+    /// F11d and S17: the outbox's contacts first, then the held ones, then
+    /// the mail friends; each contact once, at most [`engine::MAX_KEYS`].
     #[test]
     fn work_set_keeps_the_outbox_first_and_each_contact_once() {
-        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
-        assert_eq!(work_set(vec![b, a], vec![a, c]), vec![b, a, c]);
-        assert!(work_set(Vec::new(), Vec::new()).is_empty());
+        let (a, b, c, d) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]);
+        assert_eq!(work_set(vec![b, a], vec![a, c], Vec::new()), vec![b, a, c]);
+        assert_eq!(
+            work_set(vec![b, a], vec![c], vec![d, a, c, d]),
+            vec![b, a, c, d]
+        );
+        assert!(work_set(Vec::new(), Vec::new(), Vec::new()).is_empty());
+        let many: Vec<[u8; 32]> = (0..engine::MAX_KEYS as u16 + 8)
+            .map(|i| {
+                let mut k = [0xF0u8; 32];
+                k[..2].copy_from_slice(&i.to_be_bytes());
+                k
+            })
+            .collect();
+        let capped = work_set(vec![a], vec![b], many.clone());
+        assert_eq!(capped.len(), engine::MAX_KEYS);
+        assert_eq!(capped[..3], [a, b, many[0]]);
+    }
+
+    /// S17: the mail friends of the waiting contacts, in the order of the
+    /// contacts and of each one's list, each once; never a contact that
+    /// something waits for itself (it is work already), so a recipient is
+    /// never listed as its own friend.
+    #[test]
+    fn mail_friends_follow_the_waiting_contacts_in_order() {
+        let (a, b, c) = ([0xA1u8; 32], [0xB1u8; 32], [0xC1u8; 32]);
+        let (f, g) = ([0xF1u8; 32], [0xF2u8; 32]);
+        let lists = vec![
+            vec![(f, None), (b, Some(1)), (a, None)],
+            vec![(g, None), (f, None)],
+            Vec::new(),
+        ];
+        assert_eq!(friends_of(&[a, b, c], lists), vec![f, g]);
+        assert!(friends_of(&[a], vec![Vec::new()]).is_empty());
+    }
+
+    /// S17 with a profile: a waiting contact whose mail this node may leave
+    /// with a friend it listed (the outbox's own custodian list) makes that
+    /// friend work, after the contact; with the custody gates closed only
+    /// the contact is.
+    #[tokio::test]
+    async fn a_waiting_contact_makes_its_mail_friend_work() {
+        use raven_core::custody_gate::{set_custody_gates_for_this_thread, CustodyGates};
+        let dir = tempfile::tempdir().unwrap();
+        let (local, alice, bob, dave) = ([0xEE; 32], [0xA1; 32], [0xB1; 32], [0xD1; 32]);
+        let row = |key: &[u8; 32], custodians: &[[u8; 32]]| {
+            serde_json::json!({
+                "pub_hex": hex::encode(key),
+                "pinned": true,
+                "custodians": custodians.iter().map(hex::encode).collect::<Vec<_>>(),
+            })
+        };
+        let rows = vec![row(&alice, &[bob]), row(&bob, &[]), row(&dave, &[])];
+        std::fs::write(
+            dir.path().join("contacts.json"),
+            serde_json::Value::Array(rows).to_string(),
+        )
+        .unwrap();
+        let work = |waiting: Vec<[u8; 32]>| work_for(dir.path().to_path_buf(), local, waiting);
+        set_custody_gates_for_this_thread(Some(CustodyGates {
+            live: true,
+            wan: false,
+        }));
+        let live = work(vec![alice]).await;
+        let both = work(vec![dave, alice]).await;
+        set_custody_gates_for_this_thread(Some(CustodyGates {
+            live: false,
+            wan: false,
+        }));
+        let closed = work(vec![alice]).await;
+        set_custody_gates_for_this_thread(None);
+        assert_eq!(live, [alice, bob]);
+        assert_eq!(both, [dave, alice, bob]);
+        assert_eq!(closed, [alice], "custody closed: no mail friend");
+    }
+
+    /// Task 2 Q5: the contacts a background scan filter remembers across
+    /// engines: pipes newest first, `raven nearby on` until `off`, each
+    /// once and bounded.
+    #[test]
+    fn the_background_filter_remembers_recent_pipes_and_explicit_on() {
+        let mut r = Remembered::default();
+        let (a, b) = ([0xA1u8; 32], [0xB1u8; 32]);
+        r.piped(a);
+        r.piped(b);
+        r.piped(a);
+        assert_eq!(r.pipes, [a, b]);
+        for i in 0..=REMEMBERED as u8 {
+            r.piped([i; 32]);
+        }
+        assert_eq!(r.pipes.len(), REMEMBERED);
+        assert_eq!(r.pipes[0], [REMEMBERED as u8; 32]);
+        r.on(a, true);
+        r.on(b, true);
+        r.on(a, true);
+        assert_eq!(r.on, [a, b]);
+        r.on(a, false);
+        assert_eq!(r.on, [b]);
     }
 
     /// F11d on a custodian (merge I.5): its custody objects' recipients,

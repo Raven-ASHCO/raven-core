@@ -59,6 +59,18 @@
 //!   central has the lower identity key survives, and the other is reset
 //!   with DUPLICATE.
 //!
+//! - **Background life (iOS, Task 2 design §3.5):** an app in the
+//!   background sees only the adverts whose service UUIDs its scan names,
+//!   each device once, and its clock stops while it is suspended. An engine
+//!   started for the background ([`spawn`]) names up to
+//!   [`FILTER_CONTACTS`] contacts ([`Host::filter_contacts`]: work and held
+//!   recipients, mail friends, recent pipes, explicit `on`) at the epochs
+//!   from the one before now to [`FILTER_AHEAD`] ahead, as the radio's scan
+//!   filter ([`Radio::set_scan_filter`], local, never on the air), and its
+//!   scan table covers the same window for them. Every advert refreshes the
+//!   epoch and the scan table before it is matched, so the first one after a
+//!   long suspension is not lost to a stale table.
+//!
 //! Every limit here bounds what a radio neighbour can make this node hold.
 //! Nothing is written at rest; logs carry counts only.
 
@@ -123,6 +135,15 @@ pub(crate) const WORK_EVERY: Duration = Duration::from_secs(30);
 /// The scan duty cycle while nothing needs continuous scanning.
 pub(crate) const SCAN_CYCLE: Duration = Duration::from_secs(30);
 pub(crate) const SCAN_ON: Duration = Duration::from_secs(10);
+/// Contacts a background life's scan filter names at most (Task 2 Q5; the
+/// size of list iOS still handles well is measured in device row D8).
+pub(crate) const FILTER_CONTACTS: usize = 32;
+/// Epochs past the current one a background life's scan filter covers
+/// (with the one before: 10 epochs, two and a half hours): the app cannot
+/// tick while it is suspended.
+pub(crate) const FILTER_AHEAD: u64 = 8;
+/// The tokens one scan filter holds at most.
+pub(crate) const MAX_FILTER_TOKENS: usize = FILTER_CONTACTS * (FILTER_AHEAD as usize + 2);
 
 /// What tells that the pair keys must be read again: stamps of the files
 /// they come from, a generation (the contact book's reload generation) and
@@ -146,6 +167,14 @@ pub(crate) trait Host: Send + Sync + 'static {
     /// (custody objects, letters) for and the next hops it holds handoff
     /// rows for. Asked only while background mail is on.
     fn has_work(&self) -> BoxFuture<'static, Vec<[u8; 32]>>;
+    /// The contacts a background life's scan filter names, most wanted
+    /// first (Task 2 Q5): work and held recipients, mail friends, contacts
+    /// with a recent pipe, explicit `on`. The engine keeps the keyed ones,
+    /// at most [`FILTER_CONTACTS`]. By default what [`Host::has_work`]
+    /// names.
+    fn filter_contacts(&self) -> BoxFuture<'static, Vec<[u8; 32]>> {
+        self.has_work()
+    }
     /// A pipe to `peer` came up: what waits for it is due now (and, with the
     /// custody gates live, custody on the encounter: a fetch from it, what
     /// it may carry for others, its handoff rows; P5.33).
@@ -167,6 +196,7 @@ enum Cmd {
     BackgroundMail(bool),
     Keys(KeyStamp, Result<Vec<(PairKeys, KeyUse)>, String>),
     Work(Vec<[u8; 32]>),
+    Filter(Vec<[u8; 32]>),
     PipeEnded(ConnId, PipeEnd),
     Stop,
 }
@@ -194,6 +224,8 @@ pub(crate) struct EngineHandle {
     /// [`Engine::address_private`] at the start (the radio's address
     /// privacy is fixed for its life).
     on_air: bool,
+    /// This node's identity key (the engine's `me`).
+    me: [u8; 32],
 }
 
 impl EngineHandle {
@@ -210,6 +242,11 @@ impl EngineHandle {
     /// Windows today, Linux without `Privacy = device`).
     pub(crate) fn may_go_on_air(&self) -> bool {
         self.on_air
+    }
+
+    /// This node's identity key.
+    pub(crate) fn me(&self) -> [u8; 32] {
+        self.me
     }
 
     /// The pipe to `peer`: the one up now, else one the engine brings up
@@ -281,13 +318,15 @@ impl EngineHandle {
 }
 
 /// Start the engine on `radio` (whose events arrive on `events`) for this
-/// node (`me`, its identity key).
+/// node (`me`, its identity key); a background life when `background` (see
+/// the module doc: the scan filter and its window).
 pub(crate) fn spawn(
     radio: Box<dyn Radio>,
     events: mpsc::Receiver<RadioEvent>,
     host: Arc<dyn Host>,
     me: [u8; 32],
     background_mail: bool,
+    background: bool,
 ) -> (EngineHandle, JoinHandle<()>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let shared = Arc::new(Mutex::new(Snapshot::default()));
@@ -296,6 +335,7 @@ pub(crate) fn spawn(
         cmd: cmd_tx.clone(),
         shared: Arc::clone(&shared),
         on_air: address_private(&caps, host.as_ref()),
+        me,
     };
     let now = Instant::now();
     let epoch = epoch_of(host.now_ms());
@@ -322,6 +362,10 @@ pub(crate) fn spawn(
         background_mail,
         work: Vec::new(),
         work_loading: false,
+        background,
+        filter_peers: Vec::new(),
+        filter_loading: false,
+        filter: None,
         rotation: Vec::new(),
         services: HashMap::new(),
         published: None,
@@ -510,6 +554,13 @@ struct Engine {
     /// The contacts something waits for (background mail only).
     work: Vec<[u8; 32]>,
     work_loading: bool,
+    /// A background life (iOS): the scan filter and its window.
+    background: bool,
+    /// The contacts the scan filter names (background life only).
+    filter_peers: Vec<[u8; 32]>,
+    filter_loading: bool,
+    /// What the radio was last told to scan for (background life only).
+    filter: Option<Vec<[u8; 16]>>,
     rotation: Vec<[u8; 32]>,
     /// Token -> (contact, epoch) of every service published now.
     services: HashMap<[u8; 16], ([u8; 32], u64)>,
@@ -641,6 +692,7 @@ impl Engine {
                     self.work = work;
                 }
             }
+            Cmd::Filter(peers) => self.filter_loaded(peers),
             Cmd::PipeEnded(conn, end) => self.pipe_ended(conn, end),
             Cmd::Stop => {}
         }
@@ -779,6 +831,9 @@ impl Engine {
         }
         self.rebuild_scan();
         lock(&self.shared).keyed = self.keys.keys().copied().collect();
+        if self.background {
+            self.request_filter();
+        }
         if std::mem::take(&mut self.reload) {
             self.request_keys();
         }
@@ -794,9 +849,84 @@ impl Engine {
                 }
             }
         }
+        // A background life matches what its scan filter names, over the
+        // same window.
+        for peer in &self.filter_peers {
+            for (k, used) in self.sets.get(peer).into_iter().flatten() {
+                for e in filter_epochs(self.epoch) {
+                    self.scan
+                        .entry(k.token_in(e))
+                        .or_insert_with(|| (*peer, e, Arc::clone(k), *used));
+                }
+            }
+        }
         // A token that can no longer match needs no count.
         let scan = &self.scan;
         self.token_fails.retain(|t, _| scan.contains_key(t));
+    }
+
+    // ── The background scan filter ──────────────────────────────────────
+
+    fn request_filter(&mut self) {
+        if self.filter_loading {
+            return;
+        }
+        self.filter_loading = true;
+        let peers = self.host.filter_contacts();
+        let cmd = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            let _ = cmd.send(Cmd::Filter(peers.await));
+        });
+    }
+
+    /// The host named the contacts for the scan filter: the keyed ones, then
+    /// the explicit `on` ones, each once, at most [`FILTER_CONTACTS`]; the
+    /// scan table and the radio follow.
+    fn filter_loaded(&mut self, peers: Vec<[u8; 32]>) {
+        self.filter_loading = false;
+        if !self.background {
+            return;
+        }
+        let mut on: Vec<[u8; 32]> = self.explicit_on.keys().copied().collect();
+        on.sort_unstable();
+        let mut chosen: Vec<[u8; 32]> = Vec::new();
+        for peer in peers.into_iter().chain(on) {
+            if chosen.len() == FILTER_CONTACTS {
+                break;
+            }
+            if self.sets.contains_key(&peer) && !chosen.contains(&peer) {
+                chosen.push(peer);
+            }
+        }
+        self.filter_peers = chosen;
+        self.rebuild_scan();
+        self.push_filter();
+    }
+
+    /// Tell the radio the filter's tokens when they changed: each chosen
+    /// contact's, from the epoch before now to [`FILTER_AHEAD`] ahead, at
+    /// most [`MAX_FILTER_TOKENS`].
+    fn push_filter(&mut self) {
+        let mut tokens: Vec<[u8; 16]> = Vec::new();
+        'all: for peer in &self.filter_peers {
+            for (k, _) in self.sets.get(peer).into_iter().flatten() {
+                for e in filter_epochs(self.epoch) {
+                    if tokens.len() == MAX_FILTER_TOKENS {
+                        break 'all;
+                    }
+                    let t = k.token_in(e);
+                    if !tokens.contains(&t) {
+                        tokens.push(t);
+                    }
+                }
+            }
+        }
+        if self.filter.as_ref() == Some(&tokens) {
+            return;
+        }
+        if lock(&self.radio).set_scan_filter(&tokens).is_ok() {
+            self.filter = Some(tokens);
+        }
     }
 
     /// The key set `peer`'s token `t` was made with (Phase 6b: the contact
@@ -825,6 +955,9 @@ impl Engine {
                 }
             }
             RadioEvent::Seen { addr, uuids, .. } => {
+                // After a long suspension (iOS) this may come before the
+                // tick: the epoch and the scan table first.
+                self.refresh_epoch();
                 for uuid in uuids {
                     let Some(peer) = self.scan.get(&uuid).map(|(peer, ..)| *peer) else {
                         continue;
@@ -1324,21 +1457,34 @@ impl Engine {
 
     // ── Time ────────────────────────────────────────────────────────────
 
+    /// A new epoch since the last look: the scan table, the replay cache
+    /// and the keys follow (and a background life's filter). True when it
+    /// moved.
+    fn refresh_epoch(&mut self) -> bool {
+        let epoch = epoch_of(self.host.now_ms());
+        if epoch == self.epoch {
+            return false;
+        }
+        self.epoch = epoch;
+        self.rebuild_scan();
+        // §5: the replay cache covers the current and previous epoch.
+        let keep: HashSet<[u8; 16]> = self
+            .keys
+            .values()
+            .flat_map(|k| [k.token_out(epoch), k.token_out(epoch.saturating_sub(1))])
+            .collect();
+        self.replay.retain(|t| keep.contains(t));
+        self.request_keys();
+        if self.background {
+            self.push_filter();
+            self.request_filter();
+        }
+        true
+    }
+
     fn on_tick(&mut self) {
         let now = Instant::now();
-        let epoch = epoch_of(self.host.now_ms());
-        if epoch != self.epoch {
-            self.epoch = epoch;
-            self.rebuild_scan();
-            // §5: the replay cache covers the current and previous epoch.
-            let keep: HashSet<[u8; 16]> = self
-                .keys
-                .values()
-                .flat_map(|k| [k.token_out(epoch), k.token_out(epoch.saturating_sub(1))])
-                .collect();
-            self.replay.retain(|t| keep.contains(t));
-            self.request_keys();
-        } else if now >= self.next_refresh {
+        if !self.refresh_epoch() && now >= self.next_refresh {
             self.next_refresh = now + REFRESH_EVERY;
             if self.stamp.as_ref() != Some(&self.host.stamp()) {
                 self.request_keys();
@@ -1457,7 +1603,8 @@ impl Engine {
         let continuous = !self.rotation.is_empty()
             || !self.pipes.is_empty()
             || !self.waiters.is_empty()
-            || self.background_mail;
+            || self.background_mail
+            || self.background;
         let cycle = now.saturating_duration_since(self.started).as_secs() % SCAN_CYCLE.as_secs();
         // A radio that may not connect has nothing to scan for.
         let scan = powered
@@ -1495,6 +1642,12 @@ impl Engine {
         shared.up = self.pipes.keys().copied().collect();
         shared.status = status;
     }
+}
+
+/// The epochs a background life's scan filter covers around `epoch`: the
+/// one before to [`FILTER_AHEAD`] ahead.
+fn filter_epochs(epoch: u64) -> std::ops::RangeInclusive<u64> {
+    epoch.saturating_sub(1)..=epoch.saturating_add(FILTER_AHEAD)
 }
 
 /// [`Engine::address_private`] for a radio with `caps` on `host`.

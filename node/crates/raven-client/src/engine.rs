@@ -129,6 +129,10 @@ pub(crate) struct Inner {
     pub(crate) marks_unsaved: Mutex<ReadMarks>,
     /// What the watcher last saw of the group store (groups.rs).
     pub(crate) groups: Mutex<crate::groups::GroupWatch>,
+    /// The friends `nearby.contact` asked raven-node to advertise for, by
+    /// key (hex), until when (`None`: until asked to stop): what
+    /// `nearby.status` lists as `advertising_for` (nearby.rs).
+    pub(crate) nearby_on: Mutex<HashMap<String, Option<u64>>>,
 }
 
 impl Inner {
@@ -162,6 +166,7 @@ impl Inner {
             mismatches: Mutex::new(HashMap::new()),
             marks_unsaved: Mutex::new(ReadMarks::new()),
             groups: Mutex::new(crate::groups::GroupWatch::default()),
+            nearby_on: Mutex::new(HashMap::new()),
         })
     }
 
@@ -236,7 +241,7 @@ impl Inner {
             "node.start" => |me, _| me.node_start(),
             "node.stop" => |me, _| me.node_stop(),
             // The app's lifecycle (the embedded node: docs/IOS.md).
-            "node.pause" => |me, _| me.node_pause(),
+            "node.pause" => |me, args| me.node_pause(args),
             "node.resume" => |me, _| me.node_resume(),
             "mail.check" => |me, args| me.mail_check(args),
             "network.path" => |me, args| me.network_path(args),
@@ -246,6 +251,11 @@ impl Inner {
             "network.status" => |me, _| me.network_status(),
             "network.set" => |me, args| me.network_set(args),
             "network.check" => |me, args| me.network_check(args),
+            // Bluetooth nearby (nearby.rs; Task 2 design §4).
+            "nearby.status" => |me, _| me.nearby_status(),
+            "nearby.contact" => |me, args| me.nearby_contact(args),
+            "nearby.stop_all" => |me, _| me.nearby_stop_all(),
+            "nearby.permission" => |me, _| me.nearby_permission(),
             "contacts.routes" => |me, args| me.contacts_routes(args),
             "contacts.set_routes" => |me, args| me.contacts_set_routes(args),
             "security.status" => |me, _| me.security_status(),

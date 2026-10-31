@@ -137,6 +137,7 @@ fn nearby_over_the_fake_ether() {
     );
     assert_eq!(m["path"], "Bluetooth nearby", "{m}");
     assert!(b.wait_incoming(&a, "over the air", Duration::from_secs(20)));
+    nearby_ops(&a, &b);
     // Off again, as `raven nearby disable`.
     a.ok("network.set", json!({"nearby": false}));
     assert_eq!(
@@ -145,4 +146,76 @@ fn nearby_over_the_fake_ether() {
             .nearby,
         Some(false)
     );
+}
+
+/// The nearby ops (Task 2 design §4) on a live carrier: the status as the
+/// CLI's, advertising for one verified friend for a while and stopping it
+/// (`raven nearby on|off`), background mail with its consent, and the
+/// permission that only iPhone and iPad have.
+fn nearby_ops(a: &Peer, b: &Peer) {
+    let st = a.ok("nearby.status", json!({}));
+    assert_eq!(st["state"], "live", "{st}");
+    assert_eq!(st["radio"], "powered_on", "{st}");
+    assert_eq!(st["enabled"], true, "{st}");
+    assert_eq!(st["background"], "background", "{st}");
+    assert_eq!(st["advertising_for"], json!([]), "{st}");
+    assert!(st["rows"].as_array().is_some_and(|r| !r.is_empty()), "{st}");
+    assert!(
+        st["texts"]["nearby"]
+            .as_str()
+            .is_some_and(|t| t.contains("verified")),
+        "{st}"
+    );
+    assert!(st.get("permission").is_none(), "{st}");
+    let on = a.ok(
+        "nearby.contact",
+        json!({"address": b.address(), "advertise": true, "for_min": 30}),
+    );
+    assert_eq!(on["advertising"], true, "{on}");
+    assert!(on["until_ms"].as_u64().is_some(), "{on}");
+    let listed = &on["status"]["advertising_for"];
+    assert_eq!(listed[0]["address"], b.address(), "{on}");
+    assert_eq!(listed[0]["name"], format!("Friend {}", b.name), "{on}");
+    assert_eq!(
+        a.err(
+            "nearby.contact",
+            json!({"address": b.address(), "advertise": true, "for_min": 5})
+        ),
+        "BAD_REQUEST"
+    );
+    assert_eq!(
+        a.err(
+            "nearby.contact",
+            json!({"address": "rvn1notafriend", "advertise": true})
+        ),
+        "NOT_A_CONTACT"
+    );
+    let off = a.ok("nearby.stop_all", json!({}));
+    assert_eq!(off["status"]["advertising_for"], json!([]), "{off}");
+    assert_eq!(a.err("nearby.permission", json!({})), "NOT_ON_THIS_SYSTEM");
+    assert_eq!(
+        a.err("network.set", json!({"nearby_background_mail": true})),
+        "CONSENT_NEEDED"
+    );
+    let net = a.ok("network.status", json!({}));
+    assert!(net["texts"]["nearby_background_mail"]
+        .as_str()
+        .is_some_and(|t| t.contains("background mail")));
+    let set = a.ok(
+        "network.set",
+        json!({"nearby_background_mail": true, "agreed": true}),
+    );
+    assert_eq!(
+        set["changes"][0]["setting"], "nearby_background_mail",
+        "{set}"
+    );
+    assert_eq!(
+        raven_core::node_policy::try_load_policy(&a.path)
+            .unwrap()
+            .nearby_background_mail,
+        Some(true)
+    );
+    assert_eq!(a.ok("nearby.status", json!({}))["background_mail"], true);
+    a.ok("network.set", json!({"nearby_background_mail": false}));
+    assert_eq!(a.ok("nearby.status", json!({}))["background_mail"], false);
 }

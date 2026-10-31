@@ -567,6 +567,14 @@
 //!   Variant (cutoff addendum F11d): radios that meet after the user's work
 //!   ran out (`RAVEN_LAB_NEARBY_FOREGROUND_MS`) deliver only with nearby
 //!   background mail on.
+//! - **C57 a Bluetooth-only custody chain (field finding S17):** Carol
+//!   (nearby only) sends to Alice, whose radio is off; Bob is Alice's mail
+//!   friend (custody on, background mail on). With no mail friend listed
+//!   Carol never advertises for Bob; once she lists him, her send's
+//!   foreground makes her advertise for him (the hub's advert log, no
+//!   `raven nearby on`), the deposit goes over the pipe that comes up, Bob
+//!   advertises for Alice once her radio is on, she fetches it from him
+//!   exactly once, and the receipt reaches Carol.
 //!
 //! Phase 6a, learning connectivity (P6.18; `RAVEN_LAB_LEARNING=1` on the
 //! learning side while `LEARNING_PRODUCTION_ENABLED` is false, each
@@ -610,7 +618,7 @@
 //! C36-C39, s90-s93, s95-s99 (+s90p, s91b, s93b, s96w). Privacy pack: C87,
 //! C90-C93, s117, s120-s129. Phase 3: C27-C34, s80-s89 (+s85b). Phase 4:
 //! C40-C49 (uses C40-C46), s50-s59 (uses s50-s53). Phase 5: C50-C69 (uses
-//! C50-C56; C56 is the cutoff study's), s60-s79 (+b/c variants), plus s94 and
+//! C50-C57; C56 is the cutoff study's), s60-s79 (+b/c variants), plus s94 and
 //! s97b inside the cutoff block (registered by CP.1). Phase 6a: C70-C79 (uses
 //! C70-C74), s100-s109 (uses s100-s106), real rows L1-L4. Phase 6b: C80-C89
 //! (C87 is the privacy pack's), s110-s119 (s117 is the privacy pack's), real
@@ -1247,8 +1255,10 @@ impl Profile {
         let ipc = service
             .log
             .wait_for(READY_TIMEOUT, |l| l.contains("raven-node ipc: listening"));
+        // A nearby-only lab run (`RAVEN_LAB_NEARBY_ONLY=1`, C57) opens no
+        // LAN listener and says so instead.
         let lan = service.log.wait_for(READY_TIMEOUT, |l| {
-            l.contains("raven-node lan_direct: listen ")
+            l.contains("raven-node lan_direct: listen ") || l.contains(LAN_OFF_NEARBY_ONLY)
         });
         wait_at_rest(&service, self.name);
         let (Some(_), Some(lan)) = (ipc, lan) else {
@@ -1258,7 +1268,11 @@ impl Profile {
                 service.log.text()
             );
         };
-        service.lan_dial = lan.rsplit(' ').next().unwrap().trim().to_string();
+        service.lan_dial = if lan.contains(LAN_OFF_NEARBY_ONLY) {
+            String::new()
+        } else {
+            lan.rsplit(' ').next().unwrap().trim().to_string()
+        };
         if internet.is_some() {
             let inet = service.log.wait_for(READY_TIMEOUT, |l| {
                 l.contains("raven-node internet_direct: listen ")
@@ -14825,6 +14839,185 @@ fn c56_bluetooth_only_island() {
         d_svc.log.text()
     );
     assert_eq!(d.inbox().matches("c56 later").count(), 1);
+}
+
+/// What a nearby-only lab run's raven-node says instead of its LAN
+/// listener's line (`RAVEN_LAB_NEARBY_ONLY=1`).
+const LAN_OFF_NEARBY_ONLY: &str = "raven-node lan_direct: off in this lab run (nearby only)";
+
+/// The tokens `from` advertises for `to` (RNL1 §2-§3), from the epoch
+/// before now to two hours on, made with `from`'s own identity (the lab
+/// backends): an advert in the hub's log that is one of them is `from`
+/// advertising for `to`.
+fn tokens_for(from: &Profile, to: &Profile) -> Vec<String> {
+    load_profile_key(&from.dir);
+    let id = raven_core::load_identity(&from.dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", from.name))
+        .expect("an identity");
+    let mut peer = [0u8; 32];
+    hex::decode_to_slice(&to.pub_hex, &mut peer).unwrap();
+    let keys = raven_core::nearby_link::pair_keys(&id, &peer).unwrap();
+    let now = raven_core::nearby_link::epoch_of(raven_core::clock::now_ms());
+    (now.saturating_sub(1)..=now + 8)
+        .map(|e| hex::encode(keys.token_out(e)))
+        .collect()
+}
+
+/// `radio` put one of `tokens` on air (the hub's advert log).
+fn advertised(ether: &mut EtherHub, radio: &str, tokens: &[String]) -> bool {
+    ether.adverts().iter().any(|(r, advert)| {
+        r == radio
+            && advert["uuids"].as_array().is_some_and(|uuids| {
+                uuids
+                    .iter()
+                    .filter_map(|u| u.as_str())
+                    .any(|u| tokens.iter().any(|t| t.eq_ignore_ascii_case(u)))
+            })
+    })
+}
+
+/// C57 a Bluetooth-only custody chain (field finding S17; the device row D5
+/// on the ether). Alice, Bob and Carol met once on the LAN; their LAN
+/// addresses are dead, and Carol runs with Bluetooth only
+/// (`RAVEN_LAB_NEARBY_ONLY=1`). Bob keeps mail for friends (`raven node
+/// custody on`) with nearby background mail on; Alice lists him for Carol,
+/// so she collects from him what Carol leaves there. Alice's radio is off.
+/// - With no mail friend listed, Carol's message for Alice waits and
+///   Carol never advertises for Bob (only for Alice).
+/// - Carol lists Bob as Alice's mail friend and sends again: her send's
+///   foreground makes her advertise for Bob (his token in the hub's log,
+///   with no `raven nearby on` anywhere), the pipe comes up, and both
+///   messages are held by a friend over `nearby_dial`.
+/// - Carol's radio off, Alice's on: Bob advertises for Alice, she gets
+///   both from him as their keeper, each exactly once; with Carol's radio
+///   back the receipt reaches her (through Bob, or directly) and her outbox
+///   says delivered.
+#[test]
+#[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
+fn c57_bluetooth_only_custody_chain() {
+    if !lab_ready() {
+        return;
+    }
+    let _net = shared_host_network();
+    let root = tempfile::tempdir().unwrap();
+    let mut ether = EtherHub::start(&[]);
+    // Leave a message with a friend at once, fetch every second.
+    let custody: &[(&'static str, &str)] = &[
+        ("RAVEN_LAB_CUSTODY_AFTER_MS", "0"),
+        ("RAVEN_LAB_CUSTODY_FETCH_MS", "1000"),
+    ];
+    let a = nearby_profile(root.path(), "a57", &ether, custody);
+    let b = nearby_profile(root.path(), "b57", &ether, custody);
+    let c = nearby_profile(root.path(), "c57", &ether, custody);
+    let a_svc = a.start_service();
+    let b_svc = b.start_service();
+    let c_svc = c.start_service();
+    nearby_meet(&[(&a, &a_svc), (&b, &b_svc), (&c, &c_svc)], true);
+    let on = b.raven(&["node", "custody", "on", "--yes"], None);
+    assert!(
+        on.ok && on.stdout.contains("ok friend custody on"),
+        "b57 node custody on:\n{}",
+        on.all()
+    );
+    let bg = b.raven(&["nearby", "background-mail", "on", "--yes"], None);
+    assert!(bg.ok, "b57 background mail on:\n{}", bg.all());
+    list_custodians(&a, "c57", &["@b57"]);
+    // Carol has Bluetooth only from here on.
+    drop(c_svc);
+    let c_svc = c.start_service_env("127.0.0.1:0", None, &[("RAVEN_LAB_NEARBY_ONLY", "1")]);
+    assert!(
+        c_svc.log.text().contains(raven_core::NEARBY_ONLY_NOTE),
+        "{}",
+        c_svc.log.text()
+    );
+    assert!(
+        wait_until(LOG_TIMEOUT, || radio_on(&c)),
+        "{}",
+        nearby_status(&c)
+    );
+    let (for_alice, for_bob) = (tokens_for(&c, &a), tokens_for(&c, &b));
+    let carol = radio_name(&c_svc);
+    ether.power(&a_svc, false);
+
+    // ── No mail friend listed: Carol never advertises for Bob ────────────
+    let before = "c57 before a friend";
+    custody_queued_send(&c, "a57", before);
+    assert!(
+        wait_until(LOG_TIMEOUT, || advertised(&mut ether, &carol, &for_alice)),
+        "carol never advertised for alice:\n{}",
+        c_svc.log.text()
+    );
+    std::thread::sleep(Duration::from_secs(20));
+    assert!(
+        !advertised(&mut ether, &carol, &for_bob),
+        "carol advertised for bob, who is nobody's mail friend yet:\n{}",
+        c_svc.log.text()
+    );
+    let list = c.raven(&["outbox", "list"], None).stdout;
+    assert!(!list.contains("held by"), "{list}");
+
+    // ── Bob is Alice's mail friend: the send's foreground reaches him ────
+    list_custodians(&c, "a57", &["@b57"]);
+    let text = "c57 via a friend";
+    let mid = custody_queued_send(&c, "a57", text);
+    assert!(
+        wait_until(Duration::from_secs(90), || advertised(
+            &mut ether, &carol, &for_bob
+        )),
+        "carol never advertised for bob:\n{}",
+        c_svc.log.text()
+    );
+    wait_held_by_a_friend(&c, &c_svc, 120);
+    let left = c_svc.log.text();
+    assert!(
+        left.lines()
+            .any(|l| l.contains(CUSTODY_LEFT) && l.contains("nearby_dial")),
+        "the deposit did not go over nearby:\n{left}"
+    );
+
+    // ── Carol away, Alice back: Bob advertises for her, she fetches ──────
+    ether.power(&c_svc, false);
+    ether.power(&a_svc, true);
+    assert!(
+        wait_until(Duration::from_secs(180), || {
+            let inbox = a.inbox();
+            inbox.contains(text) && inbox.contains(before)
+        }),
+        "alice did not fetch from bob:\n{}\n---\n{}",
+        a_svc.log.text(),
+        b_svc.log.text()
+    );
+    // Both came from Bob, not from Carol (the friend path).
+    let kept = a_svc
+        .log
+        .text()
+        .lines()
+        .filter(|l| {
+            l.contains("raven-node inbox: received a message") && l.ends_with("from a keeper")
+        })
+        .count();
+    assert!(
+        kept >= 2,
+        "alice did not get both from a keeper:\n{}",
+        a_svc.log.text()
+    );
+
+    // ── Carol back: the receipt reaches her ───────────────────────────────
+    ether.power(&c_svc, true);
+    assert!(
+        wait_until(Duration::from_secs(180), || {
+            let st = c.raven(&["outbox", "status", &mid], None);
+            st.ok && st.stdout.contains("state       delivered")
+        }),
+        "carol's outbox never said delivered:\n{}\n---\n{}\n---\n{}",
+        c.raven(&["outbox", "status", &mid], None).all(),
+        c_svc.log.text(),
+        b_svc.log.text()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let inbox = a.inbox();
+    assert_eq!(inbox.matches(text).count(), 1, "{text} exactly once");
+    assert_eq!(inbox.matches(before).count(), 1, "{before} exactly once");
 }
 
 // ── Phase 6a: learning connectivity (P6.18) ──────────────────────────────

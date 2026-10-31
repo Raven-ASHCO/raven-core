@@ -689,7 +689,7 @@ C17-C26 (+C7f), C35 (F9), s32b-s32e, s39-s49 (+s48c, s48o). Cutoff pack:
 C36-C39, s90-s93, s95-s99 (+s90p, s91b, s93b, s96w). Privacy pack: C87,
 C90-C93, s117, s120-s129. Phase 3: C27-C34, s80-s89 (+s85b). Phase 4:
 C40-C49 (uses C40-C46), s50-s59 (uses s50-s53). Phase 5: C50-C69 (uses
-C50-C56; C56 is the cutoff study's), s60-s79 (+b/c variants), plus s94 and
+C50-C57; C56 is the cutoff study's), s60-s79 (+b/c variants), plus s94 and
 s97b inside the cutoff block (registered by CP.1). Phase 6a: C70-C79 (uses
 C70-C74), s100-s109 (uses s100-s106), real rows L1-L4. Phase 6b: C80-C89
 (C87 is the privacy pack's), s110-s119 (s117 is the privacy pack's), real

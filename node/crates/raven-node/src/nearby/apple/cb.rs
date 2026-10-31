@@ -1,19 +1,36 @@
-//! raven-nearby-helper's CoreBluetooth side (macOS; objc2-core-bluetooth
-//! 0.3.2, owner decision O5-10).
+//! CoreBluetooth for the nearby radio (objc2-core-bluetooth 0.3.2, owner
+//! decision O5-10), one source for two hosts: raven-nearby-helper on macOS,
+//! its own process (`bin/raven-nearby-helper/process.rs` adds stdin, stdout
+//! and the exit; the helper includes this file with `#[path]`), and the iOS
+//! app's own process (`super::inproc`, Task 2 design §3), where an app may
+//! start no helper.
 //!
-//! **Before any CoreBluetooth object.** The helper reads
-//! `NSBluetoothAlwaysUsageDescription` from its bundle's Info.plist. Without
-//! it macOS would kill the process at the first Bluetooth call, so the
-//! helper says `unauthorized` ("no usage description") and exits instead.
-//! `--check` stops after that answer: it never creates a manager, so it
-//! never prompts and never touches the radio.
+//! **Before any CoreBluetooth object.** [`has_usage_description`] reads
+//! `NSBluetoothAlwaysUsageDescription` from the main bundle's Info.plist
+//! (RavenNearby.app's, or the iOS app's own). Without it the system would
+//! kill the process at the first Bluetooth call, so no manager is made then
+//! ([`NO_USAGE`] says why). The helper's `--check` stops after that
+//! answer: it never creates a manager, so it never prompts and never touches
+//! the radio.
 //!
-//! **One serial queue.** Both managers deliver their callbacks on a private
-//! serial dispatch queue (a few lines of libdispatch FFI instead of the
-//! dispatch2 crate), and the [`Machine`] with every CoreBluetooth object
-//! lives behind [`STATE`], touched on that queue only. stdin's commands and
-//! a half-second tick are posted to the queue. Each callback becomes one
-//! [`Input`]; the lines the machine queues go to stdout at once.
+//! **One serial queue** per process ([`queue`]; a few lines of libdispatch
+//! FFI instead of the dispatch2 crate). Both managers deliver their
+//! callbacks on it, and [`STATE`] holds the one [`Life`] at a time: the
+//! [`Machine`] with every CoreBluetooth object, and the [`Sink`] its lines go
+//! to, touched on that queue only. Commands and the tick are posted to the
+//! queue ([`post`], [`post_after`]). Each callback becomes one [`Input`];
+//! the lines the machine queues go to the sink once the state lock is
+//! released ([`deliver`]). [`run_sync`] waits for the queue and so is never
+//! called on it (a debug assertion: [`on_queue`]).
+//!
+//! **A life's callbacks only.** Each life has a [`Delegate`] of its own; a
+//! callback from another life's managers (one queued before that life
+//! ended) is dropped.
+//!
+//! **A panic** in this code is caught on the queue and in every delegate
+//! method: it never unwinds into CoreBluetooth or libdispatch. It ends the
+//! life ([`Sink::panicked`]): the helper exits, as it always did; in
+//! process the radio is gone, and the app keeps running.
 //!
 //! **Central links.** Connect, find service `T` and characteristic `C`
 //! (both by UUID, nothing else is discovered), check that `C` can take
@@ -21,14 +38,22 @@
 //! subscription is. `max_tx` is `maximumWriteValueLengthForType:` for Write
 //! Commands. A frame is written only while `canSendWriteWithoutResponse`.
 //!
+//! **Scanning** reports every advert, duplicates allowed, so a contact
+//! stays seen; on iOS a scan filter (the background scan, Task 2 design
+//! §3.5) names the only service UUIDs to scan for, which iOS requires of an
+//! app in the background. The macOS helper never filters.
+//!
 //! **Errors** are logged by CoreBluetooth error code only, never with a
 //! device's identifier, and each distinct one once in a row.
 
+// On macOS the library builds this only for its tests, and the helper uses
+// what its process needs: the rest is the iOS app's.
+#![cfg_attr(not(target_os = "ios"), allow(dead_code))]
+
 use std::collections::HashMap;
 use std::ffi::{c_char, c_ulong, c_void};
-use std::io::{self, Write};
-use std::panic::AssertUnwindSafe;
-use std::sync::{Mutex, PoisonError, TryLockError};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use objc2::rc::{autoreleasepool, Retained};
@@ -37,37 +62,50 @@ use objc2::{define_class, msg_send, AnyThread, Message};
 use objc2_core_bluetooth::{
     CBATTError, CBATTRequest, CBAdvertisementDataIsConnectable, CBAdvertisementDataServiceUUIDsKey,
     CBAttributePermissions, CBCentral, CBCentralManager, CBCentralManagerDelegate,
-    CBCentralManagerScanOptionAllowDuplicatesKey, CBCharacteristic, CBCharacteristicProperties,
-    CBCharacteristicWriteType, CBMutableCharacteristic, CBMutableService, CBPeripheral,
-    CBPeripheralDelegate, CBPeripheralManager, CBPeripheralManagerDelegate, CBService, CBUUID,
+    CBCentralManagerOptionShowPowerAlertKey, CBCentralManagerScanOptionAllowDuplicatesKey,
+    CBCharacteristic, CBCharacteristicProperties, CBCharacteristicWriteType,
+    CBMutableCharacteristic, CBMutableService, CBPeripheral, CBPeripheralDelegate,
+    CBPeripheralManager, CBPeripheralManagerDelegate, CBPeripheralManagerOptionShowPowerAlertKey,
+    CBService, CBUUID,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSBundle, NSData, NSDictionary, NSError, NSNumber, NSObject,
     NSObjectProtocol, NSString,
 };
 
-use crate::machine::{CbState, Machine, Os};
-use crate::proto::{self, FromHelper, Power, ToHelper};
+use super::machine::{CbState, Machine, Os};
+use super::proto::{self, FromHelper};
 
-/// The usage description macOS requires before any Bluetooth call.
+/// The usage description the system requires before any Bluetooth call.
 const USAGE_KEY: &str = "NSBluetoothAlwaysUsageDescription";
-/// What the helper says when its bundle lacks [`USAGE_KEY`].
-pub(crate) const NO_USAGE: &str = "no usage description: raven-nearby-helper must run from \
-     RavenNearby.app, whose Info.plist carries NSBluetoothAlwaysUsageDescription";
+
+/// What a bundle without [`USAGE_KEY`] means: on macOS the helper runs from
+/// outside RavenNearby.app; on iOS the app was built without the key, a
+/// build error (said as the in-process radio's own failure, which the
+/// status classes as the software Raven needs, not as no Bluetooth LE).
+pub(crate) const fn no_usage_text(ios: bool) -> &'static str {
+    if ios {
+        "the nearby radio cannot start: this app build lacks NSBluetoothAlwaysUsageDescription"
+    } else {
+        "no usage description: raven-nearby-helper must run from RavenNearby.app, whose \
+         Info.plist carries NSBluetoothAlwaysUsageDescription"
+    }
+}
+
+/// What this build says when its bundle lacks [`USAGE_KEY`].
+pub(crate) const NO_USAGE: &str = no_usage_text(cfg!(target_os = "ios"));
 /// The queue's label.
 const QUEUE_LABEL: &[u8] = b"org.raven.nearby\0";
-/// How often the machine's deadlines are checked.
-const TICK: Duration = Duration::from_millis(500);
-/// The exit code after a panic (raven-node reports the helper ended).
-const PANICKED: i32 = 70;
 
 // ── libdispatch ─────────────────────────────────────────────────────────────
 
 /// `dispatch_autorelease_frequency_t`: drain an autorelease pool around
 /// every work item (CoreBluetooth's callbacks included).
 const DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM: c_ulong = 1;
+/// `DISPATCH_TIME_NOW`.
+const DISPATCH_TIME_NOW: u64 = 0;
 
-// libdispatch is part of libSystem. A `dispatch_queue_t` is an
+// libdispatch is part of libSystem (on iOS too). A `dispatch_queue_t` is an
 // Objective-C object (`@`), so it can be handed to `initWithDelegate:queue:`.
 extern "C" {
     fn dispatch_queue_attr_make_with_autorelease_frequency(
@@ -75,6 +113,13 @@ extern "C" {
         frequency: c_ulong,
     ) -> *mut AnyObject;
     fn dispatch_queue_create(label: *const c_char, attr: *mut AnyObject) -> *mut AnyObject;
+    fn dispatch_queue_set_specific(
+        queue: *mut AnyObject,
+        key: *const c_void,
+        context: *mut c_void,
+        destructor: Option<extern "C" fn(*mut c_void)>,
+    );
+    fn dispatch_get_specific(key: *const c_void) -> *mut c_void;
     fn dispatch_async_f(
         queue: *mut AnyObject,
         context: *mut c_void,
@@ -85,23 +130,71 @@ extern "C" {
         context: *mut c_void,
         work: extern "C" fn(*mut c_void),
     );
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+    fn dispatch_after_f(
+        when: u64,
+        queue: *mut AnyObject,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
 }
 
-/// The helper's serial queue (created once, never released).
+/// The process's serial queue (created once, never released).
 #[derive(Clone, Copy)]
-struct Queue(*mut AnyObject);
+pub(super) struct Queue(*mut AnyObject);
 
 // SAFETY: a dispatch queue may be used from any thread.
 unsafe impl Send for Queue {}
 unsafe impl Sync for Queue {}
 
-static QUEUE: std::sync::OnceLock<Queue> = std::sync::OnceLock::new();
+static QUEUE: OnceLock<Option<Queue>> = OnceLock::new();
+/// What a panic that reached a work item's own catch means (the queue's
+/// maker says: the helper exits, the in-process radio logs it).
+static ON_PANIC: OnceLock<fn()> = OnceLock::new();
+/// The queue's mark: its address is the key of the queue-specific value
+/// [`on_queue`] reads.
+static MARK: u8 = 0;
 
-type Work = Box<dyn FnOnce()>;
+/// The process's queue: serial, with an autorelease pool per work item,
+/// made at the first call (`None` if libdispatch gives none). `on_panic` is
+/// what a panic past every other catch on it means, set by the first call.
+pub(super) fn queue(on_panic: fn()) -> Option<Queue> {
+    *QUEUE.get_or_init(|| {
+        let _ = ON_PANIC.set(on_panic);
+        // SAFETY: a static label; the attribute is the serial one (NULL)
+        // with an autorelease pool per work item. The mark is a static, so
+        // the context outlives the queue.
+        unsafe {
+            let attr = dispatch_queue_attr_make_with_autorelease_frequency(
+                std::ptr::null_mut(),
+                DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM,
+            );
+            let q = dispatch_queue_create(QUEUE_LABEL.as_ptr().cast(), attr);
+            if q.is_null() {
+                return None;
+            }
+            let mark = std::ptr::addr_of!(MARK).cast::<c_void>();
+            dispatch_queue_set_specific(q, mark, mark.cast_mut(), None);
+            Some(Queue(q))
+        }
+    })
+}
+
+fn current() -> Option<Queue> {
+    QUEUE.get().copied().flatten()
+}
+
+/// Running on the queue now (a work item of it, or a callback on it).
+pub(super) fn on_queue() -> bool {
+    // SAFETY: a plain read of the current queue's value for the mark's key.
+    !unsafe { dispatch_get_specific(std::ptr::addr_of!(MARK).cast()) }.is_null()
+}
+
+pub(super) type Work = Box<dyn FnOnce()>;
 
 /// Run `f` on the queue later.
-fn post(f: Work) {
-    let Some(q) = QUEUE.get() else {
+pub(super) fn post(f: Work) {
+    let Some(q) = current() else {
         return;
     };
     let ctx = Box::into_raw(Box::new(f)).cast::<c_void>();
@@ -110,9 +203,28 @@ fn post(f: Work) {
     unsafe { dispatch_async_f(q.0, ctx, trampoline) };
 }
 
-/// Run `f` on the queue and wait for it.
-fn run_sync(f: Work) {
-    let Some(q) = QUEUE.get() else {
+/// Run `f` on the queue after `delay`.
+pub(super) fn post_after(delay: Duration, f: Work) {
+    let Some(q) = current() else {
+        return;
+    };
+    let nanos = i64::try_from(delay.as_nanos()).unwrap_or(i64::MAX);
+    let ctx = Box::into_raw(Box::new(f)).cast::<c_void>();
+    // SAFETY: as in `post`.
+    unsafe {
+        let when = dispatch_time(DISPATCH_TIME_NOW, nanos);
+        dispatch_after_f(when, q.0, ctx, trampoline);
+    }
+}
+
+/// Run `f` on the queue and wait for it. Never on the queue itself: it
+/// would wait for itself.
+pub(super) fn run_sync(f: Work) {
+    debug_assert!(
+        !on_queue(),
+        "run_sync on the nearby radio's own queue never returns"
+    );
+    let Some(q) = current() else {
         return;
     };
     let ctx = Box::into_raw(Box::new(f)).cast::<c_void>();
@@ -121,30 +233,137 @@ fn run_sync(f: Work) {
 }
 
 extern "C" fn trampoline(ctx: *mut c_void) {
-    // SAFETY: `ctx` came from `post` or `run_sync`.
+    // SAFETY: `ctx` came from `post`, `post_after` or `run_sync`.
     let f = unsafe { Box::from_raw(ctx.cast::<Work>()) };
-    if std::panic::catch_unwind(AssertUnwindSafe(f)).is_err() {
-        eprintln!("raven-nearby-helper: internal error; stopping");
-        std::process::exit(PANICKED);
+    if catch_unwind(AssertUnwindSafe(f)).is_err() {
+        if let Some(on_panic) = ON_PANIC.get() {
+            on_panic();
+        }
     }
 }
 
 // ── The state on the queue ──────────────────────────────────────────────────
 
-struct OnQueue(Machine<Cb>);
+/// Where a life's lines go, and what its end after a panic means.
+pub(super) trait Sink: Send + Sync {
+    /// The lines the machine queued, in order (on the queue, the state lock
+    /// released).
+    fn say(&self, lines: Vec<FromHelper>);
+    /// The machine's tick ran (on the queue).
+    fn ticked(&self) {}
+    /// Code on the queue panicked: this life is over (it was taken out of
+    /// its slot already).
+    fn panicked(&self);
+}
 
-// SAFETY: the machine and the CoreBluetooth objects it holds are only ever
-// touched on the helper's serial queue: `setup` creates them there, and
-// every input reaches them through `deliver`, which runs there.
-unsafe impl Send for OnQueue {}
+/// One life: a machine (with, for CoreBluetooth, both managers, the
+/// delegate and every object kept), the sink its lines go to, and which
+/// life it is (the in-process radio's generation; the helper has one).
+pub(super) struct Life<O: Os> {
+    pub(super) m: Machine<O>,
+    pub(super) sink: Arc<dyn Sink>,
+    pub(super) id: u64,
+}
 
-static STATE: Mutex<Option<OnQueue>> = Mutex::new(None);
+// SAFETY: a life and the CoreBluetooth objects its machine holds are only
+// ever touched on the serial queue: `make` makes them in a `run_sync` work
+// item, which the queue serialises, and every input reaches them through
+// `deliver`, which runs there.
+unsafe impl<O: Os> Send for Life<O> {}
 
-/// One thing that happened, for the machine.
+/// The one life of a machine of `O` at a time.
+pub(super) type Slot<O> = Mutex<Option<Life<O>>>;
+
+/// CoreBluetooth's life (one queue per process, one life at a time).
+pub(super) static STATE: Slot<Cb> = Mutex::new(None);
+
+/// Run `f` with the life in `slot` on the queue (nothing without one), then
+/// hand the lines its machine queued to the life's sink once the lock is
+/// released. A callback that comes while the state is in use (a call into
+/// CoreBluetooth that calls back at once) is posted again. A panic in `f`
+/// or in the sink ends the life ([`end_after_panic`]).
+pub(super) fn deliver<O: Os + 'static>(
+    slot: &'static Slot<O>,
+    f: impl FnOnce(&mut Life<O>, Instant) + 'static,
+) {
+    let mut guard = match slot.try_lock() {
+        Ok(g) => g,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            post(Box::new(move || deliver(slot, f)));
+            return;
+        }
+    };
+    let Some(life) = guard.as_mut() else {
+        return;
+    };
+    let id = life.id;
+    let handled = catch_unwind(AssertUnwindSafe(|| {
+        f(life, Instant::now());
+        (life.m.take_out(), Arc::clone(&life.sink))
+    }));
+    drop(guard);
+    let said = match handled {
+        Ok((lines, _)) if lines.is_empty() => true,
+        Ok((lines, sink)) => catch_unwind(AssertUnwindSafe(|| sink.say(lines))).is_ok(),
+        Err(_) => false,
+    };
+    if !said {
+        end_after_panic(slot, id);
+    }
+}
+
+/// Life `id` panicked: it leaves `slot`, its sink is told, and what the
+/// machine still has on the air is withdrawn as far as it goes; then every
+/// object of it is let go of, here on the queue.
+pub(super) fn end_after_panic<O: Os>(slot: &Slot<O>, id: u64) {
+    let ended = {
+        let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.as_ref().is_some_and(|l| l.id == id) {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    if let Some(mut life) = ended {
+        let _ = catch_unwind(AssertUnwindSafe(|| life.sink.panicked()));
+        let _ = catch_unwind(AssertUnwindSafe(|| life.m.stop()));
+    }
+}
+
+/// A callback of `from` for CoreBluetooth's life: dropped unless `from` is
+/// that life's delegate.
+fn deliver_cb(from: &Delegate, input: Input) {
+    let from = from.retain();
+    deliver(&STATE, move |life, now| {
+        if std::ptr::eq(&*from, &*life.m.os.delegate) {
+            autoreleasepool(|_| handle(&mut life.m, input, now));
+        }
+    });
+}
+
+/// A delegate method's body: a panic in it never unwinds into
+/// CoreBluetooth; it ends the delegate's life (posted, so the state lock is
+/// free).
+fn guarded(from: &Delegate, body: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(body)).is_err() {
+        let from = from.retain();
+        post(Box::new(move || {
+            let id = STATE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .filter(|l| std::ptr::eq(&*from, &*l.m.os.delegate))
+                .map(|l| l.id);
+            if let Some(id) = id {
+                end_after_panic(&STATE, id);
+            }
+        }));
+    }
+}
+
+/// One thing CoreBluetooth said, for the machine.
 enum Input {
-    Cmd(ToHelper),
-    Tick,
-    Stop,
     CmState(isize),
     PmState(isize),
     Discovered {
@@ -168,53 +387,6 @@ enum Input {
     Written(Retained<NSArray<CBATTRequest>>),
     Read(Retained<CBATTRequest>),
     CanNotify,
-}
-
-/// Handle `input` on the queue (a callback that comes while the state is in
-/// use is posted again).
-fn deliver(input: Input) {
-    let mut guard = match STATE.try_lock() {
-        Ok(g) => g,
-        Err(TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(TryLockError::WouldBlock) => {
-            post(Box::new(move || deliver(input)));
-            return;
-        }
-    };
-    let Some(OnQueue(m)) = guard.as_mut() else {
-        return;
-    };
-    let lines = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-        autoreleasepool(|_| handle(m, input, Instant::now()));
-        m.take_out()
-    })) {
-        Ok(lines) => lines,
-        Err(_) => {
-            eprintln!("raven-nearby-helper: internal error; stopping");
-            std::process::exit(PANICKED);
-        }
-    };
-    drop(guard);
-    say_all(&lines);
-}
-
-/// Write lines to raven-node. A closed stdout means raven-node is gone.
-fn say_all(lines: &[FromHelper]) {
-    if lines.is_empty() {
-        return;
-    }
-    let mut out = io::stdout().lock();
-    let wrote = lines
-        .iter()
-        .try_for_each(|l| out.write_all(proto::line(l).as_bytes()))
-        .and_then(|()| out.flush());
-    if wrote.is_err() {
-        std::process::exit(0);
-    }
-}
-
-fn say(line: &FromHelper) {
-    say_all(std::slice::from_ref(line));
 }
 
 // ── Identifiers and UUIDs ───────────────────────────────────────────────────
@@ -312,8 +484,10 @@ define_class!(
     unsafe impl CBCentralManagerDelegate for Delegate {
         #[unsafe(method(centralManagerDidUpdateState:))]
         fn cm_state(&self, central: &CBCentralManager) {
-            // SAFETY: `state` has no preconditions.
-            deliver(Input::CmState(unsafe { central.state() }.0));
+            guarded(self, || {
+                // SAFETY: `state` has no preconditions.
+                deliver_cb(self, Input::CmState(unsafe { central.state() }.0));
+            });
         }
 
         #[unsafe(method(centralManager:didDiscoverPeripheral:advertisementData:RSSI:))]
@@ -324,21 +498,28 @@ define_class!(
             data: &NSDictionary<NSString, AnyObject>,
             rssi: &NSNumber,
         ) {
-            let uuids = advert_uuids(data);
-            if uuids.is_empty() {
-                return;
-            }
-            deliver(Input::Discovered {
-                peripheral: peripheral.retain(),
-                uuids,
-                connectable: advert_connectable(data),
-                rssi: i16::try_from(rssi.as_isize()).unwrap_or(i16::MIN),
+            guarded(self, || {
+                let uuids = advert_uuids(data);
+                if uuids.is_empty() {
+                    return;
+                }
+                deliver_cb(
+                    self,
+                    Input::Discovered {
+                        peripheral: peripheral.retain(),
+                        uuids,
+                        connectable: advert_connectable(data),
+                        rssi: i16::try_from(rssi.as_isize()).unwrap_or(i16::MIN),
+                    },
+                );
             });
         }
 
         #[unsafe(method(centralManager:didConnectPeripheral:))]
         fn connected(&self, _central: &CBCentralManager, peripheral: &CBPeripheral) {
-            deliver(Input::LinkUp(peripheral_id(peripheral)));
+            guarded(self, || {
+                deliver_cb(self, Input::LinkUp(peripheral_id(peripheral)))
+            });
         }
 
         #[unsafe(method(centralManager:didFailToConnectPeripheral:error:))]
@@ -348,7 +529,9 @@ define_class!(
             peripheral: &CBPeripheral,
             _error: Option<&NSError>,
         ) {
-            deliver(Input::LinkDown(peripheral_id(peripheral)));
+            guarded(self, || {
+                deliver_cb(self, Input::LinkDown(peripheral_id(peripheral)))
+            });
         }
 
         #[unsafe(method(centralManager:didDisconnectPeripheral:error:))]
@@ -358,14 +541,21 @@ define_class!(
             peripheral: &CBPeripheral,
             _error: Option<&NSError>,
         ) {
-            deliver(Input::LinkDown(peripheral_id(peripheral)));
+            guarded(self, || {
+                deliver_cb(self, Input::LinkDown(peripheral_id(peripheral)))
+            });
         }
     }
 
     unsafe impl CBPeripheralDelegate for Delegate {
         #[unsafe(method(peripheral:didDiscoverServices:))]
         fn services(&self, peripheral: &CBPeripheral, error: Option<&NSError>) {
-            deliver(Input::Services(peripheral_id(peripheral), error.is_none()));
+            guarded(self, || {
+                deliver_cb(
+                    self,
+                    Input::Services(peripheral_id(peripheral), error.is_none()),
+                );
+            });
         }
 
         #[unsafe(method(peripheral:didDiscoverCharacteristicsForService:error:))]
@@ -375,10 +565,12 @@ define_class!(
             _service: &CBService,
             error: Option<&NSError>,
         ) {
-            deliver(Input::Characteristics(
-                peripheral_id(peripheral),
-                error.is_none(),
-            ));
+            guarded(self, || {
+                deliver_cb(
+                    self,
+                    Input::Characteristics(peripheral_id(peripheral), error.is_none()),
+                );
+            });
         }
 
         #[unsafe(method(peripheral:didUpdateNotificationStateForCharacteristic:error:))]
@@ -388,9 +580,11 @@ define_class!(
             characteristic: &CBCharacteristic,
             error: Option<&NSError>,
         ) {
-            // SAFETY: `isNotifying` has no preconditions.
-            let on = error.is_none() && unsafe { characteristic.isNotifying() };
-            deliver(Input::Notifying(peripheral_id(peripheral), on));
+            guarded(self, || {
+                // SAFETY: `isNotifying` has no preconditions.
+                let on = error.is_none() && unsafe { characteristic.isNotifying() };
+                deliver_cb(self, Input::Notifying(peripheral_id(peripheral), on));
+            });
         }
 
         #[unsafe(method(peripheral:didUpdateValueForCharacteristic:error:))]
@@ -400,45 +594,58 @@ define_class!(
             characteristic: &CBCharacteristic,
             error: Option<&NSError>,
         ) {
-            let bytes = if error.is_none() {
-                // SAFETY: `value` has no preconditions.
-                unsafe { characteristic.value() }.map(|d| d.to_vec())
-            } else {
-                None
-            };
-            deliver(Input::Value(
-                peripheral_id(peripheral),
-                char_uuid_of(characteristic),
-                bytes,
-            ));
+            guarded(self, || {
+                let bytes = if error.is_none() {
+                    // SAFETY: `value` has no preconditions.
+                    unsafe { characteristic.value() }.map(|d| d.to_vec())
+                } else {
+                    None
+                };
+                deliver_cb(
+                    self,
+                    Input::Value(
+                        peripheral_id(peripheral),
+                        char_uuid_of(characteristic),
+                        bytes,
+                    ),
+                );
+            });
         }
 
         #[unsafe(method(peripheralIsReadyToSendWriteWithoutResponse:))]
         fn can_write(&self, peripheral: &CBPeripheral) {
-            deliver(Input::CanWrite(peripheral_id(peripheral)));
+            guarded(self, || {
+                deliver_cb(self, Input::CanWrite(peripheral_id(peripheral)))
+            });
         }
 
         #[unsafe(method(peripheral:didModifyServices:))]
         fn modified(&self, peripheral: &CBPeripheral, invalidated: &NSArray<CBService>) {
-            let gone = invalidated
-                .to_vec()
-                .iter()
-                .filter_map(|s| attribute_uuid(s))
-                .collect();
-            deliver(Input::Invalidated(peripheral_id(peripheral), gone));
+            guarded(self, || {
+                let gone = invalidated
+                    .to_vec()
+                    .iter()
+                    .filter_map(|s| attribute_uuid(s))
+                    .collect();
+                deliver_cb(self, Input::Invalidated(peripheral_id(peripheral), gone));
+            });
         }
     }
 
     unsafe impl CBPeripheralManagerDelegate for Delegate {
         #[unsafe(method(peripheralManagerDidUpdateState:))]
         fn pm_state(&self, peripheral: &CBPeripheralManager) {
-            // SAFETY: `state` has no preconditions.
-            deliver(Input::PmState(unsafe { peripheral.state() }.0));
+            guarded(self, || {
+                // SAFETY: `state` has no preconditions.
+                deliver_cb(self, Input::PmState(unsafe { peripheral.state() }.0));
+            });
         }
 
         #[unsafe(method(peripheralManagerDidStartAdvertising:error:))]
         fn advertising(&self, _peripheral: &CBPeripheralManager, error: Option<&NSError>) {
-            deliver(Input::Advertising(error_code(error)));
+            guarded(self, || {
+                deliver_cb(self, Input::Advertising(error_code(error)))
+            });
         }
 
         #[unsafe(method(peripheralManager:didAddService:error:))]
@@ -448,9 +655,11 @@ define_class!(
             service: &CBService,
             error: Option<&NSError>,
         ) {
-            if let Some(t) = attribute_uuid(service) {
-                deliver(Input::Added(t, error_code(error)));
-            }
+            guarded(self, || {
+                if let Some(t) = attribute_uuid(service) {
+                    deliver_cb(self, Input::Added(t, error_code(error)));
+                }
+            });
         }
 
         #[unsafe(method(peripheralManager:central:didSubscribeToCharacteristic:))]
@@ -460,9 +669,11 @@ define_class!(
             central: &CBCentral,
             characteristic: &CBCharacteristic,
         ) {
-            if let Some(c) = char_uuid_of(characteristic) {
-                deliver(Input::Subscribed(central.retain(), c));
-            }
+            guarded(self, || {
+                if let Some(c) = char_uuid_of(characteristic) {
+                    deliver_cb(self, Input::Subscribed(central.retain(), c));
+                }
+            });
         }
 
         #[unsafe(method(peripheralManager:central:didUnsubscribeFromCharacteristic:))]
@@ -472,24 +683,26 @@ define_class!(
             central: &CBCentral,
             characteristic: &CBCharacteristic,
         ) {
-            if let Some(c) = char_uuid_of(characteristic) {
-                deliver(Input::Unsubscribed(central_id(central), c));
-            }
+            guarded(self, || {
+                if let Some(c) = char_uuid_of(characteristic) {
+                    deliver_cb(self, Input::Unsubscribed(central_id(central), c));
+                }
+            });
         }
 
         #[unsafe(method(peripheralManager:didReceiveWriteRequests:))]
         fn written(&self, _peripheral: &CBPeripheralManager, requests: &NSArray<CBATTRequest>) {
-            deliver(Input::Written(requests.retain()));
+            guarded(self, || deliver_cb(self, Input::Written(requests.retain())));
         }
 
         #[unsafe(method(peripheralManager:didReceiveReadRequest:))]
         fn read(&self, _peripheral: &CBPeripheralManager, request: &CBATTRequest) {
-            deliver(Input::Read(request.retain()));
+            guarded(self, || deliver_cb(self, Input::Read(request.retain())));
         }
 
         #[unsafe(method(peripheralManagerIsReadyToUpdateSubscribers:))]
         fn can_notify(&self, _peripheral: &CBPeripheralManager) {
-            deliver(Input::CanNotify);
+            guarded(self, || deliver_cb(self, Input::CanNotify));
         }
     }
 );
@@ -512,7 +725,9 @@ struct Link {
     ch: Option<Retained<CBCharacteristic>>,
 }
 
-struct Cb {
+/// CoreBluetooth as the machine's [`Os`]: both managers, this life's
+/// delegate, and every object kept for what the machine does.
+pub(super) struct Cb {
     cm: Retained<CBCentralManager>,
     pm: Retained<CBPeripheralManager>,
     delegate: Retained<Delegate>,
@@ -527,6 +742,12 @@ struct Cb {
     links: HashMap<String, Link>,
     centrals: HashMap<String, Retained<CBCentral>>,
     logged: Option<String>,
+    /// The scan under way (or none).
+    scanning: bool,
+    /// Honour scan filters (iOS); the macOS helper scans for every advert.
+    filtered: bool,
+    /// The only service UUIDs to scan for (empty: every advert).
+    filter: Vec<[u8; 16]>,
 }
 
 impl Cb {
@@ -537,8 +758,26 @@ impl Cb {
             None => what.to_owned(),
         };
         if self.logged.as_ref() != Some(&line) {
-            eprintln!("raven-nearby-helper: {line}");
+            eprintln!("{LOG_PREFIX}: {line}");
             self.logged = Some(line);
+        }
+    }
+
+    /// Start (or restart with the filter now) the scan: every advert is
+    /// reported (duplicates allowed), so a contact stays seen.
+    fn start_scan(&self) {
+        let only: Vec<Retained<CBUUID>> = self.filter.iter().map(cbuuid).collect();
+        let services = (!only.is_empty()).then(|| NSArray::from_retained_slice(&only));
+        // SAFETY: a plain call on the central manager; calling it again
+        // while scanning replaces the scan's services.
+        unsafe {
+            let options: Retained<NSDictionary<NSString, AnyObject>> =
+                NSDictionary::from_retained_objects(
+                    &[CBCentralManagerScanOptionAllowDuplicatesKey],
+                    &[NSNumber::new_bool(true).into()],
+                );
+            self.cm
+                .scanForPeripheralsWithServices_options(services.as_deref(), Some(&options));
         }
     }
 
@@ -610,20 +849,22 @@ impl Os for Cb {
     }
 
     fn scan(&mut self, on: bool) {
-        // SAFETY: plain calls on the central manager. Every advert is
-        // reported (duplicates allowed), so a contact stays seen.
-        unsafe {
-            if on {
-                let options: Retained<NSDictionary<NSString, AnyObject>> =
-                    NSDictionary::from_retained_objects(
-                        &[CBCentralManagerScanOptionAllowDuplicatesKey],
-                        &[NSNumber::new_bool(true).into()],
-                    );
-                self.cm
-                    .scanForPeripheralsWithServices_options(None, Some(&options));
-            } else {
-                self.cm.stopScan();
-            }
+        self.scanning = on;
+        if on {
+            self.start_scan();
+        } else {
+            // SAFETY: a plain call on the central manager.
+            unsafe { self.cm.stopScan() };
+        }
+    }
+
+    fn scan_filter(&mut self, only: &[[u8; 16]]) {
+        if !self.filtered || self.filter == only {
+            return;
+        }
+        self.filter = only.to_vec();
+        if self.scanning {
+            self.start_scan();
         }
     }
 
@@ -632,7 +873,7 @@ impl Os for Cb {
             return false;
         };
         // SAFETY: a peripheral this manager discovered; the delegate lives
-        // as long as the helper.
+        // as long as this life.
         unsafe {
             p.setDelegate(Some(ProtocolObject::from_ref(&*self.delegate)));
             self.cm.connectPeripheral_options(p, None);
@@ -700,6 +941,7 @@ impl Os for Cb {
         self.devices.clear();
         self.links.clear();
         self.centrals.clear();
+        self.scanning = false;
     }
 }
 
@@ -713,9 +955,6 @@ fn fail(m: &mut Machine<Cb>, dev: &str, now: Instant) {
 
 fn handle(m: &mut Machine<Cb>, input: Input, now: Instant) {
     match input {
-        Input::Cmd(cmd) => m.command(cmd, now),
-        Input::Tick => m.tick(now),
-        Input::Stop => m.stop(),
         Input::CmState(raw) => m.cm_state(CbState::from_raw(raw), now),
         Input::PmState(raw) => m.pm_state(CbState::from_raw(raw), now),
         Input::Discovered {
@@ -872,10 +1111,18 @@ fn handle(m: &mut Machine<Cb>, input: Input, now: Instant) {
     }
 }
 
-// ── The process ─────────────────────────────────────────────────────────────
+// ── A life's start ──────────────────────────────────────────────────────────
 
-/// Whether this process's bundle carries the Bluetooth usage description.
-fn has_usage_description() -> bool {
+/// What the logs of this code start with.
+const LOG_PREFIX: &str = if cfg!(target_os = "ios") {
+    "raven-node nearby"
+} else {
+    "raven-nearby-helper"
+};
+
+/// Whether this process's main bundle carries the Bluetooth usage
+/// description (RavenNearby.app's, or the iOS app's own Info.plist).
+pub(crate) fn has_usage_description() -> bool {
     debug_assert_eq!(USAGE_KEY, "NSBluetoothAlwaysUsageDescription");
     autoreleasepool(|_| {
         NSBundle::mainBundle()
@@ -884,25 +1131,55 @@ fn has_usage_description() -> bool {
     })
 }
 
-/// Create the managers on the queue, so their first callbacks (queued on
-/// it) find the machine in place.
-fn setup(queue: Queue) {
+/// What a life's managers are made with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Options {
+    /// The system's own alert when Bluetooth is off and a manager is made:
+    /// `None` leaves it to the system (the macOS helper); the iOS app says
+    /// `Some(false)` and shows its own row.
+    pub(super) power_alert: Option<bool>,
+    /// Honour scan filters (the iOS app's background scan).
+    pub(super) filtered_scan: bool,
+}
+
+/// A manager's options: none, or the power alert key.
+fn manager_options(
+    key: &NSString,
+    power_alert: Option<bool>,
+) -> Option<Retained<NSDictionary<NSString, AnyObject>>> {
+    power_alert
+        .map(|show| NSDictionary::from_retained_objects(&[key], &[NSNumber::new_bool(show).into()]))
+}
+
+/// Make a life's delegate and managers, on the queue: the caller puts the
+/// life in [`STATE`] in the same work item, so their first callbacks
+/// (queued on the queue) find it in place.
+pub(super) fn make(queue: Queue, options: Options) -> Cb {
     let delegate = Delegate::new();
-    let none: Option<&NSDictionary<NSString, AnyObject>> = None;
+    // SAFETY: CoreBluetooth constants.
+    let (cm_key, pm_key) = unsafe {
+        (
+            CBCentralManagerOptionShowPowerAlertKey,
+            CBPeripheralManagerOptionShowPowerAlertKey,
+        )
+    };
+    let cm_options = manager_options(cm_key, options.power_alert);
+    let pm_options = manager_options(pm_key, options.power_alert);
+    let (cm_options, pm_options) = (cm_options.as_deref(), pm_options.as_deref());
     // SAFETY: `initWithDelegate:queue:options:` with a delegate that lives
-    // as long as the helper, a valid serial queue (an Objective-C object)
-    // and no options.
+    // as long as this life, a valid serial queue (an Objective-C object)
+    // and no options, or only the power alert's.
     let (cm, pm): (Retained<CBCentralManager>, Retained<CBPeripheralManager>) = unsafe {
         let cm_delegate: &ProtocolObject<dyn CBCentralManagerDelegate> =
             ProtocolObject::from_ref(&*delegate);
         let pm_delegate: &ProtocolObject<dyn CBPeripheralManagerDelegate> =
             ProtocolObject::from_ref(&*delegate);
         (
-            msg_send![CBCentralManager::alloc(), initWithDelegate: cm_delegate, queue: queue.0, options: none],
-            msg_send![CBPeripheralManager::alloc(), initWithDelegate: pm_delegate, queue: queue.0, options: none],
+            msg_send![CBCentralManager::alloc(), initWithDelegate: cm_delegate, queue: queue.0, options: cm_options],
+            msg_send![CBPeripheralManager::alloc(), initWithDelegate: pm_delegate, queue: queue.0, options: pm_options],
         )
     };
-    let cb = Cb {
+    Cb {
         cm,
         pm,
         delegate,
@@ -911,56 +1188,32 @@ fn setup(queue: Queue) {
         links: HashMap::new(),
         centrals: HashMap::new(),
         logged: None,
-    };
-    *STATE.lock().unwrap_or_else(PoisonError::into_inner) = Some(OnQueue(Machine::new(cb)));
+        scanning: false,
+        filtered: options.filtered_scan,
+        filter: Vec::new(),
+    }
 }
 
-/// The helper (see the module doc). Returns the exit code.
-pub(crate) fn run(check_only: bool) -> i32 {
-    if !has_usage_description() {
-        say(&FromHelper::State {
-            state: Power::Unauthorized,
-            detail: NO_USAGE.to_owned(),
-        });
-        return 0;
+/// The app's Bluetooth permission (`CBManagerAuthorization`'s raw value) in
+/// the words of the engine API (`nearby.permission`): `not_determined`,
+/// `restricted`, `denied` or `allowed`; an unknown value is
+/// `not_determined`.
+pub(crate) fn permission_word(raw: isize) -> &'static str {
+    match raw {
+        1 => "restricted",
+        2 => "denied",
+        3 => "allowed",
+        _ => "not_determined",
     }
-    say(&FromHelper::Hello { v: proto::VERSION });
-    if check_only {
-        return 0;
-    }
-    // SAFETY: a static label; the attribute is the serial one (NULL) with
-    // an autorelease pool per work item.
-    let queue = unsafe {
-        let attr = dispatch_queue_attr_make_with_autorelease_frequency(
-            std::ptr::null_mut(),
-            DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM,
-        );
-        dispatch_queue_create(QUEUE_LABEL.as_ptr().cast(), attr)
-    };
-    if queue.is_null() {
-        eprintln!("raven-nearby-helper: no dispatch queue");
-        return 1;
-    }
-    let queue = Queue(queue);
-    let _ = QUEUE.set(queue);
-    run_sync(Box::new(move || setup(queue)));
-    let _ = std::thread::Builder::new()
-        .name("tick".into())
-        .spawn(|| loop {
-            std::thread::sleep(TICK);
-            post(Box::new(|| deliver(Input::Tick)));
-        });
-    let stdin = io::stdin();
-    let mut r = stdin.lock();
-    let mut buf = Vec::new();
-    while let Ok(true) = proto::read_line(&mut r, &mut buf) {
-        if let Some(cmd) = proto::parse::<ToHelper>(&buf) {
-            post(Box::new(move || deliver(Input::Cmd(cmd))));
-        }
-    }
-    // raven-node is gone or let go of the radio.
-    run_sync(Box::new(|| deliver(Input::Stop)));
-    0
+}
+
+/// The app's Bluetooth permission now (`CBManager.authorization`, iOS 13.1
+/// and later), read without a manager, so without a prompt.
+#[cfg(target_os = "ios")]
+pub(crate) fn authorization_raw() -> isize {
+    use objc2_core_bluetooth::CBManager;
+    // SAFETY: a class property with no preconditions.
+    unsafe { CBManager::authorization_class() }.0
 }
 
 #[cfg(test)]
@@ -969,7 +1222,7 @@ mod tests {
 
     use super::*;
 
-    /// The delegate class registers and answers every callback the helper
+    /// The delegate class registers and answers every callback the radio
     /// relies on, for all three protocols (a debug build also checks each
     /// method against the protocol's signature when the class registers).
     /// Making it touches no Bluetooth: no manager is created.
@@ -1038,5 +1291,43 @@ mod tests {
         // SAFETY: a valid 16-bit UUID string.
         let battery = unsafe { CBUUID::UUIDWithString(ns_string!("180F")) };
         assert_eq!(uuid_bytes(&battery), None);
+    }
+
+    /// The usage-description texts of each system (Task 2 design §2.2 item
+    /// 8): the helper's says RavenNearby.app, as it always did; the iOS
+    /// app's is the in-process radio's own failure (`helper_unavailable`,
+    /// not "no Bluetooth LE"); the build's own is its system's.
+    #[test]
+    fn the_usage_texts_name_each_systems_bundle() {
+        assert_eq!(
+            no_usage_text(false),
+            "no usage description: raven-nearby-helper must run from RavenNearby.app, whose \
+             Info.plist carries NSBluetoothAlwaysUsageDescription"
+        );
+        assert!(no_usage_text(true).starts_with("the nearby radio"));
+        assert!(no_usage_text(true).contains("NSBluetoothAlwaysUsageDescription"));
+        assert_eq!(NO_USAGE, no_usage_text(cfg!(target_os = "ios")));
+        for (raw, word) in [
+            (0, "not_determined"),
+            (1, "restricted"),
+            (2, "denied"),
+            (3, "allowed"),
+            (9, "not_determined"),
+        ] {
+            assert_eq!(permission_word(raw), word);
+        }
+    }
+
+    /// A manager's options are none unless a power alert choice is given
+    /// (the macOS helper gives none, as before). No manager is created.
+    #[test]
+    fn manager_options_are_none_or_the_power_alert_only() {
+        // SAFETY: a CoreBluetooth constant.
+        let key = unsafe { CBCentralManagerOptionShowPowerAlertKey };
+        assert!(manager_options(key, None).is_none());
+        let off = manager_options(key, Some(false)).unwrap();
+        assert_eq!(off.count(), 1);
+        let value = off.objectForKey(key).unwrap();
+        assert!(!value.downcast::<NSNumber>().unwrap().as_bool());
     }
 }

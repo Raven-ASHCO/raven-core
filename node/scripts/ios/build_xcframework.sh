@@ -10,6 +10,9 @@
 #   node/scripts/ios/build_xcframework.sh            # release, Tor in process
 #   PROFILE=debug node/scripts/ios/build_xcframework.sh
 #   FEATURES=embedded-node node/scripts/ios/build_xcframework.sh   # no Tor
+#   FEATURES="tor-embedded nearby-embedded" node/scripts/ios/build_xcframework.sh
+#                       # Bluetooth nearby in process too (the module map
+#                       # then links CoreBluetooth, Foundation and libobjc)
 #   OUT=/some/dir node/scripts/ios/build_xcframework.sh
 #
 # Needs: Xcode with the iOS SDK (its license accepted), and the two Rust
@@ -127,16 +130,24 @@ stage="$OUT/stage"
 rm -rf "$stage" "$OUT/RavenClient.xcframework"
 mkdir -p "$stage/include"
 cp "$NODE/crates/raven-client/include/raven_client.h" "$stage/include/"
-cat >"$stage/include/module.modulemap" <<'MAP'
-module RavenClient {
-    header "raven_client.h"
-    link framework "Security"
-    link framework "SystemConfiguration"
-    link framework "CoreFoundation"
-    link "iconv"
-    export *
-}
-MAP
+# Bluetooth nearby in process (raven-node's objc2 CoreBluetooth code): a
+# static library carries no link directives, so the module map names them.
+nearby_links=""
+case " $FEATURES " in
+  *" nearby-embedded "*)
+    nearby_links='    link framework "CoreBluetooth"
+    link framework "Foundation"
+    link "objc"
+'
+    ;;
+esac
+{
+  printf '%s\n' 'module RavenClient {' '    header "raven_client.h"' \
+    '    link framework "Security"' '    link framework "SystemConfiguration"' \
+    '    link framework "CoreFoundation"' '    link "iconv"'
+  printf '%s' "$nearby_links"
+  printf '%s\n' '    export *' '}'
+} >"$stage/include/module.modulemap"
 args=()
 for t in "${TARGETS[@]}"; do
   args+=(-library "$TARGET_DIR/$t/$PROFILE_DIR/libraven_client.a" -headers "$stage/include")

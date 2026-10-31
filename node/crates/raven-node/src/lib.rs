@@ -5092,9 +5092,14 @@ pub(crate) enum ServiceHost {
     #[cfg(all(unix, feature = "embedded"))]
     Embedded {
         stop: tokio::sync::watch::Receiver<bool>,
-        /// A mail check (iOS background refresh): IPC, the outbox worker
-        /// and the custody fetcher only; no listener, no Tor, no radio.
+        /// A small node: IPC, the outbox worker and the custody fetcher
+        /// (and forwarder) only; no listener, no p2p host, no Tor. A mail
+        /// check (iOS background refresh) runs no radio either.
         mail_check_only: bool,
+        /// The small node of an iOS app in the background with Bluetooth
+        /// kept (Task 2 Phase B, `embedded::pause_keeping_nearby`): it
+        /// runs the nearby carrier too, as a background life.
+        nearby_background: bool,
     },
 }
 
@@ -5111,6 +5116,17 @@ impl ServiceHost {
             Self::Embedded {
                 mail_check_only, ..
             } => *mail_check_only,
+        }
+    }
+
+    /// The small node that keeps Bluetooth nearby (Task 2 Phase B).
+    fn nearby_background(&self) -> bool {
+        match self {
+            Self::Process => false,
+            #[cfg(all(unix, feature = "embedded"))]
+            Self::Embedded {
+                nearby_background, ..
+            } => *nearby_background,
         }
     }
 
@@ -5476,11 +5492,15 @@ pub(crate) async fn run_service(
     );
     // The Bluetooth LE nearby carrier (Phase 5, gated; nearby/). It
     // creates no radio unless its gate is open and the user enabled
-    // nearby; like netwatch, the service never ends because of it.
+    // nearby; like netwatch, the service never ends because of it. An iOS
+    // app's background node keeps it (Task 2 Phase B: a background life).
     let data_nearby = data_dir.clone();
+    let nearby_background = host.nearby_background();
     let nearby_task = spawn_if(
-        full,
-        supervise_unlocked("nearby", None, move || nearby::run(data_nearby.clone())),
+        full || nearby_background,
+        supervise_unlocked("nearby", None, move || {
+            nearby::run(data_nearby.clone(), nearby_background)
+        }),
     );
     // The Tor onion carrier (lab, gated; onion/): its helper process
     // (Arti), the onion service and the forward listener. Nothing

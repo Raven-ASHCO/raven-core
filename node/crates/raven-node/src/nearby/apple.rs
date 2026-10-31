@@ -1,7 +1,15 @@
-//! The macOS backend of the nearby radio (RNL1 §3-§4, §8-§9; Nearby design
-//! step 5.10; owner decision O5-10): CoreBluetooth in a helper process.
-//! raven-node uses it on macOS with feature `nearby-radio`; its pure parts
+//! The Apple backends of the nearby radio (RNL1 §3-§4, §8-§9; Nearby design
+//! step 5.10; owner decision O5-10): CoreBluetooth in a helper process on
+//! macOS, and in the app's own process on iOS ([`inproc`], Task 2 design
+//! §3). raven-node uses them with feature `nearby-radio`; their pure parts
 //! are tested on every platform.
+//!
+//! **One radio, two outlets.** [`HelperRadio`] is the radio on both
+//! systems: the same connection numbering, send window and validation of
+//! what the radio says (`on_line`). Its commands go out as lines to the
+//! helper's stdin on macOS, or as the same values posted to the radio's
+//! queue in process on iOS (`Outlet`); what the radio says comes back as
+//! lines from the helper's stdout, or as the same values from the machine.
 //!
 //! **Process split.** CoreBluetooth runs in `raven-nearby-helper`
 //! (`src/bin/raven-nearby-helper/`), shipped as `RavenNearby.app` whose
@@ -40,6 +48,10 @@
 //! platforms), so the address privacy is `Random`; owner row N7 captures
 //! the advert to confirm it before any flip (RNL1 §3, owner decision O5-12).
 //!
+//! **In process** (iOS): no helper, no `hello` (one build, one version) and
+//! no line; the machine and CoreBluetooth glue (`machine`, `cb`) are the
+//! helper's own sources. See [`inproc`].
+//!
 //! **When the helper ends on its own** (a crash, a macOS SIGABRT, a kill):
 //! every connection gets its `Disconnected`, the radio says why
 //! (`Unauthorized` after SIGABRT) and its event queue closes, so the engine
@@ -57,8 +69,11 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
+#[cfg(any(test, target_os = "macos"))]
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus};
+#[cfg(any(test, target_os = "macos"))]
+use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
 use std::os::unix::process::ExitStatusExt as _;
@@ -75,6 +90,26 @@ use super::radio::{
 };
 use proto::{FromHelper, Gatt, Power, Side, ToHelper};
 
+// The helper's machine and CoreBluetooth glue, run in process on iOS (and
+// in macOS tests: the machine and the in-process radio over a fake OS on a
+// real dispatch queue, the delegate without a manager).
+#[cfg(all(
+    feature = "nearby-radio",
+    any(target_os = "ios", all(test, target_os = "macos"))
+))]
+pub(crate) mod cb;
+#[cfg(all(
+    feature = "nearby-radio",
+    any(target_os = "ios", all(test, target_os = "macos"))
+))]
+pub(crate) mod inproc;
+#[cfg(all(
+    feature = "nearby-radio",
+    any(target_os = "ios", all(test, target_os = "macos"))
+))]
+pub(crate) mod machine;
+#[cfg(all(test, feature = "nearby-radio", target_os = "macos"))]
+mod machine_tests;
 pub(crate) mod proto;
 #[cfg(test)]
 mod tests;
@@ -118,6 +153,7 @@ pub(crate) fn caps() -> RadioCaps {
 
 /// The helper's executable for `p`: `p` itself, or the executable inside
 /// it when it is an .app.
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn executable_in(p: &Path) -> PathBuf {
     if p.extension().is_some_and(|e| e == "app") {
         p.join("Contents").join("MacOS").join(EXECUTABLE)
@@ -128,6 +164,7 @@ pub(crate) fn executable_in(p: &Path) -> PathBuf {
 
 /// The helper this process would start (see the module doc); never one in
 /// a test build.
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn helper_path() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
@@ -146,6 +183,7 @@ pub(crate) fn helper_path() -> Option<PathBuf> {
 /// [`helper_path`] from its inputs: `env` alone when it is set (only an
 /// absolute path counts), else the bundle next to raven-node, else the
 /// installed one.
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn find_helper(
     env: Option<PathBuf>,
     exe_dir: Option<PathBuf>,
@@ -209,7 +247,9 @@ fn backoff() -> Arc<Mutex<Backoff>> {
 // ── Opening ─────────────────────────────────────────────────────────────────
 
 /// The radio of this Mac: the helper found by [`helper_path`], started
-/// (after any back-off wait).
+/// (after any back-off wait). Never on iOS, which forbids helper processes
+/// ([`inproc::open`] there).
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn open(tx: mpsc::Sender<RadioEvent>) -> Result<HelperRadio, RadioState> {
     let backoff = backoff();
     lock(&backoff).check(Instant::now())?;
@@ -244,6 +284,7 @@ fn note(state: &RadioState) {
 }
 
 /// Start the helper at `exe` and wait up to `hello_wait` for its `hello`.
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn open_at(
     exe: &Path,
     tx: mpsc::Sender<RadioEvent>,
@@ -486,11 +527,10 @@ pub(crate) fn start(
     backoff: Option<Arc<Mutex<Backoff>>>,
     hello_wait: Duration,
 ) -> Result<HelperRadio, RadioState> {
-    static GENERATION: AtomicU64 = AtomicU64::new(0);
-    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let generation = next_generation();
     let (out, out_rx) = std_mpsc::channel::<String>();
     let link = Arc::new(Link {
-        out: Mutex::new(Some(out)),
+        out: Mutex::new(Some(Outlet::Lines(out))),
         table: Mutex::new(Table::default()),
         child: Mutex::new(child),
         stopped: AtomicBool::new(false),
@@ -529,18 +569,41 @@ pub(crate) fn start(
     }
 }
 
+// One scan filter fits the line protocol's bound (in process only).
+const _: () = assert!(proto::MAX_FILTER == super::engine::MAX_FILTER_TOKENS);
+
+/// A new generation: the upper 32 bits of every [`ConnId`] of one helper
+/// start or one in-process life, so a number is never used again.
+fn next_generation() -> u64 {
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+    GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 // ── The radio ───────────────────────────────────────────────────────────────
 
-/// The helper as this process's [`Radio`].
+/// The helper, or the in-process radio, as this process's [`Radio`].
 pub(crate) struct HelperRadio {
     link: Arc<Link>,
 }
 
+/// Where the radio's commands go.
+enum Outlet {
+    /// Lines to the writer thread, and so to the helper's stdin (macOS).
+    Lines(std_mpsc::Sender<String>),
+    /// The same values, posted to the in-process radio's queue (iOS).
+    #[cfg(all(
+        feature = "nearby-radio",
+        any(target_os = "ios", all(test, target_os = "macos"))
+    ))]
+    Queue(inproc::Inlet),
+}
+
 /// What the radio, its reader and its writer share.
 struct Link {
-    /// To the writer thread; `None` once stopped (the helper's stdin then
-    /// closes and it exits).
-    out: Mutex<Option<std_mpsc::Sender<String>>>,
+    /// To the helper (the writer thread) or the in-process radio; `None`
+    /// once stopped (the helper's stdin then closes and it exits; the
+    /// in-process radio's life has ended).
+    out: Mutex<Option<Outlet>>,
     table: Mutex<Table>,
     child: Mutex<Option<Proc>>,
     /// raven-node stopped the helper: its end is not news.
@@ -567,11 +630,32 @@ struct Window {
 impl Link {
     fn put(&self, m: &ToHelper) -> Result<(), String> {
         match &*lock(&self.out) {
-            Some(out) => out
+            Some(Outlet::Lines(out)) => out
                 .send(proto::line(m))
                 .map_err(|_| HELPER_GONE.to_string()),
+            #[cfg(all(
+                feature = "nearby-radio",
+                any(target_os = "ios", all(test, target_os = "macos"))
+            ))]
+            Some(Outlet::Queue(inlet)) => {
+                inlet.put(m.clone());
+                Ok(())
+            }
             None => Err(HELPER_GONE.into()),
         }
+    }
+
+    /// The in-process radio is behind this link (its commands are values
+    /// on a queue, not lines to a helper).
+    fn in_process(&self) -> bool {
+        #[cfg(all(
+            feature = "nearby-radio",
+            any(target_os = "ios", all(test, target_os = "macos"))
+        ))]
+        if matches!(&*lock(&self.out), Some(Outlet::Queue(_))) {
+            return true;
+        }
+        false
     }
 
     /// raven-node's number for wire number `wire`.
@@ -593,10 +677,21 @@ impl Link {
     }
 
     /// Stop the helper: its stdin closes, and it is killed if it has not
-    /// exited within `grace` (on another thread).
+    /// exited within `grace` (on another thread). In process the radio's
+    /// life ends now, synchronously (never on its own queue).
     fn stop(self: &Arc<Self>, grace: Duration) {
         self.stopped.store(true, Ordering::SeqCst);
-        lock(&self.out).take();
+        // Taken out first: the life's end may report on this link.
+        let out = lock(&self.out).take();
+        #[cfg(all(
+            feature = "nearby-radio",
+            any(target_os = "ios", all(test, target_os = "macos"))
+        ))]
+        if let Some(Outlet::Queue(inlet)) = out {
+            inlet.stop();
+            return;
+        }
+        drop(out);
         let link = Arc::clone(self);
         let reaped = std::thread::Builder::new()
             .name("nearby-helper-reap".into())
@@ -901,6 +996,20 @@ impl Radio for HelperRadio {
         self.link.put(&ToHelper::Scan { on })
     }
 
+    /// In process only (iOS): the macOS helper is never sent a scan filter,
+    /// so it scans for every advert as it always did.
+    fn set_scan_filter(&mut self, only: &[[u8; 16]]) -> Result<(), String> {
+        if !self.link.in_process() {
+            return Ok(());
+        }
+        if only.len() > proto::MAX_FILTER {
+            return Err("too many service UUIDs for one scan filter".into());
+        }
+        self.link.put(&ToHelper::ScanFilter {
+            uuids: only.iter().map(proto::uuid_hex).collect(),
+        })
+    }
+
     fn connect(&mut self, addr: &RadioAddr, service: [u8; 16]) -> Result<ConnId, String> {
         if addr.0.is_empty() || addr.0.len() > proto::MAX_DEV {
             return Err("not a device of this radio".into());
@@ -978,7 +1087,8 @@ impl Radio for HelperRadio {
 
 impl Drop for HelperRadio {
     /// The helper's stdin closes: it stops advertising and scanning, drops
-    /// its links and exits (killed after [`REAP_WAIT`] if it does not).
+    /// its links and exits (killed after [`REAP_WAIT`] if it does not). In
+    /// process the same happens on the radio's queue before this returns.
     fn drop(&mut self) {
         self.link.stop(REAP_WAIT);
     }

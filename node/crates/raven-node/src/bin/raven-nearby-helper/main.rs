@@ -14,14 +14,22 @@
 // The state machine runs on macOS only; its tests run everywhere.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+// raven-node's own sources (src/nearby/apple/), shared with the iOS app's
+// in-process radio: the helper does not use every item (cb.rs allows that
+// itself outside iOS).
 #[cfg(target_os = "macos")]
+#[path = "../../nearby/apple/cb.rs"]
 mod cb;
+#[allow(dead_code)]
+#[path = "../../nearby/apple/machine.rs"]
 mod machine;
-// Shared with raven-node; the helper does not use every item.
+#[cfg(target_os = "macos")]
+mod process;
 #[allow(dead_code)]
 #[path = "../../nearby/apple/proto.rs"]
 mod proto;
 #[cfg(test)]
+#[path = "../../nearby/apple/machine_tests.rs"]
 mod tests;
 
 /// What the helper says on a system without CoreBluetooth.
@@ -43,7 +51,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run(check_only: bool) -> i32 {
-    cb::run(check_only)
+    process::run(check_only)
 }
 
 #[cfg(not(target_os = "macos"))]

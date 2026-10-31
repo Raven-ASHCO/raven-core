@@ -1340,6 +1340,29 @@ pub fn nearby_set(data_dir: &Path, on: bool) -> Result<Vec<String>, String> {
     super::nearby_cli::cmd_nearby(data_dir, arg)
 }
 
+/// `raven nearby background-mail on --yes|off` (nearby_cli.rs, owner
+/// decision OD-C8): the app asked the person first
+/// ([`NEARBY_BACKGROUND_MAIL_CONSENT`]). Refused while this build holds
+/// nearby; it never turns nearby itself on. The CLI's lines.
+pub fn nearby_background_set(data_dir: &Path, on: bool) -> Result<Vec<String>, String> {
+    use super::nearby_cli::BackgroundArg;
+    let arg = if on {
+        BackgroundArg::On { yes: true }
+    } else {
+        BackgroundArg::Off
+    };
+    super::nearby_cli::background_mail_with(data_dir, arg, false, |_| None).map_err(|r| r.text)
+}
+
+/// What `raven nearby background-mail on` asks (owner decision OD-C8).
+pub const NEARBY_BACKGROUND_MAIL_CONSENT: &str = super::nearby_cli::BACKGROUND_MAIL_CONSENT;
+
+/// What `raven nearby enable` shows once (owner decision O5-12), naming
+/// this computer's Bluetooth name as a device that connects reads it.
+pub fn nearby_consent() -> String {
+    super::nearby_cli::consent_text(&super::nearby_cli::bluetooth_name())
+}
+
 /// Bluetooth nearby as `raven nearby status` reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NearbyView {

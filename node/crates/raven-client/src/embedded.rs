@@ -14,7 +14,8 @@
 //!   with the program.
 //! - **What differs** is only what a process has and an app does not:
 //!   `node.stop` stops the node in process (never a signal: its pid is the
-//!   app's own), and the lifecycle ops `node.pause`, `node.resume` and
+//!   app's own), and the lifecycle ops `node.pause` (with `nearby: "keep"`,
+//!   the background node that keeps Bluetooth nearby), `node.resume` and
 //!   `mail.check`.
 
 use std::path::Path;
@@ -74,11 +75,39 @@ pub(crate) fn stop() -> bool {
 }
 
 pub(crate) fn pause(data_dir: &Path) -> bool {
+    KEPT_NEARBY.store(false, std::sync::atomic::Ordering::Relaxed);
     node::pause(data_dir)
 }
 
+/// The last pause kept Bluetooth nearby running (`node.pause {nearby:
+/// "keep"}`, Task 2 Phase B).
+static KEPT_NEARBY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `node.pause {nearby: "keep"}`: the full node stops and the background
+/// node (Bluetooth nearby kept) starts; `Ok(was_running)`.
+pub(crate) fn pause_keeping_nearby(data_dir: &Path, listen: &str) -> Result<bool, String> {
+    let kept = node::pause_keeping_nearby(&config(data_dir, listen));
+    KEPT_NEARBY.store(kept.is_ok(), std::sync::atomic::Ordering::Relaxed);
+    kept
+}
+
+/// Whether the last `node.pause` kept Bluetooth nearby.
+pub(crate) fn kept_nearby() -> bool {
+    KEPT_NEARBY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The app's Bluetooth permission (iOS), read without a prompt.
+pub(crate) fn nearby_permission() -> Option<&'static str> {
+    node::nearby_permission()
+}
+
 /// The pause ends; the caller starts the node (through the CLI's start).
+/// The background node (Bluetooth kept) stops first, so that start is the
+/// full node's.
 pub(crate) fn end_pause() {
+    if node::status().state == node::State::Background {
+        node::stop(Duration::from_secs(8));
+    }
     node::end_pause()
 }
 

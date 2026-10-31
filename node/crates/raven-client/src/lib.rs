@@ -25,6 +25,7 @@ mod groups;
 mod handoff;
 mod identity;
 mod messages;
+mod nearby;
 mod network;
 mod node;
 mod profile;

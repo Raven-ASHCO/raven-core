@@ -1,11 +1,14 @@
-//! The helper's state machine over scripted inputs (no CoreBluetooth, no
-//! radio): power, services and the one advert, scanning, both kinds of
-//! connection, the send queues, silence and stopping.
+//! The nearby radio's state machine over scripted inputs (no CoreBluetooth,
+//! no radio): power, services and the one advert, scanning, both kinds of
+//! connection, the send queues, silence and stopping. Run in the helper's
+//! tests and in raven-node's on macOS, whose in-process tests
+//! (`super::inproc`) drive the same [`FakeOs`] on a real dispatch queue.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::machine::*;
-use crate::proto::{self, FromHelper, Gatt, Power, Side, ToHelper};
+use super::machine::*;
+use super::proto::{self, FromHelper, Gatt, Power, Side, ToHelper};
 
 const A: [u8; 16] = [
     0x06, 0x2a, 0x8a, 0xc6, 0x9e, 0x02, 0x4a, 0xbb, 0xab, 0x83, 0xf9, 0xea, 0xbb, 0x5e, 0x8d, 0x99,
@@ -24,11 +27,12 @@ const CEN: &str = "0123456789abcdef0123456789abcdef";
 
 /// What the machine asked of CoreBluetooth, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Call {
+pub(super) enum Call {
     Add([u8; 16], [u8; 16]),
     Remove([u8; 16]),
     Advertise(Option<[u8; 16]>),
     Scan(bool),
+    ScanFilter(Vec<[u8; 16]>),
     Connect(String, [u8; 16], [u8; 16]),
     Cancel(String),
     Write(String, Vec<u8>),
@@ -38,53 +42,69 @@ enum Call {
     Reset,
 }
 
-struct FakeOs {
-    calls: Vec<Call>,
+pub(super) struct FakeOs {
+    pub(super) calls: Vec<Call>,
     /// Whether a write or a notification is taken now.
-    room: bool,
+    pub(super) room: bool,
+    /// Every call again, kept outside the machine (the in-process tests
+    /// read it after the life that held this fake ended).
+    pub(super) journal: Option<Arc<Mutex<Vec<Call>>>>,
+}
+
+impl FakeOs {
+    fn log(&mut self, call: Call) {
+        if let Some(j) = &self.journal {
+            j.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(call.clone());
+        }
+        self.calls.push(call);
+    }
 }
 
 impl Os for FakeOs {
     fn add(&mut self, t: [u8; 16], c: [u8; 16]) {
-        self.calls.push(Call::Add(t, c));
+        self.log(Call::Add(t, c));
     }
     fn remove(&mut self, t: [u8; 16]) {
-        self.calls.push(Call::Remove(t));
+        self.log(Call::Remove(t));
     }
     fn advertise(&mut self, t: Option<[u8; 16]>) {
-        self.calls.push(Call::Advertise(t));
+        self.log(Call::Advertise(t));
     }
     fn scan(&mut self, on: bool) {
-        self.calls.push(Call::Scan(on));
+        self.log(Call::Scan(on));
+    }
+    fn scan_filter(&mut self, only: &[[u8; 16]]) {
+        self.log(Call::ScanFilter(only.to_vec()));
     }
     fn connect(&mut self, dev: &str, t: [u8; 16], c: [u8; 16]) -> bool {
-        self.calls.push(Call::Connect(dev.into(), t, c));
+        self.log(Call::Connect(dev.into(), t, c));
         true
     }
     fn cancel(&mut self, dev: &str) {
-        self.calls.push(Call::Cancel(dev.into()));
+        self.log(Call::Cancel(dev.into()));
     }
     fn write(&mut self, dev: &str, frame: &[u8]) -> bool {
         if self.room {
-            self.calls.push(Call::Write(dev.into(), frame.to_vec()));
+            self.log(Call::Write(dev.into(), frame.to_vec()));
         }
         self.room
     }
     fn notify(&mut self, t: [u8; 16], central: &str, frame: &[u8]) -> bool {
         if self.room {
-            self.calls
-                .push(Call::Notify(t, central.into(), frame.to_vec()));
+            self.log(Call::Notify(t, central.into(), frame.to_vec()));
         }
         self.room
     }
     fn forget(&mut self, dev: &str) {
-        self.calls.push(Call::Forget(dev.into()));
+        self.log(Call::Forget(dev.into()));
     }
     fn forget_central(&mut self, central: &str) {
-        self.calls.push(Call::ForgetCentral(central.into()));
+        self.log(Call::ForgetCentral(central.into()));
     }
     fn reset(&mut self) {
-        self.calls.push(Call::Reset);
+        self.log(Call::Reset);
     }
 }
 
@@ -92,6 +112,7 @@ fn machine() -> Machine<FakeOs> {
     Machine::new(FakeOs {
         calls: Vec::new(),
         room: true,
+        journal: None,
     })
 }
 
@@ -683,4 +704,64 @@ fn stop_withdraws_everything() {
     m.cm_state(CbState::PoweredOff, now);
     assert!(m.take_out().is_empty());
     assert!(calls(&mut m).is_empty());
+}
+
+/// The texts for each system (Task 2 design §2.2 item 8): macOS names
+/// RavenNearby and System Settings, as the helper always said; iOS names
+/// Raven and Settings; the build's own are its system's.
+#[test]
+fn the_refusal_texts_name_each_systems_settings() {
+    assert_eq!(
+        not_allowed_text(false),
+        "macOS has not allowed Bluetooth for RavenNearby: allow it in System Settings > \
+         Privacy & Security > Bluetooth"
+    );
+    assert_eq!(no_le_text(false), "this Mac has no Bluetooth LE");
+    assert_eq!(
+        not_allowed_text(true),
+        "iOS has not allowed Bluetooth for Raven: allow it in Settings > Privacy & Security > \
+         Bluetooth"
+    );
+    assert_eq!(no_le_text(true), "this device has no Bluetooth LE");
+    let ios = cfg!(target_os = "ios");
+    assert_eq!(NOT_ALLOWED, not_allowed_text(ios));
+    assert_eq!(NO_LE, no_le_text(ios));
+    assert_eq!(
+        combine(CbState::Unsupported, CbState::PoweredOn),
+        Some((Power::Unsupported, NO_LE))
+    );
+}
+
+/// A scan filter (iOS in the background) goes to the radio as it is, the
+/// scan itself untouched; a filter that does not parse or is too long is
+/// ignored. The macOS helper's CoreBluetooth side does nothing with it.
+#[test]
+fn a_scan_filter_reaches_the_radio_and_bad_ones_are_ignored() {
+    let now = Instant::now();
+    let mut m = powered(now);
+    m.command(ToHelper::Scan { on: true }, now);
+    assert_eq!(calls(&mut m), vec![Call::Scan(true)]);
+    m.command(
+        ToHelper::ScanFilter {
+            uuids: vec![h(&A), h(&B)],
+        },
+        now,
+    );
+    assert_eq!(calls(&mut m), vec![Call::ScanFilter(vec![A, B])]);
+    m.command(
+        ToHelper::ScanFilter {
+            uuids: vec!["not hex".into()],
+        },
+        now,
+    );
+    m.command(
+        ToHelper::ScanFilter {
+            uuids: vec![h(&A); proto::MAX_FILTER + 1],
+        },
+        now,
+    );
+    assert!(calls(&mut m).is_empty());
+    m.command(ToHelper::ScanFilter { uuids: Vec::new() }, now);
+    assert_eq!(calls(&mut m), vec![Call::ScanFilter(Vec::new())]);
+    assert!(m.take_out().is_empty());
 }

@@ -18,9 +18,14 @@
 //! - **Lifecycle.** [`pause`] stops it cleanly (listeners closed, Tor's
 //!   helper and its circuits gone, the p2p host's goodbyes sent) and holds
 //!   it stopped until [`resume`]; the app calls them when it goes to the
-//!   background and comes back. [`check_mail`] does one bounded custody
-//!   fetch from friends (iOS background refresh), starting a small node for
-//!   it when none runs.
+//!   background and comes back. [`pause_keeping_nearby`] (an app with
+//!   background Bluetooth, Task 2 Phase B) stops it the same way and starts
+//!   a small node that keeps Bluetooth nearby: IPC, the outbox worker, the
+//!   custody fetcher and forwarder and the nearby carrier as a background
+//!   life; no listener, no p2p host, no Tor. [`resume`] replaces it with the
+//!   full node. [`check_mail`] does one bounded custody fetch from friends
+//!   (iOS background refresh), starting a small node for it when none runs
+//!   (no radio: a running background node is asked instead).
 //! - **Its log** goes to `<profile>/raven-node-service.log` (0600), where
 //!   the CLI keeps the program's.
 
@@ -86,6 +91,9 @@ pub enum State {
     Paused,
     /// A small node runs for a mail check ([`check_mail`]).
     MailCheck,
+    /// Paused with Bluetooth nearby kept: the small background node runs
+    /// ([`pause_keeping_nearby`]).
+    Background,
 }
 
 impl State {
@@ -95,8 +103,20 @@ impl State {
             State::Running => "running",
             State::Paused => "paused",
             State::MailCheck => "mail_check",
+            State::Background => "background",
         }
     }
+}
+
+/// What kind of node runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// The whole service.
+    Full,
+    /// A mail check's small node: no radio.
+    MailCheck,
+    /// The background node: a mail check's, with the nearby carrier.
+    Background,
 }
 
 /// [`status`]'s answer.
@@ -130,7 +150,7 @@ pub const PAUSED_TEXT: &str =
 
 struct Running {
     data_dir: PathBuf,
-    mail_check: bool,
+    kind: Kind,
     stop: tokio::sync::watch::Sender<bool>,
     /// The service's end, once its thread is done.
     done: mpsc::Receiver<String>,
@@ -171,7 +191,8 @@ pub fn status() -> Status {
     let mut c = controller();
     reap(&mut c);
     let (state, data_dir) = match (&c.running, &c.paused) {
-        (Some(r), _) if r.mail_check => (State::MailCheck, Some(r.data_dir.clone())),
+        (Some(r), _) if r.kind == Kind::MailCheck => (State::MailCheck, Some(r.data_dir.clone())),
+        (Some(r), _) if r.kind == Kind::Background => (State::Background, Some(r.data_dir.clone())),
         (Some(r), _) => (State::Running, Some(r.data_dir.clone())),
         (None, Some(p)) => (State::Paused, Some(p.clone())),
         (None, None) => (State::Stopped, None),
@@ -183,8 +204,8 @@ pub fn status() -> Status {
     }
 }
 
-/// Whether a node (a full one or a mail check's) runs for `data_dir` in
-/// this process.
+/// Whether a node (a full one, a mail check's or the background one) runs
+/// for `data_dir` in this process.
 pub fn running_for(data_dir: &Path) -> bool {
     let mut c = controller();
     reap(&mut c);
@@ -228,10 +249,10 @@ pub fn start(config: &NodeConfig) -> Result<(), String> {
     if paused_for(config.data_dir()) {
         return Err(PAUSED_TEXT.into());
     }
-    start_locked(config, false)
+    start_locked(config, Kind::Full)
 }
 
-fn start_locked(config: &NodeConfig, mail_check: bool) -> Result<(), String> {
+fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
     let dir = config.data_dir().to_path_buf();
     {
         let mut c = controller();
@@ -244,12 +265,14 @@ fn start_locked(config: &NodeConfig, mail_check: bool) -> Result<(), String> {
                     r.data_dir.display()
                 ));
             }
-            if r.mail_check == mail_check || !r.mail_check {
+            // The full node does all a small one does; a small node gives
+            // way to any other kind.
+            if r.kind == kind || r.kind == Kind::Full {
                 return Ok(());
             }
         }
     }
-    // A mail check's node gives way to the full one.
+    // A small node gives way to the one asked for.
     stop_locked(STOP_WAIT);
     open_profile(&dir)?;
     open_log(&dir);
@@ -260,13 +283,13 @@ fn start_locked(config: &NodeConfig, mail_check: bool) -> Result<(), String> {
     let thread = std::thread::Builder::new()
         .name("raven-node".into())
         .spawn(move || {
-            let end = run_on_own_runtime(opts, workers, stop_rx, mail_check);
+            let end = run_on_own_runtime(opts, workers, stop_rx, kind);
             let _ = done_tx.send(end);
         })
         .map_err(|e| format!("the node's thread did not start: {e}"))?;
     controller().running = Some(Running {
         data_dir: dir.clone(),
-        mail_check,
+        kind,
         stop: stop_tx,
         done: done_rx,
         thread: Some(thread),
@@ -279,7 +302,7 @@ fn run_on_own_runtime(
     opts: ServiceOptions,
     workers: usize,
     stop: tokio::sync::watch::Receiver<bool>,
-    mail_check_only: bool,
+    kind: Kind,
 ) -> String {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
@@ -292,7 +315,8 @@ fn run_on_own_runtime(
     };
     let host = ServiceHost::Embedded {
         stop,
-        mail_check_only,
+        mail_check_only: kind != Kind::Full,
+        nearby_background: kind == Kind::Background,
     };
     let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(run_service(opts, host))
@@ -415,11 +439,45 @@ pub fn pause(data_dir: &Path) -> bool {
     stop_locked(STOP_WAIT)
 }
 
-/// The app is back: the pause ends and the node starts again.
+/// The app goes to the background and keeps Bluetooth nearby (an app with
+/// the `bluetooth-central` and `bluetooth-peripheral` background modes,
+/// Task 2 Phase B): the full node stops cleanly as [`pause`] stops it, the
+/// pause holds `config`'s profile, and the small background node starts
+/// (see the module doc). `true`: a full node was running. The nearby
+/// carrier in it still needs its gate and the user's `nearby` setting, as
+/// everywhere.
+pub fn pause_keeping_nearby(config: &NodeConfig) -> Result<bool, String> {
+    let _turn = turn();
+    controller().paused = Some(config.data_dir().to_path_buf());
+    let was = stop_locked(STOP_WAIT);
+    start_locked(config, Kind::Background)?;
+    Ok(was)
+}
+
+/// The app is back: the pause ends and the node starts again (the
+/// background node, if one runs, gives way to it).
 pub fn resume(config: &NodeConfig) -> Result<(), String> {
     let _turn = turn();
     controller().paused = None;
-    start_locked(config, false)
+    start_locked(config, Kind::Full)
+}
+
+/// The app's Bluetooth permission (iOS with feature `nearby-radio`), read
+/// without a manager and so without a prompt: `not_determined`,
+/// `restricted`, `denied` or `allowed`. `None` elsewhere (on macOS the
+/// permission belongs to RavenNearby.app, which this process never asks),
+/// and in an app whose Info.plist lacks `NSBluetoothAlwaysUsageDescription`
+/// (iOS may end an app at its first Bluetooth call then: nothing is read).
+#[cfg(all(target_os = "ios", feature = "nearby-radio"))]
+pub fn nearby_permission() -> Option<&'static str> {
+    use crate::nearby::apple::cb;
+    cb::has_usage_description().then(|| cb::permission_word(cb::authorization_raw()))
+}
+
+/// The app's Bluetooth permission: none outside iOS.
+#[cfg(not(all(target_os = "ios", feature = "nearby-radio")))]
+pub fn nearby_permission() -> Option<&'static str> {
+    None
 }
 
 /// The pause ends; nothing is started (the caller starts the node its own
@@ -461,7 +519,7 @@ pub fn check_mail(config: &NodeConfig, budget: Duration) -> Result<MailCheck, St
     let (begun, _, fetched_before) = crate::custody::pass_counts();
     let result = (|| {
         if !already {
-            start_locked(config, true)?;
+            start_locked(config, Kind::MailCheck)?;
             out.started_node = true;
         } else {
             crate::custody::kick();

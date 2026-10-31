@@ -271,25 +271,33 @@ Real Arti in process has bootstrapped and published its onion service on
 macOS and in the iOS Simulator (`tor_in_process_bootstraps`, which needs
 the Tor network); the automated test uses the loopback helper in process.
 
-## 7. Bluetooth nearby on iOS (not built)
+## 7. Bluetooth nearby on iOS (built, held)
 
-Nearby is held on iOS (`NEARBY_PRODUCTION_ENABLED` is true on macOS only)
-and no iOS radio is built. The macOS radio runs CoreBluetooth in
-`raven-nearby-helper` (objc2-core-bluetooth) behind a line protocol
-(`nearby/apple/proto.rs`); iOS needs it in process. The plan, smallest
-first:
+Nearby is held on iOS (`NEARBY_PRODUCTION_ENABLED` is true on macOS only;
+a debug build opens it with `RAVEN_LAB_TEST_A=1 RAVEN_LAB_NEARBY=1`, as on
+Linux and Windows). Built with the engine's feature `nearby-embedded`
+(`FEATURES="tor-embedded nearby-embedded"`), the radio runs in the app's
+own process (raven-node `nearby/apple/inproc.rs`): the macOS helper's state
+machine and CoreBluetooth glue (`nearby/apple/machine.rs` and `cb.rs`,
+which `raven-nearby-helper` includes with `#[path]`) on the same kind of
+serial queue, behind the macOS radio's own `HelperRadio`, over typed values
+instead of lines. The bytes on the air are the helper's.
 
-1. Build the helper's CoreBluetooth code (`bin/raven-nearby-helper/cb.rs`,
-   `machine.rs`) as a module of raven-node for `target_os = "ios"` (the
-   objc2 crates are the owner-approved set; their `cfg` widens to iOS).
-2. Replace what is a process's: lines to stdout become lines to a socket
-   pair, stdin's commands come from its other end, and the `exit` after a
-   panic in a CoreBluetooth callback becomes "close the pipe, drop the
-   managers" (the node then sees the helper gone, as today).
-3. Give `nearby/apple.rs` a spawner like Tor's (`onion::InProcess`):
-   generic reader and writer instead of a `Child`'s stdin and stdout.
-4. The app's Info.plist needs `NSBluetoothAlwaysUsageDescription` (the
-   helper's existing check reads the main bundle, which is the app's).
+- No manager exists before the user turns nearby on, and none without
+  `NSBluetoothAlwaysUsageDescription` in the app's Info.plist (radio
+  `helper_unavailable`, no crash) or with Bluetooth denied or restricted
+  for Raven (radio `unauthorized`, read without a prompt;
+  `nearby.permission`). The managers ask iOS's own question once; the
+  system's Bluetooth-off alert is not shown (the app shows its row).
+- A panic in that code ends the radio, not the app; the node makes a new
+  one after its back-off.
+- `node.pause` stops nearby with the node (Phase A). `node.pause
+  {nearby: "keep"}` (an app with the `bluetooth-central` and
+  `bluetooth-peripheral` background modes, Phase B) starts a small
+  background node instead: IPC, the outbox, custody and nearby, with a scan
+  that names up to 32 friends at the epochs from the one before now to
+  eight ahead (iOS scans for nothing else in the background).
+- The app links `CoreBluetooth.framework` (and Foundation, `libobjc`).
 
 What iOS allows in the background, and what that means for RNL1:
 

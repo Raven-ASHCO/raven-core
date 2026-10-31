@@ -46,8 +46,9 @@ required-features = ["nearby-radio"]
 [features]
 default = []
 # The Bluetooth LE nearby carrier's platform radios (RNL1; src/nearby/): BlueZ
-# over zbus on linux-gnu (P5.29), WinRT on Windows (P5.30) and CoreBluetooth
-# on macOS through the raven-nearby-helper process (P5.31). Compiled in only
+# over zbus on linux-gnu (P5.29), WinRT on Windows (P5.30), CoreBluetooth
+# on macOS through the raven-nearby-helper process (P5.31), and CoreBluetooth
+# inside the app's own process on iOS (src/nearby/apple/inproc.rs). Compiled in only
 # with this feature, and held at runtime by raven_core::nearby_live_enabled
 # (NEARBY_PRODUCTION_ENABLED=false). The Linux and Windows dependencies below
 # are already in Cargo.lock (owner decision O5-11); the macOS ones are the
@@ -174,12 +175,18 @@ zvariant = { version = "=2.10.0", optional = true }
 # if-watch: no new crate, and Cargo.lock gains only this edge.
 [target.'cfg(target_os = "macos")'.dependencies]
 system-configuration = "0.7"
-# CoreBluetooth for the nearby radio helper (feature `nearby-radio`,
-# src/bin/raven-nearby-helper/; owner decision O5-10). Only raven-nearby-helper
-# uses them: raven-node itself never links CoreBluetooth. objc2-encode is
-# objc2's own dependency, listed only to pin the approved version; bitflags 2
-# is already locked. No dispatch2: the helper's private serial queue is a few
-# lines of libdispatch FFI.
+
+# CoreBluetooth for the nearby radio (feature `nearby-radio`; owner decision
+# O5-10): on macOS only raven-nearby-helper uses them (src/bin/raven-nearby-helper/,
+# built from src/nearby/apple/{machine,cb}.rs), and raven-node itself never
+# links CoreBluetooth; on iOS the app runs the same code in its own process
+# (src/nearby/apple/inproc.rs; an app may start no helper process). The same
+# exact versions on both systems, already in Cargo.lock: no new crate.
+# objc2-encode is objc2's own dependency, listed only to pin the approved
+# version; bitflags 2 is already locked. No dispatch2: the private serial
+# queue is a few lines of libdispatch FFI. CBPeripheralManagerConstants is a
+# feature of the locked crate (the iOS power-alert option).
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = { version = "=0.6.4", optional = true, default-features = false, features = ["std"] }
 objc2-encode = { version = "=4.1.0", optional = true, default-features = false }
 objc2-foundation = { version = "=0.3.2", optional = true, default-features = false, features = [
@@ -209,6 +216,7 @@ objc2-core-bluetooth = { version = "=0.3.2", optional = true, default-features =
     "CBPeer",
     "CBPeripheral",
     "CBPeripheralManager",
+    "CBPeripheralManagerConstants",
     "CBService",
     "CBUUID",
 ] }

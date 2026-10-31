@@ -13,7 +13,8 @@
 //! app going to the background): its listener closed, a start refused, B's
 //! message left with C; A's mail check (as iOS background refresh) fetches
 //! it from C within its budget while A stays paused; A resumed, and B's
-//! next message delivered directly.
+//! next message delivered directly; A paused keeping Bluetooth nearby (the
+//! small background node) and resumed again.
 //!
 //! `tor_in_process_bootstraps` (ignored: it needs the Tor network) runs
 //! real Arti in an engine's process until Tor is ready.
@@ -495,6 +496,31 @@ fn embedded_engines_end_to_end() {
     let m = b.wait_state(&a, &id, &["delivered", "failed"], Duration::from_secs(90));
     assert_eq!(m["state"], "delivered", "{m}\n{}", b.log());
     a.wait_incoming(&b, "welcome back", Duration::from_secs(30));
+
+    // Bluetooth kept in the background (Task 2 Phase B): the small node
+    // that keeps nearby runs while the pause holds (a start meanwhile finds
+    // it and starts no full node), and the next resume brings the full node
+    // back.
+    let bad = a.err("node.pause", json!({"nearby": "sometimes"}));
+    assert_eq!(bad["code"], "BAD_REQUEST", "{bad}");
+    let kept = a.ok("node.pause", json!({"nearby": "keep"}));
+    assert_eq!(kept["was_running"], true, "{kept}");
+    assert_eq!(kept["nearby"], "kept", "{kept}");
+    assert_eq!(kept["state"], "background", "{kept}");
+    assert_eq!(kept["paused"], true, "{kept}");
+    let started = a.ok("node.start", json!({}));
+    assert_eq!(started["state"], "background", "{started}");
+    let near = a.ok("nearby.status", json!({}));
+    assert_eq!(near["background"], "background", "{near}");
+    let resumed = a.ok("node.resume", json!({}));
+    assert_eq!(resumed["running"], true, "{resumed}");
+    assert_eq!(resumed["paused"], false, "{resumed}");
+    let plain = a.ok("node.pause", json!({}));
+    assert_eq!(plain["nearby"], "stopped", "{plain}");
+    assert_eq!(plain["state"], "paused", "{plain}");
+    let near = a.ok("nearby.status", json!({}));
+    assert_eq!(near["background"], "foreground_only", "{near}");
+    a.ok("node.resume", json!({}));
 
     let stopped = a.ok("node.stop", json!({}));
     assert_eq!(stopped["stop"], "stopped", "{stopped}");

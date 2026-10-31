@@ -112,13 +112,39 @@ impl Node {
     }
 
     fn with(ether: &Ether, seed: u8, contacts: &[u8], opts: FakeOpts, allow_public: bool) -> Self {
+        Self::life(ether, seed, contacts, opts, allow_public, Vec::new(), false)
+    }
+
+    /// A background life (Task 2 Phase B) whose host names `work`.
+    fn background(ether: &Ether, seed: u8, contacts: &[u8], work: &[u8]) -> Self {
+        let work = work.iter().map(|s| key(*s)).collect();
+        Self::life(
+            ether,
+            seed,
+            contacts,
+            FakeOpts::default(),
+            false,
+            work,
+            true,
+        )
+    }
+
+    fn life(
+        ether: &Ether,
+        seed: u8,
+        contacts: &[u8],
+        opts: FakeOpts,
+        allow_public: bool,
+        work: Vec<[u8; 32]>,
+        background: bool,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let host = Arc::new(TestHost {
             me: id(seed),
             contacts: Mutex::new(contacts.iter().map(|s| key(*s)).collect()),
             generation: AtomicU64::new(0),
             clock: AtomicU64::new(T0),
-            work: Mutex::new(Vec::new()),
+            work: Mutex::new(work),
             ups: Mutex::new(Vec::new()),
             inbound: tx,
             allow_public,
@@ -132,6 +158,7 @@ impl Node {
             Arc::clone(&host) as Arc<dyn Host>,
             key(seed),
             false,
+            background,
         );
         Self {
             key: key(seed),
@@ -357,6 +384,7 @@ async fn discovery_knock_pipe_then_a_message_and_its_sealed_ack_both_ways() {
             rx,
             Arc::new(host),
             me.public_key_bytes(),
+            false,
             false,
         )
     };
@@ -1004,6 +1032,123 @@ async fn a_custodian_advertises_for_held_recipients() {
             .any(|a| a.uuids == [token_out(0xAE, 0xBE, T0)])
     })
     .await;
+}
+
+/// S17: a sender's background work names the mail friend of a recipient it
+/// cannot reach, after that recipient ([`crate::nearby::NodeHost::has_work`]).
+/// Only the friend has a pair key here and is in range, so its token goes on
+/// air (never one for the recipient), the friend connects, and the pipe the
+/// deposit then takes comes up (`Host::pipe_up`, then custody's
+/// `kick_carried` in raven-node).
+#[tokio::test(start_paused = true)]
+async fn a_sender_advertises_for_the_mail_friend_of_its_recipient() {
+    let ether = Ether::new(EtherParams::default());
+    let carol = Node::new(&ether, 0xCE, &[0xBE], FakeOpts::default());
+    let bob = Node::new(&ether, 0xBE, &[0xCE], FakeOpts::default());
+    *lock(&carol.host.work) = vec![key(0xAE), key(0xBE)];
+    carol.engine.set_background_mail(true);
+    until("advertised for the mail friend", || {
+        ether
+            .adverts()
+            .iter()
+            .any(|a| a.uuids == [token_out(0xCE, 0xBE, T0)])
+    })
+    .await;
+    until("the pipe to the mail friend", || {
+        lock(&carol.host.ups).contains(&key(0xBE)) && lock(&bob.host.ups).contains(&key(0xCE))
+    })
+    .await;
+    assert!(
+        !ether
+            .adverts()
+            .iter()
+            .any(|a| a.uuids == [token_out(0xCE, 0xAE, T0)]),
+        "no pair key for the recipient: never on air"
+    );
+    assert_eq!(carol.status().pipes, 1);
+}
+
+/// The tokens `peer` advertises for `me` at the epochs from the one before
+/// `ms`'s to [`FILTER_AHEAD`] after it: what `me`'s background scan filter
+/// names for `peer`.
+fn filter_for(me: u8, peer: u8, ms: u64) -> Vec<[u8; 16]> {
+    let e = epoch_of(ms);
+    (e - 1..=e + FILTER_AHEAD)
+        .map(|e| pair_keys(&id(me), &key(peer)).unwrap().token_in(e))
+        .collect()
+}
+
+/// Task 2 Phase B: a background life scans only for the contacts its host
+/// names (here its work) at the epochs from the one before now to
+/// FILTER_AHEAD ahead, never for a keyed contact it does not name. A
+/// contact it names that advertises for it is seen and its pipe comes up;
+/// one it does not name stays unseen (as iOS reports nothing else in the
+/// background).
+#[tokio::test(start_paused = true)]
+async fn a_background_life_scans_only_for_the_contacts_it_names() {
+    let ether = Ether::new(EtherParams::default());
+    let carol = Node::background(&ether, 0xCE, &[0xBE, 0xDE], &[0xBE]);
+    until("the scan filter", || {
+        ether.scan_filter("node-ce") == filter_for(0xCE, 0xBE, T0)
+    })
+    .await;
+    assert_eq!(
+        ether.scan_filter("node-ce").len(),
+        FILTER_AHEAD as usize + 2
+    );
+    let bob = Node::new(&ether, 0xBE, &[0xCE], FakeOpts::default());
+    let dave = Node::new(&ether, 0xDE, &[0xCE], FakeOpts::default());
+    for n in [&bob, &dave] {
+        *lock(&n.host.work) = vec![key(0xCE)];
+        n.engine.set_background_mail(true);
+    }
+    until("the pipe to the named contact", || {
+        lock(&carol.host.ups).contains(&key(0xBE))
+    })
+    .await;
+    sleep(Duration::from_secs(30)).await;
+    assert!(
+        ether
+            .adverts()
+            .iter()
+            .any(|a| a.uuids == [token_out(0xDE, 0xCE, T0)]),
+        "dave advertised for carol"
+    );
+    assert!(
+        !lock(&carol.host.ups).contains(&key(0xDE)),
+        "a contact the filter does not name is not seen"
+    );
+    assert!(ether.scan_filter("node-be").is_empty(), "a foreground life");
+}
+
+/// Task 2 Phase B: a background life matches a named contact's token of an
+/// epoch well ahead of its own (its clock stopped while the app was
+/// suspended, or the contact's runs ahead), within the filter's window; a
+/// foreground life matches only the epochs next to its own.
+#[tokio::test(start_paused = true)]
+async fn a_background_life_matches_tokens_across_the_filters_window() {
+    let ether = Ether::new(EtherParams::default());
+    let ahead = epoch_of(T0) + 5;
+    let token = pair_keys(&id(0xBE), &key(0xCE)).unwrap().token_out(ahead);
+    let (mut bob, mut rx) = bare(&ether, "bob");
+    bob.set_services(&[token], Some(token)).unwrap();
+    let carol = Node::new(&ether, 0xCE, &[0xBE], FakeOpts::default());
+    sleep(Duration::from_secs(15)).await;
+    let connected = |ev: &RadioEvent| matches!(ev, RadioEvent::Connected { .. });
+    assert!(
+        next_where(&mut rx, Duration::from_secs(1), connected)
+            .await
+            .is_none(),
+        "a foreground life does not match five epochs ahead"
+    );
+    drop(carol);
+    let _carol = Node::background(&ether, 0xCE, &[0xBE], &[0xBE]);
+    assert!(
+        next_where(&mut rx, Duration::from_secs(30), connected)
+            .await
+            .is_some(),
+        "the background life connects to the token it names"
+    );
 }
 
 /// F11d: background contacts rotate round-robin per epoch, so with one slot
