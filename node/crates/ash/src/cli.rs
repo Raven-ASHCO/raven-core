@@ -344,16 +344,16 @@ pub const LOGO_64_URL: &str = "https://raven-messager.com/raven_logo_64.png";
     about = "RAVEN Node — Messaging Beyond Connectivity",
     long_about = concat!("RAVEN — serverless mesh messaging, from your terminal.\n\
                   \n\
-                  Run `ash` with no arguments for the interactive menu (recommended;\n\
-                  menu 8 is a guided tutorial). There is no central server: your\n\
-                  identity is a key kept on this computer, and you talk directly to\n\
-                  the people who added you.\n\
+                  Run `ash` with no arguments for the full-screen app (recommended).\n\
+                  There is no central server: your identity is a key kept on this\n\
+                  computer, and you talk directly to the people who added you.\n\
                   \n\
                   FIRST CHAT  (both people do steps 1-3)\n\
                   \x20 1. ash init                  create your identity (once)\n\
                   \x20 2. ash whoami                send your friend the `invite` line it prints\n\
-                  \x20 3. ash                       menu 5 Contacts, then a: paste your friend's\n\
-                  \x20                              invite line (they paste yours the same way)\n\
+                  \x20 3. ash contact add --card '<your friend's invite line>' --petname Bob\n\
+                  \x20                              (or in `ash`: A, Add a friend; they add\n\
+                  \x20                              yours the same way)\n\
                   \x20 4. ash listen                the receiving side keeps this window open\n\
                   \x20 5. ash send --contact Bob    type the message, then ", end_of_input!(), "\n\
                   \x20                              (Bob = the name you gave them)\n\
@@ -5670,11 +5670,7 @@ fn cmd_listen(data_dir: &Path, listen_flag: Option<&str>) -> Result<(), ListenEr
     };
     let contacts = load_contacts(data_dir).map_err(|e| (1, sanitize_terminal_line(&e)))?;
     if contacts.is_empty() {
-        return Err((
-            1,
-            "No pinned contacts yet.\nAdd one first (menu 5), so I know whose keys to accept."
-                .into(),
-        ));
+        return Err((1, listen_no_contacts_text()));
     }
 
     if let Some(note) = note {
@@ -5858,12 +5854,26 @@ fn cmd_listen(data_dir: &Path, listen_flag: Option<&str>) -> Result<(), ListenEr
     }
 }
 
+/// `ash listen` with an empty contact book: a contact need not be verified
+/// to be accepted, and the way to add one works outside the classic menu.
+fn listen_no_contacts_text() -> String {
+    format!("No contacts yet.\nAdd one first ({ADD_FRIEND_CMD}), so I know whose keys to accept.")
+}
+
 /// What a friend does with the address shown above: they have to add YOU too.
+/// No menu number: `ash` with no arguments opens the full-screen app, where
+/// the classic menu's numbers mean nothing.
 const LISTEN_INVITE_HINT: &str =
-    "…and they add you under menu 5 Contacts, a, pasting this invite line (it is also in `ash whoami`):";
+    "…and they add you by pasting this invite line into Raven (Add a friend, or `ash contact add --card '<line>'`; it is also in `ash whoami`):";
 
 /// This terminal is occupied by the receiver, so say where messages are read.
-const LISTEN_STAYS_BUSY: &str = "This terminal stays busy while listening: open a second terminal and run `ash inbox` (or `ash`, menu 2) to read messages. Ctrl+C stops receiving.";
+const LISTEN_STAYS_BUSY: &str = "This terminal stays busy while listening: open a second terminal and run `ash inbox` (or `ash`) to read messages. Ctrl+C stops receiving.";
+
+/// How a plain command says to add a friend: the command, and the
+/// full-screen app's key (what `ash` with no arguments opens). The classic
+/// menu's "menu 5 Contacts" is right only inside that menu.
+const ADD_FRIEND_CMD: &str = "`ash contact add --card '<their invite line>' --petname NAME`";
+const ADD_FRIEND_APP: &str = "run `ash` and press A (Add a friend)";
 
 /// Where friends reach this computer, for the hint a send with no address
 /// for its contact prints: the listener of this profile's running service
@@ -6765,7 +6775,7 @@ fn no_contact_message(contacts: &[Contact], arg: &str) -> String {
     let asked = sanitize_terminal_line(arg);
     if contacts.is_empty() {
         return format!(
-            "no contact for {asked} — you have no contacts yet. Add one: ash contact add --address rvn1… --pub-hex … --petname NAME (or run `ash`, menu 5)"
+            "no contact for {asked} — you have no contacts yet. Add one: {ADD_FRIEND_CMD}, or {ADD_FRIEND_APP}."
         );
     }
     let names: Vec<String> = contacts
@@ -6784,8 +6794,10 @@ fn no_contact_message(contacts: &[Contact], arg: &str) -> String {
     } else {
         String::new()
     };
+    // Many commands say this (contact verify, chats delete, nearby on…) and
+    // most take the contact without `--contact`: name the choice, not a flag.
     format!(
-        "no contact for {asked}. Your contacts: {}{more}. Use --contact NAME or --contact @tag.",
+        "no contact for {asked}. Your contacts: {}{more}. Use one of these names or @tags.",
         names.join(", ")
     )
 }
@@ -13821,6 +13833,18 @@ fn internet_reach_row(
 /// Guided Send / Chat. Every lane — picked contact or advanced host:port —
 /// goes through the same authenticated PairInit + indexed-session LAN-direct
 /// path as `ash send --contact/--peer` ([`menu_send_secure`]).
+/// The guided send with no contacts, answered with neither yes nor no:
+/// how to add one (`ash send` reaches it outside the classic menu too, so
+/// no menu number).
+fn send_picker_cancelled_text() -> String {
+    format!("cancelled — add a contact first: {ADD_FRIEND_CMD}.")
+}
+
+/// The guided send with no contacts, answered no.
+fn send_picker_declined_text() -> String {
+    format!("Add a contact first ({ADD_FRIEND_CMD}), then send again.")
+}
+
 fn cmd_send_interactive(data_dir: &Path) {
     let c = c();
     let id = match try_load_identity(data_dir) {
@@ -13849,15 +13873,15 @@ fn cmd_send_interactive(data_dir: &Path) {
     if contacts.is_empty() {
         screen_header("Send");
         println!(
-            "{0}no pinned contacts — add one to get started{1}",
+            "{0}no contacts yet — add one to get started{1}",
             c.dim, c.reset
         );
         println!();
         println!(
-            "  {0}1.{1} Add someone first: menu {0}5 Contacts{2}",
+            "  {0}1.{1} Add someone first: answer {0}y{2} below",
             c.bold, c.reset, c.reset
         );
-        println!("     (rvn1… address + pub_hex from their `ash whoami`, or @alias)");
+        println!("     (their invite line, from their `ash whoami`)");
         println!(
             "  {0}2.{1} Advanced: direct peer host:port (LAN demo / power users)",
             c.bold, c.reset
@@ -13872,17 +13896,11 @@ fn cmd_send_interactive(data_dir: &Path) {
             return;
         }
         if a != "advanced" && a != "a" && a != "n" && a != "no" {
-            println!(
-                "{0}cancelled — use menu 5 to add a contact.{1}",
-                c.dim, c.reset
-            );
+            println!("{0}{1}{2}", c.dim, send_picker_cancelled_text(), c.reset);
             return;
         }
         if a == "n" || a == "no" {
-            println!(
-                "{0}Add a contact first (menu 5), then try Send / Chat again.{1}",
-                c.dim, c.reset
-            );
+            println!("{0}{1}{2}", c.dim, send_picker_declined_text(), c.reset);
             return;
         }
         if let Some((peer, pub_hex, text)) = direct_peer_prompts() {
@@ -15272,7 +15290,7 @@ fn inbox_empty_text(data_dir: &Path, receiving: bool) -> String {
         )
     } else {
         format!(
-            "No messages yet in {dir}.\n  Either nobody has written to you yet, or they have not added you as a contact, or this computer is not receiving (check: `ash status`).\n  To receive: add your friend as a contact (menu 5), then keep `ash listen` running."
+            "No messages yet in {dir}.\n  Either nobody has written to you yet, or they have not added you as a contact, or this computer is not receiving (check: `ash status`).\n  To receive: add your friend as a contact ({ADD_FRIEND_CMD}), then keep `ash listen` running."
         )
     }
 }
@@ -15282,7 +15300,7 @@ fn inbox_receiver_note(state: &ext::ReceiverState) -> Option<&'static str> {
     match state {
         ext::ReceiverState::Receiving => None,
         ext::ReceiverState::NotRunning => Some(
-            "Note: raven-node is not running, so nothing can arrive right now. Start it with menu 4 Listen (`ash listen`); it also starts when you send.",
+            "Note: raven-node is not running, so nothing can arrive right now. Start it with `ash listen`; it also starts when you send.",
         ),
         ext::ReceiverState::NotReceiving => Some(
             "Note: this computer is NOT receiving: raven-node runs but its LAN listener is down. Run `ash status`.",
@@ -17959,10 +17977,9 @@ fn doctor_next_step(identity: IdentityState, contacts: Option<usize>, reach: &No
             "fix the identity store problem shown in the details below; nothing can be sent until then."
                 .into()
         }
-        (IdentityState::Ready, Some(0), _) => {
-            "add your first friend: run `ash`, open menu 5 Contacts and paste their invite line (they add yours the same way)."
-                .into()
-        }
+        (IdentityState::Ready, Some(0), _) => format!(
+            "add your first friend: {ADD_FRIEND_APP} and paste their invite line, or {ADD_FRIEND_CMD} (they add yours the same way)."
+        ),
         (IdentityState::Ready, None, _) => {
             "your contacts file cannot be read; see the message below.".into()
         }
@@ -24386,16 +24403,20 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             msg.contains("Alice (@alice)") && msg.contains("Bob"),
             "{msg}"
         );
-        assert!(
-            msg.contains("--contact NAME") && msg.contains("--contact @tag"),
-            "{msg}"
-        );
+        // Said by commands that take no `--contact` (contact verify, chats
+        // delete, nearby on…): it names the choice, never that flag.
+        assert!(msg.contains("Use one of these names or @tags."), "{msg}");
+        assert!(!msg.contains("--contact"), "{msg}");
         let none = no_contact_message(&[], "Zed");
         assert!(none.starts_with("no contact for Zed"), "{none}");
         assert!(
-            none.contains("no contacts yet") && none.contains("ash contact add"),
+            none.contains("no contacts yet")
+                && none.contains("ash contact add --card '<their invite line>'"),
             "{none}"
         );
+        // No classic-menu number: `ash` opens the full-screen app.
+        assert!(!none.contains("menu"), "{none}");
+        assert!(none.contains("press A (Add a friend)"), "{none}");
         // A hostile name cannot smuggle escapes into the line.
         assert!(!no_contact_message(&book, "x\u{1b}[2J").contains('\u{1b}'));
         // Many contacts are capped, with a way to see the rest.
@@ -26443,7 +26464,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         };
         assert!(next(&local_only(), cutoff).starts_with("friends cannot reach you"));
         // Earlier problems still win.
-        assert!(summary_next_step(None, Ready, Some(0), &both, all()).contains("menu 5 Contacts"));
+        assert!(summary_next_step(None, Ready, Some(0), &both, all())
+            .contains("press A (Add a friend)"));
     }
 
     /// The local-only listener is a node problem: identity and contacts come
@@ -26457,7 +26479,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     fn doctor_steps_for_a_listener_friends_cannot_reach() {
         use IdentityState::*;
         assert!(doctor_next_step(Missing, Some(2), &local_only()).contains("ash init"));
-        assert!(doctor_next_step(Ready, Some(0), &local_only()).contains("menu 5 Contacts"));
+        assert!(doctor_next_step(Ready, Some(0), &local_only()).contains("press A (Add a friend)"));
         let step = doctor_next_step(Ready, Some(2), &local_only());
         assert!(
             step.starts_with(
@@ -26522,7 +26544,7 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         // Every earlier problem still wins.
         assert!(
             summary_next_step(None, Ready, Some(0), &local_only(), side(w1(), None))
-                .contains("menu 5 Contacts")
+                .contains("press A (Add a friend)")
         );
         let gone = doctor_next_step(Ready, Some(2), &addr_not_here());
         assert!(
@@ -26584,9 +26606,8 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
         assert!(doctor_next_step(Missing, Some(0), &all_up).contains("ash init"));
         assert!(doctor_next_step(Missing, None, &NodeReach::NotRunning).contains("ash init"));
         assert!(doctor_next_step(Unavailable, Some(2), &all_up).contains("identity store"));
-        assert!(
-            doctor_next_step(Ready, Some(0), &NodeReach::NotRunning).contains("menu 5 Contacts")
-        );
+        assert!(doctor_next_step(Ready, Some(0), &NodeReach::NotRunning)
+            .contains("press A (Add a friend)"));
         assert!(doctor_next_step(Ready, None, &all_up).contains("contacts file"));
         assert!(doctor_next_step(Ready, Some(2), &NodeReach::NotRunning).contains("ash listen"));
         assert!(doctor_next_step(Ready, Some(2), &send_only()).contains("NOT receiving"));
@@ -27571,11 +27592,68 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             !LISTEN_STAYS_BUSY.contains("land in menu 2"),
             "{LISTEN_STAYS_BUSY}"
         );
-        assert!(LISTEN_INVITE_HINT.contains("add you") && LISTEN_INVITE_HINT.contains("menu 5"));
+        assert!(
+            LISTEN_INVITE_HINT.contains("add you")
+                && LISTEN_INVITE_HINT.contains("Add a friend")
+                && LISTEN_INVITE_HINT.contains("`ash contact add --card '<line>'`"),
+            "{LISTEN_INVITE_HINT}"
+        );
         assert!(
             LISTEN_INVITE_HINT.contains("`ash whoami`"),
             "{LISTEN_INVITE_HINT}"
         );
+    }
+
+    /// `ash` with no arguments opens the full-screen app, so what a plain
+    /// command prints never sends the user to a classic-menu number (menu 5
+    /// Contacts, menu 4 Listen, menu 2 Inbox): the way it names is a command,
+    /// or the app's own key.
+    #[test]
+    fn plain_command_texts_name_no_classic_menu_number() {
+        use IdentityState::*;
+        let texts = [
+            LISTEN_INVITE_HINT.to_string(),
+            LISTEN_STAYS_BUSY.to_string(),
+            listen_no_contacts_text(),
+            inbox_empty_text(Path::new("/tmp/raven-profile"), false),
+            inbox_empty_text(Path::new("/tmp/raven-profile"), true),
+            inbox_receiver_note(&ext::ReceiverState::NotRunning)
+                .unwrap()
+                .to_string(),
+            doctor_next_step(Ready, Some(0), &NodeReach::NotRunning),
+            no_contact_message(&[], "Zed"),
+            send_picker_cancelled_text(),
+            send_picker_declined_text(),
+        ];
+        for text in &texts {
+            assert!(!text.contains("menu"), "{text}");
+        }
+        // Each one that says how to add a friend names a command that exists.
+        for text in [
+            listen_no_contacts_text(),
+            inbox_empty_text(Path::new("/tmp/raven-profile"), false),
+            doctor_next_step(Ready, Some(0), &NodeReach::NotRunning),
+            send_picker_cancelled_text(),
+            send_picker_declined_text(),
+        ] {
+            assert!(text.contains("ash contact add --card"), "{text}");
+        }
+        // ...and that command parses as written.
+        assert!(Cli::try_parse_from([
+            "ash",
+            "contact",
+            "add",
+            "--card",
+            "raven:rvn1x:00",
+            "--petname",
+            "NAME"
+        ])
+        .is_ok());
+        // Any contact will do: listen accepts friends not verified yet.
+        assert!(listen_no_contacts_text().starts_with("No contacts yet."));
+        assert!(inbox_receiver_note(&ext::ReceiverState::NotRunning)
+            .unwrap()
+            .contains("`ash listen`"));
     }
 
     // ── Contact routes, set-addr, cards, carrier plan (transports P1) ────────

@@ -358,6 +358,14 @@ fn version_and_help_are_plain_and_the_example_starts_with_adding_each_other() {
         "{help}"
     );
     assert!(help.contains("ash listen"), "{help}");
+    // `ash` with no arguments opens the full-screen app: the steps name a
+    // command and the app's key, never a classic-menu number.
+    assert!(help.contains("ash contact add --card"), "{help}");
+    assert!(help.contains("Add a friend"), "{help}");
+    assert!(
+        !help.contains("menu 5") && !help.contains("menu 8"),
+        "{help}"
+    );
     // A Windows console ends input at Ctrl-Z, then Enter.
     let end = if cfg!(windows) {
         "Ctrl-Z, then Enter"
@@ -2440,7 +2448,23 @@ fn send_contact_finds_a_person_by_petname_like_the_picker_does() {
         err.contains("no contact for Zed. Your contacts: Bob."),
         "{err}"
     );
-    assert!(err.contains("--contact NAME or --contact @tag"), "{err}");
+    assert!(err.contains("Use one of these names or @tags."), "{err}");
+
+    // The same words where the contact is not a `--contact` flag.
+    for args in [
+        &["contact", "verify", "Zed"][..],
+        &["contact", "show", "Zed"],
+        &["chats", "pin", "Zed"],
+    ] {
+        let o = ash_out(dir.path(), args, "");
+        let err = text(&o.stderr);
+        assert_eq!(code(&o), 1, "{args:?}: {err}");
+        assert!(
+            err.contains("no contact for Zed. Your contacts: Bob."),
+            "{args:?}: {err}"
+        );
+        assert!(!err.contains("--contact"), "{args:?}: {err}");
+    }
     // A lone @ still reaches nobody, not the untagged contact.
     let o = ash_out(dir.path(), &["send", "--contact", "@"], "hello\n");
     assert_eq!(code(&o), 1);

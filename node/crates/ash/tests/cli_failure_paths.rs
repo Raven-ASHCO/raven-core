@@ -111,7 +111,13 @@ fn listen_exits_nonzero_when_it_cannot_start() {
     let o = run(c, "");
     assert_eq!(code(&o), 1, "{}", text(&o.stderr));
     assert!(
-        text(&o.stderr).contains("No pinned contacts"),
+        text(&o.stderr).contains("No contacts yet"),
+        "{}",
+        text(&o.stderr)
+    );
+    // The way to add one is a command, not a classic-menu number.
+    assert!(
+        text(&o.stderr).contains("ash contact add --card") && !text(&o.stderr).contains("menu"),
         "{}",
         text(&o.stderr)
     );
