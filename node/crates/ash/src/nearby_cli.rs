@@ -90,7 +90,9 @@ pub(super) fn consent_text(name: &str) -> String {
 /// [`consent_text`] as the desktop app shows it before `network.set
 /// {nearby: true}` (the engine's `texts.nearby`): no `raven` command (the
 /// app installs none) and not "shown once" (the app asks before each
-/// turn-on).
+/// turn-on). Only `engine_bridge` reads it, and the binaries call no
+/// `engine_bridge` item.
+#[allow(dead_code)]
 pub(super) fn app_consent_text(name: &str) -> String {
     consent_with(name, "", "Turn nearby off any time in Network.")
 }
@@ -156,7 +158,8 @@ time: raven nearby background-mail off"
 
 /// [`BACKGROUND_MAIL_CONSENT`] as the desktop app shows it (the engine's
 /// `texts.nearby_background_mail`): no `raven` command (the app installs
-/// none).
+/// none). Only `engine_bridge` reads it, as [`app_consent_text`].
+#[allow(dead_code)]
 pub(super) const BACKGROUND_MAIL_CONSENT_APP: &str = concat!(
     background_mail_disclosure!(),
     "\nIt works only while nearby itself is on. Turn it off any time in Network."
