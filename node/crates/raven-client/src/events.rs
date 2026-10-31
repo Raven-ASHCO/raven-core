@@ -7,6 +7,12 @@
 //! from before this engine started), the poll says `reset: true`: the app
 //! then reloads what it shows instead of trusting the events alone (an
 //! addition to the contract: an extra field, which API.md allows).
+//!
+//! While Lock v2 holds the profile ([`EventHub::set_locked`]) the queue is
+//! empty and stays so: what was not read yet goes at the lock (an
+//! `incoming` event carries a message's text), every event meanwhile is
+//! dropped, and a poll says `locked: true` with no events. The first poll
+//! after the unlock says `reset: true`.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -20,8 +26,11 @@ pub const CAPACITY: usize = 512;
 struct Queue {
     seq: u64,
     events: VecDeque<(u64, Value)>,
-    /// The highest seq dropped for room (0: none).
+    /// The highest seq dropped for room, or at a lock or an unlock (0:
+    /// none).
     dropped_through: u64,
+    /// Lock v2 holds the profile: nothing is queued.
+    locked: bool,
 }
 
 /// One poll's answer.
@@ -32,6 +41,8 @@ pub struct Batch {
     pub events: Vec<Value>,
     /// Events after `after_seq` were lost: reload.
     pub reset: bool,
+    /// Lock v2 holds the profile: no events until the unlock.
+    pub locked: bool,
 }
 
 #[derive(Default)]
@@ -45,8 +56,12 @@ impl EventHub {
     }
 
     /// Adds one event of `kind` with `fields`, at `at_ms`; returns its seq.
+    /// While locked nothing is added (the newest seq so far is returned).
     pub fn emit(&self, kind: &str, fields: Map<String, Value>, at_ms: u64) -> u64 {
         let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if q.locked {
+            return q.seq;
+        }
         q.seq += 1;
         let seq = q.seq;
         let mut event = Map::new();
@@ -69,9 +84,36 @@ impl EventHub {
         seq
     }
 
+    /// Lock v2 locked (`true`) or unlocked the profile. A lock empties the
+    /// queue; an unlock takes a seq of its own and counts it as dropped, so
+    /// every poll from before it says `reset: true` (what the app showed
+    /// before the lock is reloaded). No change: nothing happens.
+    pub fn set_locked(&self, locked: bool) {
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if q.locked == locked {
+            return;
+        }
+        q.locked = locked;
+        if locked {
+            q.events.clear();
+        } else {
+            q.seq += 1;
+        }
+        q.dropped_through = q.seq;
+    }
+
     /// What came after `after_seq`. Never blocks beyond the queue's lock.
+    /// While locked: no events, `locked`.
     pub fn poll(&self, after_seq: u64) -> Batch {
         let q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if q.locked {
+            return Batch {
+                seq: q.seq,
+                events: Vec::new(),
+                reset: false,
+                locked: true,
+            };
+        }
         // A seq from before this engine (the app outlived an engine restart)
         // or one whose followers were dropped: everything kept, and reset.
         let ahead = after_seq > q.seq;
@@ -86,6 +128,7 @@ impl EventHub {
                 .map(|(_, e)| e.clone())
                 .collect(),
             reset,
+            locked: false,
         }
     }
 
@@ -138,6 +181,47 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["presence", "status_ok"]);
         assert!(!batch.reset, "a replaced heartbeat is no loss");
+    }
+
+    /// Lock v2: the lock empties the queue (a message's text goes with
+    /// its `incoming` event), nothing is queued while locked and a poll
+    /// says so; the first poll after the unlock says reset, then events
+    /// flow again.
+    #[test]
+    fn a_lock_empties_the_queue_and_keeps_it_empty_until_the_unlock() {
+        let hub = EventHub::new();
+        hub.emit("incoming", fields(json!({"message": {"text": "hello"}})), 1);
+        hub.emit("status_ok", Map::new(), 2);
+        let before = hub.poll(0);
+        assert_eq!(before.events.len(), 2);
+        assert!(!before.locked);
+        hub.set_locked(true);
+        let locked = hub.poll(0);
+        assert!(locked.locked);
+        assert!(locked.events.is_empty());
+        assert!(!locked.reset);
+        assert_eq!(locked.seq, 2);
+        // Nothing is queued meanwhile, whatever comes.
+        assert_eq!(
+            hub.emit("incoming", fields(json!({"message": {"text": "x"}})), 3),
+            2
+        );
+        hub.emit("node", Map::new(), 4);
+        assert!(hub.poll(0).events.is_empty());
+        assert!(!format!("{:?}", hub.poll(0)).contains("hello"));
+        hub.set_locked(true);
+        assert_eq!(hub.seq(), 2, "locked already: no change");
+        hub.set_locked(false);
+        let after = hub.poll(locked.seq);
+        assert!(!after.locked);
+        assert!(after.reset, "what was shown before the lock is reloaded");
+        assert!(after.events.is_empty());
+        let seq = hub.emit("incoming", fields(json!({"message": {"text": "new"}})), 5);
+        let next = hub.poll(after.seq);
+        assert!(!next.reset);
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0]["seq"], seq);
+        assert!(!format!("{:?}", hub.poll(0)).contains("hello"));
     }
 
     #[test]

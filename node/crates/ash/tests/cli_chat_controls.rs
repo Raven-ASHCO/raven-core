@@ -70,8 +70,12 @@ fn profile_with_bob() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let seed = dir.path().join("identity.seed");
     std::fs::write(&seed, [0x5au8; 32]).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // The seed file is owner-only where modes exist (Windows has none).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let bob = Identity::from_seed(&[0x42; 32]);
     let key = hex::encode(bob.public_key_bytes());
     let fp = device_fingerprint_v1(&bob.public_key_bytes());

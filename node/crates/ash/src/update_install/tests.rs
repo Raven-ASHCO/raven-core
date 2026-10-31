@@ -355,10 +355,12 @@ mod with_the_gate {
             }
         }
 
+        #[cfg_attr(not(unix), allow(dead_code))]
         fn read(&self, name: &str) -> String {
             String::from_utf8(std::fs::read(self.prefix.path().join(name)).unwrap()).unwrap()
         }
 
+        #[cfg_attr(not(unix), allow(dead_code))]
         fn names(&self) -> BTreeSet<String> {
             std::fs::read_dir(self.prefix.path())
                 .unwrap()
@@ -412,6 +414,7 @@ mod with_the_gate {
     /// The node as the tests see it: a stop notes what had run until then;
     /// a start runs the folder's raven-node with `ping` and keeps whether it
     /// answered.
+    #[cfg_attr(not(unix), allow(dead_code))]
     struct FakeHost {
         dir: PathBuf,
         record: PathBuf,
@@ -424,6 +427,7 @@ mod with_the_gate {
         locked: bool,
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     impl FakeHost {
         fn new(world: &World) -> FakeHost {
             FakeHost {
@@ -532,11 +536,14 @@ mod with_the_gate {
             .map(str::to_owned)
             .into()
         );
-        // Owner only, never executable, nothing run.
-        assert_eq!(mode(&staged), 0o700);
-        assert_eq!(mode(&world.dd().join(STAGED_DIR)), 0o700);
-        for name in &names {
-            assert_eq!(mode(&staged.join(name)), 0o600, "{name}");
+        // Owner only, never executable, nothing run (Unix mode bits; Windows
+        // has none).
+        if cfg!(unix) {
+            assert_eq!(mode(&staged), 0o700);
+            assert_eq!(mode(&world.dd().join(STAGED_DIR)), 0o700);
+            for name in &names {
+                assert_eq!(mode(&staged.join(name)), 0o600, "{name}");
+            }
         }
         assert!(world.runs().is_empty());
         // The log came along into the update state.

@@ -258,6 +258,38 @@ fn a_keychain_profile_resumes_without_a_passphrase() {
     });
 }
 
+/// A profile this process holds locked stays locked at the next service
+/// start, whatever its keystore: the embedded node (the iPhone app) stopped
+/// and started again while locked, by the app's pause and resume. Its
+/// preflight would otherwise meet the lock's refusal of every key load.
+/// Once unlocked, a keychain profile starts unlocked again.
+#[test]
+fn a_profile_locked_in_this_process_stays_locked_at_the_next_start() {
+    let _state = crate::lan_direct::listener_state_test_lock();
+    let _gate = GateOpen::new();
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path();
+    std::fs::write(dd.join("identity.backend"), "locked-file\n").unwrap();
+    assert!(!passphrase_profile(dd));
+    assert!(!start(dd), "a keychain profile starts unlocked");
+    runtime().block_on(async {
+        assert!(lock(dd).await.unwrap().locked);
+    });
+    // The pause stopped the node; the resume starts it again.
+    assert!(start(dd), "still locked");
+    assert!(is_locked() && raven_core::local_lock::engaged(dd));
+    assert_eq!(status(), Some(true));
+    runtime().block_on(async {
+        let opened = unlock_with(dd, None, |_, _| panic!("no vault is asked"))
+            .await
+            .unwrap();
+        assert!(!opened.locked);
+    });
+    assert!(!raven_core::local_lock::engaged(dd));
+    assert!(!start(dd), "unlocked: it starts unlocked");
+    assert!(!is_locked());
+}
+
 /// The service's LAN listener under `supervise_unlocked` with a sealed
 /// profile: a lock closes it (a dial is refused), ends the link it held,
 /// drops its identity (no `Arc` of it is left), the at-rest keys and the

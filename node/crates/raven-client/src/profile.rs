@@ -74,6 +74,16 @@ impl Inner {
         self.open_as(KeyLoad::IfDue)
     }
 
+    /// The refusals [`Inner::open`] reads every time (an erase or a key
+    /// change that did not finish), and nothing else: what an op that runs
+    /// while Lock v2 holds the profile gets, since opening loads keys.
+    pub(crate) fn refuse_closed(&self) -> Result<(), ApiError> {
+        match bridge::closed(self.data_dir()?) {
+            Some(closed) => Err(closed_error(&closed)),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn open_as(&self, keys: KeyLoad) -> Result<(), ApiError> {
         let dir = self.data_dir()?;
         if let Some(closed) = bridge::closed(dir) {
@@ -128,12 +138,36 @@ impl Inner {
 
     /// `profile.state`: the refusals first, then the identity, then whether
     /// the at-rest key is there and whether `raven lock` locked it. The key
-    /// of a sealed profile is asked for now.
+    /// of a sealed profile is asked for now. While Lock v2 holds the
+    /// profile nothing is loaded: `locked` with the extra field `lock_v2`
+    /// (`lock.unlock` opens it, not `privacy.unlock`).
     pub(crate) fn profile_state(&self) -> Value {
         let dir = match self.data_dir() {
             Ok(dir) => dir,
             Err(e) => return json!({"state": "unreadable", "reason": e.message}),
         };
+        // An app that opens while its node is locked (Lock v2) learns it
+        // here, before anything loads (one Status; none while the gate is
+        // shut).
+        if crate::network::lock_v2_live() {
+            match bridge::lock_v2_state(dir) {
+                Some(locked) => self.note_locked(locked),
+                // No node: a Raven passphrase profile this process cannot
+                // open yet is locked here all the same.
+                None if self.vault_key_missing() => self.note_locked(true),
+                None => {}
+            }
+        }
+        if self.locked() {
+            if let Err(e) = self.refuse_closed() {
+                return json!({"state": "unreadable", "reason": e.message, "detail": e.detail});
+            }
+            return json!({
+                "state": "locked",
+                "lock_v2": true,
+                "reason": raven_core::privacy::LOCKED_V2_SCREEN,
+            });
+        }
         if let Err(e) = self.open_as(KeyLoad::Now) {
             return json!({"state": "unreadable", "reason": e.message, "detail": e.detail});
         }

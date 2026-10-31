@@ -83,6 +83,9 @@ pub(crate) struct Probe {
     /// The transports of the relays its p2p host uses (`tcp`, `quic`,
     /// `wss`, `wss-proxy`).
     pub relay_paths: Vec<String>,
+    /// Lock v2 holds it (`Status.locked`; absent from a node whose gate is
+    /// shut, or an older one).
+    pub locked: Option<bool>,
 }
 
 impl Probe {
@@ -125,6 +128,10 @@ pub(crate) fn probe_of_here(
         NodeReach::NotRunning => (Reach::NotRunning, None),
         NodeReach::NotAnswering => (Reach::NotAnswering, None),
     };
+    let locked = match status {
+        Ok(IpcResponse::Status { locked, .. }) => *locked,
+        _ => None,
+    };
     let (pid, listen, last_paths, relay_paths) = match status {
         Ok(IpcResponse::Status {
             pid,
@@ -150,6 +157,7 @@ pub(crate) fn probe_of_here(
         listen,
         last_paths,
         relay_paths,
+        locked,
     }
 }
 
@@ -312,10 +320,14 @@ impl Inner {
         v
     }
 
-    /// Notes a Status: the heartbeat (`status_ok`) when it answered, a node
-    /// this app started that is gone, and a `node` event when what the app
-    /// shows changed.
+    /// Notes a Status: Lock v2 as the node says it (a lock or an unlock
+    /// made elsewhere counts: [`Inner::note_locked`]), the heartbeat
+    /// (`status_ok`) when it answered, a node this app started that is
+    /// gone, and a `node` event when what the app shows changed.
     pub(crate) fn note_probe(&self, p: &Probe, starting: bool) -> Value {
+        if let Some(locked) = p.locked {
+            self.note_locked(locked);
+        }
         {
             let mut mem = lock(&self.node);
             if p.answered() {
@@ -360,9 +372,17 @@ impl Inner {
 
     /// Starts the profile's node unless one answers; the caller holds the
     /// node gate. Refused before the identity exists (`raven-node service`
-    /// would make one itself). Err is the start's own text.
+    /// would make one itself); while Lock v2 holds the profile the
+    /// identity is not loaded for it, its record answers (the node then
+    /// starts as its own rule says). Err is the start's own text.
     fn ensure_node_locked(&self) -> Result<Probe, String> {
-        self.identity().map_err(|e| e.detail)?;
+        if self.locked() {
+            if !self.identity_on_record() {
+                return Err("this profile has no Raven identity yet".into());
+            }
+        } else {
+            self.identity().map_err(|e| e.detail)?;
+        }
         let dir = self.data_dir().map_err(|e| e.detail)?.to_path_buf();
         let before = probe(&dir);
         if before.running() {
@@ -409,6 +429,10 @@ impl Inner {
     /// its own start: the at-rest key is loaded now if this process lacks
     /// it (outside the node gate; profile.rs).
     fn after_node_start(&self) {
+        // Nothing loads while Lock v2 holds the profile.
+        if self.locked() {
+            return;
+        }
         if let Ok(dir) = self.data_dir() {
             if bridge::at_rest_key_missing(dir) {
                 let _ = self.open_as(KeyLoad::Now);
@@ -417,7 +441,17 @@ impl Inner {
     }
 
     pub(crate) fn node_start(&self) -> OpResult {
-        self.identity()?;
+        if !self.locked() {
+            self.identity()?;
+        }
+        // `raven lock` stopped this profile (Lock now v1, PP.15): refused as
+        // locked before anything looks for raven-node, probes for one or
+        // starts one, so every system says the same. The CLI's start refuses
+        // it too, but only after the program was found and no node answered
+        // (on Windows the app could say "not running" instead).
+        if raven_core::privacy::lock_state(self.data_dir()?).locked_by_user {
+            return Err(start_error(bridge::LOCKED_TEXT));
+        }
         let started = {
             let _gate = lock(&self.node_gate);
             self.ensure_node_locked()
@@ -425,22 +459,7 @@ impl Inner {
         self.after_node_start();
         match started {
             Ok(after) => Ok(self.status_value(&after, false)),
-            Err(why) => {
-                let plain = explain::explain_node_start(&why);
-                // `raven lock` stopped it: the app's Locked screen unlocks.
-                let code = if why.trim() == bridge::LOCKED_TEXT {
-                    code::PROFILE_LOCKED
-                } else {
-                    code::NODE_NOT_RUNNING
-                };
-                Err(ApiError::new(
-                    code,
-                    format!("{} {}", plain.headline, plain.next)
-                        .trim()
-                        .to_owned(),
-                    why,
-                ))
-            }
+            Err(why) => Err(start_error(&why)),
         }
     }
 
@@ -600,12 +619,18 @@ impl Inner {
     }
 
     /// `events.poll`: never blocks. Keeps the watcher running (it stops
-    /// after half a minute without a poll).
+    /// after half a minute without a poll; it also sees an unlock made
+    /// elsewhere). While Lock v2 holds the profile: no events and the extra
+    /// field `locked: true` (events.rs).
     pub(crate) fn events_poll(&self, args: &Args) -> OpResult {
         let after = args.opt_u64("after_seq")?.unwrap_or(0);
         self.ensure_watcher();
         let batch = self.events.poll(after);
-        Ok(json!({"seq": batch.seq, "events": batch.events, "reset": batch.reset}))
+        let mut v = json!({"seq": batch.seq, "events": batch.events, "reset": batch.reset});
+        if batch.locked {
+            v["locked"] = true.into();
+        }
+        Ok(v)
     }
 
     fn ensure_watcher(&self) {
@@ -632,9 +657,11 @@ impl Inner {
         };
         let p = probe(dir);
         self.note_probe(&p, false);
+        // An unlock made elsewhere: the identity loads again here.
+        self.reload_after_unlock();
         // The profile as an operation opens it (profile.rs): nothing is read
-        // while it is closed, and a key raven-node's start made necessary is
-        // loaded.
+        // while it is closed (or locked: no identity then), and a key
+        // raven-node's start made necessary is loaded.
         if self.cached_identity().is_some() && self.open().is_ok() {
             let _ = self.refresh(Duration::from_millis(900));
             self.refresh_groups();
@@ -667,6 +694,25 @@ fn watch(me: Weak<Inner>) {
 #[cfg(feature = "embedded-node")]
 fn mail_friend_names(dir: &Path) -> Vec<String> {
     bridge::contact_names(dir, &bridge::mail_asked_keys(dir))
+}
+
+/// A start that did not happen, in the user's words: `raven lock` stopped
+/// it (PROFILE_LOCKED: the app's Locked screen unlocks), else
+/// NODE_NOT_RUNNING; the start's own text is the detail.
+fn start_error(why: &str) -> ApiError {
+    let plain = explain::explain_node_start(why);
+    let code = if why.trim() == bridge::LOCKED_TEXT {
+        code::PROFILE_LOCKED
+    } else {
+        code::NODE_NOT_RUNNING
+    };
+    ApiError::new(
+        code,
+        format!("{} {}", plain.headline, plain.next)
+            .trim()
+            .to_owned(),
+        why,
+    )
 }
 
 /// The answer of a lifecycle op the program's node does not have (it runs

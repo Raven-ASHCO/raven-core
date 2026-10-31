@@ -1,6 +1,6 @@
 //! Every way to reach friends (desktop/api/NETWORK_PARITY.md): `network.*`,
 //! `contacts.routes` / `contacts.set_routes`, `security.status`, `lock.*`
-//! and `updates.status`.
+//! (Lock v2 and the Raven passphrase) and `updates.status`.
 //!
 //! The settings are the CLI's own commands (crates/ash, through the engine
 //! bridge), on the same node_policy.json the CLI reads; the states are the
@@ -15,10 +15,11 @@ use ash_engine::engine as bridge;
 use raven_core::ipc::{IpcRequest, IpcResponse, P2pStatusInfo};
 use raven_core::node_policy::NodePolicy;
 use raven_core::outbox::QueueReach;
+use raven_core::raven_passphrase::{self, Offer};
 use raven_core::security_gate::{self, SecGate};
 use serde_json::{json, Value};
 
-use crate::engine::{build_kind, Inner};
+use crate::engine::{build_kind, locked_error, Inner};
 use crate::envelope::{code, ApiError, Args, OpResult};
 use crate::node::PROBE_TIMEOUT;
 
@@ -1932,9 +1933,20 @@ impl Inner {
 
 /// The CLI command Lock now is without Lock v2.
 const LOCK_CLI: &str = "raven lock";
+/// The CLI command for the Raven passphrase.
+const PASSPHRASE_CLI: &str = "raven passphrase";
+/// What a change of the passphrase says when raven-node stayed locked
+/// after it (the CLI says `raven unlock`).
+const STAYS_LOCKED: &str = "Raven stays locked. Unlock it to continue.";
+
+/// Lock v2's gate (`LOCAL_PROTECTION`) in this build: the engine follows a
+/// lock only while it is live ([`Inner::note_locked`]).
+pub(crate) fn lock_v2_live() -> bool {
+    security_gate::live(SecGate::LocalProtection)
+}
 
 impl Inner {
-    /// `lock.state`.
+    /// `lock.state`. What the node says is noted ([`Inner::note_locked`]).
     pub(crate) fn lock_state(&self) -> OpResult {
         let dir = self.data_dir()?.to_path_buf();
         let g = gate("lock_v2");
@@ -1943,11 +1955,16 @@ impl Inner {
         } else {
             None
         };
+        if let Some(locked) = node {
+            self.note_locked(locked);
+        }
         let mut v = json!({
             "available": g.live,
             "lab": g.lab(),
             "supported": node.is_some(),
-            "locked": node.unwrap_or(false),
+            // The node's lock, or this engine's (a passphrase profile whose
+            // vault this process cannot open yet).
+            "locked": node.unwrap_or(false) || self.locked(),
         });
         if let Some(has) = bridge::has_passphrase(&dir) {
             v["has_passphrase"] = has.into();
@@ -1955,7 +1972,8 @@ impl Inner {
         Ok(v)
     }
 
-    /// `lock.now`: Lock v2 (raven-node keeps running and forgets its keys).
+    /// `lock.now`: Lock v2 (raven-node keeps running and forgets its keys;
+    /// so does this engine, and it queues no event until the unlock).
     pub(crate) fn lock_now(&self) -> OpResult {
         let dir = self.data_dir()?.to_path_buf();
         if !gate("lock_v2").live {
@@ -1971,7 +1989,10 @@ impl Inner {
             ));
         }
         match bridge::lock_now(&dir) {
-            Ok(true) => self.lock_state(),
+            Ok(true) => {
+                self.note_locked(true);
+                self.lock_state()
+            }
             Ok(false) => Err(crate::engine::not_in_the_app("lock.now", LOCK_CLI)),
             Err(e) => Err(ApiError::new(
                 code::NODE_NOT_RUNNING,
@@ -1982,15 +2003,25 @@ impl Inner {
     }
 
     /// `lock.unlock {passphrase?}`: Lock v2's unlock (the passphrase only
-    /// goes to raven-node, in a field that is never logged).
+    /// goes to raven-node, in a field that is never logged, and is wiped
+    /// here once sent). The identity loads again at once.
     pub(crate) fn lock_unlock(&self, args: &Args) -> OpResult {
         let dir = self.data_dir()?.to_path_buf();
         if !gate("lock_v2").live {
             return Err(crate::engine::not_in_the_app("lock.unlock", "raven unlock"));
         }
-        let pass = args.opt_str("passphrase")?.map(|p| p.as_bytes().to_vec());
-        match bridge::unlock(&dir, pass.as_deref()) {
+        let pass = secret_arg(args, "passphrase")?;
+        match bridge::unlock(&dir, pass.as_deref().map(|p| &p[..])) {
             bridge::Unlocked::Opened(lines) => {
+                // A Raven passphrase profile whose raven-node runs in a
+                // process of its own: this engine opens the vault in its
+                // own process too (an embedded node's check cached the key
+                // in this one), or nothing loads here.
+                if self.vault_key_missing() {
+                    open_vault_here(&dir, pass.as_deref().map(|p| &p[..]))?;
+                }
+                self.note_locked(false);
+                self.reload_after_unlock();
                 let mut v = self.lock_state()?;
                 v["note"] = plain_lines(lines).join(" ").into();
                 Ok(v)
@@ -2004,6 +2035,218 @@ impl Inner {
                 m,
             )),
         }
+    }
+
+    /// `lock.passphrase_state`: what the Raven passphrase offers this
+    /// profile (`raven passphrase` with no op), read-only; it answers while
+    /// the gate is shut too (`available: false`, `offer: "none"`).
+    pub(crate) fn lock_passphrase_state(&self) -> OpResult {
+        let dir = self.data_dir()?.to_path_buf();
+        let g = gate("lock_v2");
+        let view = bridge::passphrase_view(&dir);
+        let mut v = json!({
+            "available": g.live,
+            "lab": g.lab(),
+            "offer": offer_word(&view.offer),
+            "unfinished": view.unfinished && view.offer == Offer::ChangeOrRemove,
+            "lines": passphrase_lines(&view),
+        });
+        if let Offer::No(why) = view.offer {
+            v["why"] = why_word(why).into();
+        }
+        if let Some(has) = bridge::has_passphrase(&dir) {
+            v["has_passphrase"] = has.into();
+        }
+        Ok(v)
+    }
+
+    /// `lock.set_passphrase {new, old?}`: sets a Raven passphrase (without
+    /// `old`; this also finishes a switch that stopped halfway, with the
+    /// passphrase it was started with) or changes it from `old` to `new`.
+    /// raven-node is held locked while the keys move and unlocked after
+    /// (`raven passphrase set` / `change`). The passphrases are never
+    /// returned, logged or kept: wiped once used.
+    pub(crate) fn lock_set_passphrase(&self, args: &Args) -> OpResult {
+        const OP: &str = "lock.set_passphrase";
+        if !gate("lock_v2").live {
+            return Err(crate::engine::not_in_the_app(OP, PASSPHRASE_CLI));
+        }
+        let new = secret_arg(args, "new")?
+            .ok_or_else(|| ApiError::bad_request(format!("{OP}: \"new\" is missing")))?;
+        let old = secret_arg(args, "old")?;
+        let change = if old.is_some() {
+            bridge::PassphraseChange::Change
+        } else {
+            bridge::PassphraseChange::Set
+        };
+        self.change_passphrase(OP, change, old.as_deref().map(|p| &p[..]), Some(&new[..]))
+    }
+
+    /// `lock.remove_passphrase {old}`: removes the Raven passphrase (`old`
+    /// opens the vault): the keys move back into the login keychain
+    /// (`raven passphrase remove`; macOS only).
+    pub(crate) fn lock_remove_passphrase(&self, args: &Args) -> OpResult {
+        const OP: &str = "lock.remove_passphrase";
+        if !gate("lock_v2").live {
+            return Err(crate::engine::not_in_the_app(OP, PASSPHRASE_CLI));
+        }
+        let old = secret_arg(args, "old")?
+            .ok_or_else(|| ApiError::bad_request(format!("{OP}: \"old\" is missing")))?;
+        self.change_passphrase(OP, bridge::PassphraseChange::Remove, Some(&old[..]), None)
+    }
+
+    /// One change of the Raven passphrase: `PassphraseState` with `note`
+    /// (what it did), or the refusal. Lock v2 as the node is after it is
+    /// noted (a node that could not be unlocked again stays locked).
+    fn change_passphrase(
+        &self,
+        op: &str,
+        change: bridge::PassphraseChange,
+        old: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> OpResult {
+        let dir = self.data_dir()?.to_path_buf();
+        let done = bridge::change_passphrase(&dir, change, old, new);
+        if let Some(locked) = bridge::lock_v2_state(&dir) {
+            self.note_locked(locked);
+        }
+        let lines = done.map_err(|refused| passphrase_error(op, refused))?;
+        let stayed = lines.iter().any(|l| l == bridge::PASSPHRASE_STAYS_LOCKED);
+        let mut lines = plain_lines(
+            lines
+                .into_iter()
+                .filter(|l| l != bridge::PASSPHRASE_STAYS_LOCKED)
+                .collect(),
+        );
+        if stayed {
+            lines.push(STAYS_LOCKED.to_owned());
+        }
+        let mut v = self.lock_passphrase_state()?;
+        v["note"] = lines.join(" ").into();
+        Ok(v)
+    }
+}
+
+/// `lock.unlock`'s second half for a raven-node of its own: `passphrase`
+/// checked against the profile's vault in this process (Argon2id), which
+/// caches its key here. None came: PASSPHRASE_NEEDED; a wrong one:
+/// PASSPHRASE_WRONG (the node, unlocked, never saw it checked: an unlocked
+/// node answers an unlock at once).
+fn open_vault_here(dir: &Path, passphrase: Option<&[u8]>) -> Result<(), ApiError> {
+    use raven_core::keystore_vault::{Vault, VaultError};
+    let Some(passphrase) = passphrase else {
+        return Err(ApiError::of(
+            code::PASSPHRASE_NEEDED,
+            "lock.unlock: this profile's keys open in the app only with its Raven passphrase",
+        ));
+    };
+    match Vault::for_data_dir(dir).verify_passphrase(passphrase) {
+        Ok(()) => Ok(()),
+        Err(VaultError::WrongPassphraseOrTampered) => Err(ApiError::of(
+            code::PASSPHRASE_WRONG,
+            "lock.unlock: the passphrase does not open this profile's vault",
+        )),
+        Err(e) => Err(ApiError::new(
+            code::KEYCHAIN_DENIED,
+            "Raven couldn't open your keys on this computer. Open Details.",
+            format!("lock.unlock: the vault: {e}"),
+        )),
+    }
+}
+
+/// A passphrase argument (`passphrase`, `old`, `new`), wiped when dropped.
+/// Its value is never part of an error.
+fn secret_arg(args: &Args, key: &str) -> Result<Option<raven_core::ipc::SecretBytes>, ApiError> {
+    Ok(args
+        .opt_str(key)?
+        .map(|p| raven_core::ipc::SecretBytes::new(p.as_bytes().to_vec())))
+}
+
+/// `PassphraseState.offer`.
+fn offer_word(offer: &Offer) -> &'static str {
+    match offer {
+        Offer::Set => "set",
+        Offer::ChangeOrRemove => "change_or_remove",
+        Offer::Change => "change",
+        Offer::No(_) => "none",
+    }
+}
+
+/// `PassphraseState.why` (with `offer: "none"`): raven-core's reason as a
+/// word.
+fn why_word(why: &str) -> &'static str {
+    if why == raven_passphrase::NOT_IN_THIS_VERSION {
+        "not_in_this_version"
+    } else if why == raven_passphrase::KEYRING_PROFILE {
+        "keyring_profile"
+    } else if why == raven_passphrase::LAB_FILES {
+        "lab_files"
+    } else {
+        // NOT_ON_WINDOWS, NOT_ON_IOS.
+        "not_on_this_system"
+    }
+}
+
+/// What the profile has and can do, in the app's words (`raven passphrase`
+/// says the same with its commands).
+fn passphrase_lines(view: &bridge::PassphraseView) -> Vec<String> {
+    let has =
+        "This profile has a Raven passphrase: Raven's keys on this computer open only with it.";
+    let mut lines: Vec<String> = match &view.offer {
+        Offer::Set => vec![
+            "This profile has no Raven passphrase.".into(),
+            raven_core::privacy::keys_open_to_login_text().into(),
+        ],
+        Offer::ChangeOrRemove | Offer::Change => vec![has.into()],
+        Offer::No(why) => vec![(*why).into()],
+    };
+    if view.unfinished && view.offer == Offer::ChangeOrRemove {
+        lines.push(
+            "Moving your Raven keys stopped halfway. Set the passphrase you chose again, or \
+             remove it, to finish."
+                .into(),
+        );
+    }
+    lines
+}
+
+/// A change of the passphrase that did not happen, as an API error (never
+/// a passphrase in it).
+fn passphrase_error(op: &str, refused: bridge::PassphraseRefused) -> ApiError {
+    use bridge::PassphraseRefused as R;
+    match refused {
+        R::NotOffered(why) if why == raven_passphrase::NOT_IN_THIS_VERSION => {
+            ApiError::new(code::NOT_AVAILABLE_YET, why.clone(), format!("{op}: {why}"))
+        }
+        R::NotOffered(why) => ApiError::new(
+            code::NOT_ON_THIS_SYSTEM,
+            why.clone(),
+            format!("{op}: not on this system or profile: {why}"),
+        ),
+        R::NotNow(why) => ApiError::new(code::BAD_REQUEST, why.clone(), format!("{op}: {why}")),
+        R::Missing(what) => ApiError::bad_request(format!("{op}: {what} is missing")),
+        R::Rules(why) => ApiError::new(
+            code::BAD_REQUEST,
+            format!("Choose another passphrase. {why}"),
+            format!("{op}: the new passphrase breaks a rule: {why}"),
+        ),
+        R::Wrong(why) => ApiError::of(code::PASSPHRASE_WRONG, format!("{op}: {why}")),
+        R::NodeLocked => {
+            let mut e = locked_error(op);
+            e.message = "Raven is locked. Unlock it first, then change your passphrase.".into();
+            e
+        }
+        R::NodeUnheld(why) => ApiError::new(
+            code::NOT_AVAILABLE_YET,
+            "Raven's background program can't hold your keys still while they move. Stop it, \
+             then try again. Nothing was changed.",
+            format!("{op}: {why}"),
+        ),
+        R::Failed(why) => ApiError::new(
+            code::INTERNAL,
+            "Raven couldn't change your Raven passphrase. Open Details, then try again.",
+            format!("{op}: {why}"),
+        ),
     }
 }
 

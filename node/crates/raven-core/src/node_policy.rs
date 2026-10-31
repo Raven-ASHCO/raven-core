@@ -2847,10 +2847,13 @@ mod tests {
     /// debug build follows exactly the variables.
     #[test]
     fn random_port_lab_switch_is_inert_in_release() {
+        let switch = std::env::var(crate::security_gate::LAB_RANDOM_PORT).ok();
         let lab = cfg!(debug_assertions)
             && std::env::var("RAVEN_LAB_TEST_A").as_deref() == Ok("1")
-            && std::env::var(crate::security_gate::LAB_RANDOM_PORT).as_deref() == Ok("1");
-        let want = crate::security_gate::LISTEN_PORT_RANDOM_PRODUCTION_ENABLED || lab;
+            && switch.as_deref() == Some("1");
+        // A debug build's "0" closes the gate even once the const is set.
+        let closed = cfg!(debug_assertions) && switch.as_deref() == Some("0");
+        let want = (crate::security_gate::LISTEN_PORT_RANDOM_PRODUCTION_ENABLED && !closed) || lab;
         assert_eq!(live(SecGate::RandomPort), want);
         let dir = tempdir().unwrap();
         let picked = pick_lan_port_for_new_profile(dir.path());

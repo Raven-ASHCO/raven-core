@@ -877,9 +877,14 @@ mod tests {
             return;
         }
         fn expect(g: SecGate) -> bool {
-            let own = g.production()
-                || (crate::pair_init::lab_test_a_enabled()
-                    && std::env::var(g.lab_switch()).ok().as_deref() == Some("1"));
+            // A set const closes only at exactly "0" (the debug close); one
+            // not set opens only with Lab Test A and exactly "1".
+            let switch = std::env::var(g.lab_switch()).ok();
+            let own = if g.production() {
+                switch.as_deref() != Some("0")
+            } else {
+                crate::pair_init::lab_test_a_enabled() && switch.as_deref() == Some("1")
+            };
             own && match g.requires() {
                 Requires::Nothing => true,
                 Requires::Gate(below) => expect(below),

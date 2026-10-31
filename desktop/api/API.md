@@ -70,7 +70,7 @@ changes. Fields marked `?` may be missing.
 | op | args | result |
 |---|---|---|
 | `app.info` | – | `{version, build: "release" \| "dev", platform, api: 1}` |
-| `profile.state` | – | `{state: "new" \| "ready" \| "locked" \| "unreadable", reason?, detail?}` (`locked`: `raven lock` stopped Raven; `unreadable` also while an erase or key change is unfinished, or while the keychain does not give the key of an encrypted profile) |
+| `profile.state` | – | `{state: "new" \| "ready" \| "locked" \| "unreadable", reason?, detail?, lock_v2?: true}` (`locked`: `raven lock` stopped Raven, or with `lock_v2: true` Lock v2 holds it: `lock.unlock` opens it, see "Security, Lock and updates"; `unreadable` also while an erase or key change is unfinished, or while the keychain does not give the key of an encrypted profile) |
 | `identity.create` | `{display_name?}` | `{address, words: [10], old_code, note?}` (`note`: a problem that did not stop setup, e.g. the first prekey) |
 | `identity.me` | – | `{display_name?, address, words: [10], old_code, card, invite}` |
 | `card.make` | `{include_address: bool}` | `{card, invite, address_included?: "ip:port", address_missing?: "not_receiving" \| "this_computer_only" \| "no_network"}` |
@@ -104,7 +104,7 @@ changes. Fields marked `?` may be missing.
 | `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}` (embedded node only: the kind of network the device uses, from the iOS app's `NWPathMonitor`; with `tor_wifi_only` on, Tor stays off on `cellular`) |
 | `settings.get` | – | `Settings` |
 | `settings.set` | `{...partial Settings}` | `Settings` |
-| `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool}` (see Events) |
+| `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool, locked?: true}` (see Events) |
 | `privacy.state` | – | `{available: bool, encrypted: bool, locked: bool}` (`encrypted`: the privacy pack encrypts this profile; `locked`: `raven lock` stopped Raven; `available` is false until the apps offer the privacy actions, which they then show with the Preview label) |
 | `privacy.lock` / `privacy.unlock` | – | `{state}` (`unlock` clears a `raven lock` and answers as `profile.state`) |
 | `privacy.encrypt` | – | `{state}` (encrypts everything Raven stores on this computer) |
@@ -118,6 +118,9 @@ changes. Fields marked `?` may be missing.
 | `lock.state` | – | `LockState` |
 | `lock.now` | – | `LockState` (Lock v2: raven-node keeps running and forgets its keys) |
 | `lock.unlock` | `{passphrase?}` | `LockState` + `{note?}` |
+| `lock.passphrase_state` | – | `PassphraseState` (`raven passphrase`, read-only) |
+| `lock.set_passphrase` | `{new, old?}` | `PassphraseState` + `{note}` (without `old`: sets one, `raven passphrase set`; with `old`: changes it, `raven passphrase change`) |
+| `lock.remove_passphrase` | `{old}` | `PassphraseState` + `{note}` (`raven passphrase remove`: the keys go back into the login keychain) |
 | `updates.status` | – | `UpdatesStatus` (`raven update status`, read-only; installing stays in the CLI) |
 | `groups.list` | – | `{available: bool, groups: [Group]}` (see Groups) |
 | `groups.get` | `{group}` | `{group: Group, members: [GroupMember]}` |
@@ -265,7 +268,9 @@ the privacy pack encrypts the profile.
 
 ### Node
 
-- `node.start` is refused before the identity exists. raven-node listens on the network while the
+- `node.start` is refused before the identity exists, and with `PROFILE_LOCKED` while `raven lock`
+  holds the profile (Lock now v1; on every system, before raven-node is looked for or probed).
+  raven-node listens on the network while the
   setting `receive` is on, where the CLI would start it for this profile (`RAVEN_SERVICE_LAN_LISTEN`
   when set, else every interface on the profile's own port: the one it picked when the random
   listen port is live, else `7420`), and on `127.0.0.1` (a free port) while it is off.
@@ -441,6 +446,42 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   does not serve it (no node, an older one, the gate shut) both answer `NOT_AVAILABLE_YET` naming
   `raven lock` / `raven unlock`. `updates.status` is `raven update status`; installing stays in the
   CLI (`raven update install`).
+- **While Lock v2 holds the profile** the engine holds no key either. It learns of a lock from
+  `lock.now`, `lock.state`, `profile.state` and the node's own status (the watcher's beat, a
+  `node.*` op), so a lock made elsewhere (`raven lock`, the terminal app, a wake from sleep) counts
+  too, and the same for an unlock. At the lock it lets go of the identity, the keys this process
+  loaded (a sealed profile's at-rest key, a vault's derived key), its cached history, contacts and
+  read markers, and every event not read yet. Until the unlock: `profile.state` is `locked` with
+  `lock_v2: true` and loads nothing; `events.poll` answers `{seq, events: [], reset: false, locked:
+  true}` and nothing is queued (no message text waits in the engine); `lock.state`, `lock.now`,
+  `lock.unlock`, `lock.passphrase_state`, `node.status`, `node.start`, `node.stop`, `node.pause` and
+  `node.resume` run (a node started then follows raven-node's rule: a passphrase profile's starts
+  locked, an embedded node stays locked across a pause, a keychain profile's new raven-node process
+  starts unlocked); every other op that reads the profile, `lock.set_passphrase` and
+  `lock.remove_passphrase` included, is `PROFILE_LOCKED`. After the unlock the identity loads again
+  and the first `events.poll` says `reset: true`: reload what the window shows. A profile with a
+  Raven passphrase whose keys this engine's process cannot open yet (no passphrase file, and no
+  unlock with the passphrase in this process) counts as locked the same way, whatever raven-node
+  says: `lock.unlock {passphrase}` opens it, and for a raven-node program it also checks the
+  passphrase against the vault in the engine's own process (`PASSPHRASE_NEEDED` without one,
+  `PASSPHRASE_WRONG` for a wrong one). With the gate shut (every release build so far) none of this
+  happens.
+- **The Raven passphrase.** `lock.passphrase_state` says what `raven passphrase` offers this
+  profile (it answers with the gate shut too: `available: false`, `offer: "none"`).
+  `lock.set_passphrase {new}` sets one (macOS: the keys move from the login keychain into a
+  passphrase vault; it also finishes a switch that stopped halfway, with the passphrase that switch
+  was started with), `lock.set_passphrase {new, old}` changes it (macOS, and GNU/Linux vault
+  profiles), `lock.remove_passphrase {old}` removes it (macOS: the keys go back into the login
+  keychain). raven-node is held locked while the keys move and unlocked after; a node that already
+  runs locked is refused (`PROFILE_LOCKED`: unlock first). The passphrases go in these fields only,
+  are checked by raven-core's own rules (the CLI's), are never returned, logged or kept, and are
+  wiped once used. Refusals: the gate shut is `NOT_AVAILABLE_YET` naming `raven passphrase` (as
+  `lock.now` names `raven lock`); a system or profile where a Raven passphrase does not apply
+  (Windows, iPhone and iPad, a desktop-keyring profile, the lab's file backends) is
+  `NOT_ON_THIS_SYSTEM` with raven-core's words; a wrong `old` is `PASSPHRASE_WRONG`; a `new` that
+  breaks a rule, or an op this profile does not offer now (a set where one is set, a remove without
+  one), is `BAD_REQUEST` with the reason in `message`. A forgotten Raven passphrase cannot be
+  recovered: the apps say so before a set.
 
 ### Types
 
@@ -581,6 +622,17 @@ SecurityStatus { available, lab, kept: "off" | "unsealed" | "live", counted,
                      link_tag_failures_24h, alerts_open } }
 LockState { available (this build has Lock v2), lab, supported (the running raven-node serves it),
             locked, has_passphrase? }
+            locked: raven-node is locked, or this engine is (a passphrase profile whose keys it
+            cannot open yet: "While Lock v2 holds the profile").
+PassphraseState { available (this build has Lock v2), lab,
+            offer: "set" | "change_or_remove" | "change" | "none",
+            why?: "not_in_this_version" | "not_on_this_system" | "keyring_profile" | "lab_files",
+            unfinished: bool, has_passphrase?, lines: [..] }
+            offer: what this profile can do (change: a GNU/Linux vault profile, which keeps its
+            passphrase); why: with offer none. unfinished: a switch of the keys to or from the vault
+            stopped halfway (offer change_or_remove; a set with the passphrase it was started with,
+            or a remove, finishes it). lines: what the profile has and can do, in plain words.
+            Never a passphrase.
 UpdatesStatus { available, bundles, from_friends, lab, lines: [..], summary?, offer?: [..],
             install: "cli_only", install_text }
 Group     { id, name, short_id, status: "active" | "left" | "removed", admin: bool (you are the admin),
@@ -607,7 +659,9 @@ other). **`reset: true`** means events after `after_seq` were lost (dropped for 
 from before this engine started): reload what the window shows (contacts, the open chat, node status)
 instead of trusting the events, then keep polling from the returned `seq`. The engine watches
 raven-node from the first poll on (about once a second) and stops watching after 30 s without a poll;
-its first look only notes what is there, so old messages do not arrive as `incoming`.
+its first look only notes what is there, so old messages do not arrive as `incoming`. While Lock v2
+holds the profile the queue is empty and nothing is added: a poll answers no events and `locked:
+true`, and the first poll after the unlock says `reset: true` ("Security, Lock and updates").
 
 ```text
 Event     { seq, kind, at_ms, ... } kinds:
@@ -644,8 +698,10 @@ A `receipt` comes only after Raven verified the friend's signed receipt, and alw
 `NOT_A_CONTACT`, `CONTACT_BLOCKED`, `NAME_CLASH`, `CARD_INVALID`, `WORDS_INCOMPLETE`, `MESSAGE_TOO_LONG`,
 `NOT_AVAILABLE_YET`, `BAD_REQUEST` (unknown op or bad arguments), `INTERNAL`, and for the network ops
 `CONSENT_NEEDED` (`network.set` needs `agreed: true`), `PASSPHRASE_WRONG`, `PASSPHRASE_NEEDED` and
-`UNLOCK_WAIT` (`lock.unlock`). Each comes with a plain-English `message` that names one next step;
-the technical text goes in `detail`.
+`UNLOCK_WAIT` (`lock.unlock`; `PASSPHRASE_WRONG` also for a wrong `old` of the passphrase ops), and
+`NOT_ON_THIS_SYSTEM` (`lock.set_passphrase` / `lock.remove_passphrase` where a Raven passphrase does
+not apply). Each comes with a plain-English `message` that names one next step; the technical text
+goes in `detail`.
 
 Groups add `GROUP_NOT_FOUND`, `GROUP_NOT_ADMIN` (only the admin adds and removes),
 `GROUP_NOT_MEMBER` (you left or were removed), `GROUP_TOO_LARGE` (more than 16 members),

@@ -37,6 +37,9 @@ pub mod code {
     pub const PASSPHRASE_NEEDED: &str = "PASSPHRASE_NEEDED";
     /// `lock.unlock`: too many wrong passphrases; wait, then try again.
     pub const UNLOCK_WAIT: &str = "UNLOCK_WAIT";
+    /// `lock.set_passphrase` / `lock.remove_passphrase`: not on this system
+    /// or for this profile (Windows, iPhone, a desktop-keyring profile).
+    pub const NOT_ON_THIS_SYSTEM: &str = "NOT_ON_THIS_SYSTEM";
 }
 
 /// The default sentence for each code (desktop/design/strings.en.json words
@@ -81,6 +84,7 @@ pub fn default_message(code: &str) -> &'static str {
         code::PASSPHRASE_WRONG => "That isn't your Raven passphrase. Try again.",
         code::PASSPHRASE_NEEDED => "Type your Raven passphrase to unlock.",
         code::UNLOCK_WAIT => "Too many wrong passphrases. Wait a little, then try again.",
+        code::NOT_ON_THIS_SYSTEM => "This isn't available on this system. Nothing was changed.",
         code::BAD_REQUEST => {
             "Raven didn't understand what this app asked. Update Raven; if it keeps happening, \
              open Details."
@@ -281,6 +285,7 @@ mod tests {
             code::PASSPHRASE_WRONG,
             code::PASSPHRASE_NEEDED,
             code::UNLOCK_WAIT,
+            code::NOT_ON_THIS_SYSTEM,
         ] {
             let m = default_message(c);
             assert!(m.ends_with('.') || m.ends_with(')'), "{c}: {m}");

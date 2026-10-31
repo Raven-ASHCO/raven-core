@@ -291,6 +291,35 @@ fn held_ways_are_preview_and_refused_without_a_lab_switch() {
     let lock = p.ok("lock.state", json!({}));
     assert_eq!(lock["available"], false, "{lock}");
     assert_eq!(lock["locked"], false, "{lock}");
+    // The Raven passphrase: its state answers, its changes are refused as
+    // lock.now is, and no passphrase comes back in any of it.
+    let pass = p.ok("lock.passphrase_state", json!({}));
+    assert_eq!(pass["available"], false, "{pass}");
+    assert_eq!(pass["offer"], "none", "{pass}");
+    assert_eq!(pass["why"], "not_in_this_version", "{pass}");
+    for (op, args) in [
+        (
+            "lock.set_passphrase",
+            json!({"new": "a long new passphrase"}),
+        ),
+        (
+            "lock.set_passphrase",
+            json!({"new": "a long new passphrase", "old": "the old passphrase"}),
+        ),
+        (
+            "lock.remove_passphrase",
+            json!({"old": "the old passphrase"}),
+        ),
+    ] {
+        let r = common::raw(&p.client, op, args);
+        assert_eq!(r["error"]["code"], "NOT_AVAILABLE_YET", "{op}: {r}");
+        let text = common::all_text(&r);
+        assert!(!text.contains("a long new") && !text.contains("the old passphrase"));
+        assert!(text.contains("raven passphrase"), "{op}: {r}");
+    }
+    // Nothing is locked: events carry no `locked`.
+    let poll = p.ok("events.poll", json!({"after_seq": 0}));
+    assert!(poll.get("locked").is_none(), "{poll}");
     let sec = p.ok("security.status", json!({}));
     assert_eq!(sec["available"], false, "{sec}");
     assert_eq!(sec["kept"], "off", "{sec}");

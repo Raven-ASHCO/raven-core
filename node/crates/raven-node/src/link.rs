@@ -52,8 +52,9 @@ pub(crate) fn padding_live() -> bool {
 
 /// Link padding open (`Some(true)`) or shut for the current thread until
 /// dropped (`SecGate::LinkPadding`'s lab override; a `#[tokio::test]` runs
-/// both ends of a scripted link on that thread). A release build ignores it:
-/// a caller checks [`padding_live`] after setting it.
+/// both ends of a scripted link on that thread). Shut stays shut in a debug
+/// build once the const is set too (SecGate's debug close). A release build
+/// ignores it: a caller checks [`padding_live`] after setting it.
 #[cfg(test)]
 pub(crate) struct PaddingForTest;
 

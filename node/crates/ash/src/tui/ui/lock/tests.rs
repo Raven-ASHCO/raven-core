@@ -135,8 +135,9 @@ fn a_keychain_profile_s_locked_says_what_it_does_not_protect() {
     assert!(!locked_view(&app).passphrase);
     let text = testkit::render_text(&app);
     assert!(text.contains(bridge::LOCKED_SCREEN), "{text}");
+    // The Windows text is longer and wraps before "them" at 80x24.
     assert!(
-        text.contains("Anyone who can log in as you can open them"),
+        text.contains("Anyone who can log in as you can open"),
         "{text}"
     );
     assert!(!text.contains("Type your Raven passphrase"), "{text}");

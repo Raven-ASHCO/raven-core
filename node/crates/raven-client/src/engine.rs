@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use ash_engine::engine::{self as bridge, ContactView, NodeSlot, ReadMarks};
@@ -80,6 +80,20 @@ pub(crate) struct Caches {
     marks: Option<(MarkStamps, Arc<ReadMarks>)>,
 }
 
+/// What the engine holds of the profile's keys, and Lock v2 as it last
+/// learned it ([`Inner::note_locked`]).
+#[derive(Default)]
+struct Keys {
+    /// The identity once loaded, while Lock v2 does not hold the profile.
+    identity: Option<Arc<Identity>>,
+    /// Lock v2 holds the profile: no key is loaded or kept, and only the
+    /// lock's own ops and the node's lifecycle run ([`runs_while_locked`]).
+    locked: bool,
+    /// An unlock came and the identity was not loaded again yet (the next
+    /// operation that needs it, or the watcher's next beat, loads it).
+    reload: bool,
+}
+
 struct SettingsState {
     value: Settings,
     /// Read from the profile (or found missing) once.
@@ -93,7 +107,9 @@ pub(crate) struct Inner {
     /// What opening the profile did (profile.rs): taken before the profile
     /// is read, never under a data-dir lock.
     pub(crate) open_state: Mutex<OpenState>,
-    identity: OnceLock<Arc<Identity>>,
+    /// The identity, and Lock v2's hold (never one without the other's
+    /// mutex: a lock that comes during a load drops what the load found).
+    keys: Mutex<Keys>,
     pub(crate) events: EventHub,
     /// Every change to contacts.json the engine makes goes through it.
     pub(crate) contacts_lock: Mutex<()>,
@@ -129,7 +145,7 @@ impl Inner {
             me: me.clone(),
             data_dir,
             open_state: Mutex::new(OpenState::default()),
-            identity: OnceLock::new(),
+            keys: Mutex::new(Keys::default()),
             events: EventHub::new(),
             contacts_lock: Mutex::new(()),
             node_gate: Mutex::new(()),
@@ -247,8 +263,26 @@ impl Inner {
             "groups.history" => |me, args| me.groups_history(args),
             "groups.send" => |me, args| me.groups_send(args),
             "groups.mark_read" => |me, args| me.groups_mark_read(args),
+            "lock.passphrase_state" => |me, _| me.lock_passphrase_state(),
+            "lock.set_passphrase" => |me, args| me.lock_set_passphrase(args),
+            "lock.remove_passphrase" => |me, args| me.lock_remove_passphrase(args),
             other => return Err(ApiError::bad_request(format!("unknown op {other:?}"))),
         };
+        // A Raven passphrase profile whose keys this process cannot open
+        // yet counts as locked (Lock v2) from the first op on.
+        if !self.locked() && self.vault_key_missing() {
+            self.note_locked(true);
+        }
+        // Lock v2 holds the profile: only the lock's own ops and the node's
+        // lifecycle run, and the profile is not opened for them (opening
+        // loads keys); the cheap refusals still apply.
+        if self.locked() {
+            if !runs_while_locked(op) {
+                return Err(locked_error(op));
+            }
+            self.refuse_closed()?;
+            return run(self, args);
+        }
         // Opened as the CLI opens it before every command, and refused as
         // it refuses (profile.rs).
         self.open()?;
@@ -268,20 +302,39 @@ impl Inner {
         })
     }
 
-    /// The identity once loaded (never asked for again).
+    /// The identity once loaded (asked for again only after a Lock v2
+    /// unlock; none while locked).
     pub(crate) fn cached_identity(&self) -> Option<Arc<Identity>> {
-        self.identity.get().cloned()
+        lock(&self.keys).identity.clone()
     }
 
     /// The profile's identity: NOT_INITIALIZED before there is one,
-    /// KEYCHAIN_DENIED or PROFILE_UNREADABLE when it can't be read.
+    /// KEYCHAIN_DENIED or PROFILE_UNREADABLE when it can't be read,
+    /// PROFILE_LOCKED while Lock v2 holds the profile (nothing is loaded
+    /// then).
     pub(crate) fn identity(&self) -> Result<Arc<Identity>, ApiError> {
-        if let Some(id) = self.identity.get() {
-            return Ok(Arc::clone(id));
+        {
+            let keys = lock(&self.keys);
+            if keys.locked {
+                return Err(locked_error("identity"));
+            }
+            if let Some(id) = &keys.identity {
+                return Ok(Arc::clone(id));
+            }
         }
         let dir = self.data_dir()?;
         match bridge::try_load_identity(dir) {
-            Ok(Some(id)) => Ok(self.keep_identity(id)),
+            Ok(Some(id)) => {
+                let mut keys = lock(&self.keys);
+                // A lock that came during the load: what it found goes.
+                if keys.locked {
+                    return Err(locked_error("identity"));
+                }
+                keys.reload = false;
+                Ok(Arc::clone(
+                    keys.identity.get_or_insert_with(|| Arc::new(id)),
+                ))
+            }
             Ok(None) => Err(ApiError::of(
                 code::NOT_INITIALIZED,
                 "this profile has no Raven identity yet",
@@ -290,15 +343,23 @@ impl Inner {
         }
     }
 
+    /// Keeps `id` as the profile's identity (the first one kept stays),
+    /// unless Lock v2 holds the profile: the caller still gets it then, and
+    /// nothing is kept.
     pub(crate) fn keep_identity(&self, id: Identity) -> Arc<Identity> {
-        Arc::clone(self.identity.get_or_init(|| Arc::new(id)))
+        let mut keys = lock(&self.keys);
+        if keys.locked {
+            return Arc::new(id);
+        }
+        keys.reload = false;
+        Arc::clone(keys.identity.get_or_insert_with(|| Arc::new(id)))
     }
 
     /// The profile has an identity: loaded in this engine, or on record
     /// (raven-core's marker files; no keystore call). Settings are written
     /// into the profile only then.
     pub(crate) fn identity_on_record(&self) -> bool {
-        self.identity.get().is_some()
+        self.cached_identity().is_some()
             || self.data_dir().is_ok_and(|dir| {
                 raven_core::identity_store::identity_recorded(dir).unwrap_or(false)
             })
@@ -307,8 +368,8 @@ impl Inner {
     fn identity_create(&self, args: &Args) -> OpResult {
         let name = args.opt_str("display_name")?.and_then(settings::clean_name);
         let dir = self.data_dir()?.to_path_buf();
-        let id = match self.identity.get() {
-            Some(id) => Arc::clone(id),
+        let id = match self.cached_identity() {
+            Some(id) => id,
             None => match bridge::try_load_identity(&dir) {
                 Ok(Some(id)) => self.keep_identity(id),
                 // Never offer to create an identity over one that can't be
@@ -366,6 +427,97 @@ impl Inner {
             result["display_name"] = name.into();
         }
         Ok(result)
+    }
+
+    // ── Lock v2: what the engine lets go ────────────────────────────────────
+
+    /// Lock v2 holds the profile, as this engine last learned it.
+    pub(crate) fn locked(&self) -> bool {
+        lock(&self.keys).locked
+    }
+
+    /// Lock v2 as the engine just learned it: from `lock.now`, `lock.unlock`
+    /// or `lock.state`, or from the node's Status (the watcher's beat, a
+    /// node op), so a lock or an unlock made elsewhere (`raven lock`, the
+    /// terminal app, a wake from sleep) counts too. Only while the gate is
+    /// live in this build: a build with it shut never locks here. A lock
+    /// lets go of what this engine holds of the profile's secrets: the
+    /// identity, the at-rest keys and the vault's derived key this process
+    /// loaded, the cached history (message text), contacts, read markers
+    /// and outbox, and every event not read yet; while it holds, no event
+    /// is queued ([`EventHub::set_locked`]). An unlock lets them load again
+    /// at their next use; `events.poll` then says `reset` once. An unlock
+    /// of a node does not unlock this engine while it cannot open the
+    /// profile's vault itself ([`Inner::vault_key_missing`]): `lock.unlock`
+    /// with the passphrase does.
+    pub(crate) fn note_locked(&self, locked: bool) {
+        if !crate::network::lock_v2_live() {
+            return;
+        }
+        let locked = locked || self.vault_key_missing();
+        // All under the keys' mutex (then the queue's and the caches'), so
+        // a lock and an unlock noted at once by two threads end in one
+        // state.
+        let mut keys = lock(&self.keys);
+        let was = keys.locked;
+        if locked == was {
+            return;
+        }
+        keys.locked = locked;
+        keys.reload = !locked;
+        self.events.set_locked(locked);
+        if locked {
+            keys.identity = None;
+            *lock(&self.caches) = Caches::default();
+            if let Ok(dir) = self.data_dir() {
+                raven_core::at_rest::forget_cached_keys(dir);
+                raven_core::keystore_vault::forget_process_key(dir);
+            }
+        }
+    }
+
+    /// A profile with a Raven passphrase whose vault this process cannot
+    /// open by itself now: its derived key is not cached here (an unlock
+    /// with the passphrase caches it: in this process for an embedded node,
+    /// through `lock.unlock` for a raven-node program) and no passphrase
+    /// file is configured (a headless setup reads that by itself). Such a
+    /// profile counts as locked here whatever the node says: nothing could
+    /// load. Only while the gate is live; file reads only, no KDF.
+    pub(crate) fn vault_key_missing(&self) -> bool {
+        if !crate::network::lock_v2_live() {
+            return false;
+        }
+        let Ok(dir) = self.data_dir() else {
+            return false;
+        };
+        let vault = bridge::has_passphrase(dir).unwrap_or(false)
+            || raven_core::raven_passphrase::unfinished(dir).unwrap_or(false);
+        vault
+            && !raven_core::keystore_vault::process_key_held(dir)
+            && !raven_core::keystore_vault::passphrase_file_configured()
+    }
+
+    /// After an unlock the identity (and a sealed profile's at-rest key)
+    /// loads again: at once from `lock.unlock`, and at the watcher's next
+    /// beat when the unlock came from elsewhere. Best effort: a failure is
+    /// said by the next operation that needs them.
+    pub(crate) fn reload_after_unlock(&self) {
+        let due = {
+            let keys = lock(&self.keys);
+            !keys.locked && keys.reload
+        };
+        if due && self.identity().is_ok() {
+            let _ = self.open_as(crate::profile::KeyLoad::Now);
+        }
+    }
+
+    /// Puts something into the caches, unless Lock v2 holds the profile
+    /// (a read that began before the lock keeps nothing past it).
+    fn keep_cached(&self, put: impl FnOnce(&mut Caches)) {
+        let keys = lock(&self.keys);
+        if !keys.locked {
+            put(&mut lock(&self.caches));
+        }
     }
 
     // ── The privacy pack ────────────────────────────────────────────────────
@@ -478,7 +630,7 @@ impl Inner {
                 .map(|h| h.without_group_copies().entries)
                 .map_err(|e| history_error(dir, &e.to_string()))?,
         );
-        lock(&self.caches).history = Some((stamp, Arc::clone(&entries)));
+        self.keep_cached(|c| c.history = Some((stamp, Arc::clone(&entries))));
         Ok(entries)
     }
 
@@ -513,7 +665,7 @@ impl Inner {
                 why,
             )
         })?);
-        lock(&self.caches).contacts = Some((stamp, Arc::clone(&contacts)));
+        self.keep_cached(|c| c.contacts = Some((stamp, Arc::clone(&contacts))));
         Ok(contacts)
     }
 
@@ -530,7 +682,7 @@ impl Inner {
             }
         }
         let mut snap = OutboxSnap::default();
-        if let (Some(_), Ok(dir)) = (self.identity.get(), self.data_dir()) {
+        if let (Some(_), Ok(dir)) = (self.cached_identity(), self.data_dir()) {
             let req = IpcRequest::OutboxList {
                 v: IPC_VERSION,
                 peer_pub_hex: None,
@@ -558,7 +710,7 @@ impl Inner {
             }
         }
         let snap = Arc::new(snap);
-        lock(&self.caches).outbox = Some((Instant::now(), Arc::clone(&snap)));
+        self.keep_cached(|c| c.outbox = Some((Instant::now(), Arc::clone(&snap))));
         snap
     }
 
@@ -582,7 +734,7 @@ impl Inner {
         };
         let saved = cached.unwrap_or_else(|| {
             let marks = Arc::new(bridge::read_marks(dir));
-            lock(&self.caches).marks = Some((stamps, Arc::clone(&marks)));
+            self.keep_cached(|c| c.marks = Some((stamps, Arc::clone(&marks))));
             marks
         });
         let mut marks = (*saved).clone();
@@ -681,6 +833,36 @@ pub(crate) fn copy_holders(dir: &Path) -> HashMap<String, Vec<String>> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// What runs while Lock v2 holds the profile: the lock's own ops (a change
+/// of the Raven passphrase waits for the unlock), and the node's status and
+/// lifecycle (the iPhone app pauses and resumes a locked node; a node that
+/// starts follows its own rule: `raven-node` starts a passphrase profile
+/// locked, and keeps an embedded node locked across a pause). The ops that
+/// need no profile (`app.info`, `profile.state`, `events.poll`, ...) answer
+/// before this is asked.
+fn runs_while_locked(op: &str) -> bool {
+    matches!(
+        op,
+        "lock.state"
+            | "lock.now"
+            | "lock.unlock"
+            | "lock.passphrase_state"
+            | "node.status"
+            | "node.start"
+            | "node.stop"
+            | "node.pause"
+            | "node.resume"
+    )
+}
+
+/// An op refused while Lock v2 holds the profile.
+pub(crate) fn locked_error(op: &str) -> ApiError {
+    ApiError::of(
+        code::PROFILE_LOCKED,
+        format!("{op}: Raven is locked (Lock v2); lock.unlock opens it"),
+    )
 }
 
 /// A privacy-pack action the app does not offer yet: the CLI command that

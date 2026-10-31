@@ -708,6 +708,12 @@ impl KeyCache {
             keys.retain(|k| k.path != path);
         }
     }
+
+    fn holds(&self, path: &Path) -> bool {
+        self.keys
+            .lock()
+            .is_ok_and(|keys| keys.iter().any(|k| k.path == path))
+    }
 }
 
 fn process_key_cache() -> Arc<KeyCache> {
@@ -720,6 +726,15 @@ fn process_key_cache() -> Arc<KeyCache> {
 /// passphrase again.
 pub fn forget_process_key(data_dir: &Path) {
     process_key_cache().forget(&data_dir.join(VAULT_FILE_NAME));
+}
+
+/// Lock v2 (P6.40): whether this process holds the derived key of the
+/// profile's vault (a load or an unlock with the passphrase put it there;
+/// [`forget_process_key`] drops it). Nothing is read, no passphrase is
+/// asked and no KDF runs: the desktop engine asks it to tell whether the
+/// keys of a profile with a Raven passphrase open in its own process.
+pub fn process_key_held(data_dir: &Path) -> bool {
+    process_key_cache().holds(&data_dir.join(VAULT_FILE_NAME))
 }
 
 /// Lock v2's `raven unlock` (P6.40): read the Raven passphrase from the
@@ -1448,6 +1463,35 @@ mod tests {
             &[7u8; 32]
         );
         assert_eq!(reopened_source.asked(), vec![PassphrasePurpose::Unlock]);
+    }
+
+    /// Lock v2: the process's cached key of one profile's vault is told
+    /// (no KDF, nothing read), and forgetting it drops it for that profile
+    /// only.
+    #[test]
+    fn the_process_key_is_told_and_forgotten_per_profile() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        assert!(!process_key_held(&a));
+        let cache = process_key_cache();
+        cache.put(
+            &a.join(VAULT_FILE_NAME),
+            [1; SALT_LEN],
+            TEST_PARAMS,
+            &[2; 32],
+        );
+        cache.put(
+            &b.join(VAULT_FILE_NAME),
+            [3; SALT_LEN],
+            TEST_PARAMS,
+            &[4; 32],
+        );
+        assert!(process_key_held(&a) && process_key_held(&b));
+        forget_process_key(&a);
+        assert!(!process_key_held(&a), "forgotten");
+        assert!(process_key_held(&b), "another profile keeps its key");
+        forget_process_key(&b);
+        assert!(!process_key_held(&b));
     }
 
     #[test]

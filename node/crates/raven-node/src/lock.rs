@@ -253,15 +253,26 @@ pub(crate) fn passphrase_profile(data_dir: &Path) -> bool {
 /// Service start, before the identity preflight and any task: the profile
 /// this process serves. With the gate live, a passphrase profile with an
 /// identity whose passphrase this process cannot read by itself starts
-/// locked (`true`): nothing loads a key until `Unlock`.
+/// locked (`true`): nothing loads a key until `Unlock`. So does a profile
+/// this process holds locked already: an embedded node (the iPhone app)
+/// stopped and started again while locked, by the app's pause and resume
+/// (`node.pause` / `node.resume`), stays locked whatever its keystore (the
+/// lock lives in this process, docs/IOS.md); a program's start never finds
+/// one.
 pub(crate) fn start(data_dir: &Path) -> bool {
     state().data_dir = Some(data_dir.to_path_buf());
-    let locked = live()
-        && passphrase_profile(data_dir)
-        && raven_core::identity_store::identity_recorded(data_dir).unwrap_or(false)
-        && !raven_core::keystore_vault::passphrase_file_configured();
+    let still = live() && is_locked() && raven_core::local_lock::engaged(data_dir);
+    let locked = still
+        || (live()
+            && passphrase_profile(data_dir)
+            && raven_core::identity_store::identity_recorded(data_dir).unwrap_or(false)
+            && !raven_core::keystore_vault::passphrase_file_configured());
     if locked {
         drop_secrets(data_dir);
+    }
+    if still {
+        eprintln!("raven-node lock: still locked: it was locked before this start (raven unlock)");
+    } else if locked {
         eprintln!(
             "raven-node lock: locked at start: this profile's Raven passphrase opens it (raven \
              unlock)"

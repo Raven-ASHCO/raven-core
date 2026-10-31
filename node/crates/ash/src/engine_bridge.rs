@@ -1701,6 +1701,124 @@ pub fn unlock(data_dir: &Path, passphrase: Option<&[u8]>) -> Unlocked {
     }
 }
 
+/// What the Raven passphrase offers this profile (`raven passphrase` with
+/// no op, lock_cli.rs `cmd_passphrase`): raven-core's offer, refused with
+/// its words while the gate is shut or where it does not apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassphraseView {
+    pub offer: raven_core::raven_passphrase::Offer,
+    /// A switch of the keys to or from the vault stopped halfway: a set
+    /// with the passphrase it was started with, or a remove, finishes it.
+    pub unfinished: bool,
+}
+
+/// [`PassphraseView`] of the profile (file reads only).
+pub fn passphrase_view(data_dir: &Path) -> PassphraseView {
+    PassphraseView {
+        offer: raven_core::raven_passphrase::offer(data_dir),
+        unfinished: raven_core::raven_passphrase::unfinished(data_dir).unwrap_or(false),
+    }
+}
+
+/// A change of the Raven passphrase (lock_cli.rs `PassOp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassphraseChange {
+    /// The keys move into a vault the new passphrase opens (or a switch
+    /// that stopped halfway finishes, with the passphrase it was started
+    /// with).
+    Set,
+    /// From the current passphrase to a new one.
+    Change,
+    /// The keys move back into the login keychain (the current passphrase
+    /// opens the vault).
+    Remove,
+}
+
+/// Why a change of the Raven passphrase did not happen. Never a passphrase
+/// in any of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PassphraseRefused {
+    /// Not in this build, on this system or for this profile (raven-core's
+    /// words: `raven_passphrase::NOT_IN_THIS_VERSION`, `NOT_ON_WINDOWS`,
+    /// `NOT_ON_IOS`, `KEYRING_PROFILE`, `LAB_FILES`).
+    NotOffered(String),
+    /// Not what this profile can do now: it has one already, or none.
+    NotNow(String),
+    /// A passphrase the change needs did not come.
+    Missing(&'static str),
+    /// The new passphrase breaks a rule (its words).
+    Rules(String),
+    /// The current passphrase does not open the vault.
+    Wrong(String),
+    /// raven-node runs locked: it stays so until it is unlocked.
+    NodeLocked,
+    /// raven-node runs and cannot be held locked while the keys move
+    /// (lock_cli.rs `NODE_UNHELD`).
+    NodeUnheld(String),
+    /// A keystore or file step failed (its words, and what it left).
+    Failed(String),
+}
+
+/// The line a change's answer ends with when raven-node stayed locked
+/// after it (lock_cli.rs `STAYS_LOCKED`, the CLI's words).
+pub const PASSPHRASE_STAYS_LOCKED: &str = super::lock_cli::STAYS_LOCKED;
+
+/// `raven passphrase set|change|remove` for the app (lock_cli.rs
+/// `cmd_passphrase` after the terminal's prompts, the terminal app's PASS):
+/// the same checks (the offer, a set that finishes a switch stopped halfway,
+/// the new passphrase's rules), then lock_cli.rs `run_op`, which holds
+/// raven-node locked while the keys move and unlocks it after. A node that
+/// runs locked is left alone (the app unlocks first). The lines to say.
+pub fn change_passphrase(
+    data_dir: &Path,
+    change: PassphraseChange,
+    current: Option<&[u8]>,
+    new: Option<&[u8]>,
+) -> Result<Vec<String>, PassphraseRefused> {
+    use raven_core::raven_passphrase::{self, Offer};
+
+    use super::lock_cli::{self, NodeHold, PassOp, Typed};
+
+    let op = match change {
+        PassphraseChange::Set => PassOp::Set,
+        PassphraseChange::Change => PassOp::Change,
+        PassphraseChange::Remove => PassOp::Remove,
+    };
+    let view = passphrase_view(data_dir);
+    if !lock_cli::allowed(op, &view.offer, view.unfinished) {
+        return Err(match view.offer {
+            Offer::No(why) => PassphraseRefused::NotOffered(why.into()),
+            offer => PassphraseRefused::NotNow(lock_cli::refusal(op, &offer)),
+        });
+    }
+    let secret = |p: &[u8]| raven_core::ipc::SecretBytes::new(p.to_vec());
+    let mut typed = Typed::default();
+    if op.needs_current() {
+        typed.current = Some(secret(
+            current.ok_or(PassphraseRefused::Missing("the current passphrase"))?,
+        ));
+    }
+    if op.needs_new() {
+        let new = new.ok_or(PassphraseRefused::Missing("the new passphrase"))?;
+        raven_passphrase::check_new(new).map_err(|e| PassphraseRefused::Rules(e.to_string()))?;
+        typed.new = Some(secret(new));
+    }
+    match lock_cli::node_hold(data_dir) {
+        NodeHold::Locked => return Err(PassphraseRefused::NodeLocked),
+        NodeHold::Unheld => {
+            return Err(PassphraseRefused::NodeUnheld(lock_cli::NODE_UNHELD.into()))
+        }
+        NodeHold::Absent | NodeHold::Unlocked => {}
+    }
+    lock_cli::run_op(data_dir, op, &typed).map_err(|text| {
+        if text.starts_with(raven_passphrase::WRONG) {
+            PassphraseRefused::Wrong(text)
+        } else {
+            PassphraseRefused::Failed(text)
+        }
+    })
+}
+
 /// `raven update status` as the terminal app's NET screen reads it
 /// (update_install.rs `view(dir, false)`: nothing staged, stored or noted).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

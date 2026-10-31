@@ -5,9 +5,13 @@
 //! signs its own waiver (owner decision OD6b-1). A debug build opens one with
 //! its lab switch, and only with the Lab Test A unlock: `RAVEN_LAB_TEST_A=1`
 //! ([`crate::pair_init::lab_test_a_enabled`]) and the switch set to exactly
-//! `1` ([`crate::p2p_gate::lab_flag`]), the Phase 4 pattern. A release build
-//! reads neither variable. A gate that sits on another one is live only
-//! while that one is ([`SecGate::requires`]):
+//! `1` ([`crate::p2p_gate::lab_flag`]), the Phase 4 pattern. A debug build
+//! also closes one whose const is set: its switch set to exactly `0` (no Lab
+//! Test A needed), as the LAN gates do ([`crate::lan_gate`]'s `gate_live`),
+//! so the gate-closed paths and the harnesses' "old side" stay testable
+//! after a flip. A release build reads neither variable: it follows the
+//! const alone. A gate that sits on another one is live only while that one
+//! is ([`SecGate::requires`]):
 //!
 //! | Gate ([`SecGate`]) | Lab switch | Requires | Holds |
 //! |---|---|---|---|
@@ -32,9 +36,10 @@
 //! loopback too, which it never does otherwise (other local profiles and
 //! every harness use it).
 //!
-//! In-process tests open or shut one gate's lab unlock for the current
-//! thread only ([`set_lab_for_this_thread`]); a release build ignores that
-//! too. The `node_policy` settings these gates guard are read only while the
+//! In-process tests open or shut one gate for the current thread only
+//! ([`set_lab_for_this_thread`]: in a debug build `Some(false)` shuts it
+//! whatever its const says); a release build ignores that too. The
+//! `node_policy` settings these gates guard are read only while the
 //! matching gate is live (the `NodePolicy` accessors), so no build changes
 //! behaviour before a flip.
 
@@ -104,7 +109,8 @@ pub const LAB_MESH_UPDATE: &str = "RAVEN_LAB_MESH_UPDATE";
 const GATES: usize = 11;
 
 /// Every Phase 6b lab switch, in [`SecGate::ALL`] order (the harnesses
-/// scrub these).
+/// scrub these). In a debug build each also closes its gate when set to
+/// exactly `0`, whatever the const says ([`live`]).
 pub const SECURITY_LAB_SWITCHES: [&str; GATES] = [
     LAB_SECURITY_EVENTS,
     LAB_SECURITY_RESPONSES,
@@ -220,10 +226,12 @@ impl SecGate {
 
 /// The gate is live: its production const, or in a debug build its lab
 /// switch with the Lab Test A unlock (or this thread's override), and what
-/// it sits on is live too. A release build reads no variable and no
-/// override. A security notice's hold on a gate's feature (P6.45,
-/// [`crate::suite_policy::hold_allows`]) closes it, and so every gate that
-/// sits on it; it can never open one, and `Advisory` itself is never held.
+/// it sits on is live too. In a debug build the switch at `0` (or the
+/// override at `Some(false)`) closes a gate whose const is set. A release
+/// build reads no variable and no override. A security notice's hold on a
+/// gate's feature (P6.45, [`crate::suite_policy::hold_allows`]) closes it,
+/// and so every gate that sits on it; it can never open one, and
+/// `Advisory` itself is never held.
 pub fn live(g: SecGate) -> bool {
     live_from(g, &own_held, &crate::route_hints::route_hints_live)
 }
@@ -272,27 +280,57 @@ fn live_from(g: SecGate, own: &dyn Fn(SecGate) -> bool, route_hints: &dyn Fn() -
         }
 }
 
-/// The gate on its own: the const, or its lab unlock.
+/// The gate on its own: the const, or in a debug build its lab switch
+/// ([`lab_gate`]).
 fn own_open(g: SecGate) -> bool {
-    g.production()
-        || lab_open(
-            cfg!(debug_assertions),
-            lab_override(g),
-            crate::pair_init::lab_test_a_enabled,
-            || std::env::var(g.lab_switch()).ok(),
-        )
+    lab_gate(
+        cfg!(debug_assertions),
+        production(g),
+        lab_override(g),
+        crate::pair_init::lab_test_a_enabled,
+        || std::env::var(g.lab_switch()).ok(),
+    )
 }
 
-/// A gate's lab unlock: never in a release build (`test_a` and `value` are
-/// not called and `over` is ignored); in a debug build this thread's
-/// override when one is set, else the Lab Test A unlock and exactly `1`.
-fn lab_open(
+/// The gate's production const ([`SecGate::production`]).
+#[cfg(not(test))]
+fn production(g: SecGate) -> bool {
+    g.production()
+}
+
+/// raven-core's own unit tests: the const, or one this thread pretends is
+/// set (`tests::Flipped`), so the debug close of a flipped gate is proven
+/// before any const is flipped.
+#[cfg(test)]
+fn production(g: SecGate) -> bool {
+    g.production() || tests::pretends_flipped(g)
+}
+
+/// A gate on its own from its inputs. A release build: exactly the const
+/// (`production`); `test_a` and `value` are not called and `over` is
+/// ignored, so nothing a user sets opens or closes a gate. A debug build:
+/// this thread's override when one is set (`Some(false)` closes even a gate
+/// whose const is set); else a set const unless the switch is exactly `0`,
+/// and a const that is not set only with the Lab Test A unlock and the
+/// switch exactly `1` (the variable is not read without the unlock).
+fn lab_gate(
     debug: bool,
+    production: bool,
     over: Option<bool>,
     test_a: impl FnOnce() -> bool,
     value: impl FnOnce() -> Option<String>,
 ) -> bool {
-    debug && over.unwrap_or_else(|| test_a() && crate::p2p_gate::lab_flag(true, value))
+    if !debug {
+        return production;
+    }
+    if let Some(open) = over {
+        return open;
+    }
+    if production {
+        value().as_deref() != Some("0")
+    } else {
+        test_a() && crate::p2p_gate::lab_flag(true, value)
+    }
 }
 
 thread_local! {
@@ -304,11 +342,13 @@ fn lab_override(g: SecGate) -> Option<bool> {
     LAB_OVERRIDE.with(|cell| cell.get()[g as usize])
 }
 
-/// In-process tests open (`Some(true)`) or shut (`Some(false)`) one gate's
-/// lab unlock for the current thread only, in place of the variables (which
-/// would leak into every other test of the binary); `None` goes back to the
-/// variables. What the gate sits on still applies, and so does the const.
-/// Ignored in release builds, like the variables.
+/// In-process tests open (`Some(true)`) or shut (`Some(false)`) one gate
+/// for the current thread only, in place of the variables (which would leak
+/// into every other test of the binary); `None` goes back to the variables.
+/// `Some(false)` shuts the gate even when its const is set (the debug close:
+/// a test that wants the gate shut keeps testing it shut after a flip). What
+/// the gate sits on still applies, and so does a security notice's hold.
+/// Ignored in release builds, like the variables: there the const decides.
 #[doc(hidden)]
 pub fn set_lab_for_this_thread(g: SecGate, on: Option<bool>) {
     LAB_OVERRIDE.with(|cell| {
@@ -455,19 +495,51 @@ mod tests {
         assert!(!live_from(PairSeed, &only(&[]), &yes));
     }
 
+    thread_local! {
+        static FLIPPED: Cell<[bool; GATES]> = const { Cell::new([false; GATES]) };
+    }
+
+    /// This thread pretends the gate's const is set ([`Flipped`]).
+    pub(super) fn pretends_flipped(g: SecGate) -> bool {
+        FLIPPED.with(|cell| cell.get()[g as usize])
+    }
+
+    /// This thread pretends some gates' consts are set until dropped (the
+    /// real consts stay as they are: `production_flags_stay_false`).
+    struct Flipped;
+
+    impl Flipped {
+        fn set(gates: &[SecGate]) -> Self {
+            FLIPPED.with(|cell| {
+                let mut all = cell.get();
+                for g in gates {
+                    all[*g as usize] = true;
+                }
+                cell.set(all);
+            });
+            Flipped
+        }
+    }
+
+    impl Drop for Flipped {
+        fn drop(&mut self) {
+            FLIPPED.with(|cell| cell.set([false; GATES]));
+        }
+    }
+
     #[test]
     fn lab_unlock_needs_debug_test_a_and_exactly_one() {
         let unread = || -> Option<String> { panic!("read the variable") };
         let no_test_a = || -> bool { panic!("read RAVEN_LAB_TEST_A") };
         // Release: nothing is read and the override is ignored.
         for over in [None, Some(true), Some(false)] {
-            assert!(!lab_open(false, over, no_test_a, unread), "{over:?}");
+            assert!(!lab_gate(false, false, over, no_test_a, unread), "{over:?}");
         }
         // Debug: the override wins over the variables.
-        assert!(lab_open(true, Some(true), no_test_a, unread));
-        assert!(!lab_open(true, Some(false), no_test_a, unread));
+        assert!(lab_gate(true, false, Some(true), no_test_a, unread));
+        assert!(!lab_gate(true, false, Some(false), no_test_a, unread));
         // Debug without an override: Lab Test A first, then exactly "1".
-        assert!(!lab_open(true, None, || false, unread));
+        assert!(!lab_gate(true, false, None, || false, unread));
         for value in [
             None,
             Some(""),
@@ -477,9 +549,82 @@ mod tests {
             Some("yes"),
         ] {
             let read = || value.map(str::to_owned);
-            assert!(!lab_open(true, None, || true, read), "{value:?}");
+            assert!(!lab_gate(true, false, None, || true, read), "{value:?}");
         }
-        assert!(lab_open(true, None, || true, || Some("1".into())));
+        assert!(lab_gate(true, false, None, || true, || Some("1".into())));
+    }
+
+    /// The debug close (cross-cutting finding 4 of the 0.1.1 protections
+    /// report, before any flip): a gate whose const is set is closed in a
+    /// debug build by its switch at exactly `0` (no Lab Test A needed) or
+    /// by this thread's `Some(false)`, and by nothing else; a release build
+    /// follows the const and reads nothing (the LAN gates' rule,
+    /// `lan_gate::debug_zero_closes_an_open_gate`).
+    #[test]
+    fn debug_zero_closes_a_flipped_gate() {
+        let unread = || -> Option<String> { panic!("read the variable") };
+        let no_test_a = || -> bool { panic!("read RAVEN_LAB_TEST_A") };
+        // Release: exactly the const, whatever is set.
+        for over in [None, Some(true), Some(false)] {
+            assert!(lab_gate(false, true, over, no_test_a, unread), "{over:?}");
+            assert!(!lab_gate(false, false, over, no_test_a, unread), "{over:?}");
+        }
+        // Debug: the override first, both ways.
+        assert!(!lab_gate(true, true, Some(false), no_test_a, unread));
+        assert!(lab_gate(true, true, Some(true), no_test_a, unread));
+        // Debug, no override: only exactly "0" closes it; Lab Test A is
+        // never asked.
+        assert!(!lab_gate(true, true, None, no_test_a, || Some("0".into())));
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some(" 0"),
+            Some("false"),
+            Some("no"),
+        ] {
+            let read = || value.map(str::to_owned);
+            assert!(lab_gate(true, true, None, no_test_a, read), "{value:?}");
+        }
+    }
+
+    /// The same through the gates themselves: with every const pretended
+    /// set on this thread (the real consts stay false), `Some(false)` shuts
+    /// each gate in a debug build, and with it every gate that sits on it;
+    /// a release build ignores the override and follows the const. The
+    /// in-process tests' `Some(false)` (and raven-node's `PaddingForTest` /
+    /// `KnockForTest`) therefore keep testing a shut gate after a flip.
+    #[test]
+    fn some_false_shuts_a_flipped_gate_in_debug_only() {
+        let debug = cfg!(debug_assertions);
+        // Every const as if flipped: what each gate sits on is open too.
+        let flipped = Flipped::set(&SecGate::ALL);
+        let own = &own_open;
+        let hints = || true;
+        for g in SecGate::ALL {
+            // No override: open, unless this debug process's own switch
+            // for it is exactly "0".
+            let zero = debug && std::env::var(g.lab_switch()).ok().as_deref() == Some("0");
+            assert_eq!(own_open(g), !zero, "{g:?}");
+            set_lab_for_this_thread(g, Some(false));
+            assert_eq!(own_open(g), !debug, "{g:?} shut by Some(false)");
+            assert_eq!(live_from(g, own, &hints), !debug, "{g:?}");
+            set_lab_for_this_thread(g, Some(true));
+            assert!(own_open(g), "{g:?}");
+            set_lab_for_this_thread(g, None);
+        }
+        // A gate below that is shut shuts the one above it.
+        set_lab_for_this_thread(SecGate::Events, Some(false));
+        set_lab_for_this_thread(SecGate::Responses, Some(true));
+        assert_eq!(live_from(SecGate::Responses, own, &hints), !debug);
+        set_lab_for_this_thread(SecGate::Advisory, Some(false));
+        assert_eq!(live_from(SecGate::MeshUpdate, own, &hints), !debug);
+        for g in SecGate::ALL {
+            set_lab_for_this_thread(g, None);
+        }
+        drop(flipped);
+        // Nothing pretended any more: every real const is false.
+        assert!(SecGate::ALL.iter().all(|g| !production(*g)));
     }
 
     #[test]
