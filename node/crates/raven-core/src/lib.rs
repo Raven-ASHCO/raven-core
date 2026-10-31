@@ -30,6 +30,7 @@ pub mod canon;
 pub mod capability_floor;
 pub mod carrier_admission;
 pub mod chat_history;
+pub mod chat_prefs;
 pub mod clock;
 pub mod clock_skew;
 pub mod contact_book;

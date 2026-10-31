@@ -1224,6 +1224,35 @@ pub(super) fn store_job(controller: &Controller, job: StoreJob) -> JobResult {
             &pub_hex,
             controller.unblock(&pub_hex),
         ),
+        StoreJob::BlockFriend { pub_hex } => {
+            // What could not be forgotten comes along, as for ForgetAddress.
+            let done = controller.block(&pub_hex);
+            let (result, notes) = match done.result {
+                Ok(notes) => (Ok(()), notes),
+                Err(why) => (Err(why), Vec::new()),
+            };
+            JobResult::FriendChanged {
+                change: FriendChange::Block,
+                pub_hex,
+                result,
+                notes,
+            }
+        }
+        StoreJob::UnverifyFriend { pub_hex } => changed(
+            FriendChange::Unverify,
+            &pub_hex,
+            controller.unverify(&pub_hex),
+        ),
+        StoreJob::LoadChatPrefs => JobResult::ChatPrefs(controller.chat_prefs()),
+        StoreJob::SetChatPin { pub_hex, pinned } => JobResult::ChatPinSet {
+            result: controller.set_chat_pinned(&pub_hex, pinned),
+            pub_hex,
+            pinned,
+        },
+        StoreJob::DeleteChatFromList { pub_hex } => JobResult::ChatLeftList {
+            result: controller.delete_chat_from_list(&pub_hex),
+            pub_hex,
+        },
         StoreJob::LoadPrivacy => JobResult::Privacy(controller.read_privacy()),
         StoreJob::SetChatKeep(keep) => JobResult::ChatKeepSaved {
             keep,
@@ -1519,6 +1548,9 @@ pub(super) enum Watched {
     /// groups.json (lab): a group message, a receipt or a roster came, or
     /// raven-node parked a copy. Watched only while groups are live.
     Groups,
+    /// chat_prefs.json (0.1.1 chat controls): a chat pinned or deleted from
+    /// the chat list, here or in another app on this device.
+    ChatPrefs,
 }
 
 /// A file's size and time of last change, or that it is missing.
@@ -1875,6 +1907,8 @@ struct FileWatch {
     marks: [Option<FileStamp>; 2],
     /// desktop_hidden.json's.
     hidden: Option<FileStamp>,
+    /// chat_prefs.json's.
+    chat_prefs: Option<FileStamp>,
     /// Whether groups are live, read at the first look (the App reads it
     /// once too), and groups.json's stamp while they are.
     groups_live: Option<bool>,
@@ -1919,6 +1953,11 @@ impl FileWatch {
             (Watched::ReadMarks, settings, marks),
             (Watched::ReadMarks, private, sealed_marks),
             (Watched::Hidden, hidden::path(data_dir), &mut self.hidden),
+            (
+                Watched::ChatPrefs,
+                bridge::chat_prefs_path(data_dir),
+                &mut self.chat_prefs,
+            ),
         ];
         for (watched, path, last) in watched {
             let stamp = FileStamp::of(&path);
@@ -3080,9 +3119,23 @@ mod tests {
                     watched: Watched::Hidden,
                     stamp: FileStamp::default()
                 },
+                PollUpdate::File {
+                    watched: Watched::ChatPrefs,
+                    stamp: FileStamp::default()
+                },
             ]
         );
         assert!(files.look(dir.path()).is_empty());
+        // A chat pinned or deleted from the list, here or in another app.
+        let prefs = bridge::chat_prefs_path(dir.path());
+        std::fs::write(&prefs, r#"{"pinned":["contact:aa"]}"#).unwrap();
+        assert_eq!(
+            files.look(dir.path()),
+            [PollUpdate::File {
+                watched: Watched::ChatPrefs,
+                stamp: FileStamp::of(&prefs)
+            }]
+        );
         // A message deleted in the desktop app (desktop_hidden.json).
         let deleted = hidden::path(dir.path());
         std::fs::write(&deleted, r#"{"messages":[]}"#).unwrap();

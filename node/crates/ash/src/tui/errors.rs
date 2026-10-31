@@ -635,6 +635,36 @@ pub(super) fn explain_forget_partial(name: &str, notes: &[String]) -> Plain {
     }
 }
 
+/// Block (0.1.1 chat controls) put the friend on the block list, but some
+/// of what Raven kept to reach them could not be forgotten: `notes`, one
+/// per part (`raven contact block`'s notes), for Details.
+pub(super) fn explain_block_partial(name: &str, notes: &[String]) -> Plain {
+    Plain {
+        headline: format!(
+            "{name} is blocked on this device, but Raven couldn't forget everything it kept to \
+             reach {name}."
+        ),
+        next: String::new(),
+        action: Action::None,
+        technical: notes.join("\n"),
+    }
+}
+
+/// Delete chat (0.1.1 chat controls) cleared the chat with the friend, but
+/// it could not leave the chat list: `text` is raven-core's reason, for
+/// Details.
+pub(super) fn explain_hide_chat(name: &str, text: &str) -> Plain {
+    Plain {
+        headline: format!(
+            "Raven deleted your messages with {name}, but couldn't take the chat out of your \
+             chat list."
+        ),
+        next: String::new(),
+        action: Action::None,
+        technical: text.trim().to_owned(),
+    }
+}
+
 /// A change to the security notices or to a pause that could not be made
 /// (P6.31): `headline`, with raven-core's text for Details.
 pub(super) fn explain_security(headline: &str, text: &str) -> Plain {

@@ -8,6 +8,16 @@ nothing here has had an independent security review, and there are no downloads 
 
 Fixes from our own testing after 0.1.0, the engine for the iPhone app, and a Linux package.
 
+### Chats and contacts
+
+- New chat controls, on this device only (the other person is never told): block a contact, remove a
+  contact's verification, clear a chat's history, delete a chat from your chat list (it comes back
+  when a new message arrives) and pin a chat to the top. A blocked contact's messages, contact
+  requests and group messages are dropped, and nothing goes to them, until you unblock; the contact
+  stays. In the terminal: `raven contact block|unblock|unverify NAME`, `raven chats
+  clear|delete|pin|unpin NAME` (or `--group`), `raven group clear GROUP`; for the apps, the engine
+  ops in `desktop/api/API.md` ("Chat controls").
+
 ### Sending
 
 - A message to a verified friend no longer gets lost when the secure connection with them has to be

@@ -810,6 +810,65 @@ fn messages_are_bounded_across_groups_and_evicted_ids_still_drop_copies() {
         .any(|m| m.id == format!("{:032x}", 1)));
 }
 
+/// Clear (0.1.1 chat controls): every message goes and is remembered as
+/// seen, so a copy that comes again is a duplicate; my own message still on
+/// its way stays unless asked, and then the intent sending it goes too.
+#[test]
+fn a_cleared_group_keeps_only_my_messages_on_their_way_and_drops_copies() {
+    let mut file = joined(2, &roster(1, &[2, 3], 1));
+    let stored = |n: u8, mine: bool, state: &str| store::StoredMsg {
+        id: format!("{n:032x}"),
+        from: hex::encode(key(if mine { 2 } else { 3 })),
+        epoch: 1,
+        sent_ms: NOW,
+        received_ms: NOW,
+        body: "b".into(),
+        sig: String::new(),
+        mine,
+        via: String::new(),
+        lines: if mine {
+            vec![store::Line {
+                member: hex::encode(key(3)),
+                device: String::new(),
+                copy: String::new(),
+                via: store::VIA_DIRECT.into(),
+                state: state.into(),
+            }]
+        } else {
+            Vec::new()
+        },
+        path: String::new(),
+    };
+    let g = &mut file.groups[0];
+    g.messages = vec![
+        stored(1, false, ""),
+        stored(2, true, LINE_DELIVERED),
+        stored(3, true, LINE_WAITING),
+        stored(4, true, LINE_FAILED),
+    ];
+    g.intents.push(store::Intent {
+        id: "i".into(),
+        kind: INTENT_SEND.into(),
+        to: hex::encode(key(3)),
+        frame: String::new(),
+        of: String::new(),
+        via: String::new(),
+        line_of: format!("{:032x}", 3),
+        made_ms: NOW,
+        tries: 0,
+        author: String::new(),
+    });
+    let mut all = g.clone();
+    assert_eq!(g.clear_messages(false), (3, 1));
+    assert_eq!(g.messages.len(), 1);
+    assert_eq!(g.messages[0].id, format!("{:032x}", 3));
+    assert_eq!(g.intents.len(), 1, "its copy still goes");
+    assert!(g.has_seen(&hex::encode(key(3)), &format!("{:032x}", 1)));
+    assert!(g.has_seen(&hex::encode(key(2)), &format!("{:032x}", 2)));
+    assert_eq!(all.clear_messages(true), (4, 0));
+    assert!(all.messages.is_empty() && all.intents.is_empty());
+}
+
 #[test]
 fn groups_are_found_by_id_prefix_or_name() {
     let mut file = joined(2, &roster(1, &[2], 1));

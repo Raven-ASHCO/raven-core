@@ -495,6 +495,36 @@ impl GroupRecord {
         }
     }
 
+    /// [`clear`]'s change to one group: `(cleared, pending_kept)`.
+    pub fn clear_messages(&mut self, include_pending: bool) -> (usize, usize) {
+        let on_its_way = |m: &StoredMsg| {
+            m.mine
+                && m.lines
+                    .iter()
+                    .any(|l| l.state != LINE_DELIVERED && l.state != LINE_FAILED)
+        };
+        let (kept, gone): (Vec<StoredMsg>, Vec<StoredMsg>) = std::mem::take(&mut self.messages)
+            .into_iter()
+            .partition(|m| !include_pending && on_its_way(m));
+        if include_pending {
+            let mine: HashSet<&str> = gone
+                .iter()
+                .filter(|m| m.mine)
+                .map(|m| m.id.as_str())
+                .collect();
+            self.intents
+                .retain(|i| !(i.kind == INTENT_SEND && mine.contains(i.line_of.as_str())));
+        }
+        for m in &gone {
+            self.seen
+                .push(format!("{}@{}", seen_key(&m.from, &m.id), m.sent_ms));
+        }
+        trim_front(&mut self.seen, MAX_SEEN_PER_GROUP);
+        let counts = (gone.len(), kept.len());
+        self.messages = kept;
+        counts
+    }
+
     pub fn push_intent(&mut self, intent: Intent) {
         self.intents.push(intent);
     }
@@ -748,6 +778,24 @@ pub fn mark_read(data_dir: &Path, id: &GroupId, now_ms: u64) -> Result<usize, Gr
             g.read_ms = newest;
         }
         Ok(0)
+    })
+}
+
+/// Clear group `id`'s chat on this device (0.1.1 chat controls; the other
+/// members are not told): its messages go, each remembered as seen
+/// (`<author>:<id>@<sent_ms>`, as the caps drop them) so a copy that comes
+/// again is a duplicate, never shown again. This profile's own messages
+/// still on their way to a member (a line neither delivered nor failed) stay
+/// unless `include_pending`; with it they go too, and so do the intents
+/// still sending their copies. `(cleared, pending_kept)`.
+pub fn clear(
+    data_dir: &Path,
+    id: &GroupId,
+    include_pending: bool,
+) -> Result<(usize, usize), GroupError> {
+    edit(data_dir, |file| {
+        let g = file.group_mut(id).ok_or(GroupError::NotFound)?;
+        Ok(g.clear_messages(include_pending))
     })
 }
 

@@ -38,6 +38,9 @@ pub(super) use super::super::CARD_MAX_LEN;
 pub(super) use super::super::{parse_lan_dial, update_contact_lan_dial};
 // Unblocking: `contact unblock`.
 pub(super) use super::super::cmd_contact_unblock;
+// The chat controls (0.1.1): `contact block` and `contact unverify`, on this
+// computer only.
+pub(super) use super::super::{block_saved_contact, unverify_saved_contact};
 // The CLI's refusal of the user's own invite: reference text for tests.
 #[cfg(test)]
 pub(super) use super::super::OWN_INVITE_REFUSAL;
@@ -1587,6 +1590,91 @@ pub(super) fn delete_chat(data_dir: &Path, peer: &str) -> Result<DeleteChatOutco
 /// with the notes in Details, where it used to say only that it forgot).
 pub(super) fn forget_address(data_dir: &Path, peer: &str) -> Result<Vec<String>, String> {
     super::super::forget_contact_address(data_dir, peer)
+}
+
+// ── The chat controls (0.1.1) ───────────────────────────────────────────────
+
+/// The chat list's pins and deleted chats on this computer, as
+/// `chat_prefs.json` has them (raven-core's `chat_prefs`, which the CLI and
+/// the desktop and phone apps read too). Nothing of it is ever sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ChatPrefsView(raven_core::chat_prefs::ChatPrefs);
+
+impl ChatPrefsView {
+    /// The chat with the friend `pub_hex` among the pinned ones: 0 for the
+    /// newest pin; None while it is not pinned.
+    pub(super) fn pin_rank(&self, pub_hex: &str) -> Option<usize> {
+        let chat = raven_core::chat_prefs::contact_chat(pub_hex);
+        self.0.pinned.iter().position(|pinned| *pinned == chat)
+    }
+
+    pub(super) fn is_pinned(&self, pub_hex: &str) -> bool {
+        self.pin_rank(pub_hex).is_some()
+    }
+
+    /// The chat with the friend `pub_hex` was deleted from the chat list
+    /// and no message came since: `newest_ms` is the newest message with
+    /// them (0 without one).
+    pub(super) fn is_hidden(&self, pub_hex: &str, newest_ms: u64) -> bool {
+        self.0
+            .is_hidden(&raven_core::chat_prefs::contact_chat(pub_hex), newest_ms)
+    }
+
+    /// Tests: the friends `pinned` (the newest pin first) and `hidden`
+    /// (each deleted from the list at its time).
+    #[cfg(test)]
+    pub(super) fn of(pinned: &[&str], hidden: &[(&str, u64)]) -> ChatPrefsView {
+        use raven_core::chat_prefs::{contact_chat, ChatPrefs, HiddenChat};
+        ChatPrefsView(ChatPrefs {
+            pinned: pinned.iter().map(|key| contact_chat(key)).collect(),
+            hidden: hidden
+                .iter()
+                .map(|(key, at_ms)| HiddenChat {
+                    chat: contact_chat(key),
+                    at_ms: *at_ms,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// `chat_prefs.json`, which the poller watches.
+pub(super) fn chat_prefs_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(raven_core::chat_prefs::CHAT_PREFS_FILE)
+}
+
+/// The chat list's pins and deleted chats; none of either without the file.
+/// An error when it can't be read now (a sealed profile's key not loaded
+/// yet, a changed byte). Reads only.
+pub(super) fn chat_prefs(data_dir: &Path) -> Result<ChatPrefsView, String> {
+    raven_core::chat_prefs::load(data_dir)
+        .map(ChatPrefsView)
+        .map_err(|e| sanitize_terminal_line(&e.to_string()))
+}
+
+/// Pin or Unpin: the chat with the friend `peer` goes to the top of the
+/// chat list on this computer, or back to its place, as `raven chats
+/// pin|unpin` does. Store worker only.
+pub(super) fn set_chat_pinned(data_dir: &Path, peer: &str, pinned: bool) -> Result<(), String> {
+    raven_core::chat_prefs::set_pinned(
+        data_dir,
+        &raven_core::chat_prefs::contact_chat(peer),
+        pinned,
+    )
+    .map(drop)
+    .map_err(|e| sanitize_terminal_line(&e.to_string()))
+}
+
+/// Delete chat's second half, after [`delete_chat`]: the chat with the
+/// friend `peer` leaves the chat list until a message newer than now comes,
+/// as `raven chats delete` does. Store worker only.
+pub(super) fn hide_chat(data_dir: &Path, peer: &str) -> Result<(), String> {
+    raven_core::chat_prefs::hide(
+        data_dir,
+        &raven_core::chat_prefs::contact_chat(peer),
+        raven_core::clock::now_ms(),
+    )
+    .map_err(|e| sanitize_terminal_line(&e.to_string()))
 }
 
 /// The privacy pack's one-time notices still to show (PP.4, PP.9).
@@ -3406,6 +3494,93 @@ mod tests {
         // Someone not saved: refused.
         let dave = me_view(&Identity::from_seed(&[0xD0; 32]));
         assert!(forget_address(dd, &dave.pub_hex).is_err());
+    }
+
+    /// The chat controls (0.1.1) take the CLI's and raven-core's own paths:
+    /// Block puts the key on the block list and keeps the contact, Remove
+    /// verification unpins it (once), Pin orders the chats newest pin
+    /// first, and a deleted chat is hidden only until a newer message.
+    #[test]
+    fn block_unverify_pin_and_hide_take_the_clis_paths() {
+        testkit::lab_backends();
+        let dir = testkit::short_dir();
+        let dd = dir.path();
+        load_or_create_identity(dd).expect("an identity");
+        let bob = me_view(&Identity::from_seed(&[0xB0; 32]));
+        let carol = me_view(&Identity::from_seed(&[0xC0; 32]));
+        for (who, name, typed_fp) in [
+            (&bob, "Bob", Some(bob.fingerprint.as_str())),
+            (&carol, "Carol", None),
+        ] {
+            add_contact_with_routes(
+                dd,
+                &who.address,
+                &who.pub_hex,
+                name,
+                "",
+                typed_fp,
+                "192.168.1.30:7420",
+                "",
+                None,
+            )
+            .expect("saved");
+        }
+        let of = |who: &MeView| {
+            let book = contact_views(dd).expect("the book");
+            let c = book
+                .iter()
+                .find(|c| c.pub_hex == who.pub_hex)
+                .expect("saved");
+            (c.label.clone(), c.pinned, c.blocked)
+        };
+        assert_eq!(of(&bob), ("Bob".into(), true, false));
+
+        // Block: Bob stays saved and verified, and is blocked; Carol not.
+        assert_eq!(block_saved_contact(dd, &bob.pub_hex), Ok(Vec::new()));
+        assert_eq!(of(&bob), ("Bob".into(), true, true));
+        assert_eq!(of(&carol), ("Carol".into(), false, false));
+        assert!(BlockList::load_checked(dd)
+            .expect("the block list")
+            .is_blocked(&bob.pub_hex));
+        // And the CLI's unblock takes it back.
+        cmd_contact_unblock(dd, &bob.pub_hex).expect("unblocked");
+        assert_eq!(of(&bob), ("Bob".into(), true, false));
+
+        // Remove verification: once; his name and address stay.
+        assert_eq!(unverify_saved_contact(dd, &bob.pub_hex), Ok(true));
+        assert_eq!(of(&bob), ("Bob".into(), false, false));
+        assert_eq!(unverify_saved_contact(dd, &bob.pub_hex), Ok(false));
+        assert_eq!(unverify_saved_contact(dd, &carol.pub_hex), Ok(false));
+        let book = contact_views(dd).expect("the book");
+        assert!(book.iter().all(|c| c.lan_dial == "192.168.1.30:7420"));
+
+        // Pin: nothing before the file; the newest pin first; unpinned
+        // goes back to its place. The file is the one the poller watches.
+        assert_eq!(chat_prefs(dd), Ok(ChatPrefsView::default()));
+        assert!(!chat_prefs_path(dd).exists());
+        set_chat_pinned(dd, &bob.pub_hex, true).expect("pinned");
+        set_chat_pinned(dd, &carol.pub_hex.to_ascii_uppercase(), true).expect("pinned");
+        let prefs = chat_prefs(dd).expect("read");
+        assert!(chat_prefs_path(dd).is_file());
+        assert_eq!(
+            (prefs.pin_rank(&carol.pub_hex), prefs.pin_rank(&bob.pub_hex)),
+            (Some(0), Some(1))
+        );
+        set_chat_pinned(dd, &bob.pub_hex, false).expect("unpinned");
+        let prefs = chat_prefs(dd).expect("read");
+        assert!(!prefs.is_pinned(&bob.pub_hex) && prefs.is_pinned(&carol.pub_hex));
+
+        // Delete chat's list part: hidden from now until a newer message.
+        let before = now_ms();
+        hide_chat(dd, &bob.pub_hex).expect("hidden");
+        let prefs = chat_prefs(dd).expect("read");
+        assert!(prefs.is_hidden(&bob.pub_hex, 0));
+        assert!(prefs.is_hidden(&bob.pub_hex, before));
+        assert!(!prefs.is_hidden(&bob.pub_hex, now_ms() + 60_000));
+        assert!(!prefs.is_hidden(&carol.pub_hex, 0));
+        // Someone not saved: nothing to unverify.
+        let dave = me_view(&Identity::from_seed(&[0xD0; 32]));
+        assert!(unverify_saved_contact(dd, &dave.pub_hex).is_ok_and(|changed| !changed));
     }
 
     /// Field test E3 round 2 (mac-b #9): after forget-address the list

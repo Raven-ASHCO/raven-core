@@ -397,6 +397,34 @@ pub fn remove_contact(data_dir: &Path, address: &str) -> Result<(), String> {
     super::cmd_contact_remove(data_dir, None, None, Some(address), true)
 }
 
+/// `contact block NAME` (0.1.1 chat controls): the key on the block list,
+/// its routes and mail-friend choice forgotten; the contact stays. What
+/// could not be forgotten, one line each.
+pub fn block_contact(data_dir: &Path, pub_hex: &str) -> Result<Vec<String>, String> {
+    super::block_saved_contact(data_dir, pub_hex)
+}
+
+/// `contact unblock NAME`: `false` when it was not blocked.
+pub fn unblock_contact(data_dir: &Path, pub_hex: &str) -> Result<bool, String> {
+    super::unblock_key(data_dir, pub_hex)
+}
+
+/// `contact unverify NAME`: `false` when it was not verified.
+pub fn unverify_contact(data_dir: &Path, pub_hex: &str) -> Result<bool, String> {
+    super::unverify_saved_contact(data_dir, pub_hex)
+}
+
+/// `chats clear NAME` for one contact (privacy pack PP.8, a clear that
+/// sticks): how many messages went, and how many still waiting to be sent
+/// stay.
+pub fn clear_chat(data_dir: &Path, pub_hex: &str) -> Result<(u32, usize), String> {
+    let deleted = super::ext::delete_chat_with(data_dir, pub_hex)?;
+    Ok((
+        deleted.history.max(deleted.inbox.deleted),
+        super::ext::waiting_messages_to(data_dir, pub_hex),
+    ))
+}
+
 /// `contact set-dial --address <address> <lan>`: checked as the CLI checks
 /// it; the outbox plans from the book again, and what the friend told this
 /// computer (its route hints, its PeerId) stays.

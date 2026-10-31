@@ -202,6 +202,10 @@ pub enum Kind {
     /// app's. The desktop apps' numbers count up from 128, a lane of their
     /// own, so they never meet the phases' lanes.
     DesktopPrivate = 128,
+    /// `chat_prefs.json`: the chats pinned to the top of the chat list and
+    /// the ones deleted from it until a new message ([`crate::chat_prefs`]),
+    /// shared by every UI on this device (0.1.1 chat controls).
+    ChatPrefs = 129,
     /// `groups.json`: every group's roster, messages, held frames and
     /// intents ([`crate::group::store`]). Groups count up from 144, a lane of
     /// their own.
@@ -210,7 +214,7 @@ pub enum Kind {
 
 impl Kind {
     /// Every kind, in code order.
-    pub const ALL: [Kind; 43] = [
+    pub const ALL: [Kind; 44] = [
         Kind::Contacts,
         Kind::LanSeen,
         Kind::LearnedRoutes,
@@ -253,6 +257,7 @@ impl Kind {
         Kind::KnockReplays,
         Kind::UpdateDownloads,
         Kind::DesktopPrivate,
+        Kind::ChatPrefs,
         Kind::Groups,
     ];
 
@@ -311,6 +316,7 @@ impl Kind {
             Kind::KnockReplays => "knock_replays",
             Kind::UpdateDownloads => "update_downloads",
             Kind::DesktopPrivate => "desktop_private",
+            Kind::ChatPrefs => "chat_prefs",
             Kind::Groups => "groups",
         }
     }

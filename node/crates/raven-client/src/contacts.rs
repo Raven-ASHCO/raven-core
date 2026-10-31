@@ -375,13 +375,20 @@ impl Inner {
 
     /// The saved friend at `address`, as one `Contact`, with presence and
     /// unread count.
-    fn contact_result(&self, address: &str) -> OpResult {
+    pub(crate) fn contact_result(&self, address: &str) -> OpResult {
         let c = self.contact(address)?;
         let peer = c.pub_hex.to_ascii_lowercase();
         let snap = self.refresh(std::time::Duration::from_millis(1500)).ok();
         let presence = snap.as_ref().and_then(|s| s.presence.get(&peer).cloned());
         let unread = snap.as_ref().and_then(|s| s.unread.get(&peer).copied());
-        Ok(json!({"contact": self.contact_json(&c, presence.as_ref(), unread)}))
+        let newest = snap
+            .as_ref()
+            .and_then(|s| crate::chats::newest_by_peer(s).get(&peer).copied())
+            .unwrap_or(0);
+        let mut contact = self.contact_json(&c, presence.as_ref(), unread);
+        let chat = raven_core::chat_prefs::contact_chat(&peer);
+        crate::chats::add_chat_fields(&mut contact, &self.chat_prefs(), &chat, newest);
+        Ok(json!({ "contact": contact }))
     }
 
     pub(crate) fn card_make(&self, args: &Args) -> OpResult {
@@ -482,12 +489,19 @@ impl Inner {
     pub(crate) fn contacts_list(&self) -> OpResult {
         self.identity()?;
         let snap = self.refresh(std::time::Duration::from_millis(1500))?;
+        let prefs = self.chat_prefs();
+        let newest = crate::chats::newest_by_peer(&snap);
         let list: Vec<Value> = snap
             .contacts
             .iter()
             .map(|c| {
                 let peer = c.pub_hex.to_ascii_lowercase();
-                self.contact_json(c, snap.presence.get(&peer), snap.unread.get(&peer).copied())
+                let mut contact =
+                    self.contact_json(c, snap.presence.get(&peer), snap.unread.get(&peer).copied());
+                let chat = raven_core::chat_prefs::contact_chat(&peer);
+                let last = newest.get(&peer).copied().unwrap_or(0);
+                crate::chats::add_chat_fields(&mut contact, &prefs, &chat, last);
+                contact
             })
             .collect();
         Ok(json!({"contacts": list}))

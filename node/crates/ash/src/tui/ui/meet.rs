@@ -303,7 +303,8 @@ fn find_rows(
         return (lines, None);
     }
     let mut keys = vec![("[Enter]", " Save")];
-    if app.contacts().len() > 1 {
+    // Up and Down go through the chat list (Home's order).
+    if app.listed().nth(1).is_some() {
         keys.push((g.up_down, " Another friend"));
     }
     keys.push(("[Esc]", " Back"));

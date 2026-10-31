@@ -3332,10 +3332,10 @@ fn chats_delete_asks_first_and_says_what_stays() {
     let help = text(&o.stdout);
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
     for words in [
-        "Delete your chat with one contact on this computer",
-        "Your contact keeps their copy",
+        "Delete your chat with one contact or group on this computer",
+        "They keep their copy",
         "Messages still waiting to be sent stay",
-        "raven chats delete --petname Bob",
+        "raven chats delete Bob",
     ] {
         assert!(help.contains(words), "{words:?} missing: {help}");
     }

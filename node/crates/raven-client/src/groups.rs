@@ -50,7 +50,7 @@ fn held_by(m: &MessageView, key: &Key, state: &str, names: &Names) -> Option<Str
     names.holders.get(&hex::encode(copy)).cloned()
 }
 
-fn group_error(e: GroupError) -> ApiError {
+pub(crate) fn group_error(e: GroupError) -> ApiError {
     let (c, message): (&'static str, &str) = match &e {
         GroupError::Hold => (code::NOT_AVAILABLE_YET, ""),
         GroupError::NotFound => (
@@ -114,7 +114,7 @@ fn gate() -> Result<(), ApiError> {
     }
 }
 
-fn group_arg(args: &Args) -> Result<GroupId, ApiError> {
+pub(crate) fn group_arg(args: &Args) -> Result<GroupId, ApiError> {
     let raw = args.str("group")?.trim().to_ascii_lowercase();
     group::wire::hex_n::<16>(&raw)
         .ok_or_else(|| ApiError::bad_request("\"group\" must be a group id (32 hex characters)"))
@@ -383,12 +383,16 @@ impl Inner {
         }
         self.group_identity()?;
         let names = self.group_names()?;
+        let prefs = self.chat_prefs();
         let groups: Vec<Value> = group::list(dir)
             .map_err(group_error)?
             .iter()
             .map(|s| {
                 let view = group::view(dir, &s.id).ok();
-                self.group_json(s, view.as_ref(), &names)
+                let mut g = self.group_json(s, view.as_ref(), &names);
+                let chat = raven_core::chat_prefs::group_chat(&hex::encode(s.id));
+                crate::chats::add_chat_fields(&mut g, &prefs, &chat, s.last_ms);
+                g
             })
             .collect();
         Ok(json!({"available": true, "groups": groups}))

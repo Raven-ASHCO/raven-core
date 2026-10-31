@@ -1642,6 +1642,7 @@ protected (keystore or K_hist), or plain with a reason.
 | `chat_inbox_cursors.json` | kind 9; format 2 entries (`seq`) for a schema-3 session store (PP.14, section 4.12) | PP.6 | per-friend activity markers and clear tombstones |
 | `tui_state.json` `last_read`, `last_read_at`, `display_name` | moved to `tui_private.rms`, kind 10; the rest stays plain | PP.24 | per-friend read markers (shared with the desktop apps), own display name |
 | `desktop_private.rms` (the desktop apps' engine, `node/crates/raven-client`) | kind 128 under `.at_rest.desktop_private.lock.sqlite`; plain JSON until the profile is sealed, then sealed in place by the engine once it holds the key (as `tui_private.rms`); a write without the key fails, never plain; an older engine's name in `desktop_settings.json` moves here; erase removes it | desktop merge review | own display name in the desktop apps |
+| `chat_prefs.json` (0.1.1 chat controls, `raven_core::chat_prefs`) | kind 129 under `.at_rest.chat_prefs.lock.sqlite`; plain JSON in a plain profile, RMS1 in a sealed one (the migration seals it with the rest); a write without the key fails, never plain; removed once nothing is pinned or hidden; erase removes it | chat controls (0.1.1) | which chats (friends' keys, group ids) are pinned or deleted from the chat list, and when |
 | `route_memory.json` | kind 13; expired leases dropped (PP.7) | PP.6 | lab route memory per contact |
 | `lan_noise_pins.json` (cutoff CP.2) | kind 16 under the NEW name `lan_noise_pins.rms` (R07: an older build rewrites an unreadable `lan_noise_pins.json`); plain pins merged only for contacts without a sealed pin, then the plain file removed | PP.5 | contact key -> keyed digest of its Noise static |
 | `route_hints_state.json` (Phase 2, rn `hints::GEN_STATE_FILE`) | kind 17; an advisory file (unreadable reads as no state, and is then never written over) | PP.5 (sealed; the cutoff follow-up re-verify asked for it by PP.6 at the latest) | per-contact digests and sent generations; also the node's own LAN listener address when it is bound to one address (`lan`), and an unkeyed SHA-256 `global` digest over the PeerId, relays and confirmed direct addresses that could be brute-forced: both only inside the sealed file now |
@@ -1688,7 +1689,7 @@ prekey bundles (`prekey_published_local.json`, P5.11), 69 the letters left with 
 (`letter_deposits.json`, P5.15); 64 is an `owed_acks.sqlite.corrupt-<ms>` set-aside copy sealed in place (PP.12,
 section 4.10); 65 a responder's cached PairResponse (section 4.22); 120 is Phase 6b's update downloads
 (`updates/downloads`, P6.49; the updates sub-lane counted up from 120). The desktop apps count up
-from 128, a lane of their own: 128 is their copy of the user's own name (`desktop_private.rms`). A
+from 128, a lane of their own: 128 is their copy of the user's own name (`desktop_private.rms`); 129 the chat controls every UI shares (`chat_prefs.json`, 0.1.1). A
 sealed file whose older readers rewrite it when it looks corrupt gets a new name
 (the R07 rule).
 

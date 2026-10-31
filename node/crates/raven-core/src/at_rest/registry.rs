@@ -177,6 +177,13 @@ pub const FILES: &[FileRule] = &[
         Kind::DesktopPrivate,
         ".at_rest.desktop_private.lock.sqlite",
     ),
+    // The chat controls (0.1.1): pinned chats and the ones deleted from the
+    // chat list, shared by every UI on this device. RMS1 in a sealed profile.
+    sealed(
+        crate::chat_prefs::CHAT_PREFS_FILE,
+        Kind::ChatPrefs,
+        crate::chat_prefs::CHAT_PREFS_LOCK,
+    ),
     // Groups (docs/design/2026-10-groups.md §6): rosters with member keys,
     // group messages, held frames and intents. RMS1 in a sealed profile.
     sealed(

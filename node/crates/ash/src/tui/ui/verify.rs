@@ -43,7 +43,9 @@ use super::app::{
     VerifyView,
 };
 #[cfg(test)]
-use super::app::{Cmd, FriendChange, JobResult, Key, Msg, Overlay, PasteVia, Session, StoreJob};
+use super::app::{
+    ChatControl, Cmd, FriendChange, JobResult, Key, Msg, Overlay, PasteVia, Session, StoreJob,
+};
 use super::bridge::{self, ContactView, ParseError, WORDS};
 #[cfg(test)]
 use super::bridge::{ChatKeepView, DeleteChatOutcome};
@@ -1147,20 +1149,27 @@ pub(super) fn render_page(f: &mut Frame, area: Rect, app: &App, page: &PageState
     }
     let (field, col) = match &page.edit {
         None => {
-            // The privacy pack's actions (PP.21), once its read answered.
-            let delete = format!(" Delete chat with {name}");
             let forget = format!(" Forget {name}'s address");
             let mut keys = vec![
                 ("[R]", " Rename"),
                 ("[E]", " Edit address"),
                 ("[V]", " Verify"),
-                ("[X]", " Remove"),
+                ("[X]", " Remove contact"),
             ];
+            // The chat controls (0.1.1): Block (Unblock while blocked), and
+            // Remove verification while verified.
             if friend.blocked {
                 keys.push(("[U]", " Unblock"));
+            } else {
+                keys.push(("[B]", " Block"));
             }
+            if friend.pinned {
+                keys.push(("[N]", " Remove verification"));
+            }
+            // The privacy pack's actions (PP.21), once its read answered:
+            // Clear history is PP.8's delete.
             if app.privacy().is_some() {
-                keys.push(("[C]", &delete));
+                keys.push(("[C]", " Clear history"));
                 keys.push(("[F]", &forget));
             }
             // The security notices about them, and pausing sending (P6.31).
@@ -1221,8 +1230,9 @@ pub(super) fn render_page(f: &mut Frame, area: Rect, app: &App, page: &PageState
         Some(PageEdit::Remove { typed }) => {
             lines.extend(wizard::rows(
                 &format!(
-                    "Remove {name}? This deletes their contact and verification on this \
-                     computer. Your messages with them stay. Type remove to confirm:"
+                    "Remove {name}? Their contact and verification are deleted; your messages \
+                     with them stay. Only on this device: {name} is not told. Type remove to \
+                     confirm:"
                 ),
                 width,
             ));
@@ -2250,8 +2260,8 @@ mod tests {
                 "        │ Raven address: rvn1qye5mw...mu82td                           │        ",
                 "        │ Local network: 192.168.1.30:7420                             │        ",
                 "        │                                                              │        ",
-                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove         │        ",
-                "        │ [Esc] Back                                                   │        ",
+                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove contact │        ",
+                "        │ [B] Block  [N] Remove verification  [Esc] Back               │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
                 "                                                                                ",
                 "                                                                                ",
@@ -2299,7 +2309,7 @@ mod tests {
                 "        │ Internet: 203.0.113.9:7420                                   │        ",
                 "        │ Blocked: Raven refuses messages from Alice.                  │        ",
                 "        │                                                              │        ",
-                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove         │        ",
+                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove contact │        ",
                 "        │ [U] Unblock  [Esc] Back                                      │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
                 "                                                                                ",
@@ -2343,8 +2353,8 @@ mod tests {
                 "| Internet: 203.0.113.9:7420                               |",
                 "| Blocked: Raven refuses messages from Alice.              |",
                 "|                                                          |",
-                "| [R] Rename  [E] Edit address  [V] Verify  [X] Remove     |",
-                "| [U] Unblock  [Esc] Back                                  |",
+                "| [R] Rename  [E] Edit address  [V] Verify                 |",
+                "| [X] Remove contact  [U] Unblock  [Esc] Back              |",
                 "+----------------------------------------------------------+",
                 "                                                            ",
                 "                                                            ",
@@ -2416,9 +2426,9 @@ mod tests {
                 "        │ Raven address: rvn1qye5mw...mu82td                           │        ",
                 "        │ Local network: 192.168.1.30:7420                             │        ",
                 "        │                                                              │        ",
-                "        │ Remove Bob? This deletes their contact and verification on   │        ",
-                "        │ this computer. Your messages with them stay. Type remove to  │        ",
-                "        │ confirm:                                                     │        ",
+                "        │ Remove Bob? Their contact and verification are deleted; your │        ",
+                "        │ messages with them stay. Only on this device: Bob is not     │        ",
+                "        │ told. Type remove to confirm:                                │        ",
                 "        │ > rem                                                        │        ",
                 "        │                                                              │        ",
                 "        │ [Enter] Remove   [Esc] Back                                  │        ",
@@ -2520,7 +2530,7 @@ mod tests {
         }
         let text = testkit::screen_text(&testkit::render(&app, 80, 24));
         assert!(
-            !text.contains("Delete chat") && !text.contains("Forget"),
+            !text.contains("Clear history") && !text.contains("Forget"),
             "{text}"
         );
         let help = |app: &mut App| {
@@ -2531,14 +2541,14 @@ mod tests {
         };
         let text = help(&mut app);
         assert!(
-            !text.contains("Delete your chat") && !text.contains("Forget"),
+            !text.contains("Clear history") && !text.contains("Forget"),
             "{text}"
         );
         // Available: both, with Bob's name, and in HELP.
         testkit::privacy_on(&mut app, ChatKeepView::Days30, Default::default());
         let text = help(&mut app);
         assert!(
-            text.contains("C Delete your chat on this computer"),
+            text.contains("C Clear history (on this device only)"),
             "{text}"
         );
         assert!(text.contains("F Forget their address"), "{text}");
@@ -2560,9 +2570,9 @@ mod tests {
                 "        │ Raven address: rvn1qye5mw...mu82td                           │        ",
                 "        │ Local network: 192.168.1.30:7420                             │        ",
                 "        │                                                              │        ",
-                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove         │        ",
-                "        │ [C] Delete chat with Bob  [F] Forget Bob's address           │        ",
-                "        │ [Esc] Back                                                   │        ",
+                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove contact │        ",
+                "        │ [B] Block  [N] Remove verification  [C] Clear history        │        ",
+                "        │ [F] Forget Bob's address  [Esc] Back                         │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
                 "                                                                                ",
                 "                                                                                ",
@@ -2586,9 +2596,9 @@ mod tests {
                 "│ Raven address: rvn1qye5mw...mu82td                       │",
                 "│ Local network: 192.168.1.30:7420                         │",
                 "│                                                          │",
-                "│ [R] Rename  [E] Edit address  [V] Verify  [X] Remove     │",
-                "│ [C] Delete chat with Bob  [F] Forget Bob's address       │",
-                "│ [Esc] Back                                               │",
+                "│ [R] Rename  [E] Edit address  [V] Verify                 │",
+                "│ [X] Remove contact  [B] Block  [N] Remove verification   │",
+                "│ [C] Clear history  [F] Forget Bob's address  [Esc] Back  │",
                 "└──────────────────────────────────────────────────────────┘",
                 "                                                            ",
             ],
@@ -2603,7 +2613,8 @@ mod tests {
             app.overlays(),
             [Overlay::DeleteChat {
                 peer: bob_key(),
-                typed: String::new()
+                typed: String::new(),
+                from_list: false,
             }]
         );
         type_text(&mut app, "dele");
@@ -2617,17 +2628,17 @@ mod tests {
                 "                                                                                ",
                 "                                                                                ",
                 "        ┌──────────────────────────────────────────────────────────────┐        ",
-                "        │ Bob                                                          │        ",
                 "        ┌──────────────────────────────────────────────────────────────┐        ",
-                "        │ Delete your chat with Bob on this computer? Bob keeps their  │        ",
-                "        │ copy. Type delete to confirm:                                │        ",
+                "        │ Clear history with Bob? Your messages with Bob are deleted;  │        ",
+                "        │ the chat stays in your chat list. Only on this device: Bob   │        ",
+                "        │ is not told and keeps their copy.                            │        ",
+                "        │ Type delete to confirm:                                      │        ",
                 "        │ > dele                                                       │        ",
                 "        │                                                              │        ",
                 "        │ [Enter] Delete   [Esc] Cancel                                │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
-                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove         │        ",
-                "        │ [C] Delete chat with Bob  [F] Forget Bob's address           │        ",
-                "        │ [Esc] Back                                                   │        ",
+                "        │ [B] Block  [N] Remove verification  [C] Clear history        │        ",
+                "        │ [F] Forget Bob's address  [Esc] Back                         │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
                 "                                                                                ",
                 "                                                                                ",
@@ -2694,9 +2705,9 @@ mod tests {
                 "        │ Raven address: rvn1qye5mw...mu82td                           │        ",
                 "        │ Local network: 192.168.1.30:7420                             │        ",
                 "        │                                                              │        ",
-                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove         │        ",
-                "        │ [C] Delete chat with Bob  [F] Forget Bob's address           │        ",
-                "        │ [Esc] Back                                                   │        ",
+                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove contact │        ",
+                "        │ [B] Block  [N] Remove verification  [C] Clear history        │        ",
+                "        │ [F] Forget Bob's address  [Esc] Back                         │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
                 "                                                                                ",
                 "                                                                                ",
@@ -2720,17 +2731,17 @@ mod tests {
                 "R A V E N - Friend page           o Receiving is off  ? Help",
                 "                                                            ",
                 "┌──────────────────────────────────────────────────────────┐",
-                "│ Bob                                                      │",
                 "┌──────────────────────────────────────────────────────────┐",
-                "│ Delete your chat with Bob on this computer? Bob keeps    │",
-                "│ their copy. Type delete to confirm:                      │",
+                "│ Clear history with Bob? Your messages with Bob are       │",
+                "│ deleted; the chat stays in your chat list. Only on this  │",
+                "│ device: Bob is not told and keeps their copy.            │",
+                "│ Type delete to confirm:                                  │",
                 "│ > delete                                                 │",
                 "│                                                          │",
                 "│ [Enter] Delete   [Esc] Cancel                            │",
                 "└──────────────────────────────────────────────────────────┘",
-                "│ [R] Rename  [E] Edit address  [V] Verify  [X] Remove     │",
-                "│ [C] Delete chat with Bob  [F] Forget Bob's address       │",
-                "│ [Esc] Back                                               │",
+                "│ [X] Remove contact  [B] Block  [N] Remove verification   │",
+                "│ [C] Clear history  [F] Forget Bob's address  [Esc] Back  │",
                 "└──────────────────────────────────────────────────────────┘",
                 "                                                            ",
             ],
@@ -2757,9 +2768,9 @@ mod tests {
                 "│ Raven address: rvn1qye5mw...mu82td                       │",
                 "│ Local network: 192.168.1.30:7420                         │",
                 "│                                                          │",
-                "│ [R] Rename  [E] Edit address  [V] Verify  [X] Remove     │",
-                "│ [C] Delete chat with Bob  [F] Forget Bob's address       │",
-                "│ [Esc] Back                                               │",
+                "│ [R] Rename  [E] Edit address  [V] Verify                 │",
+                "│ [X] Remove contact  [B] Block  [N] Remove verification   │",
+                "│ [C] Clear history  [F] Forget Bob's address  [Esc] Back  │",
                 "└──────────────────────────────────────────────────────────┘",
                 "Deleted your chat with Bob on this computer (0 messages).   ",
             ],
@@ -2776,7 +2787,8 @@ mod tests {
             app.overlays(),
             [Overlay::DeleteChat {
                 peer: bob_key(),
-                typed: "delete".into()
+                typed: "delete".into(),
+                from_list: false,
             }]
         );
         assert_eq!(
@@ -2836,6 +2848,79 @@ mod tests {
     }
 
     #[test]
+    fn ci_block_and_remove_verification_ask_first() {
+        // CTL (0.1.1 chat controls): what happens, on this device only.
+        let mut app = ci_privacy((80, 24), true);
+        testkit::press(&mut app, KeyCode::Char('b'));
+        assert_eq!(
+            app.overlays(),
+            [Overlay::ChatControl {
+                peer: bob_key(),
+                control: ChatControl::Block,
+            }]
+        );
+        testkit::assert_rows(
+            &testkit::render(&app, 80, 24),
+            &[
+                "R A V E N - Friend page                               o Receiving is off  ? Help",
+                "                                                                                ",
+                "                                                                                ",
+                "                                                                                ",
+                "                                                                                ",
+                "                                                                                ",
+                "        ┌──────────────────────────────────────────────────────────────┐        ",
+                "        │ Bob                                                          │        ",
+                "        ┌──────────────────────────────────────────────────────────────┐        ",
+                "        │ Block Bob? Messages, contact requests and group messages     │        ",
+                "        │ from Bob are dropped, and nothing goes to Bob, until you     │        ",
+                "        │ unblock. Only on this device: Bob is not told.               │        ",
+                "        │                                                              │        ",
+                "        │ [Enter] Block   [Esc] Cancel                                 │        ",
+                "        └──────────────────────────────────────────────────────────────┘        ",
+                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove contact │        ",
+                "        │ [B] Block  [N] Remove verification  [C] Clear history        │        ",
+                "        │ [F] Forget Bob's address  [Esc] Back                         │        ",
+                "        └──────────────────────────────────────────────────────────────┘        ",
+                "                                                                                ",
+                "                                                                                ",
+                "                                                                                ",
+                "                                                                                ",
+                "                                                                                ",
+            ],
+        );
+        testkit::press(&mut app, KeyCode::Esc);
+        testkit::press(&mut app, KeyCode::Char('n'));
+        assert_eq!(
+            app.overlays(),
+            [Overlay::ChatControl {
+                peer: bob_key(),
+                control: ChatControl::Unverify,
+            }]
+        );
+        testkit::assert_rows(
+            &testkit::render(&app, 60, 16),
+            &[
+                "R A V E N - Friend page           o Receiving is off  ? Help",
+                "                                                            ",
+                "┌──────────────────────────────────────────────────────────┐",
+                "│ Bob                                                      │",
+                "┌──────────────────────────────────────────────────────────┐",
+                "│ Remove the verification of Bob? Your chat and Bob's      │",
+                "│ addresses stay; friend mailboxes with Bob stop until you │",
+                "│ compare the 10 security words again. Only on this        │",
+                "│ device: Bob is not told.                                 │",
+                "│                                                          │",
+                "│ [Enter] Remove verification   [Esc] Cancel               │",
+                "└──────────────────────────────────────────────────────────┘",
+                "│ [X] Remove contact  [B] Block  [N] Remove verification   │",
+                "│ [C] Clear history  [F] Forget Bob's address  [Esc] Back  │",
+                "└──────────────────────────────────────────────────────────┘",
+                "                                                            ",
+            ],
+        );
+    }
+
+    #[test]
     fn ci_forget_address_asks_first() {
         let mut app = ci_privacy((80, 24), true);
         testkit::press(&mut app, KeyCode::Char('f'));
@@ -2858,9 +2943,9 @@ mod tests {
                 "        │                                                              │        ",
                 "        │ [Enter] Forget   [Esc] Cancel                                │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
-                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove         │        ",
-                "        │ [C] Delete chat with Bob  [F] Forget Bob's address           │        ",
-                "        │ [Esc] Back                                                   │        ",
+                "        │ [R] Rename  [E] Edit address  [V] Verify  [X] Remove contact │        ",
+                "        │ [B] Block  [N] Remove verification  [C] Clear history        │        ",
+                "        │ [F] Forget Bob's address  [Esc] Back                         │        ",
                 "        └──────────────────────────────────────────────────────────────┘        ",
                 "                                                                                ",
                 "                                                                                ",
@@ -2917,9 +3002,9 @@ mod tests {
                 "│                                                          │",
                 "│ [Enter] Forget   [Esc] Cancel                            │",
                 "└──────────────────────────────────────────────────────────┘",
-                "│ [R] Rename  [E] Edit address  [V] Verify  [X] Remove     │",
-                "│ [C] Delete chat with Bob  [F] Forget Bob's address       │",
-                "│ [Esc] Back                                               │",
+                "│ [R] Rename  [E] Edit address  [V] Verify                 │",
+                "│ [X] Remove contact  [B] Block  [N] Remove verification   │",
+                "│ [C] Clear history  [F] Forget Bob's address  [Esc] Back  │",
                 "└──────────────────────────────────────────────────────────┘",
                 "                                                            ",
             ],

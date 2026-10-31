@@ -110,8 +110,13 @@ pub(super) fn render(f: &mut Frame, app: &App, now: Instant) {
                 Overlay::KeepChats { choice } => {
                     overlays::render_keep_chats(f, area, look, *choice)
                 }
-                Overlay::DeleteChat { peer, typed } => {
-                    overlays::render_delete_chat(f, area, app, peer, typed)
+                Overlay::DeleteChat {
+                    peer,
+                    typed,
+                    from_list,
+                } => overlays::render_delete_chat(f, area, app, peer, typed, *from_list),
+                Overlay::ChatControl { peer, control } => {
+                    overlays::render_chat_control(f, area, app, peer, *control)
                 }
                 Overlay::ForgetAddress { peer } => {
                     overlays::render_forget_address(f, area, app, peer)
@@ -297,6 +302,8 @@ mod tests {
                 "│   │ Ctrl+C  Quit                                                         │   │",
                 "│   │ L       Lock: stop Raven and quit                                    │   │",
                 "│   │ Ctrl+L  Redraw the screen                                            │   │",
+                "│   │ T       Pin or unpin the highlighted chat (on the list)              │   │",
+                "│   │ H       Show or hide deleted chats (on the list)                     │   │",
                 "│   │ Shortcuts also work with a Persian keyboard.                         │   │",
                 "│   │                                                                      │   │",
                 "│   │ What the symbols mean                                                │   │",
@@ -304,11 +311,9 @@ mod tests {
                 "│   │   one of yours was delivered, in the last 15 minutes. It doesn't     │   │",
                 "│   │   mean they are online now.                                          │   │",
                 "│   │ ~ Messages waiting: some of your messages haven't reached them yet.  │   │",
-                "│   │ o No recent contact: Raven has no online indicator.                  │   │",
+                "│   │ o No recent contact: Raven has no online indicator.                  │── │",
                 "│   │ x No address: Raven doesn't know where to reach them.                │   │",
-                "│   │ ! Not verified: you haven't compared security words yet. More in     │── │",
-                "│   │   docs/SECURITY_WORDS.md.                                            │   │",
-                "│ A │ !! Security alert: Raven noticed something about them (press D, or W │   │",
+                "│ A │ ! Not verified: you haven't compared security words yet. More in     │   │",
                 "└───└ Esc Close  Up/Down Scroll ───────────────────────────────────────────┘───┘",
                 "No friends yet - all quiet                     activity ........................",
                 "? Help  Q Quit  Up/Down Choose  Enter Open  A Add  V Verify  E Friend page      ",
@@ -363,14 +368,14 @@ mod tests {
             "│ Ctrl+C  Quit                                             │",
             "│ L       Lock: stop Raven and quit                        │",
             "│ Ctrl+L  Redraw the screen                                │",
+            "│ T       Pin or unpin the highlighted chat (on the list)  │",
+            "│ H       Show or hide deleted chats (on the list)         │",
             "│ Shortcuts also work with a Persian keyboard.             │",
             "│                                                          │",
             "│ What the symbols mean                                    │",
             "│ * In touch: since you opened Raven, a message from them  │",
             "│   arrived, or one of yours was delivered, in the last 15 │",
             "│   minutes. It doesn't mean they are online now.          │",
-            "│ ~ Messages waiting: some of your messages haven't        │",
-            "│   reached them yet.                                      │",
             "└ Esc Close  Up/Down Scroll ───────────────────────────────┘",
         ];
         let fancy = &[
@@ -381,14 +386,14 @@ mod tests {
             "│ Ctrl+C  Quit                                             │",
             "│ L       Lock: stop Raven and quit                        │",
             "│ Ctrl+L  Redraw the screen                                │",
+            "│ T       Pin or unpin the highlighted chat (on the list)  │",
+            "│ H       Show or hide deleted chats (on the list)         │",
             "│ Shortcuts also work with a Persian keyboard.             │",
             "│                                                          │",
             "│ What the symbols mean                                    │",
             "│ ● In touch: since you opened Raven, a message from them  │",
             "│   arrived, or one of yours was delivered, in the last 15 │",
             "│   minutes. It doesn't mean they are online now.          │",
-            "│ ◐ Messages waiting: some of your messages haven't        │",
-            "│   reached them yet.                                      │",
             "╰ Esc Close · ↑↓ Scroll ───────────────────────────────────╯",
         ];
         let ascii = &[
@@ -399,14 +404,14 @@ mod tests {
             "| Ctrl+C  Quit                                             |",
             "| L       Lock: stop Raven and quit                        |",
             "| Ctrl+L  Redraw the screen                                |",
+            "| T       Pin or unpin the highlighted chat (on the list)  |",
+            "| H       Show or hide deleted chats (on the list)         |",
             "| Shortcuts also work with a Persian keyboard.             |",
             "|                                                          |",
             "| What the symbols mean                                    |",
             "| * In touch: since you opened Raven, a message from them  |",
             "|   arrived, or one of yours was delivered, in the last 15 |",
             "|   minutes. It doesn't mean they are online now.          |",
-            "| ~ Messages waiting: some of your messages haven't        |",
-            "|   reached them yet.                                      |",
             "+ Esc Close  Up/Down Scroll -------------------------------+",
         ];
         for (glyphs, expected) in [

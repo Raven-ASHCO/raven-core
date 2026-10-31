@@ -47,6 +47,13 @@
 //!   banner says what happened, with [V] [D] [P]; while sending to them is
 //!   paused the banner and the composer's hint say how to resume. The
 //!   words are security_text.rs's, through bridge.rs.
+//! - The chat controls (0.1.1, this computer only): pinned chats come first
+//!   in the list, the newest pin first ('pinned' in the wide list where the
+//!   badge has room); a chat deleted from the list (X) is not in it until a
+//!   newer message comes, and while any is, a footer row offers H, which
+//!   shows them last, marked 'deleted'. The key row ends with T (Pin or
+//!   Unpin) and X (Delete chat) for the highlighted friend, where it has
+//!   room.
 //! - Groups (lab only, ui/groups.rs): while they are live, the list has a
 //!   GROUPS section under the friends and a second footer row (C, a new
 //!   group), the highlight moves over both, and an open group's chat takes
@@ -109,6 +116,16 @@ const LIST_TITLE: &str = " Friends ";
 const CHATS_TITLE: &str = " Chats ";
 const LIST_EMPTY: [&str; 2] = ["No friends yet.", "Press A to add one."];
 const LIST_FOOTER: (&str, &str) = ("A", "  Add a friend");
+/// The list's footer while chats are deleted from it (0.1.1 chat
+/// controls): H shows them at its end, or hides them again.
+const DELETED_SHOW: &str = "  Deleted chats";
+const DELETED_HIDE: &str = "  Hide deleted";
+/// Every saved friend's chat is deleted from the list.
+const LIST_ALL_DELETED: [&str; 2] = ["No chats in your list.", "Press H for deleted chats."];
+/// A deleted chat's badge while H shows it, and a pinned one's where the
+/// name leaves room.
+const DELETED: &str = "deleted";
+const PINNED: &str = "pinned";
 const LIST_UNREADABLE: &str = "Raven can't read your list of friends right now.";
 const BLOCKED: &str = "blocked";
 /// A friend's badge while not verified, where the name leaves room (else
@@ -191,6 +208,20 @@ pub(super) fn render(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     .position(|k| k.0 == "A")
                     .map_or(keys.len(), |a| a + 1);
                 keys.insert(at, ("C", "New group"));
+            }
+            // The chat controls (0.1.1) for the highlighted friend, last:
+            // where the row has room.
+            if app.focus() == Focus::Friends {
+                if let Some(friend) = app.highlighted_friend() {
+                    keys.push(if app.chat_pinned(friend) {
+                        ("T", "Unpin")
+                    } else {
+                        ("T", "Pin")
+                    });
+                    if app.privacy().is_some() {
+                        keys.push(("X", "Delete chat"));
+                    }
+                }
             }
             keys
         };
@@ -432,7 +463,7 @@ pub(crate) fn moving(app: &App) -> Vec<Moving> {
     moving.extend(app.live().news_until().map(Moving::Deadline));
 
     if list_visible(app) {
-        for friend in app.contacts() {
+        for friend in app.listed() {
             // In touch: the mark breathes (Calm), from when they came in
             // touch, while they are.
             let rows = app.rows(&friend.pub_hex);
@@ -638,10 +669,18 @@ fn render_list(f: &mut Frame, rect: Rect, app: &App, now: Instant) {
     if inner.is_empty() {
         return;
     }
-    // While groups are live (lab), a second footer row: C, a new group.
+    // While groups are live (lab), a second footer row: C, a new group;
+    // while chats are deleted from the list, H for them.
     let mut footers = vec![LIST_FOOTER];
     if app.groups_live() {
         footers.push(groups::FOOTER);
+    }
+    if app.deleted_chats() > 0 {
+        footers.push(if app.showing_deleted() {
+            ("H", DELETED_HIDE)
+        } else {
+            ("H", DELETED_SHOW)
+        });
     }
     let footer_rows = u16::try_from(footers.len()).unwrap_or(1).min(inner.height);
     let footer = Rect {
@@ -689,17 +728,21 @@ fn render_list(f: &mut Frame, rect: Rect, app: &App, now: Instant) {
             .flat_map(|text| words(text))
             .map(Line::raw)
             .collect()
-    } else if app.groups_live() {
-        app.contacts()
+    } else if app.listed().next().is_none() {
+        LIST_ALL_DELETED
             .iter()
+            .flat_map(|text| words(text))
+            .map(|row| Line::styled(row, look.theme.secondary))
+            .collect()
+    } else if app.groups_live() {
+        app.listed()
             .enumerate()
             .map(|(i, friend)| friend_row(app, i, friend, rows.width, focused, now))
             .collect()
     } else {
         let visible = usize::from(rows.height);
         let first = (app.highlight() + 1).saturating_sub(visible);
-        app.contacts()
-            .iter()
+        app.listed()
             .enumerate()
             .skip(first)
             .take(visible)
@@ -716,7 +759,7 @@ fn render_list(f: &mut Frame, rect: Rect, app: &App, now: Instant) {
     let marked = if app.highlighted_group_at().is_some() {
         section.highlighted.map(|row| lines.len() + row)
     } else {
-        (!app.contacts().is_empty()).then_some(app.highlight())
+        app.listed().next().is_some().then_some(app.highlight())
     };
     let visible = usize::from(rows.height);
     let first = marked.map_or(0, |row| (row + 1).saturating_sub(visible));
@@ -728,9 +771,11 @@ fn render_list(f: &mut Frame, rect: Rect, app: &App, now: Instant) {
 
 /// One friend's row in `width` cells: '>' when highlighted, the mark, the
 /// name (at most 14 cells, less when the badge needs the room) and the badge
-/// at the right: 'blocked', the alarm while a security alert or warning
-/// about them is open (P6.31), the unread count, 'paused' while sending to
-/// them is paused, or '!' while not verified.
+/// at the right: 'deleted' for a chat deleted from the list (while H shows
+/// it), 'blocked', the alarm while a security alert or warning about them
+/// is open (P6.31), the unread count, 'paused' while sending to them is
+/// paused, '!' while not verified, or in the wide list 'pinned' for a
+/// pinned chat.
 ///
 /// At `now` (UXF.10): the in-touch mark breathes with the clock's seconds,
 /// the waiting mark rings for a moment when Raven tried them again, and the
@@ -755,7 +800,9 @@ fn friend_row(
     let wide = app.size().0 >= WIDE_LIST_FROM;
     let name_cells = display::width(&friend.label).min(usize::from(LIST_NAME_CELLS));
     let roomy = |words: &str| wide && lead + name_cells + 1 + cells(words) <= usize::from(width);
-    let (badge, badge_style) = if friend.blocked {
+    let (badge, badge_style) = if app.chat_hidden(&friend.pub_hex) {
+        (DELETED.to_owned(), t.secondary)
+    } else if friend.blocked {
         (BLOCKED.to_owned(), t.secondary)
     } else if app.notices_about(&friend.pub_hex).next().is_some() {
         (g.alarm_badge.to_owned(), t.warn)
@@ -768,6 +815,8 @@ fn friend_row(
         (NOT_VERIFIED.to_owned(), t.warn)
     } else if !friend.pinned {
         (g.dot_alert.to_owned(), t.warn)
+    } else if app.chat_pinned(&friend.pub_hex) && roomy(PINNED) {
+        (PINNED.to_owned(), t.secondary)
     } else if let Some(route) = last_route(app, friend).filter(|r| roomy(r.carrier_words())) {
         (
             route.carrier_words().to_owned(),

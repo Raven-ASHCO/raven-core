@@ -1,5 +1,5 @@
 //! Groups in the CLI (docs/design/2026-10-groups.md §8): `raven group
-//! create|add|remove|leave|list|show|send`, and the group section of
+//! create|add|remove|leave|clear|list|show|send`, and the group section of
 //! `raven inbox`.
 //!
 //! - **Held** by [`raven_core::group::GROUPS_PRODUCTION_ENABLED`] (false; a
@@ -43,6 +43,11 @@ pub(super) enum GroupArg {
         group: String,
         yes: bool,
     },
+    /// Clear the group's chat on this computer only (0.1.1 chat controls).
+    Clear {
+        group: String,
+        yes: bool,
+    },
     List,
     Show {
         group: String,
@@ -53,6 +58,22 @@ pub(super) enum GroupArg {
     Send {
         group: String,
     },
+}
+
+/// What `raven group clear` says: how many messages went, and that mine
+/// still on their way stay.
+fn clear_lines(name: &str, cleared: usize, kept: usize) -> Vec<String> {
+    let mut lines = vec![format!(
+        "ok cleared {cleared} message{} of {name} on this computer; the other members keep theirs",
+        if cleared == 1 { "" } else { "s" }
+    )];
+    if kept > 0 {
+        lines.push(format!(
+            "{kept} of your messages still on their way stay{}, and go on to the members",
+            if kept == 1 { "s" } else { "" }
+        ));
+    }
+    lines
 }
 
 /// Recent messages `raven group show` lists.
@@ -105,6 +126,18 @@ fn resolve_members(data_dir: &Path, asked: &[String]) -> Result<Vec<(Key, String
 
 fn find(data_dir: &Path, query: &str) -> Result<GroupId, String> {
     group::find(data_dir, query).map_err(|e| err_text(&e))
+}
+
+/// The group `query` names and its name (for `raven chats`).
+pub(super) fn find_named(data_dir: &Path, query: &str) -> Result<(GroupId, String), String> {
+    let id = find(data_dir, query)?;
+    let view = group::view(data_dir, &id).map_err(|e| err_text(&e))?;
+    Ok((id, view.summary.name))
+}
+
+/// Clear group `id`'s chat on this computer: `(cleared, pending_kept)`.
+pub(super) fn clear_group(data_dir: &Path, id: &GroupId) -> Result<(usize, usize), String> {
+    group::store::clear(data_dir, id, false).map_err(|e| err_text(&e))
 }
 
 /// Ask raven-node to send what was parked; start it when none answers, as
@@ -209,6 +242,28 @@ pub(super) fn cmd_group(data_dir: &Path, arg: GroupArg) -> Result<Vec<String>, S
             let mut lines = vec![format!("ok you left {name}; its admin is told")];
             lines.extend(kick(data_dir));
             Ok(lines)
+        }
+        GroupArg::Clear { group: g, yes } => {
+            let id = find(data_dir, &g)?;
+            let view = group::view(data_dir, &id).map_err(|e| err_text(&e))?;
+            let name = sanitize_terminal_line(&view.summary.name);
+            if !yes {
+                if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+                    return Err(
+                        "clearing a group's chat needs --yes when stdin is not a terminal".into(),
+                    );
+                }
+                let question = format!(
+                    "Clear the chat of {name} on this computer? Its messages go from this \
+                     computer only; the other members are not told and keep theirs. [y/N] "
+                );
+                if !super::custody_cli::said_yes(super::custody_cli::ask_on_terminal(&question)) {
+                    return Ok(vec!["nothing changed".into()]);
+                }
+            }
+            let (cleared, kept) =
+                group::store::clear(data_dir, &id, false).map_err(|e| err_text(&e))?;
+            Ok(clear_lines(&name, cleared, kept))
         }
         GroupArg::Send { group: g } => {
             let me = identity(data_dir)?;

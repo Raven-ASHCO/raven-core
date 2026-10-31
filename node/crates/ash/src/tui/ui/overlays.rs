@@ -19,8 +19,9 @@ use ratatui::Frame;
 
 use super::anim::Moving;
 use super::app::{
-    self, App, Bubble, ConfirmAction, EraseStage, EraseState, KeychainView, LockStep, MessageView,
-    Overlay, QuitChoice, QuitView, RunningQuit, RxState, Screen, TickView, Toast, WaitingQuit,
+    self, App, Bubble, ChatControl, ConfirmAction, EraseStage, EraseState, KeychainView, LockStep,
+    MessageView, Overlay, QuitChoice, QuitView, RunningQuit, RxState, Screen, TickView, Toast,
+    WaitingQuit,
 };
 #[cfg(test)]
 use super::app::{
@@ -136,6 +137,19 @@ const HOME_KEYS: &[(&str, &str)] = &[
     ("Ctrl+C", "Quit"),
     ("L", "Lock: stop Raven and quit"),
     ("Ctrl+L", "Redraw the screen"),
+    ("T", "Pin or unpin the highlighted chat (on the list)"),
+    ("H", "Show or hide deleted chats (on the list)"),
+];
+/// Home's keys once the privacy read answered (PP.21): Delete chat too.
+const HOME_PRIVACY_KEYS: &[(&str, &str)] = &[
+    ("?", "Help"),
+    ("Q", "Quit"),
+    ("Ctrl+C", "Quit"),
+    ("L", "Lock: stop Raven and quit"),
+    ("Ctrl+L", "Redraw the screen"),
+    ("T", "Pin or unpin the highlighted chat (on the list)"),
+    ("X", "Delete the highlighted chat (on the list)"),
+    ("H", "Show or hide deleted chats (on the list)"),
 ];
 /// Home's group keys, while groups are live (lab): a section of their own.
 const GROUP_KEYS: &[(&str, &str)] = &[
@@ -220,8 +234,10 @@ const FRIEND_PAGE_KEYS: &[(&str, &str)] = &[
     ("R", "Rename"),
     ("E", "Edit their address"),
     ("V", "Verify"),
-    ("X", "Remove"),
+    ("X", "Remove contact"),
+    ("B", "Block (on this device only)"),
     ("U", "Unblock"),
+    ("N", "Remove verification (on this device only)"),
     ("P", "Pause or resume sending to them"),
     ("W", "Security notices"),
     ("D", "Details of a failure"),
@@ -232,9 +248,11 @@ const FRIEND_PAGE_PRIVACY_KEYS: &[(&str, &str)] = &[
     ("R", "Rename"),
     ("E", "Edit their address"),
     ("V", "Verify"),
-    ("X", "Remove"),
+    ("X", "Remove contact"),
+    ("B", "Block (on this device only)"),
     ("U", "Unblock"),
-    ("C", "Delete your chat on this computer"),
+    ("N", "Remove verification (on this device only)"),
+    ("C", "Clear history (on this device only)"),
     ("F", "Forget their address"),
     ("P", "Pause or resume sending to them"),
     ("W", "Security notices"),
@@ -337,6 +355,10 @@ const KEEP_KEYS: [(&str, &str); 2] = [("[Enter]", " Save"), ("[Esc]", " Cancel")
 /// DEL's and FORGET's keys.
 const DELETE_KEYS: [(&str, &str); 2] = [("[Enter]", " Delete"), ("[Esc]", " Cancel")];
 const FORGET_KEYS: [(&str, &str); 2] = [("[Enter]", " Forget"), ("[Esc]", " Cancel")];
+/// CTL's keys (0.1.1 chat controls).
+const BLOCK_KEYS: [(&str, &str); 2] = [("[Enter]", " Block"), ("[Esc]", " Cancel")];
+const UNVERIFY_KEYS: [(&str, &str); 2] =
+    [("[Enter]", " Remove verification"), ("[Esc]", " Cancel")];
 /// NOTICE's key.
 const NOTICE_KEYS: (&str, &str) = ("[Enter]", " OK");
 
@@ -426,6 +448,7 @@ fn group_keys(screen: &Screen, groups: bool) -> &'static [(&'static str, &'stati
 /// The keys HELP lists over `screen`.
 fn help_keys(screen: &Screen, privacy: bool) -> &'static [(&'static str, &'static str)] {
     match screen {
+        Screen::Home if privacy => HOME_PRIVACY_KEYS,
         Screen::Home => HOME_KEYS,
         Screen::Wizard(_) | Screen::IdentityError(_) => WELCOME_KEYS,
         Screen::AddFriend(_) | Screen::NameClash(_) => ADD_FRIEND_KEYS,
@@ -1335,21 +1358,27 @@ pub(super) fn render_keep_chats(f: &mut Frame, area: Rect, look: &Look, choice: 
     draw_card(f, rect, look, fit(lines, rect.height));
 }
 
-/// DEL (PP.21): the question for the friend `peer`, the word as typed (the
-/// terminal's cursor after it), and the keys.
-pub(super) fn render_delete_chat(f: &mut Frame, area: Rect, app: &App, peer: &str, typed: &str) {
+/// DEL (PP.21): the question for the friend `peer`, CI's Clear history or
+/// (`from_list`) Home's Delete chat, the word as typed (the terminal's
+/// cursor after it), and the keys.
+pub(super) fn render_delete_chat(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    peer: &str,
+    typed: &str,
+    from_list: bool,
+) {
     let look = app.look();
     let name = friend_name(app, peer);
     let rect_width = NOTE_WIDTH.min(area.width);
     let width = inner_width(rect_width);
-    let question = format!(
-        "Delete your chat with {name} on this computer? {name} keeps their copy. Type delete to \
-         confirm:"
-    );
+    let question = delete_chat_question(&name, from_list);
     let mut lines: Vec<Line<'static>> = wrap(&question, width, 0)
         .into_iter()
         .map(Line::raw)
         .collect();
+    lines.push(Line::raw(DELETE_ASK));
     let field = Line::raw(format!("> {}", display::one_line(typed, u16::MAX, "")));
     lines.push(field.clone());
     lines.push(Line::default());
@@ -1367,6 +1396,70 @@ pub(super) fn render_delete_chat(f: &mut Frame, area: Rect, app: &App, peer: &st
             f.set_cursor_position(Position::new(x, inner.y + row));
         }
     }
+}
+
+/// DEL's last line, under its question: the word to type.
+const DELETE_ASK: &str = "Type delete to confirm:";
+
+/// DEL's question for the friend `name`: Clear history, or (`from_list`)
+/// Delete chat, which also takes the chat out of the chat list.
+pub(super) fn delete_chat_question(name: &str, from_list: bool) -> String {
+    let what = if from_list {
+        format!(
+            "Delete chat with {name}? Your messages with {name} are deleted, and the chat \
+             leaves your chat list until a new message comes."
+        )
+    } else {
+        format!(
+            "Clear history with {name}? Your messages with {name} are deleted; the chat stays \
+             in your chat list."
+        )
+    };
+    format!("{what} Only on this device: {name} is not told and keeps their copy.")
+}
+
+/// CTL's question (0.1.1 chat controls) for `name`: what Block or Remove
+/// verification does, on this device only.
+pub(super) fn chat_control_question(name: &str, control: ChatControl) -> String {
+    match control {
+        ChatControl::Block => format!(
+            "Block {name}? Messages, contact requests and group messages from {name} are \
+             dropped, and nothing goes to {name}, until you unblock. Only on this device: {name} \
+             is not told."
+        ),
+        ChatControl::Unverify => format!(
+            "Remove the verification of {name}? Your chat and {name}'s addresses stay; friend \
+             mailboxes with {name} stop until you compare the 10 security words again. Only on \
+             this device: {name} is not told."
+        ),
+    }
+}
+
+/// CTL (0.1.1 chat controls): the question for the friend `peer` and the
+/// keys.
+pub(super) fn render_chat_control(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    peer: &str,
+    control: ChatControl,
+) {
+    let look = app.look();
+    let name = friend_name(app, peer);
+    let rect_width = NOTE_WIDTH.min(area.width);
+    let width = inner_width(rect_width);
+    let mut lines: Vec<Line<'static>> = wrap(&chat_control_question(&name, control), width, 0)
+        .into_iter()
+        .map(Line::raw)
+        .collect();
+    lines.push(Line::default());
+    let keys = match control {
+        ChatControl::Block => BLOCK_KEYS,
+        ChatControl::Unverify => UNVERIFY_KEYS,
+    };
+    lines.extend(verify::key_rows(look, &keys, "   ", width));
+    let rect = centered(area, rect_width, height_of(&lines));
+    draw_card(f, rect, look, fit(lines, rect.height));
 }
 
 /// FORGET (PP.21): the question for the friend `peer` (the CLI's words)
@@ -3540,9 +3633,16 @@ mod tests {
         for look in testkit::every_look() {
             for (cols, rows) in [(60, 16), (80, 24), (100, 30)] {
                 let inner = overlay_block(&look).inner(help_rect(Rect::new(0, 0, cols, rows)));
-                for line in [HOME_KEYS, WELCOME_KEYS, NETWORK_KEYS, MEET_KEYS]
-                    .into_iter()
-                    .flat_map(|keys| help_lines(&look, keys, &[], inner.width))
+                for line in [
+                    HOME_KEYS,
+                    HOME_PRIVACY_KEYS,
+                    WELCOME_KEYS,
+                    NETWORK_KEYS,
+                    MEET_KEYS,
+                    FRIEND_PAGE_PRIVACY_KEYS,
+                ]
+                .into_iter()
+                .flat_map(|keys| help_lines(&look, keys, &[], inner.width))
                 {
                     assert!(
                         line.width() <= usize::from(inner.width),
@@ -4847,7 +4947,12 @@ mod tests {
                 testkit::press(&mut app, KeyCode::Char('e'));
                 says(
                     &app,
-                    &["[C] Delete chat with Bob", "[F] Forget Bob's address"],
+                    &[
+                        "[C] Clear history",
+                        "[F] Forget Bob's address",
+                        "[B] Block",
+                        "[N] Remove verification",
+                    ],
                 );
                 testkit::press(&mut app, KeyCode::Char('c'));
                 says(
@@ -4857,6 +4962,23 @@ mod tests {
                 testkit::press(&mut app, KeyCode::Esc);
                 testkit::press(&mut app, KeyCode::Char('f'));
                 says(&app, &["Forget Bob's saved address?", "[Enter] Forget"]);
+                // The chat controls' questions (CTL, 0.1.1) on CI.
+                testkit::press(&mut app, KeyCode::Esc);
+                testkit::press(&mut app, KeyCode::Char('b'));
+                says(&app, &["Block Bob?", "[Enter] Block", "[Esc] Cancel"]);
+                testkit::press(&mut app, KeyCode::Esc);
+                testkit::press(&mut app, KeyCode::Char('n'));
+                says(
+                    &app,
+                    &["Remove the verification", "[Enter] Remove verification"],
+                );
+                // Home's Delete chat: DEL, from the list.
+                let mut app = base(Default::default());
+                testkit::press(&mut app, KeyCode::Char('x'));
+                says(
+                    &app,
+                    &["Delete chat with Bob?", "[Enter] Delete", "[Esc] Cancel"],
+                );
                 // NOTICE on Home.
                 let app = base(bridge::PrivacyNotices {
                     sealing: true,

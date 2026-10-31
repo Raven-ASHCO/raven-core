@@ -44,9 +44,9 @@ use super::app::{
     EXT_NOT_WAITING, EXT_NO_OUTBOX, NOT_RETRIED_TOAST, NOT_WAITING_TOAST, STOPPED_TOAST,
 };
 use super::bridge::{
-    self, ChatKeepView, ContactView, DeleteChatOutcome, DialCarrier, EraseEnd, ErasePlanView,
-    FriendPreview, IdentityLoad, LoginItemView, MeView, NotAvailable, Notice, OutboxCmd,
-    PrivacyNotices, Resolved, SecurityView,
+    self, ChatKeepView, ChatPrefsView, ContactView, DeleteChatOutcome, DialCarrier, EraseEnd,
+    ErasePlanView, FriendPreview, IdentityLoad, LoginItemView, MeView, NotAvailable, Notice,
+    OutboxCmd, PrivacyNotices, Resolved, SecurityView,
 };
 #[cfg(all(test, unix))]
 use super::errors::{self, NodeStartProblem};
@@ -332,6 +332,16 @@ pub(super) struct PrivacyRead {
     pub(super) notices: PrivacyNotices,
     pub(super) disk_needed: Option<u64>,
     pub(super) login_item_stays_off: bool,
+}
+
+/// What Delete chat did (X on Home, 0.1.1 chat controls): the chat cleared,
+/// as DEL on CI clears it, then the chat list's pins and deleted chats as
+/// saved after, or why the chat could not leave the list (raw; it was
+/// cleared all the same).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChatDeletedFromList {
+    pub(super) cleared: DeleteChatOutcome,
+    pub(super) list: Result<ChatPrefsView, String>,
 }
 
 /// The newest messages a group's chat reads (scrolling up goes no further).
@@ -1199,6 +1209,29 @@ impl Controller {
         })
     }
 
+    /// Blocks a saved friend on this computer only (0.1.1 chat controls),
+    /// as `raven contact block --yes` does (the App asked first): their key
+    /// goes on the block list and what Raven kept to reach them goes; they
+    /// stay saved, to be unblocked. What could not be forgotten comes back,
+    /// one note each.
+    pub(super) fn block(&self, pub_hex: &str) -> Captured<Vec<String>> {
+        self.contact_job_notes(pub_hex, |data_dir| {
+            let friend = self.saved(pub_hex)?;
+            bridge::block_saved_contact(data_dir, &friend.pub_hex)
+        })
+    }
+
+    /// Removes a saved friend's verification on this computer only (0.1.1
+    /// chat controls), as `raven contact unverify --yes` does (the App asked
+    /// first): their name, addresses and the chat stay. A friend not
+    /// verified (any more) is no error: that is what was asked.
+    pub(super) fn unverify(&self, pub_hex: &str) -> Captured<()> {
+        self.contact_job(pub_hex, |data_dir| {
+            let friend = self.saved(pub_hex)?;
+            bridge::unverify_saved_contact(data_dir, &friend.pub_hex).map(drop)
+        })
+    }
+
     // ── Privacy (privacy pack PP.21) ────────────────────────────────────────
 
     /// What SET's "Keep chats for", CI's privacy actions and Home's one-time
@@ -1311,6 +1344,45 @@ impl Controller {
             result,
             captured: capture.finish(),
         }
+    }
+
+    // ── The chat controls (0.1.1) ───────────────────────────────────────────
+
+    /// The chat list's pins and deleted chats (`chat_prefs.json`), when the
+    /// poller saw the file change. A read: nothing is created.
+    pub(super) fn chat_prefs(&self) -> Result<ChatPrefsView, String> {
+        self.identity()?;
+        bridge::chat_prefs(&self.data_dir)
+    }
+
+    /// Pin or Unpin (T on Home): the chat with the friend `pub_hex` goes to
+    /// the top of the chat list or back to its place, in a critical section
+    /// (it writes the file); the pins and deleted chats as saved after.
+    pub(super) fn set_chat_pinned(
+        &self,
+        pub_hex: &str,
+        pinned: bool,
+    ) -> Result<ChatPrefsView, String> {
+        self.identity()?;
+        let _critical = Critical::enter();
+        bridge::set_chat_pinned(&self.data_dir, pub_hex, pinned)?;
+        bridge::chat_prefs(&self.data_dir)
+    }
+
+    /// Delete chat (X on Home, after 'delete' was typed): the chat with the
+    /// friend `pub_hex` is cleared as [`Controller::delete_chat`] clears it,
+    /// then leaves the chat list until a new message comes, as `raven chats
+    /// delete --yes` does. Nothing leaves the list when the clear failed.
+    pub(super) fn delete_chat_from_list(
+        &self,
+        pub_hex: &str,
+    ) -> Result<ChatDeletedFromList, String> {
+        let cleared = self.delete_chat(pub_hex).result?;
+        let _critical = Critical::enter();
+        let key = pub_hex.trim().to_ascii_lowercase();
+        let list = bridge::hide_chat(&self.data_dir, &key)
+            .and_then(|()| bridge::chat_prefs(&self.data_dir));
+        Ok(ChatDeletedFromList { cleared, list })
     }
 
     /// Forgets a saved friend's addresses, as `contact forget-address --yes`
@@ -2640,6 +2712,60 @@ mod tests {
         assert!(why.contains("block list"), "{why}");
     }
 
+    /// The chat controls (0.1.1) on CI: Block keeps the friend saved (and
+    /// verified) with their key on the block list, U takes it back; Remove
+    /// verification unpins them, their name and address stay, and asking
+    /// again is no error. No security code shows in what either says.
+    #[test]
+    fn block_and_unverify_change_only_this_computer() {
+        let (dir, controller) = profile();
+        let (bob, card) = someone(0xB0, "192.168.1.30:7420");
+        let (carol, carol_card) = someone(0xC0, "");
+        add(
+            &controller,
+            &card,
+            "Bob",
+            Verify::Pinned {
+                typed_fp: bob.fingerprint.clone(),
+            },
+        );
+        add(&controller, &carol_card, "Carol", Verify::Unpinned);
+        assert!(saved(&controller, &bob.pub_hex).is_some_and(|c| c.pinned && !c.blocked));
+
+        let blocked = controller.block(&bob.pub_hex);
+        assert_eq!(blocked.result, Ok(Vec::new()));
+        assert_no_code(&blocked.captured, &carol.fingerprint);
+        let row = saved(&controller, &bob.pub_hex).expect("Bob stays");
+        assert!(row.blocked && row.pinned && row.label == "Bob");
+        assert!(BlockList::load_checked(dir.path())
+            .expect("the block list")
+            .is_blocked(&bob.pub_hex));
+        assert!(saved(&controller, &carol.pub_hex).is_some_and(|c| !c.blocked));
+        controller.unblock(&bob.pub_hex).result.expect("unblocked");
+        assert!(saved(&controller, &bob.pub_hex).is_some_and(|c| !c.blocked));
+
+        let unverified = controller.unverify(&bob.pub_hex);
+        assert_eq!(unverified.result, Ok(()));
+        // Not verified any more: their code is out of what was printed.
+        assert_no_code(&unverified.captured, &bob.fingerprint);
+        let row = saved(&controller, &bob.pub_hex).expect("Bob stays");
+        assert!(!row.pinned && row.label == "Bob" && row.lan_dial == "192.168.1.30:7420");
+        assert_eq!(controller.unverify(&bob.pub_hex).result, Ok(()));
+        // Someone not saved: refused, nothing blocked.
+        let (dave, _) = someone(0xD0, "");
+        assert_eq!(
+            controller.block(&dave.pub_hex).result,
+            Err(NOT_SAVED.to_owned())
+        );
+        assert_eq!(
+            controller.unverify(&dave.pub_hex).result,
+            Err(NOT_SAVED.to_owned())
+        );
+        assert!(!BlockList::load_checked(dir.path())
+            .expect("the block list")
+            .is_blocked(&dave.pub_hex));
+    }
+
     #[test]
     fn a_profile_without_an_identity_stays_inert() {
         testkit::lab_backends();
@@ -2667,11 +2793,27 @@ mod tests {
             controller.save_learned_dial(&bob.pub_hex, "192.168.1.30:7420"),
             controller.remove(&bob.pub_hex),
             controller.unblock(&bob.pub_hex),
+            controller.unverify(&bob.pub_hex),
         ];
         for job in jobs {
             assert_eq!(job.result, Err(NO_IDENTITY.to_owned()));
             assert_eq!(job.captured, "");
         }
+        // The chat controls (0.1.1): refused, and no chat_prefs.json.
+        assert_eq!(
+            controller.block(&bob.pub_hex).result,
+            Err(NO_IDENTITY.to_owned())
+        );
+        assert_eq!(controller.chat_prefs(), Err(NO_IDENTITY.to_owned()));
+        assert_eq!(
+            controller.set_chat_pinned(&bob.pub_hex, true),
+            Err(NO_IDENTITY.to_owned())
+        );
+        assert_eq!(
+            controller.delete_chat_from_list(&bob.pub_hex),
+            Err(NO_IDENTITY.to_owned())
+        );
+        assert!(!bridge::chat_prefs_path(dir.path()).exists());
         let forgot = controller.forget_address(&bob.pub_hex);
         assert_eq!(forgot.result, Err(NO_IDENTITY.to_owned()));
         assert_eq!(forgot.captured, "");
@@ -3810,6 +3952,122 @@ mod tests {
         assert!(bridge::lock_state_for_tests(dir.path()).0);
         assert!(Controller::new(dir.path()).unlock().is_err());
         assert!(bridge::lock_state_for_tests(dir.path()).0);
+    }
+
+    /// The chat controls' store jobs (0.1.1): the pins and deleted chats
+    /// read and changed in `chat_prefs.json`, Delete chat clearing the chat
+    /// as DeleteChat does and then hiding it, Block and Remove verification
+    /// as friend changes.
+    #[test]
+    fn the_chat_control_jobs_run_on_the_profile() {
+        let (dir, controller) = profile();
+        let (bob, card) = someone(0xB0, "192.168.1.30:7420");
+        let (alice, alice_card) = someone(0xA1, "");
+        add(
+            &controller,
+            &card,
+            "Bob",
+            Verify::Pinned {
+                typed_fp: bob.fingerprint.clone(),
+            },
+        );
+        add(&controller, &alice_card, "Alice", Verify::Unpinned);
+        let job = |job| workers::store_job(&controller, job);
+        assert_eq!(
+            job(StoreJob::LoadChatPrefs),
+            JobResult::ChatPrefs(Ok(ChatPrefsView::default()))
+        );
+        // Pin: the answer is the file as saved, newest pin first.
+        for who in [&bob, &alice] {
+            let JobResult::ChatPinSet {
+                pinned: true,
+                result: Ok(_),
+                ..
+            } = job(StoreJob::SetChatPin {
+                pub_hex: who.pub_hex.clone(),
+                pinned: true,
+            })
+            else {
+                panic!("not pinned");
+            };
+        }
+        let JobResult::ChatPrefs(Ok(prefs)) = job(StoreJob::LoadChatPrefs) else {
+            panic!("not read");
+        };
+        assert_eq!(
+            (prefs.pin_rank(&alice.pub_hex), prefs.pin_rank(&bob.pub_hex)),
+            (Some(0), Some(1))
+        );
+        assert_eq!(
+            job(StoreJob::SetChatPin {
+                pub_hex: alice.pub_hex.clone(),
+                pinned: false,
+            }),
+            JobResult::ChatPinSet {
+                pub_hex: alice.pub_hex.clone(),
+                pinned: false,
+                result: Ok(ChatPrefsView::of(&[bob.pub_hex.as_str()], &[])),
+            }
+        );
+        // Delete chat: both directions with Bob go, Alice's stay, and Bob's
+        // chat is hidden until a message newer than now.
+        for e in [
+            entry(&bob.pub_hex, 1, "in", 3_000, "hi"),
+            entry(&alice.pub_hex, 2, "in", 1_000, "hello"),
+            entry(&bob.pub_hex, 3, "out", 2_000, "hi back"),
+        ] {
+            ChatHistory::append_persisted(dir.path(), e).expect("a row");
+        }
+        let before = bridge::now_ms();
+        let JobResult::ChatLeftList {
+            pub_hex,
+            result: Ok(done),
+        } = job(StoreJob::DeleteChatFromList {
+            pub_hex: bob.pub_hex.clone(),
+        })
+        else {
+            panic!("not deleted");
+        };
+        assert_eq!(pub_hex, bob.pub_hex);
+        assert_eq!(
+            done.cleared,
+            DeleteChatOutcome {
+                deleted: 2,
+                still_waiting: 0,
+                skipped_pending: 0,
+            }
+        );
+        let list = done.list.expect("out of the list");
+        assert!(list.is_hidden(&bob.pub_hex, before) && list.is_pinned(&bob.pub_hex));
+        assert!(!list.is_hidden(&bob.pub_hex, bridge::now_ms() + 60_000));
+        assert!(!list.is_hidden(&alice.pub_hex, 0));
+        let history = controller.load_history().expect("the history");
+        assert_eq!(history.keys().collect::<Vec<_>>(), [&alice.pub_hex]);
+        // Block and Remove verification: friend changes, with no notes.
+        assert_eq!(
+            job(StoreJob::BlockFriend {
+                pub_hex: bob.pub_hex.clone()
+            }),
+            JobResult::FriendChanged {
+                change: FriendChange::Block,
+                pub_hex: bob.pub_hex.clone(),
+                result: Ok(()),
+                notes: Vec::new(),
+            }
+        );
+        assert_eq!(
+            job(StoreJob::UnverifyFriend {
+                pub_hex: bob.pub_hex.clone()
+            }),
+            JobResult::FriendChanged {
+                change: FriendChange::Unverify,
+                pub_hex: bob.pub_hex.clone(),
+                result: Ok(()),
+                notes: Vec::new(),
+            }
+        );
+        let row = saved(&controller, &bob.pub_hex).expect("Bob stays");
+        assert!(row.blocked && !row.pinned);
     }
 
     #[test]

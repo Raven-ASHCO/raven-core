@@ -12,6 +12,7 @@
 //! `private_key`, `secret`, `plaintext`, `recovery`), all display text
 //! sanitised, no panic across the boundary (it becomes `INTERNAL`).
 
+mod chats;
 mod contacts;
 #[cfg(feature = "embedded-node")]
 mod embedded;

@@ -29,7 +29,44 @@ line menu. It covers the everyday tasks of the menu in one place:
   get no mark against theirs, and after 3 entries that are not theirs VF stops checking
   (`protocol/RAVEN_SECURITY_WORDS_V1.md` section 8). A name that clashes with a verified friend
   shows a warning (NAME-CLASH) instead of saving.
-- **Friend page** (CI): rename, edit their address, verify, remove, unblock.
+- **Friend page** (CI): rename, edit their address, verify, remove contact, block or unblock,
+  remove the verification, clear history (the chat controls below).
+- **Chat controls** (0.1.1, the owner's). Everything is on this computer only: the friend is never
+  told, and nothing is sent. The words are the same in every Raven app.
+  - On the chat list (Home's friend list): **Pin / Unpin** (`T`) puts the highlighted chat at the
+    top, the newest pin first, or back in its place; nothing is asked, and a toast says 'Pinned
+    {name} to the top. Only on this device: {name} is not told.' **Delete chat** (`X`) asks first
+    (DEL, `delete` typed): the history is cleared as Clear history clears it, then the chat leaves
+    the list until a message newer than that comes (from them or to them). While any chat is out
+    of the list, the list's footer has `H  Deleted chats`: `H` shows them at the end, marked
+    'deleted', for this session only (`H  Hide deleted` hides them again), so you can still open
+    one and write. A list with every chat deleted says 'No chats in your list. Press H
+    for deleted chats.' In the wide list a pinned, verified chat without another badge reads
+    'pinned'.
+  - On the friend page (CI): **Clear history** (`C`, DEL: your messages with them go, the chat
+    stays in the list; the privacy pack's PP.8 delete), **Remove verification** (`N`, only while
+    verified; CTL), **Block** (`B`, while not blocked; CTL) or **Unblock** (`U`, at once, while
+    blocked), and **Remove contact** (`X`, 'remove' typed, as before).
+  - Each question says what happens and 'Only on this device: {name} is not told.':
+
+    | Box | Says | Keys |
+    |---|---|---|
+    | DEL from Home (Delete chat) | 'Delete chat with {name}? Your messages with {name} are deleted, and the chat leaves your chat list until a new message comes. Only on this device: {name} is not told and keeps their copy. Type delete to confirm:' | type `delete`, `Enter` Delete, `Esc` Cancel |
+    | DEL from CI (Clear history) | 'Clear history with {name}? Your messages with {name} are deleted; the chat stays in your chat list. Only on this device: {name} is not told and keeps their copy. Type delete to confirm:' | the same |
+    | CTL Block | 'Block {name}? Messages, contact requests and group messages from {name} are dropped, and nothing goes to {name}, until you unblock. Only on this device: {name} is not told.' | `Enter` Block, `Esc` Cancel |
+    | CTL Remove verification | 'Remove the verification of {name}? Your chat and {name}'s addresses stay; friend mailboxes with {name} stop until you compare the 10 security words again. Only on this device: {name} is not told.' | `Enter` Remove verification, `Esc` Cancel |
+    | Remove contact (CI's field) | 'Remove {name}? Their contact and verification are deleted; your messages with them stay. Only on this device: {name} is not told. Type remove to confirm:' | type `remove`, `Enter`, `Esc` |
+
+  - The pins and deleted chats live in `chat_prefs.json` (raven-core's `chat_prefs`; sealed in a
+    sealed profile), which the CLI (`raven chats pin|unpin|delete|clear`, `raven contact
+    block|unblock|unverify`) and the desktop and phone apps read and write too. The app reads it
+    on the store worker when the poller sees it change (here or in another app), and once more
+    after its own change; a read that fails leaves the list as it was. Block, Remove verification
+    and Clear history take the CLI's own paths (`block_saved_contact`, `unverify_saved_contact`,
+    `delete_chat_with`). A block that could not forget everything Raven kept to reach them says so
+    on CI with the notes in Details (D).
+  - Groups (lab) are not pinned or deleted from the TUI's list yet: their GROUPS section keeps its
+    own order.
 - **Network** (NET): what the background program (raven-node) is doing, where it listens or why
   it doesn't (on this computer only, an address that isn't here, a port another program uses, no
   network at all), the ways to reach friends by what people do (release builds: this Wi-Fi or
@@ -145,7 +182,7 @@ HELP lists that screen's keys and every mark (§4); its 'Not verified' line poin
 
 | Focus | Keys |
 |---|---|
-| Friends | `Up`/`Down` or `k`/`j` move the highlight only; `Enter` opens that friend and goes to the composer; `A` add a friend; `V` verify (a verified friend with an open security notice: check again); `E` or `I` friend page; `G` meet without the internet (for the highlighted friend); `N` network; `S` settings; `L` Lock now (LOCK); `W` security notices (SEC); `D` SEC on the highlighted friend's notice; `P` pause or resume sending to them (only while a notice about them is open, or it is paused) |
+| Friends | `Up`/`Down` or `k`/`j` move the highlight only; `Enter` opens that friend and goes to the composer; `A` add a friend; `V` verify (a verified friend with an open security notice: check again); `E` or `I` friend page; `G` meet without the internet (for the highlighted friend); `N` network; `S` settings; `L` Lock now (LOCK); `W` security notices (SEC); `D` SEC on the highlighted friend's notice; `P` pause or resume sending to them (only while a notice about them is open, or it is paused); `T` pin or unpin the highlighted chat; `X` delete the highlighted chat (DEL, once the privacy read answered); `H` show or hide the deleted chats (while there are any) |
 | Composer | type; `Enter` sends; `Ctrl+J` new line; `Backspace`, `Delete`, `Left`, `Right`, `Home`, `End` edit; `Up`, `Down`, `PgUp`, `PgDn` scroll; `Esc` back to the friends |
 | Messages | `Up`/`Down` choose a message; `Enter` shows a clipped message whole, then its details (MSG); `R` retry or send again; `C` stop trying (after confirming); `D` details; `L` Lock now (LOCK); `W` security notices (SEC); `Esc` back |
 
@@ -163,7 +200,9 @@ mouse wheel that the terminal turns into arrow keys therefore can't redirect a m
 | Copy view (COPY) | the invite alone on the normal screen, to select and copy; any key returns |
 | Verify (VF) | type the words your friend reads out; `Tab` (or `Space`) picks the word suggested; `Enter` check them, then save; `Tab` with no word being typed: later (save as not verified); `Ctrl+O` the old code instead, or back; with the code, `Left`/`Right` spell the group before or after; `Esc` cancel, nothing saved. For a verified friend: `Enter` on 'Already verified' checks again (P6.31; at once while a security notice about them is open); a match resolves their notices, and while their Raven offers an older security method than before, type `accept` and `Enter` to accept it (`Esc`, or anything else, keeps the newer one) |
 | Added (AF-3) | `Enter` open the chat; `1` show my invite; `A` add another friend; `Esc` home |
-| Friend page (CI) | `R` rename; `E` edit their address; `V` verify (or compare words again); `X` remove; `U` unblock; `W` security notices; `P` pause or resume sending to them (as on Home); `D` details of a failure; `Esc` back |
+| Friend page (CI) | `R` rename; `E` edit their address; `V` verify (or compare words again); `X` remove contact; `B` block (CTL, while not blocked); `U` unblock (while blocked); `N` remove verification (CTL, while verified); `C` clear history (DEL) and `F` forget their address (FORGET), both once the privacy read answered; `W` security notices; `P` pause or resume sending to them (as on Home); `D` details of a failure; `Esc` back |
+| Delete chat, Clear history (DEL; `X` on Home, `C` on CI) | type `delete`, then `Enter` (a paste clears the word; `Enter` means nothing for 300 ms after one); `Esc` cancel |
+| Block, Remove verification (CTL; `B` and `N` on CI) | `Enter` block or remove the verification (not right after a paste); `Esc` cancel |
 | Message (MSG) | as its state allows: `R` try now or send again, `C` stop trying, `S` send again anyway (after a warning that they may see it twice); `D` details; `Esc` close |
 | Network (NET) | `L` service log; `S` start the background program; `X` stop it; `R` check again; `W` security notices; `G` meet without the internet; `Up`/`Down` scroll; `Esc` back |
 | Security (SEC; `W`, or `D` on a friend) | `Up`/`Down` or `k`/`j` choose a notice; `D` its details; `R` resolve it; `V` compare security words with the friend it is about; `W` or `Esc` close |
@@ -215,7 +254,8 @@ On every macOS layout above, Ctrl with a letter key types the control code of th
 letter, so `Ctrl+C`, `Ctrl+L`, `Ctrl+U` and `Ctrl+J` need no mapping. A key the table reads as
 another letter reaches another shortcut of the same screen. Most of those open a screen (Esc goes
 back) or ask first; a few act at once, for example `R` sends again a message that never left this
-computer, `U` unblocks a blocked friend on CI and `L` turns my address in my invite on or off. On
+computer, `U` unblocks a blocked friend on CI, `T` pins or unpins a chat on Home (`T` again takes it
+back) and `L` turns my address in my invite on or off. On
 the phonetic layouts most letter keys do this (E reads as U, M as L); whether the app should do more
 there is the owner's call. Mapping Shift+`/` to `?` is a one-line change once Windows and GNOME are
 checked.

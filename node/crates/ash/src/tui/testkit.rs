@@ -2143,6 +2143,15 @@ fn bridge_api_pins() {
     let _: fn(&Path, bridge::ChatKeepView) -> Result<(), String> = bridge::set_chat_keep;
     let _: fn(&Path, &str) -> Result<bridge::DeleteChatOutcome, String> = bridge::delete_chat;
     let _: fn(&Path, &str) -> Result<Vec<String>, String> = bridge::forget_address;
+    // The chat controls (0.1.1): Block and Remove verification take the
+    // CLI's own paths; Pin and Delete chat's list part are raven-core's
+    // chat_prefs, which every app on this device reads.
+    let _: fn(&Path, &str) -> Result<Vec<String>, String> = bridge::block_saved_contact;
+    let _: fn(&Path, &str) -> Result<bool, String> = bridge::unverify_saved_contact;
+    let _: fn(&Path) -> Result<bridge::ChatPrefsView, String> = bridge::chat_prefs;
+    let _: fn(&Path) -> PathBuf = bridge::chat_prefs_path;
+    let _: fn(&Path, &str, bool) -> Result<(), String> = bridge::set_chat_pinned;
+    let _: fn(&Path, &str) -> Result<(), String> = bridge::hide_chat;
     let _: fn(&Path) -> bridge::PrivacyNotices = bridge::privacy_notices;
     let _: fn(&Path, bridge::Notice) = bridge::mark_notice_shown;
     let _: fn(bridge::ChatKeepView, u64, u64) -> String = bridge::retention_notice_text;

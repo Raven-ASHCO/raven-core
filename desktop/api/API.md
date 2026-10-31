@@ -80,6 +80,9 @@ changes. Fields marked `?` may be missing.
 | `contacts.rename` | `{address, name}` | `{contact}` |
 | `contacts.remove` | `{address}` | `{}` |
 | `contacts.set_address` | `{address, lan: "ip:port"}` | `{contact}` |
+| `contacts.block` | `{address}` | `{contact}` with `blocked: true` (see "Chat controls") |
+| `contacts.unblock` | `{address}` | `{contact}` |
+| `contacts.unverify` | `{address}` | `{contact}` with `verified: false` (see "Chat controls") |
 | `verify.check_words` | `{address, words: [10]}` | `{result: "match" \| "typo" \| "mismatch", contact?, reason?, position?, mismatches?}` (see below) |
 | `verify.check_old_code` | `{address, code}` | `{result: "match" \| "mismatch", contact?, case_only?: bool, mismatches?}` (see below) |
 | `verify.word_hint` | `{prefix}` | `{word?, known: bool}` (completes after 3 letters from Raven's word list; says nothing about the friend's words) |
@@ -90,6 +93,7 @@ changes. Fields marked `?` may be missing.
 | `messages.delete` | `{id}` | `{id, deleted: true}` (an ended message of yours: see below) |
 | `messages.details` | `{id}` | `{message, status_text, why_text, action_text, detail, technical}` (`detail`: plain lines, such as the stored message ID, the way it went and what the last try said; `technical`: the developer fields, shown only under "Technical details") |
 | `messages.mark_read` | `{address, id?}` | `{address, unread, note?}` (the chat is read up to `id`, default its newest message; see "Read and unread") |
+| `messages.clear` | `{address, include_pending?: bool}` | `{cleared, pending_kept}` (this device's history of that chat; see "Chat controls") |
 | `messages.handoff` | `{budget_ms?}` | `{handed, left, delivered, holders: [name], custody: "on" \| "off", completed, elapsed_ms}` (before the app goes to the background: what waits goes to friends who hold mail now; see "Hand-off") |
 | `node.status` | – | `NodeStatus` |
 | `node.start` | – | `NodeStatus` |
@@ -124,6 +128,10 @@ changes. Fields marked `?` may be missing.
 | `groups.history` | `{group, before?: id, limit?}` | `{messages: [GroupMessage]}` (oldest first; `limit` default 100, at most 500) |
 | `groups.send` | `{group, text}` | `{message: GroupMessage, note?}` (returns at once; raven-node delivers each copy, started first when none runs; `note`: why it could not be asked to now, the copies wait) |
 | `groups.mark_read` | `{group}` | `{group: id, unread: 0}` |
+| `groups.clear` | `{group, include_pending?: bool}` | `{cleared, pending_kept}` (see "Chat controls") |
+| `chats.list` | – | `{chats: [Chat]}` (pinned first, then the newest message first; see "Chat controls") |
+| `chats.delete` | `{address}` or `{group}` | `{deleted: true, cleared, pending_kept}` |
+| `chats.pin` | `{address \| group, pinned: bool}` | `{pinned}` |
 
 Until the apps offer them, `privacy.lock`, `privacy.encrypt` and `privacy.erase` return the error
 `NOT_AVAILABLE_YET` (the message names the CLI command: `raven lock`, `raven privacy seal-now`,
@@ -226,6 +234,34 @@ raven-node).
   removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`.
 - **Read and unread.** `Group.unread` counts others' messages received after the group was last read
   on this computer (`groups.mark_read`, or `raven group show`). Local only.
+
+### Chat controls
+
+Block, remove verification, clear history, delete a chat and pin one (0.1.1). Everything is local to
+this device: the other person is never told, and nothing about it is sent. Every UI on the device
+(the apps, the terminal app, `raven`) shares the same state.
+
+- **Block** (`contacts.block`): the friend's 1:1 messages, contact requests and group messages are
+  dropped silently and nothing goes to them (no receipt, no route hints, no friend custody for them
+  or with them): raven-node refuses a blocked key on every way. Their saved routes and their choice
+  as a mail friend are forgotten; the contact stays (`blocked: true`) and `contacts.unblock` undoes
+  it. The CLI: `raven contact block NAME`, `raven contact unblock NAME`.
+- **Remove verification** (`contacts.unverify`): `verified: false`; the contact, the chat and the
+  routes stay. What needs both of you verified (friend mailboxes, the LAN address shared over Tor)
+  stops until `verify.check_words` matches again. `raven contact unverify NAME`.
+- **Clear history** (`messages.clear`, `groups.clear`): this device's messages of that chat go for
+  good (received copies leave a tombstone, so neither the archive nor a copy that comes again
+  brings them back; the privacy pack's delete-chat). Messages of yours still waiting to be sent stay
+  (`pending_kept`) and show again once sent, unless `include_pending: true`, which stops them first.
+  `raven chats clear NAME`, `raven group clear GROUP`.
+- **Delete chat** (`chats.delete`): clear history, and the chat leaves `chats.list` (and
+  `hidden: true` on its Contact or Group) until a new message comes. The contact and the group
+  membership stay. `raven chats delete NAME` or `--group GROUP`.
+- **Pin** (`chats.pin`): pinned chats come first in `chats.list`, the newest pin first.
+  `raven chats pin|unpin NAME` or `--group GROUP`.
+
+Pins and deleted chats are kept in `chat_prefs.json` in the profile, encrypted with the rest when
+the privacy pack encrypts the profile.
 
 ### Node
 
@@ -409,7 +445,7 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
 ### Types
 
 ```text
-Contact   { address, name, short_address, verified: bool, blocked: bool,
+Contact   { address, name, short_address, verified: bool, blocked: bool, pinned: bool, hidden: bool,
             presence: "in_touch" | "waiting" | "none" | "no_address",
             last_contact_ms?, waiting: {count, until_ms}?, avatar_index: 0..4, lan?: "ip:port",
             unread }
@@ -419,6 +455,10 @@ Contact   { address, name, short_address, verified: bool, blocked: bool,
             receipt this run saw, is under 15 minutes old.
             unread: the friend's messages after the one last read here or in the terminal app
             (see "Read and unread").
+            pinned: the chat is pinned (chat controls); hidden: the chat was deleted from the
+            chat list and no message came since. A Group has both too.
+Chat      { kind: "contact" | "group", address? (kind contact), group? (kind group), name,
+            pinned: bool, last_ms (0 without a message), unread }
 Message   { id, address, direction: "in" | "out", text, at_ms,
             state: "sending" | "sent" | "delivered" | "waiting" | "time_ran_out" | "not_sent_meet_first" | "failed",
             until_ms?, path?, path_kind?, via_name?, delivered_at_ms?, attempts? }

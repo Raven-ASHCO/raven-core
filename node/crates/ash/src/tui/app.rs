@@ -55,7 +55,7 @@
 //! screen before they matched, words get no mark against theirs, and after 3
 //! entries that were not theirs VF stops checking. CI is one saved friend's
 //! page: rename, their address, verify, remove (after typing 'remove'),
-//! unblock.
+//! block and unblock, remove the verification.
 //!
 //! NET (N on the friend list) says what the background program is doing and
 //! what this build lets on, read once at startup ([`GatesView`]): On,
@@ -165,6 +165,16 @@
 //! about them is open or it is paused, and never by itself; while paused,
 //! nothing is sent to them from here either.
 //!
+//! The chat controls (0.1.1), each on this computer only (the friend is
+//! never told): on the friend list T pins the highlighted chat to the top or
+//! unpins it, X deletes it (DEL with 'delete' typed: cleared as CI's Clear
+//! history, then out of the list until a message newer than that comes) and
+//! H shows the deleted chats at the list's end for this session; on CI B
+//! blocks and N removes the verification, each after CTL's Enter, and C
+//! clears the history (DEL). The list's order and what it leaves out come
+//! from `chat_prefs.json` ([`StoreJob::LoadChatPrefs`], read again whenever
+//! the poller sees it change), which every app on this device reads.
+//!
 //! Groups (lab only, app/groups.rs): while this build lets them on, the
 //! friend list has a GROUPS section, a group's chat opens in the
 //! conversation pane, and C, M and E open NEW GROUP and MEMBERS. While it
@@ -185,12 +195,14 @@ use raven_core::ipc::OutboxItem;
 #[cfg(test)]
 use super::anim;
 use super::bridge::{
-    self, AtRestStateView, ChatKeepView, ContactView, DeleteChatOutcome, EraseEnd, ErasePlanView,
-    FriendPreview, LoginItemView, MeView, NotAvailable, Notice, Resolved, SecNotice, SecurityView,
+    self, AtRestStateView, ChatKeepView, ChatPrefsView, ContactView, DeleteChatOutcome, EraseEnd,
+    ErasePlanView, FriendPreview, LoginItemView, MeView, NotAvailable, Notice, Resolved, SecNotice,
+    SecurityView,
 };
 use super::controller::{
-    self, Conversations, GroupChange, GroupDone, GroupsRead, Horizons, NameCheck, NoCardLan,
-    PasteProblem, PrivacyRead, RowView, SendOutcome, SendResult, Share, Verify,
+    self, ChatDeletedFromList, Conversations, GroupChange, GroupDone, GroupsRead, Horizons,
+    NameCheck, NoCardLan, PasteProblem, PrivacyRead, RowView, SendOutcome, SendResult, Share,
+    Verify,
 };
 use super::delivery::{
     self, Actions, JobState, Outcome, PendingSend, Sources, Tick, Unmet, Waiting, WriteEvidence,
@@ -1210,6 +1222,11 @@ pub(super) enum FriendChange {
     Unblock,
     /// F on CI (PP.21): the saved addresses forgotten.
     ForgetAddress,
+    /// B on CI (0.1.1 chat controls): blocked on this computer only.
+    Block,
+    /// N on CI (0.1.1 chat controls): not verified any more, on this
+    /// computer only.
+    Unverify,
 }
 
 /// What AF-1's share box says about my invite (OD-5): this computer's
@@ -1339,11 +1356,21 @@ pub(super) enum Overlay {
     KeepChats {
         choice: ChatKeepView,
     },
-    /// DEL (PP.21): 'Delete chat with {name}' for the friend `peer` (lower
-    /// case); Enter deletes once `typed` is 'delete'.
+    /// DEL (PP.21): CI's 'Clear history' for the friend `peer` (lower
+    /// case); Enter deletes once `typed` is 'delete'. `from_list`: Home's
+    /// 'Delete chat' (0.1.1 chat controls), which also takes the chat out
+    /// of the chat list until a new message comes.
     DeleteChat {
         peer: String,
         typed: String,
+        from_list: bool,
+    },
+    /// CI's Block and Remove verification (0.1.1 chat controls) for the
+    /// friend `peer` (lower case): what happens, on this computer only;
+    /// Enter does it.
+    ChatControl {
+        peer: String,
+        control: ChatControl,
     },
     /// FORGET (PP.21): 'Forget {name}'s address' for the friend `peer`
     /// (lower case); Enter forgets.
@@ -1369,6 +1396,15 @@ pub(super) enum Overlay {
     /// The groups' boxes (lab): NEW GROUP's name and the friend picker,
     /// MEMBERS, WHO HAS IT (app/groups.rs).
     Group(GroupOverlay),
+}
+
+/// What CTL asks before (0.1.1 chat controls).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatControl {
+    /// B on CI.
+    Block,
+    /// N on CI, for a verified friend.
+    Unverify,
 }
 
 /// SEC: which notice is chosen (by its place in the list) and whether its
@@ -1738,6 +1774,29 @@ pub(super) enum StoreJob {
     UnblockFriend {
         pub_hex: String,
     },
+    /// B on CI, after Enter on CTL (0.1.1 chat controls).
+    BlockFriend {
+        pub_hex: String,
+    },
+    /// N on CI, after Enter on CTL (0.1.1 chat controls).
+    UnverifyFriend {
+        pub_hex: String,
+    },
+    /// The chat list's pins and deleted chats (`chat_prefs.json`): read,
+    /// nothing is written.
+    LoadChatPrefs,
+    /// T on Home: the chat with the friend pinned to the top of the chat
+    /// list (`pinned`), or back to its place.
+    SetChatPin {
+        pub_hex: String,
+        pinned: bool,
+    },
+    /// X on Home, after 'delete' was typed: the chat with the friend is
+    /// cleared as DeleteChat clears it, then leaves the chat list until a
+    /// new message comes.
+    DeleteChatFromList {
+        pub_hex: String,
+    },
     /// The privacy pack's read (PP.21): 'Keep chats for', the one-time
     /// notices due, the free disk space sealing waits for. Nothing is
     /// written.
@@ -1818,6 +1877,11 @@ impl StoreJob {
             StoreJob::SetFriendAddress { .. } => JobName::ChangeFriend(FriendChange::Address),
             StoreJob::RemoveFriend { .. } => JobName::ChangeFriend(FriendChange::Remove),
             StoreJob::UnblockFriend { .. } => JobName::ChangeFriend(FriendChange::Unblock),
+            StoreJob::BlockFriend { .. } => JobName::ChangeFriend(FriendChange::Block),
+            StoreJob::UnverifyFriend { .. } => JobName::ChangeFriend(FriendChange::Unverify),
+            StoreJob::LoadChatPrefs => JobName::LoadChatPrefs,
+            StoreJob::SetChatPin { .. } => JobName::SetChatPin,
+            StoreJob::DeleteChatFromList { .. } => JobName::DeleteChat,
             StoreJob::LoadPrivacy => JobName::LoadPrivacy,
             StoreJob::SetChatKeep(_) => JobName::SetChatKeep,
             StoreJob::MarkNoticeShown(_) => JobName::MarkNotice,
@@ -2001,6 +2065,8 @@ pub(super) enum JobName {
     SetChatKeep,
     MarkNotice,
     DeleteChat,
+    LoadChatPrefs,
+    SetChatPin,
     ErasePlan,
     Erase,
     LoadSecurity,
@@ -2049,6 +2115,7 @@ impl JobName {
             | JobName::UpdateAddresses
             | JobName::ChangeFriend(_)
             | JobName::DeleteChat
+            | JobName::SetChatPin
             | JobName::Erase
             | JobName::SetSendHold
             | JobName::AcceptOlderMethod => JobKind::Critical,
@@ -2068,6 +2135,7 @@ impl JobName {
             | JobName::LoadPrivacy
             | JobName::SetChatKeep
             | JobName::MarkNotice
+            | JobName::LoadChatPrefs
             | JobName::ErasePlan
             | JobName::LoadSecurity
             | JobName::ResolveNotice
@@ -2212,6 +2280,22 @@ pub(super) enum JobResult {
         pub_hex: String,
         result: Result<DeleteChatOutcome, String>,
     },
+    /// The chat list's pins and deleted chats, or why they can't be read
+    /// now (0.1.1 chat controls).
+    ChatPrefs(Result<ChatPrefsView, String>),
+    /// T on Home: the pins and deleted chats as saved after, or why the pin
+    /// could not change (`pinned`: what was asked).
+    ChatPinSet {
+        pub_hex: String,
+        pinned: bool,
+        result: Result<ChatPrefsView, String>,
+    },
+    /// X on Home: the chat with the friend `pub_hex` cleared and out of
+    /// the chat list, or why it could not be cleared.
+    ChatLeftList {
+        pub_hex: String,
+        result: Result<ChatDeletedFromList, String>,
+    },
     /// What erasing this profile deletes, or why erase refuses it (raw).
     ErasePlan(Result<ErasePlanView, String>),
     /// How the erase ended.
@@ -2313,7 +2397,9 @@ impl JobResult {
             JobResult::Privacy(_) => JobName::LoadPrivacy,
             JobResult::ChatKeepSaved { .. } => JobName::SetChatKeep,
             JobResult::NoticeMarked(_) => JobName::MarkNotice,
-            JobResult::ChatDeleted { .. } => JobName::DeleteChat,
+            JobResult::ChatDeleted { .. } | JobResult::ChatLeftList { .. } => JobName::DeleteChat,
+            JobResult::ChatPrefs(_) => JobName::LoadChatPrefs,
+            JobResult::ChatPinSet { .. } => JobName::SetChatPin,
             JobResult::ErasePlan(_) => JobName::ErasePlan,
             JobResult::Erased(_) => JobName::Erase,
             JobResult::Security(_) => JobName::LoadSecurity,
@@ -3077,8 +3163,9 @@ pub(super) struct App {
     look: Look,
     /// The terminal's size in cells, as the last [`Msg::Resize`] said.
     size: (u16, u16),
-    /// The friend list, top to bottom, by public key (hex). Empty until the
-    /// contacts are loaded.
+    /// The friend list, top to bottom, by public key (hex): the chat list's
+    /// order ([`App::chat_list`]), so a chat deleted from it is not here.
+    /// Empty until the contacts are loaded.
     friends: Vec<String>,
     /// The friend-list cursor. Up and Down move it in Friends focus only.
     highlight: usize,
@@ -3193,6 +3280,18 @@ pub(super) struct App {
     /// desktop_hidden.json as the poller last saw it: a change after the
     /// first look (the desktop app deleted a message) loads the history again.
     hidden_seen: Option<FileStamp>,
+    /// The chat list's pins and deleted chats (0.1.1 chat controls), as the
+    /// store worker last read `chat_prefs.json`: none of either before the
+    /// first read, and while it can't be read.
+    chat_prefs: ChatPrefsView,
+    /// A read runs; `chat_prefs_due`: another is wanted once it ends.
+    chat_prefs_loading: bool,
+    chat_prefs_due: bool,
+    /// chat_prefs.json as the poller last saw it.
+    chat_prefs_seen: Option<FileStamp>,
+    /// H on Home: the chats deleted from the list show at its end (this
+    /// session only, never saved).
+    show_deleted: bool,
     /// How long a message written now could wait for each friend, as the
     /// last read found it; a friend not in it is not known (no line).
     horizons: Horizons,
@@ -3375,6 +3474,11 @@ impl App {
             history_stamp: None,
             history_seen: None,
             hidden_seen: None,
+            chat_prefs: ChatPrefsView::default(),
+            chat_prefs_loading: false,
+            chat_prefs_due: false,
+            chat_prefs_seen: None,
+            show_deleted: false,
             horizons: Horizons::new(),
             horizons_on: false,
             horizons_loading: false,
@@ -3736,7 +3840,9 @@ impl App {
             },
             NodeState::NotRunning | NodeState::StartFailed(_) => match self.settings.receive {
                 Receive::Off => Chip::ReceiveOff,
-                _ if self.contacts_loaded && self.friends.is_empty() => Chip::StartsWithFirstFriend,
+                _ if self.contacts_loaded && self.contacts.is_empty() => {
+                    Chip::StartsWithFirstFriend
+                }
                 _ => Chip::NotRunning,
             },
         })
@@ -3776,7 +3882,8 @@ impl App {
         self.open_friend.as_deref()
     }
 
-    /// The saved friends, in the list's order; raw strings.
+    /// The saved friends, in the friends file's order; raw strings. The
+    /// list's own order is [`App::listed`].
     pub(super) fn contacts(&self) -> &[ContactView] {
         &self.contacts
     }
@@ -4780,6 +4887,13 @@ impl App {
             // Marked, or left for the CLI to say: nothing to show.
             JobResult::NoticeMarked(_) => {}
             JobResult::ChatDeleted { pub_hex, result } => self.chat_deleted(&pub_hex, result),
+            JobResult::ChatPrefs(read) => self.chat_prefs_read(read),
+            JobResult::ChatPinSet {
+                pub_hex,
+                pinned,
+                result,
+            } => self.chat_pin_set(&pub_hex, pinned, result),
+            JobResult::ChatLeftList { pub_hex, result } => self.chat_left_list(&pub_hex, result),
             JobResult::ErasePlan(plan) => self.erase_plan_read(plan),
             JobResult::Erased(end) => self.erase_ended(end),
             JobResult::Security(read) => self.security_read(read),
@@ -4876,6 +4990,16 @@ impl App {
                 watched: Watched::Groups,
                 stamp,
             } => self.groups_file_seen(stamp),
+            // chat_prefs.json (0.1.1 chat controls): read at the first look,
+            // and again whenever it changed (here, or in another app).
+            PollUpdate::File {
+                watched: Watched::ChatPrefs,
+                stamp,
+            } => {
+                if self.chat_prefs_seen.replace(stamp) != Some(stamp) {
+                    self.load_chat_prefs();
+                }
+            }
             PollUpdate::HorizonsDue => {
                 self.horizons_on = true;
                 self.load_horizons();
@@ -4993,11 +5117,13 @@ impl App {
                 let first = !self.contacts_loaded;
                 self.contacts_loaded = true;
                 self.contacts_error = None;
-                let friends: Vec<String> = contacts.iter().map(|c| c.pub_hex.clone()).collect();
-                let changed = friends != self.friends;
-                self.set_friends(friends);
+                let keys = |book: &[ContactView]| -> Vec<String> {
+                    book.iter().map(|c| c.pub_hex.clone()).collect()
+                };
+                let changed = keys(&contacts) != keys(&self.contacts);
                 self.contacts = contacts;
-                if first && !self.friends.is_empty() {
+                self.refresh_chat_list();
+                if first && !self.contacts.is_empty() {
                     self.request_auto_start(AutoStart::Launch);
                 }
                 if self.horizons_due || (changed && self.horizons_on) {
@@ -5030,13 +5156,14 @@ impl App {
             return;
         }
         self.horizons_due = false;
-        if self.friends.is_empty() {
+        if self.contacts.is_empty() {
             self.horizons.clear();
             return;
         }
         self.horizons_loading = true;
+        // Every saved friend's, those deleted from the chat list too.
         self.job(Cmd::Store(StoreJob::LoadHorizons {
-            peers: self.friends.clone(),
+            peers: self.contacts.iter().map(|c| c.pub_hex.clone()).collect(),
         }));
     }
 
@@ -5080,6 +5207,8 @@ impl App {
                 self.time_old_marks();
                 self.history_loaded = true;
                 self.history_error = None;
+                // A message newer than a chat's deletion brings it back.
+                self.refresh_chat_list();
                 self.scroll = home::clamp_scroll(self, self.scroll);
                 // A friend's message may have come over a new connection.
                 if self.horizons_on {
@@ -5293,6 +5422,9 @@ impl App {
             JobName::LoadSecurity => self.security_read(Err(NotAvailable)),
             // The toast said so; what is open is read again.
             JobName::ResolveNotice | JobName::SetSendHold => self.load_security(),
+            // What was read before stays; the pins are read again.
+            JobName::LoadChatPrefs => self.chat_prefs_read(Err(plain.technical)),
+            JobName::SetChatPin => self.load_chat_prefs(),
             // Not known now: hidden until a read answers.
             JobName::LoadPrivacy => self.privacy_read(Err(NotAvailable)),
             JobName::ErasePlan => self.erase_plan_read(Err(plain.technical)),
@@ -6122,9 +6254,17 @@ impl App {
                 let choice = *choice;
                 self.on_keep_key(key, choice);
             }
-            Some(Overlay::DeleteChat { peer, typed }) => {
-                let (peer, typed) = (peer.clone(), typed.clone());
-                self.on_delete_chat_key(key, &peer, &typed);
+            Some(Overlay::DeleteChat {
+                peer,
+                typed,
+                from_list,
+            }) => {
+                let (peer, typed, from_list) = (peer.clone(), typed.clone(), *from_list);
+                self.on_delete_chat_key(key, &peer, &typed, from_list);
+            }
+            Some(Overlay::ChatControl { peer, control }) => {
+                let (peer, control) = (peer.clone(), *control);
+                self.on_chat_control_key(key, &peer, control);
             }
             Some(Overlay::ForgetAddress { peer }) => {
                 let peer = peer.clone();
@@ -7102,6 +7242,24 @@ impl App {
                     self.toggle_pause(&pub_hex);
                 }
             }
+            // The chat controls (0.1.1): Pin or Unpin, Delete chat (once the
+            // privacy read answered, as CI's Clear history), and the
+            // deleted chats shown or not.
+            (_, Some('t' | 'T')) => {
+                if let Some(pub_hex) = highlighted {
+                    self.toggle_pin(&pub_hex);
+                }
+            }
+            (_, Some('x' | 'X')) if self.privacy.is_some() => {
+                if let Some(pub_hex) = highlighted {
+                    self.open_overlay(Overlay::DeleteChat {
+                        peer: convo_key(&pub_hex),
+                        typed: String::new(),
+                        from_list: true,
+                    });
+                }
+            }
+            (_, Some('h' | 'H')) => self.toggle_deleted(),
             _ => {}
         }
     }
@@ -8815,7 +8973,7 @@ impl App {
             (FriendChange::Remove, _) => {
                 self.contacts
                     .retain(|c| !c.pub_hex.eq_ignore_ascii_case(pub_hex));
-                self.set_friends(self.contacts.iter().map(|c| c.pub_hex.clone()).collect());
+                self.refresh_chat_list();
                 if matches!(self.screen, Screen::FriendPage(_)) {
                     self.set_screen(Screen::Home);
                 }
@@ -8825,6 +8983,24 @@ impl App {
                 self.edit_contact(pub_hex, |c| c.blocked = false);
                 self.page_saved();
                 self.push_toast(&format!("{name} is unblocked."));
+            }
+            (FriendChange::Block, _) => {
+                self.edit_contact(pub_hex, |c| c.blocked = true);
+                self.page_saved();
+                if notes.is_empty() {
+                    self.push_toast(&format!(
+                        "{name} is blocked on this device. U on {name}'s page unblocks."
+                    ));
+                } else {
+                    // Blocked; part of what Raven kept to reach them is
+                    // still on disk: the page says so, the notes in Details.
+                    self.change_partly_done(errors::explain_block_partial(&name, &notes));
+                }
+            }
+            (FriendChange::Unverify, _) => {
+                self.edit_contact(pub_hex, |c| c.pinned = false);
+                self.page_saved();
+                self.push_toast(&format!("{name} is not verified any more on this device."));
             }
             (FriendChange::ForgetAddress, _) => {
                 self.edit_contact(pub_hex, |c| {
@@ -9048,10 +9224,26 @@ impl App {
                 self.page_saving();
                 self.job(Cmd::Store(StoreJob::UnblockFriend { pub_hex }));
             }
+            // The chat controls (0.1.1): Block while not blocked, Remove
+            // verification while verified; each asks first (CTL).
+            (_, Some('b' | 'B')) if !friend.blocked => {
+                self.open_overlay(Overlay::ChatControl {
+                    peer: convo_key(&pub_hex),
+                    control: ChatControl::Block,
+                });
+            }
+            (_, Some('n' | 'N')) if friend.pinned => {
+                self.open_overlay(Overlay::ChatControl {
+                    peer: convo_key(&pub_hex),
+                    control: ChatControl::Unverify,
+                });
+            }
+            // Clear history (PP.8): the chat stays in the list.
             (_, Some('c' | 'C')) if self.privacy.is_some() => {
                 self.open_overlay(Overlay::DeleteChat {
                     peer: convo_key(&pub_hex),
                     typed: String::new(),
+                    from_list: false,
                 });
             }
             (_, Some('f' | 'F')) if self.privacy.is_some() => {
@@ -9695,7 +9887,7 @@ impl App {
     /// edits; Enter (not right after a paste) deletes once the word is
     /// 'delete', and means nothing before; Esc keeps the chat; Ctrl+C opens
     /// QUIT.
-    fn on_delete_chat_key(&mut self, key: KeyEvent, peer: &str, typed: &str) {
+    fn on_delete_chat_key(&mut self, key: KeyEvent, peer: &str, typed: &str, from_list: bool) {
         if is_ctrl(key, 'c') {
             self.open_overlay(Overlay::Quit);
             return;
@@ -9719,8 +9911,11 @@ impl App {
             _ if self.confirms(key) && typed_word_is(typed, DELETE_WORD) => {
                 self.close_overlay();
                 self.page_saving();
-                self.job(Cmd::Store(StoreJob::DeleteChat {
-                    pub_hex: peer.to_owned(),
+                let pub_hex = peer.to_owned();
+                self.job(Cmd::Store(if from_list {
+                    StoreJob::DeleteChatFromList { pub_hex }
+                } else {
+                    StoreJob::DeleteChat { pub_hex }
                 }));
             }
             _ => {}
@@ -9748,6 +9943,25 @@ impl App {
         typed.clear();
         self.dirty = true;
         true
+    }
+
+    /// CTL (0.1.1 chat controls): Enter (not right after a paste) blocks
+    /// the friend or removes their verification, on this computer only; Esc
+    /// changes nothing; Ctrl+C opens QUIT.
+    fn on_chat_control_key(&mut self, key: KeyEvent, peer: &str, control: ChatControl) {
+        if is_ctrl(key, 'c') {
+            self.open_overlay(Overlay::Quit);
+        } else if key.code == KeyCode::Esc {
+            self.close_overlay();
+        } else if self.confirms(key) {
+            self.close_overlay();
+            self.page_saving();
+            let pub_hex = peer.to_owned();
+            self.job(Cmd::Store(match control {
+                ChatControl::Block => StoreJob::BlockFriend { pub_hex },
+                ChatControl::Unverify => StoreJob::UnverifyFriend { pub_hex },
+            }));
+        }
     }
 
     /// FORGET: Enter (not right after a paste) forgets the friend's saved
@@ -10018,7 +10232,7 @@ impl App {
             }
         }
         self.save_settings();
-        if self.contacts_loaded && !self.friends.is_empty() {
+        if self.contacts_loaded && !self.contacts.is_empty() {
             self.request_auto_start(AutoStart::Launch);
         }
     }
@@ -10112,6 +10326,184 @@ impl App {
             return Vec::new();
         }
         vec![Cmd::SwitchToClassic]
+    }
+
+    // ── The chat list (0.1.1 chat controls) ─────────────────────────────────
+
+    /// The chat list's friends, top to bottom: the pinned chats first, the
+    /// newest pin first, then the others in the friends file's order. A
+    /// chat deleted from the list is left out until a message newer than
+    /// its deletion; while H shows them, the deleted ones come last.
+    fn chat_list(&self) -> Vec<String> {
+        let (deleted, mut listed): (Vec<&ContactView>, Vec<&ContactView>) = self
+            .contacts
+            .iter()
+            .partition(|c| self.chat_hidden(&c.pub_hex));
+        // Stable: friends not pinned keep the file's order.
+        listed.sort_by_key(|c| self.chat_prefs.pin_rank(&c.pub_hex).unwrap_or(usize::MAX));
+        if self.show_deleted {
+            listed.extend(deleted);
+        }
+        listed.into_iter().map(|c| c.pub_hex.clone()).collect()
+    }
+
+    /// The friends, the pins and deleted chats, or the history changed: the
+    /// list is laid out again.
+    fn refresh_chat_list(&mut self) {
+        let listed = self.chat_list();
+        self.set_friends(listed);
+        // Nothing deleted any more: H has nothing to show.
+        if self.show_deleted && self.deleted_chats() == 0 {
+            self.show_deleted = false;
+        }
+    }
+
+    /// The newest message with the friend `pub_hex` in the chat history, by
+    /// its sender's clock as every app on this device reads it (0 without
+    /// one).
+    fn newest_message_ms(&self, pub_hex: &str) -> u64 {
+        self.convo
+            .get(&convo_key(pub_hex))
+            .and_then(|rows| rows.iter().map(|row| row.view.created_at_ms).max())
+            .unwrap_or(0)
+    }
+
+    /// The chat with the friend `pub_hex` was deleted from the chat list and
+    /// no message came since.
+    pub(super) fn chat_hidden(&self, pub_hex: &str) -> bool {
+        self.chat_prefs
+            .is_hidden(pub_hex, self.newest_message_ms(pub_hex))
+    }
+
+    /// The chat with the friend `pub_hex` is pinned to the top of the list.
+    pub(super) fn chat_pinned(&self, pub_hex: &str) -> bool {
+        self.chat_prefs.is_pinned(pub_hex)
+    }
+
+    /// How many saved friends' chats are deleted from the list now.
+    pub(super) fn deleted_chats(&self) -> usize {
+        self.contacts
+            .iter()
+            .filter(|c| self.chat_hidden(&c.pub_hex))
+            .count()
+    }
+
+    /// H shows the deleted chats at the end of the list.
+    pub(super) fn showing_deleted(&self) -> bool {
+        self.show_deleted
+    }
+
+    /// The friend under the list's highlight (none on a group's row).
+    pub(super) fn highlighted_friend(&self) -> Option<&str> {
+        self.friends.get(self.highlight).map(String::as_str)
+    }
+
+    /// The chat list's friends in its order ([`App::chat_list`]).
+    pub(super) fn listed(&self) -> impl Iterator<Item = &ContactView> + '_ {
+        self.friends.iter().filter_map(|key| self.friend(key))
+    }
+
+    /// Reads the pins and deleted chats on the store worker, once the
+    /// identity exists and no read runs (else as soon as that is so).
+    fn load_chat_prefs(&mut self) {
+        if self.identity != IdentityStatus::Ready || self.chat_prefs_loading {
+            self.chat_prefs_due = true;
+            return;
+        }
+        self.chat_prefs_loading = true;
+        self.chat_prefs_due = false;
+        self.job(Cmd::Store(StoreJob::LoadChatPrefs));
+    }
+
+    /// The pins and deleted chats as read: the list is laid out again. One
+    /// that can't be read now leaves the list as it was.
+    fn chat_prefs_read(&mut self, read: Result<ChatPrefsView, String>) {
+        self.chat_prefs_loading = false;
+        if let Ok(prefs) = read {
+            self.set_chat_prefs(prefs);
+        }
+        if mem::take(&mut self.chat_prefs_due) {
+            self.load_chat_prefs();
+        }
+    }
+
+    fn set_chat_prefs(&mut self, prefs: ChatPrefsView) {
+        if self.chat_prefs != prefs {
+            self.chat_prefs = prefs;
+            self.refresh_chat_list();
+        }
+    }
+
+    /// T on the friend list: the highlighted friend's chat pinned to the top
+    /// of the list, or unpinned. Nothing is asked: it changes only the order
+    /// on this computer, and T again takes it back.
+    fn toggle_pin(&mut self, pub_hex: &str) {
+        let pinned = !self.chat_pinned(pub_hex);
+        self.job(Cmd::Store(StoreJob::SetChatPin {
+            pub_hex: convo_key(pub_hex),
+            pinned,
+        }));
+    }
+
+    /// T answered: the list in its new order, and a toast saying what
+    /// changed; or why it could not change.
+    fn chat_pin_set(&mut self, pub_hex: &str, pinned: bool, result: Result<ChatPrefsView, String>) {
+        let name = self.shown_name(pub_hex);
+        match result {
+            Ok(prefs) => {
+                self.set_chat_prefs(prefs);
+                self.push_toast(&if pinned {
+                    format!("Pinned {name} to the top. Only on this device: {name} is not told.")
+                } else {
+                    format!("Unpinned {name}.")
+                });
+            }
+            Err(_) => {
+                self.push_toast(&if pinned {
+                    format!("Raven couldn't pin {name}.")
+                } else {
+                    format!("Raven couldn't unpin {name}.")
+                });
+                self.load_chat_prefs();
+            }
+        }
+    }
+
+    /// H on the friend list: the chats deleted from it show at its end, or
+    /// go again. Nothing to show: nothing changes.
+    fn toggle_deleted(&mut self) {
+        if !self.show_deleted && self.deleted_chats() == 0 {
+            return;
+        }
+        self.show_deleted = !self.show_deleted;
+        self.refresh_chat_list();
+    }
+
+    /// Delete chat answered (X on Home): the clear's toasts as DEL's on CI,
+    /// then the chat leaves the list (closed if it was open) until a new
+    /// message comes; if it could not leave it, the toast says so.
+    fn chat_left_list(&mut self, pub_hex: &str, result: Result<ChatDeletedFromList, String>) {
+        let done = match result {
+            Ok(done) => done,
+            Err(why) => return self.chat_deleted(pub_hex, Err(why)),
+        };
+        self.chat_deleted(pub_hex, Ok(done.cleared));
+        let name = self.shown_name(pub_hex);
+        let name = if name.is_empty() {
+            NO_NAME.to_owned()
+        } else {
+            name
+        };
+        match done.list {
+            Ok(prefs) => {
+                self.set_chat_prefs(prefs);
+                self.push_toast(&format!(
+                    "{name} is out of your chat list until a new message comes. H shows deleted \
+                     chats."
+                ));
+            }
+            Err(why) => self.change_failed(errors::explain_hide_chat(&name, &why)),
+        }
     }
 
     /// The friend list after a load. The highlight stays on the same friend
@@ -16250,5 +16642,377 @@ mod tests {
         for typed in ["", "delet", "deleted", "remove", "d e l e t e"] {
             assert!(!typed_word_is(typed, DELETE_WORD), "{typed:?}");
         }
+    }
+
+    // ── The chat controls (0.1.1) ───────────────────────────────────────────
+
+    /// The chat list's names, top to bottom.
+    fn listed(app: &App) -> Vec<String> {
+        app.listed().map(|c| c.label.clone()).collect()
+    }
+
+    /// Friends 1 to 3, one message with each (30, 20 and 10 minutes ago),
+    /// on Home at 100 by 30.
+    fn three_chats(extra: &[(u8, RowView)]) -> Conversations {
+        let mut rows = vec![
+            (1, testkit::row(1, false, "", 30, "hi from 1")),
+            (2, testkit::row(2, false, "", 20, "hi from 2")),
+            (3, testkit::row(3, true, "delivered", 10, "hi to 3")),
+        ];
+        rows.extend(extra.iter().cloned());
+        testkit::conversations(&rows)
+    }
+
+    #[test]
+    fn pinned_chats_come_first_and_a_deleted_one_waits_for_a_newer_message() {
+        let mut app = testkit::home_app(
+            (100, 30),
+            Receive::Off,
+            (1..=3).map(testkit::friend).collect(),
+            three_chats(&[]),
+        );
+        let (k1, k2, k3) = (
+            testkit::friend(1).pub_hex,
+            testkit::friend(2).pub_hex,
+            testkit::friend(3).pub_hex,
+        );
+        // Before any read: the friends file's order.
+        assert_eq!(listed(&app), ["Friend 1", "Friend 2", "Friend 3"]);
+        // Pinned 3, then 2 (the newest pin first), then 1 in its place.
+        let pins = [k3.as_str(), k2.as_str()];
+        answer(
+            &mut app,
+            JobResult::ChatPrefs(Ok(ChatPrefsView::of(&pins, &[]))),
+        );
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2", "Friend 1"]);
+        assert!(app.chat_pinned(&k3) && !app.chat_pinned(&k1));
+        // Friend 1's chat deleted 5 minutes ago, after its message: out of
+        // the list, and the footer offers H.
+        let deleted_at = app.now_ms() - 5 * 60_000;
+        let prefs = ChatPrefsView::of(&pins, &[(k1.as_str(), deleted_at)]);
+        answer(&mut app, JobResult::ChatPrefs(Ok(prefs.clone())));
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2"]);
+        assert_eq!(app.deleted_chats(), 1);
+        let text = testkit::render_text(&app);
+        assert!(text.contains("H Deleted chats"), "{text}");
+        assert!(!text.contains("Friend 1"), "{text}");
+        // H shows it last, marked 'deleted'; H again leaves it out.
+        testkit::press(&mut app, KeyCode::Char('h'));
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2", "Friend 1"]);
+        let text = testkit::render_text(&app);
+        assert!(
+            text.contains("H Hide deleted") && text.contains("Friend 1 deleted"),
+            "{text}"
+        );
+        testkit::press(&mut app, KeyCode::Char('h'));
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2"]);
+        // A message older than the deletion keeps it out; a newer one (from
+        // them or to them) brings it back to its place.
+        let older = three_chats(&[(1, testkit::row(4, false, "", 6, "still old"))]);
+        answer(
+            &mut app,
+            JobResult::History {
+                history: Ok(older),
+                stamp: FileStamp::default(),
+            },
+        );
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2"]);
+        let newer = three_chats(&[
+            (1, testkit::row(4, false, "", 6, "still old")),
+            (1, testkit::row(5, false, "", 1, "back")),
+        ]);
+        answer(
+            &mut app,
+            JobResult::History {
+                history: Ok(newer),
+                stamp: FileStamp::default(),
+            },
+        );
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2", "Friend 1"]);
+        assert_eq!(app.deleted_chats(), 0);
+        assert!(!testkit::render_text(&app).contains("Deleted chats"));
+        // A read that fails leaves the list as it was.
+        answer(&mut app, JobResult::ChatPrefs(Err("not now".into())));
+        assert_eq!(listed(&app), ["Friend 3", "Friend 2", "Friend 1"]);
+        // H with nothing deleted does nothing.
+        testkit::press(&mut app, KeyCode::Char('h'));
+        assert!(!app.showing_deleted());
+    }
+
+    #[test]
+    fn the_chat_prefs_file_is_read_when_the_poller_sees_it_change() {
+        let mut app = testkit::home_app(
+            (100, 30),
+            Receive::Off,
+            (1..=2).map(testkit::friend).collect(),
+            Conversations::new(),
+        );
+        let seen = |app: &mut App, stamp| {
+            stores(&testkit::send(
+                app,
+                Msg::Poll(PollUpdate::File {
+                    watched: Watched::ChatPrefs,
+                    stamp,
+                }),
+            ))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        };
+        // The first look reads it, missing or not; the same stamp again
+        // does nothing; a read running takes the next change after it.
+        assert_eq!(
+            seen(&mut app, FileStamp::default()),
+            [StoreJob::LoadChatPrefs]
+        );
+        assert!(seen(&mut app, FileStamp::default()).is_empty());
+        let dir = testkit::short_dir();
+        let file = dir.path().join("chat_prefs.json");
+        std::fs::write(&file, "{}").expect("a file");
+        assert!(
+            seen(&mut app, FileStamp::of(&file)).is_empty(),
+            "one read at a time"
+        );
+        let cmds = answer(&mut app, JobResult::ChatPrefs(Ok(ChatPrefsView::default())));
+        assert_eq!(stores(&cmds), [&StoreJob::LoadChatPrefs]);
+    }
+
+    #[test]
+    fn t_pins_and_x_deletes_the_highlighted_chat() {
+        let mut app = testkit::home_app(
+            (100, 30),
+            Receive::Off,
+            (1..=2).map(testkit::friend).collect(),
+            testkit::conversations(&[(2, testkit::row(1, false, "", 30, "hi"))]),
+        );
+        let k2 = testkit::friend(2).pub_hex;
+        testkit::press(&mut app, KeyCode::Down);
+        // T: nothing is asked; the answer moves the chat to the top, the
+        // highlight stays on it, and the toast says it is only here.
+        let cmds = testkit::press(&mut app, KeyCode::Char('t'));
+        assert_eq!(
+            stores(&cmds),
+            [&StoreJob::SetChatPin {
+                pub_hex: k2.clone(),
+                pinned: true
+            }]
+        );
+        assert!(app.overlays().is_empty());
+        answer(
+            &mut app,
+            JobResult::ChatPinSet {
+                pub_hex: k2.clone(),
+                pinned: true,
+                result: Ok(ChatPrefsView::of(&[k2.as_str()], &[])),
+            },
+        );
+        assert_eq!(listed(&app), ["Friend 2", "Friend 1"]);
+        assert_eq!(app.highlighted_friend(), Some(k2.as_str()));
+        assert!(app
+            .toasts_for_tests()
+            .contains(&"Pinned Friend 2 to the top. Only on this device: Friend 2 is not told."));
+        // T again unpins; a refusal says so and reads the file again.
+        let cmds = testkit::press(&mut app, KeyCode::Char('T'));
+        assert_eq!(
+            stores(&cmds),
+            [&StoreJob::SetChatPin {
+                pub_hex: k2.clone(),
+                pinned: false
+            }]
+        );
+        let cmds = answer(
+            &mut app,
+            JobResult::ChatPinSet {
+                pub_hex: k2.clone(),
+                pinned: false,
+                result: Err("chat_prefs.json: locked".into()),
+            },
+        );
+        assert_eq!(stores(&cmds), [&StoreJob::LoadChatPrefs]);
+        assert!(app
+            .toasts_for_tests()
+            .contains(&"Raven couldn't unpin Friend 2."));
+        answer(&mut app, JobResult::ChatPrefs(Err("not now".into())));
+        // X: only once the privacy read answered (as CI's Clear history).
+        assert!(stores(&testkit::press(&mut app, KeyCode::Char('x'))).is_empty());
+        assert!(app.overlays().is_empty());
+        testkit::privacy_on(&mut app, ChatKeepView::Days30, Default::default());
+        assert_eq!(app.highlighted_friend(), Some(k2.as_str()));
+        testkit::press(&mut app, KeyCode::Char('x'));
+        assert_eq!(
+            app.overlays(),
+            [Overlay::DeleteChat {
+                peer: k2.clone(),
+                typed: String::new(),
+                from_list: true,
+            }]
+        );
+        // Nothing before 'delete' is typed; then Delete chat, not a clear.
+        let mut cmds = type_into(&mut app, "delet");
+        cmds.extend(testkit::press(&mut app, KeyCode::Enter));
+        assert!(stores(&cmds).is_empty());
+        type_into(&mut app, "e");
+        let cmds = testkit::press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            stores(&cmds),
+            [&StoreJob::DeleteChatFromList {
+                pub_hex: k2.clone()
+            }]
+        );
+        assert!(app.jobs_in_flight().holds_classic());
+        // Cleared (DEL's toast) and out of the list until a new message.
+        let hidden = ChatPrefsView::of(&[k2.as_str()], &[(k2.as_str(), app.now_ms())]);
+        let cmds = answer(
+            &mut app,
+            JobResult::ChatLeftList {
+                pub_hex: k2.clone(),
+                result: Ok(ChatDeletedFromList {
+                    cleared: DeleteChatOutcome {
+                        deleted: 1,
+                        ..DeleteChatOutcome::default()
+                    },
+                    list: Ok(hidden),
+                }),
+            },
+        );
+        assert_eq!(stores(&cmds), [&StoreJob::LoadHistory]);
+        assert_eq!(listed(&app), ["Friend 1"]);
+        let toasts = app.toasts_for_tests();
+        assert!(
+            toasts.contains(&"Deleted your chat with Friend 2 on this computer (1 message).")
+                && toasts.contains(
+                    &"Friend 2 is out of your chat list until a new message comes. H shows \
+                      deleted chats."
+                ),
+            "{toasts:?}"
+        );
+        // Cleared, but it could not leave the list: the toast says so (the
+        // history read asked for above is still running).
+        answer(
+            &mut app,
+            JobResult::ChatLeftList {
+                pub_hex: k2.clone(),
+                result: Ok(ChatDeletedFromList {
+                    cleared: DeleteChatOutcome::default(),
+                    list: Err("chat_prefs.json: locked".into()),
+                }),
+            },
+        );
+        assert!(app.toasts_for_tests().contains(
+            &"Raven deleted your messages with Friend 2, but couldn't take the chat out of your \
+              chat list."
+        ));
+        // Not cleared: nothing left the list either.
+        answer(
+            &mut app,
+            JobResult::ChatLeftList {
+                pub_hex: k2,
+                result: Err("database is locked".into()),
+            },
+        );
+        assert!(app
+            .toasts_for_tests()
+            .iter()
+            .any(|t| t.starts_with("Raven couldn't delete the chat.")));
+    }
+
+    #[test]
+    fn the_friend_page_blocks_and_removes_the_verification_after_asking() {
+        let bob = testkit::saved_as(BOB, "Bob", true, "");
+        let mut app = testkit::home_app(
+            (80, 24),
+            Receive::Off,
+            vec![bob.clone()],
+            Conversations::new(),
+        );
+        let me = bob.pub_hex.clone();
+        testkit::press(&mut app, KeyCode::Char('e'));
+        // B asks first (CTL); Esc changes nothing.
+        assert!(stores(&testkit::press(&mut app, KeyCode::Char('b'))).is_empty());
+        let block = Overlay::ChatControl {
+            peer: me.clone(),
+            control: ChatControl::Block,
+        };
+        assert_eq!(app.overlays(), [block]);
+        testkit::press(&mut app, KeyCode::Esc);
+        assert!(app.overlays().is_empty());
+        // Enter blocks; while it saves, the keys wait.
+        testkit::press(&mut app, KeyCode::Char('B'));
+        let cmds = testkit::press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            stores(&cmds),
+            [&StoreJob::BlockFriend {
+                pub_hex: me.clone()
+            }]
+        );
+        assert!(page(&app).saving && app.overlays().is_empty());
+        assert!(stores(&testkit::press(&mut app, KeyCode::Char('n'))).is_empty());
+        answer(&mut app, saved(FriendChange::Block, &me, Ok(())));
+        assert!(app.friend(&me).is_some_and(|f| f.blocked && f.pinned));
+        assert!(app
+            .toasts_for_tests()
+            .contains(&"Bob is blocked on this device. U on Bob's page unblocks."));
+        // Blocked: B asks nothing (U unblocks instead).
+        testkit::press(&mut app, KeyCode::Char('b'));
+        assert!(app.overlays().is_empty());
+        // N, only while verified: CTL, then Enter.
+        testkit::press(&mut app, KeyCode::Char('n'));
+        assert_eq!(
+            app.overlays(),
+            [Overlay::ChatControl {
+                peer: me.clone(),
+                control: ChatControl::Unverify,
+            }]
+        );
+        let cmds = testkit::press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            stores(&cmds),
+            [&StoreJob::UnverifyFriend {
+                pub_hex: me.clone()
+            }]
+        );
+        answer(&mut app, saved(FriendChange::Unverify, &me, Ok(())));
+        assert!(app.friend(&me).is_some_and(|f| !f.pinned));
+        assert!(app
+            .toasts_for_tests()
+            .contains(&"Bob is not verified any more on this device."));
+        testkit::press(&mut app, KeyCode::Char('n'));
+        assert!(app.overlays().is_empty());
+        // A block that could not forget everything says so on the page,
+        // with the notes in Details; a refused one says why.
+        testkit::press(&mut app, KeyCode::Char('u'));
+        answer(&mut app, saved(FriendChange::Unblock, &me, Ok(())));
+        testkit::press(&mut app, KeyCode::Char('b'));
+        testkit::press(&mut app, KeyCode::Enter);
+        answer(
+            &mut app,
+            JobResult::FriendChanged {
+                change: FriendChange::Block,
+                pub_hex: me.clone(),
+                result: Ok(()),
+                notes: vec!["could not forget the saved routes".into()],
+            },
+        );
+        let failure = page(&app).failure.clone().expect("partly done");
+        assert_eq!(
+            failure.plain.headline,
+            "Bob is blocked on this device, but Raven couldn't forget everything it kept to \
+             reach Bob."
+        );
+        assert_eq!(failure.plain.technical, "could not forget the saved routes");
+        testkit::press(&mut app, KeyCode::Char('u'));
+        answer(&mut app, saved(FriendChange::Unblock, &me, Ok(())));
+        testkit::press(&mut app, KeyCode::Char('b'));
+        testkit::press(&mut app, KeyCode::Enter);
+        answer(
+            &mut app,
+            saved(
+                FriendChange::Block,
+                &me,
+                Err("contacts.json: expected value".into()),
+            ),
+        );
+        let failure = page(&app).failure.clone().expect("a failure");
+        assert_eq!(failure.plain.headline, "Your friends list can't be read.");
     }
 }

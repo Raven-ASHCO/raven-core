@@ -820,23 +820,84 @@ enum GroupCommands {
         /// The group's name or the start of its id.
         group: String,
     },
+    /// Clear a group's chat on this computer only: its messages go from
+    /// here; the other members are not told and keep theirs. Your messages
+    /// still on their way stay.
+    ///
+    ///   raven group clear "Book club"
+    Clear {
+        /// The group's name or the start of its id.
+        group: String,
+        /// Skip the question (scripts).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum ChatsCommands {
-    /// Delete your chat with one contact on this computer: the messages you
-    /// received and sent. Your contact keeps their copy. Messages still
-    /// waiting to be sent stay, and show in your chat again once they are
-    /// sent.
+    /// Delete your chat with one contact or group on this computer: the
+    /// messages you received and sent go, and the chat leaves your chat list
+    /// until a new message comes. They keep their copy and are not told.
+    /// Messages still waiting to be sent stay, and show in your chat again
+    /// once they are sent.
     ///
-    ///   raven chats delete --petname Bob
+    ///   raven chats delete Bob
+    ///
+    ///   raven chats delete --group "Book club"
     Delete {
+        /// The contact: name, @tag or rvn1 address.
+        name: Option<String>,
         /// The contact's name, as `raven contact list` shows it.
         #[arg(long)]
-        petname: String,
+        petname: Option<String>,
+        /// A group instead: its name or the start of its id.
+        #[arg(long)]
+        group: Option<String>,
         /// Skip the typed confirmation (scripts).
         #[arg(long, default_value_t = false)]
         yes: bool,
+    },
+    /// Clear your chat with one contact or group on this computer: as
+    /// `delete`, but the chat stays in your chat list.
+    ///
+    ///   raven chats clear Bob
+    Clear {
+        /// The contact: name, @tag or rvn1 address.
+        name: Option<String>,
+        /// The contact's name, as `raven contact list` shows it.
+        #[arg(long)]
+        petname: Option<String>,
+        /// A group instead: its name or the start of its id.
+        #[arg(long)]
+        group: Option<String>,
+        /// Skip the typed confirmation (scripts).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Pin a chat to the top of your chat list on this computer.
+    ///
+    ///   raven chats pin Bob
+    ///
+    ///   raven chats pin --group "Book club"
+    Pin {
+        /// The contact: name, @tag or rvn1 address.
+        name: Option<String>,
+        #[arg(long)]
+        petname: Option<String>,
+        /// A group instead: its name or the start of its id.
+        #[arg(long)]
+        group: Option<String>,
+    },
+    /// Unpin a chat.
+    Unpin {
+        /// The contact: name, @tag or rvn1 address.
+        name: Option<String>,
+        #[arg(long)]
+        petname: Option<String>,
+        /// A group instead: its name or the start of its id.
+        #[arg(long)]
+        group: Option<String>,
     },
     /// How long Raven keeps your chats on this computer: 7d, 30d (the
     /// default), 90d or always. Older chats are deleted from this computer
@@ -1409,13 +1470,45 @@ Step by step: run `raven` and pick Contacts.
     },
     /// Decline a pending request (on this computer only).
     Decline { request_id: String },
-    /// Block sender of a pending request (local block list).
-    Block { request_id: String },
-    /// Undo a block: remove a sender's public key from the local block list.
+    /// Block a contact on this computer only: their messages, contact
+    /// requests and group messages are dropped, and nothing goes to them,
+    /// until you unblock. They are not told, and the contact stays. Also
+    /// blocks the sender of a pending request (its id, `raven contact
+    /// pending`).
+    ///
+    ///   raven contact block Bob
+    Block {
+        /// The contact (name, @tag or rvn1 address), or a pending request's
+        /// id (32 hex characters).
+        target: String,
+        /// Skip the question (scripts).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Undo a block.
+    ///
+    ///   raven contact unblock Bob
     Unblock {
-        /// Ed25519 public key hex (64 chars) of the blocked sender.
+        /// The contact: name, @tag or rvn1 address.
+        selector: Option<String>,
+        /// Ed25519 public key hex (64 chars) of a blocked sender who is no
+        /// contact.
         #[arg(long)]
-        pub_hex: String,
+        pub_hex: Option<String>,
+    },
+    /// Remove a contact's verification on this computer only: the contact,
+    /// your chat and their addresses stay, but what needs you both verified
+    /// (friend mailboxes, sharing your local address over Tor) stops until
+    /// you compare the 10 security words again (`raven contact verify`).
+    /// They are not told.
+    ///
+    ///   raven contact unverify Bob
+    Unverify {
+        /// The contact: name, @tag or rvn1 address.
+        selector: String,
+        /// Skip the question (scripts).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
     /// Remove a contact (and its pin) from this device's book — local only.
     ///
@@ -8193,6 +8286,15 @@ fn cmd_contact_remove(
     for note in forget_mail_friend(data_dir, &target.pub_hex) {
         eprintln!("{}", sanitize_terminal_line(&note));
     }
+    if let Err(e) = raven_core::chat_prefs::forget(
+        data_dir,
+        &raven_core::chat_prefs::contact_chat(&target.pub_hex),
+    ) {
+        eprintln!(
+            "{C_DIM}note: could not forget this chat's pin ({}){C_RESET}",
+            sanitize_terminal_line(&e.to_string())
+        );
+    }
     println!("{C_GREEN}removed{C_RESET} {}", target.primary_label());
     // Removing a contact is the explicit re-pin: also forget the prekey pinned
     // for it, so a contact that reinstalled (and is refused as PEER_PREKEY_RESET
@@ -8319,6 +8421,159 @@ fn cmd_contact_unblock(data_dir: &Path, pub_hex: &str) -> Result<(), String> {
     println!(
         "{C_GREEN}unblocked{C_RESET} fingerprint {}",
         device_fingerprint_v1(&ed)
+    );
+    Ok(())
+}
+
+/// A pending contact request's id: 32 hex characters (`raven contact
+/// pending`). Anything else names a saved contact.
+fn is_request_id(target: &str) -> bool {
+    let t = target.trim();
+    t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Asks `question` at a terminal (`[y/N]`, a typed yes); a script passes
+/// `--yes` instead. `Err` when stdin is no terminal.
+fn confirm_local_change(question: &str, flag: &str) -> Result<bool, String> {
+    if !stdin_is_tty() {
+        return Err(format!(
+            "stdin is not a terminal: pass --yes to {flag} without the question"
+        ));
+    }
+    print!("{question} [y/N] ");
+    let _ = io::stdout().flush();
+    Ok(read_decision_line().is_some_and(|a| typed_word_is(&a, "yes") || typed_word_is(&a, "y")))
+}
+
+/// Block a saved contact on this computer only (0.1.1 chat controls): its
+/// key goes on the block list, which every carrier, the outbox, custody and
+/// the groups refuse ([`raven_core::outbox::contact_admission`]), and what
+/// this computer kept to reach it (the outbox's routes, it as a mail
+/// friend) is forgotten as `/block` in a chat forgets it. The contact stays,
+/// to be unblocked. What could not be forgotten comes back as one line each.
+pub(crate) fn block_saved_contact(data_dir: &Path, pub_hex: &str) -> Result<Vec<String>, String> {
+    let key = hex::encode(parse_pub_hex(pub_hex)?);
+    let mut blocks = BlockList::load_checked(data_dir).map_err(|e| format!("block list: {e}"))?;
+    blocks.block(&key);
+    blocks.save(data_dir)?;
+    let mut notes = forget_outbox_routes(data_dir, &key);
+    notes.extend(forget_mail_friend(data_dir, &key));
+    Ok(notes)
+}
+
+/// Take `pub_hex` off the block list; `false` when it was not on it.
+pub(crate) fn unblock_key(data_dir: &Path, pub_hex: &str) -> Result<bool, String> {
+    let key = hex::encode(parse_pub_hex(pub_hex)?);
+    let mut blocks = BlockList::load_checked(data_dir).map_err(|e| format!("block list: {e}"))?;
+    if !blocks.is_blocked(&key) {
+        return Ok(false);
+    }
+    blocks.unblock(&key);
+    blocks.save(data_dir)?;
+    Ok(true)
+}
+
+/// Remove a saved contact's verification on this computer only (0.1.1 chat
+/// controls): every row of its key is no longer pinned; name, tag, routes
+/// and the chat stay. What needs both verified stops by itself (raven-node
+/// reads the pin: custody, the LAN hint over Tor), and it is no mail friend
+/// any more, so verifying it again does not silently make it one.
+/// `false` when it was not verified.
+pub(crate) fn unverify_saved_contact(data_dir: &Path, pub_hex: &str) -> Result<bool, String> {
+    let key = hex::encode(parse_pub_hex(pub_hex)?);
+    let mut contacts = load_contacts(data_dir)?;
+    let mut changed = false;
+    for c in contacts
+        .iter_mut()
+        .filter(|c| c.pub_hex.eq_ignore_ascii_case(&key))
+    {
+        changed |= c.pinned;
+        c.pinned = false;
+    }
+    if !changed {
+        return Ok(false);
+    }
+    save_contacts(data_dir, &contacts)?;
+    for note in forget_mail_friend(data_dir, &key) {
+        eprintln!("{}", sanitize_terminal_line(&note));
+    }
+    Ok(true)
+}
+
+/// `raven contact block NAME`.
+fn cmd_contact_block_saved(data_dir: &Path, selector: &str, yes: bool) -> Result<(), String> {
+    let contacts = load_contacts(data_dir)?;
+    let target = select_contact_for_edit(&contacts, Some(selector), None, None, None)?;
+    let name = target.primary_label();
+    if !yes
+        && !confirm_local_change(
+            &format!(
+                "Block {name}? Only on this computer: {name} is not told. Messages, contact \
+                 requests and group messages from {name} are dropped, and nothing goes to \
+                 {name}, until you unblock."
+            ),
+            "block",
+        )?
+    {
+        return Err("cancelled — nothing blocked".into());
+    }
+    for note in block_saved_contact(data_dir, &target.pub_hex)? {
+        eprintln!("{}", sanitize_terminal_line(&note));
+    }
+    println!(
+        "{C_GREEN}blocked{C_RESET} {name} on this computer; undo with `raven contact unblock {}`",
+        sanitize_terminal_line(selector.trim())
+    );
+    Ok(())
+}
+
+/// `raven contact unblock NAME` or `--pub-hex <key>`.
+fn cmd_contact_unblock_any(
+    data_dir: &Path,
+    selector: Option<&str>,
+    pub_hex: Option<&str>,
+) -> Result<(), String> {
+    match (selector.map(str::trim).filter(|s| !s.is_empty()), pub_hex) {
+        (Some(sel), None) => {
+            let contacts = load_contacts(data_dir)?;
+            let target = select_contact_for_edit(&contacts, Some(sel), None, None, None)?;
+            if !unblock_key(data_dir, &target.pub_hex)? {
+                return Err(format!("{} is not blocked", target.primary_label()));
+            }
+            println!("{C_GREEN}unblocked{C_RESET} {}", target.primary_label());
+            Ok(())
+        }
+        (None, Some(key)) => cmd_contact_unblock(data_dir, key),
+        _ => {
+            Err("name the contact (NAME, @tag or rvn1 address) or give --pub-hex, not both".into())
+        }
+    }
+}
+
+/// `raven contact unverify NAME`.
+fn cmd_contact_unverify(data_dir: &Path, selector: &str, yes: bool) -> Result<(), String> {
+    let contacts = load_contacts(data_dir)?;
+    let target = select_contact_for_edit(&contacts, Some(selector), None, None, None)?;
+    let name = target.primary_label();
+    if !target.pinned {
+        return Err(format!("{name} is not verified"));
+    }
+    if !yes
+        && !confirm_local_change(
+            &format!(
+                "Remove the verification of {name}? Only on this computer: {name} is not told. \
+                 Your chat and {name}'s addresses stay; friend mailboxes with {name} stop until \
+                 you compare the 10 security words again."
+            ),
+            "remove the verification",
+        )?
+    {
+        return Err("cancelled — still verified".into());
+    }
+    unverify_saved_contact(data_dir, &target.pub_hex)?;
+    println!(
+        "{C_GREEN}not verified any more{C_RESET}: {name}; verify again with `raven contact verify {}`",
+        sanitize_terminal_line(selector.trim())
     );
     Ok(())
 }
@@ -8831,28 +9086,93 @@ fn chat_deleted_lines(name: &str, deleted: u32, waiting: usize) -> Vec<String> {
 /// needs `--yes`. Messages still waiting to be sent stay and are counted.
 /// What went stays in older copies in freed disk blocks until the next
 /// data-key rotation, which it marks due (PP.10).
-fn cmd_chats_delete(data_dir: &Path, petname: &str, yes: bool) -> Result<(), String> {
-    let contacts = load_contacts(data_dir)?;
-    let asked = sanitize_terminal_line(petname.trim());
-    let target = match find_contacts(&contacts, None, Some(petname), None)
-        .unwrap_or_default()
-        .as_slice()
-    {
-        [one] => (*one).clone(),
-        [] => {
-            return Err(format!(
-                "no contact named {asked} (see `raven contact list`) — nothing deleted"
-            ))
+/// The chat a `raven chats` command names: a saved contact (NAME, or
+/// `--petname` as `raven contact list` shows it) or a group (`--group`).
+enum ChatTarget {
+    Contact(Box<Contact>),
+    Group {
+        id: raven_core::group::GroupId,
+        name: String,
+    },
+}
+
+impl ChatTarget {
+    fn label(&self) -> String {
+        match self {
+            ChatTarget::Contact(c) => c.primary_label(),
+            ChatTarget::Group { name, .. } => sanitize_terminal_line(name),
         }
-        many => {
-            return Err(format!(
-                "{} contacts are named {asked}: give one another name first (`raven contact \
-                 list`) — nothing deleted",
-                many.len()
-            ))
+    }
+
+    /// Its id in `chat_prefs.json` ([`raven_core::chat_prefs`]).
+    fn chat(&self) -> String {
+        match self {
+            ChatTarget::Contact(c) => raven_core::chat_prefs::contact_chat(&c.pub_hex),
+            ChatTarget::Group { id, .. } => raven_core::chat_prefs::group_chat(&hex::encode(id)),
         }
-    };
-    let name = target.primary_label();
+    }
+}
+
+fn chat_target(
+    data_dir: &Path,
+    name: Option<&str>,
+    petname: Option<&str>,
+    group: Option<&str>,
+) -> Result<ChatTarget, String> {
+    match (
+        name.map(str::trim).filter(|s| !s.is_empty()),
+        petname,
+        group,
+    ) {
+        (None, None, Some(g)) => {
+            let (id, name) = group_cli::find_named(data_dir, g)?;
+            Ok(ChatTarget::Group { id, name })
+        }
+        (Some(n), None, None) => {
+            let contacts = load_contacts(data_dir)?;
+            select_contact_for_edit(&contacts, Some(n), None, None, None)
+                .map(|c| ChatTarget::Contact(Box::new(c)))
+        }
+        (None, Some(petname), None) => {
+            let contacts = load_contacts(data_dir)?;
+            let asked = sanitize_terminal_line(petname.trim());
+            match find_contacts(&contacts, None, Some(petname), None)
+                .unwrap_or_default()
+                .as_slice()
+            {
+                [one] => Ok(ChatTarget::Contact(Box::new((*one).clone()))),
+                [] => Err(format!(
+                    "no contact named {asked} (see `raven contact list`) — nothing changed"
+                )),
+                many => Err(format!(
+                    "{} contacts are named {asked}: give one another name first (`raven contact \
+                     list`) — nothing changed",
+                    many.len()
+                )),
+            }
+        }
+        _ => Err("name one chat: a contact (NAME or --petname) or --group".into()),
+    }
+}
+
+/// `raven chats delete|clear` (privacy pack PP.8; 0.1.1 chat controls):
+/// clear one chat on this computer so that it stays cleared
+/// ([`ext::delete_chat_with`]: the session store's received rows leave
+/// tombstones, then every history row goes; a group's messages are
+/// remembered as seen, [`raven_core::group::store::clear`]). `hide`
+/// (delete) also takes the chat out of the chat list until a new message
+/// ([`raven_core::chat_prefs::hide`]). On a terminal the user types
+/// `delete` (Enter, EOF or anything else keeps everything); without one it
+/// needs `--yes`. Messages still waiting to be sent stay and are counted.
+/// What went stays in older copies in freed disk blocks until the next
+/// data-key rotation, which it marks due (PP.10).
+fn cmd_chats_delete(
+    data_dir: &Path,
+    target: &ChatTarget,
+    yes: bool,
+    hide: bool,
+) -> Result<(), String> {
+    let name = target.label();
     if !yes {
         if !stdin_is_tty() {
             return Err(
@@ -8865,21 +9185,51 @@ fn cmd_chats_delete(data_dir: &Path, petname: &str, yes: bool) -> Result<(), Str
             return Err("cancelled — nothing deleted".into());
         }
     }
-    let deleted = ext::delete_chat_with(data_dir, &target.pub_hex)?;
-    let waiting = ext::waiting_messages_to(data_dir, &target.pub_hex);
-    // The store's received rows are mostly in the history too; one that
-    // never reached it still went.
-    let messages = deleted.history.max(deleted.inbox.deleted);
-    for line in chat_deleted_lines(&name, messages, waiting) {
-        println!("{line}");
+    match target {
+        ChatTarget::Contact(c) => {
+            let deleted = ext::delete_chat_with(data_dir, &c.pub_hex)?;
+            let waiting = ext::waiting_messages_to(data_dir, &c.pub_hex);
+            // The store's received rows are mostly in the history too; one
+            // that never reached it still went.
+            let messages = deleted.history.max(deleted.inbox.deleted);
+            for line in chat_deleted_lines(&name, messages, waiting) {
+                println!("{line}");
+            }
+            if deleted.inbox.skipped > 0 {
+                let n = deleted.inbox.skipped;
+                println!(
+                    "{C_DIM}{n} received message{} could not be deleted now: run this again \
+                     later.{C_RESET}",
+                    if n == 1 { "" } else { "s" }
+                );
+            }
+        }
+        ChatTarget::Group { id, .. } => {
+            let (cleared, kept) = group_cli::clear_group(data_dir, id)?;
+            let cleared = u32::try_from(cleared).unwrap_or(u32::MAX);
+            for line in chat_deleted_lines(&name, cleared, kept) {
+                println!("{line}");
+            }
+        }
     }
-    if deleted.inbox.skipped > 0 {
-        let n = deleted.inbox.skipped;
-        println!(
-            "{C_DIM}{n} received message{} could not be deleted now: run this again later.{C_RESET}",
-            if n == 1 { "" } else { "s" }
-        );
+    if hide {
+        raven_core::chat_prefs::hide(data_dir, &target.chat(), now_ms())
+            .map_err(|e| format!("could not take the chat out of your chat list ({e})"))?;
+        println!("It leaves your chat list until a new message comes.");
     }
+    Ok(())
+}
+
+/// `raven chats pin|unpin`: the chat goes to the top of the chat list on
+/// this computer, or back to its place ([`raven_core::chat_prefs`]).
+fn cmd_chats_pin(data_dir: &Path, target: &ChatTarget, pinned: bool) -> Result<(), String> {
+    raven_core::chat_prefs::set_pinned(data_dir, &target.chat(), pinned)
+        .map_err(|e| format!("could not change the pin ({e})"))?;
+    println!(
+        "{C_GREEN}{}{C_RESET} {} on this computer",
+        if pinned { "pinned" } else { "unpinned" },
+        target.label()
+    );
     Ok(())
 }
 
@@ -16316,7 +16666,52 @@ pub fn run() {
             CustodyCommands::Status => custody_cli::cmd_custody_status(&data_dir),
         },
         Some(Commands::Chats { cmd }) => exit_on_err(match cmd {
-            ChatsCommands::Delete { petname, yes } => cmd_chats_delete(&data_dir, &petname, yes),
+            ChatsCommands::Delete {
+                name,
+                petname,
+                group,
+                yes,
+            } => chat_target(
+                &data_dir,
+                name.as_deref(),
+                petname.as_deref(),
+                group.as_deref(),
+            )
+            .and_then(|t| cmd_chats_delete(&data_dir, &t, yes, true)),
+            ChatsCommands::Clear {
+                name,
+                petname,
+                group,
+                yes,
+            } => chat_target(
+                &data_dir,
+                name.as_deref(),
+                petname.as_deref(),
+                group.as_deref(),
+            )
+            .and_then(|t| cmd_chats_delete(&data_dir, &t, yes, false)),
+            ChatsCommands::Pin {
+                name,
+                petname,
+                group,
+            } => chat_target(
+                &data_dir,
+                name.as_deref(),
+                petname.as_deref(),
+                group.as_deref(),
+            )
+            .and_then(|t| cmd_chats_pin(&data_dir, &t, true)),
+            ChatsCommands::Unpin {
+                name,
+                petname,
+                group,
+            } => chat_target(
+                &data_dir,
+                name.as_deref(),
+                petname.as_deref(),
+                group.as_deref(),
+            )
+            .and_then(|t| cmd_chats_pin(&data_dir, &t, false)),
             ChatsCommands::Keep { how_long } => cmd_chats_keep(&data_dir, &how_long),
             ChatsCommands::Status => cmd_chats_status(&data_dir),
         }),
@@ -16454,6 +16849,7 @@ pub fn run() {
                 GroupCommands::List => group_cli::GroupArg::List,
                 GroupCommands::Show { group, all } => group_cli::GroupArg::Show { group, all },
                 GroupCommands::Send { group } => group_cli::GroupArg::Send { group },
+                GroupCommands::Clear { group, yes } => group_cli::GroupArg::Clear { group, yes },
             };
             match group_cli::cmd_group(&data_dir, arg) {
                 Ok(lines) => group_cli::print_lines(&lines),
@@ -16888,9 +17284,20 @@ pub fn run() {
                 petname,
             } => cmd_contact_accept(&data_dir, &request_id, &petname),
             ContactCommands::Decline { request_id } => cmd_contact_decline(&data_dir, &request_id),
-            ContactCommands::Block { request_id } => cmd_contact_block(&data_dir, &request_id),
-            ContactCommands::Unblock { pub_hex } => {
-                exit_on_err(cmd_contact_unblock(&data_dir, &pub_hex))
+            ContactCommands::Block { target, yes } => {
+                if is_request_id(&target) {
+                    cmd_contact_block(&data_dir, &target)
+                } else {
+                    exit_on_err(cmd_contact_block_saved(&data_dir, &target, yes))
+                }
+            }
+            ContactCommands::Unblock { selector, pub_hex } => exit_on_err(cmd_contact_unblock_any(
+                &data_dir,
+                selector.as_deref(),
+                pub_hex.as_deref(),
+            )),
+            ContactCommands::Unverify { selector, yes } => {
+                exit_on_err(cmd_contact_unverify(&data_dir, &selector, yes))
             }
             ContactCommands::Remove {
                 tag,
@@ -28666,12 +29073,16 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             )
             .unwrap();
         }
-        let err = cmd_chats_delete(d, "Zed", true).unwrap_err();
+        let err = chat_target(d, None, Some("Zed"), None)
+            .and_then(|t| cmd_chats_delete(d, &t, true, false))
+            .unwrap_err();
         assert!(err.starts_with("no contact named Zed"), "{err}");
-        assert!(err.ends_with("nothing deleted"), "{err}");
+        assert!(err.ends_with("nothing changed"), "{err}");
         assert_eq!(raven_core::ChatHistory::load(d).unwrap().entries.len(), 3);
 
-        cmd_chats_delete(d, "alice", true).unwrap();
+        chat_target(d, None, Some("alice"), None)
+            .and_then(|t| cmd_chats_delete(d, &t, true, false))
+            .unwrap();
         let left = raven_core::ChatHistory::load(d).unwrap();
         assert_eq!(left.entries.len(), 1);
         assert_eq!(left.entries[0].peer_pub_hex, bob);

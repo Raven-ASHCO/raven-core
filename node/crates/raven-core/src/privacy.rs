@@ -115,6 +115,7 @@ pub const MIGRATED: &[(&str, Kind)] = &[
     ("friend_relay/relay_key.ed25519", Kind::FriendRelayKey),
     (crate::lan_meeting::LAN_MEETING_FILE, Kind::LanMeeting),
     (crate::custody_home::CUSTODY_HOME_FILE, Kind::CustodyHome),
+    (crate::chat_prefs::CHAT_PREFS_FILE, Kind::ChatPrefs),
     (
         crate::peer_rotation::PEER_SCHEDULES_FILE,
         Kind::PeerSchedules,
