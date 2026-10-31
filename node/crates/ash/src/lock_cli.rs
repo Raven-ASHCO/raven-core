@@ -670,13 +670,25 @@ pub(super) fn saved_file_line(file: &Path, done: bool) -> String {
     }
 }
 
+/// Where Raven's keys are, in a sentence: the engine's passphrase ops run in
+/// the iPhone app too.
+fn this_device() -> &'static str {
+    if cfg!(target_os = "ios") {
+        "this phone"
+    } else {
+        "this computer"
+    }
+}
+
 /// What a change that went through says; `saved`: the passphrase file this
 /// computer keeps, now stale after a change.
 pub(super) fn done_lines(op: PassOp, moved: &Moved, saved: Option<&Path>) -> Vec<String> {
     let mut lines = match op {
         PassOp::Set => vec![
-            "Your Raven passphrase is set. Raven's keys on this computer open only with it."
-                .to_owned(),
+            format!(
+                "Your Raven passphrase is set. Raven's keys on {} open only with it.",
+                this_device()
+            ),
             "Raven can't open them without it: there is no way to recover a forgotten one."
                 .to_owned(),
         ],
@@ -686,8 +698,13 @@ pub(super) fn done_lines(op: PassOp, moved: &Moved, saved: Option<&Path>) -> Vec
             lines
         }
         PassOp::Remove => vec![
-            "Your Raven passphrase is removed. Your Raven keys are in your login keychain again."
-                .to_owned(),
+            if cfg!(target_os = "ios") {
+                "Your Raven passphrase is removed. Your Raven keys are in this phone's keychain \
+                 again."
+            } else {
+                "Your Raven passphrase is removed. Your Raven keys are in your login keychain again."
+            }
+            .to_owned(),
             raven_core::privacy::keys_open_to_login_text().to_owned(),
         ],
     };

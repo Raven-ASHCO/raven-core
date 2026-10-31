@@ -26,8 +26,9 @@ set -euo pipefail
 # session and prekey backends; `keychain_delete_item` and `keychain_accounts`
 # (an attribute-only search of the session service) are `raven erase`'s
 # (privacy pack PP.16; review C-deletion-erase-1). raven_passphrase.rs's
-# `get` / `put` / `delete` / `accounts` are the login keychain of the Raven
-# passphrase's switch (Lock v2, P6.40). apple_keychain.rs names the calls for
+# `get` / `put` / `delete` / `accounts` are the keychain of the Raven
+# passphrase's switch (Lock v2, P6.40): the login keychain on macOS, the
+# data-protection keychain on iOS. apple_keychain.rs names the calls for
 # both Apple systems: on macOS it only re-exports security-framework's (the
 # allow-listed callers guard them), on iOS it is the data-protection keychain.
 #

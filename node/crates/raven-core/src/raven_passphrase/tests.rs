@@ -3,24 +3,24 @@
 //! cheap KDF parameters; an interruption between the markers; the rules
 //! for a new passphrase; and what each build and system offers.
 
-// The switch's helpers serve the macOS tests only (the switch runs on
-// macOS; see the marker note below).
-#[cfg(target_os = "macos")]
+// The switch's helpers serve the Apple tests only (the switch runs on
+// macOS and iOS; see the marker note below).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::collections::BTreeMap;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::sync::Mutex;
 
 use super::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use crate::keystore_vault::{KdfBounds, KdfParams, KeyCache};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const PARAMS: KdfParams = KdfParams {
     m_kib: 8,
     t: 1,
     p: 1,
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const BOUNDS: KdfBounds = KdfBounds {
     min_m_kib: 8,
     max_m_kib: 1 << 20,
@@ -30,11 +30,11 @@ const BOUNDS: KdfBounds = KdfBounds {
     max_p: 4,
 };
 const FIRST: &[u8] = b"correct horse battery";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const SECOND: &[u8] = b"staple and more staples";
 
 /// A login keychain in memory: (service, account) to value.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[derive(Default)]
 struct MapKeychain {
     items: Mutex<BTreeMap<(String, String), Vec<u8>>>,
@@ -42,7 +42,7 @@ struct MapKeychain {
     refuse_deletes: bool,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl MapKeychain {
     fn with(items: &[(&Item, &[u8])]) -> Self {
         let keychain = MapKeychain::default();
@@ -65,7 +65,7 @@ impl MapKeychain {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl LoginStore for MapKeychain {
     fn get(&self, item: &Item) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         Ok(self.holds(item).map(Zeroizing::new))
@@ -103,7 +103,7 @@ impl LoginStore for MapKeychain {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn vault(dir: &Path, passphrase: &[u8]) -> Vault {
     Vault::with_options(
         dir,
@@ -117,21 +117,20 @@ fn vault(dir: &Path, passphrase: &[u8]) -> Vault {
 /// A keychain profile of the identity `seed`: its marker and binding, and
 /// in the keychain its identity, history key, two conversations (one the
 /// session store never listed) and its prekey state.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 struct Profile {
     dir: tempfile::TempDir,
     seed: [u8; 32],
     items: Vec<(Item, Vec<u8>)>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl Profile {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let dd = dir.path();
         let seed = [0x5a; 32];
-        crate::identity_store::rebind_backend(dd, IdentityStoreBackend::MacosKeychain, &seed)
-            .unwrap();
+        crate::identity_store::rebind_backend(dd, KEYCHAIN_BACKEND, &seed).unwrap();
         let items = vec![
             (identity_item(dd), seed.to_vec()),
             (hist_item(dd), vec![0x11; 32]),
@@ -156,9 +155,10 @@ impl Profile {
     }
 }
 
-/// The marker files: macOS reads the keystore marker only; other systems
-/// read a vault file too (`recorded_backend`), so the switch runs on macOS.
-#[cfg(target_os = "macos")]
+/// The marker files: macOS and iOS read the keystore marker only; other
+/// systems read a vault file too (`recorded_backend`), so the switch runs
+/// on Apple systems.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
 fn set_moves_every_key_into_the_vault_and_remove_brings_them_back() {
     let profile = Profile::new();
@@ -236,10 +236,7 @@ fn set_moves_every_key_into_the_vault_and_remove_brings_them_back() {
         assert_eq!(keychain.holds(item).as_ref(), Some(value), "{item:?}");
     }
     assert!(!has_passphrase(dd).unwrap());
-    assert_eq!(
-        profile.identity_marker(),
-        Some(IdentityStoreBackend::MacosKeychain)
-    );
+    assert_eq!(profile.identity_marker(), Some(KEYCHAIN_BACKEND));
     assert!(
         !dd.join(keystore_vault::VAULT_FILE_NAME).exists(),
         "the vault is gone"
@@ -253,7 +250,7 @@ fn set_moves_every_key_into_the_vault_and_remove_brings_them_back() {
 /// A set that stopped between its two markers (the identity reads the
 /// vault, every other store the keychain): both copies are whole, and
 /// either command finishes it. A stray vault no marker names is replaced.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
 fn an_interrupted_switch_is_finished_by_either_command() {
     let profile = Profile::new();
@@ -299,10 +296,7 @@ fn an_interrupted_switch_is_finished_by_either_command() {
         .unwrap();
     remove_with(dd, FIRST, &keychain, &vault(dd, FIRST)).unwrap();
     assert!(!halfway(dd).unwrap() && !has_passphrase(dd).unwrap());
-    assert_eq!(
-        profile.identity_marker(),
-        Some(IdentityStoreBackend::MacosKeychain)
-    );
+    assert_eq!(profile.identity_marker(), Some(KEYCHAIN_BACKEND));
 }
 
 /// A switch that stopped between its markers (here a remove whose
@@ -312,7 +306,7 @@ fn an_interrupted_switch_is_finished_by_either_command() {
 /// does a set with the passphrase it was started with (review
 /// lock-updates-local-4: it was offered only a set, and a remove was
 /// refused as "no passphrase").
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
 fn an_unfinished_switch_is_offered_and_finished_by_remove_or_set() {
     let profile = Profile::new();
@@ -338,10 +332,7 @@ fn an_unfinished_switch_is_offered_and_finished_by_remove_or_set() {
     let back = remove_offered(dd, &offered, FIRST, &keychain, &vault(dd, FIRST)).unwrap();
     assert_eq!(back.keys, 5);
     assert!(!unfinished(dd).unwrap() && !has_passphrase(dd).unwrap());
-    assert_eq!(
-        profile.identity_marker(),
-        Some(IdentityStoreBackend::MacosKeychain)
-    );
+    assert_eq!(profile.identity_marker(), Some(KEYCHAIN_BACKEND));
     assert_eq!(offer_on_this_system(dd), Offer::Set);
 
     // The same state, finished the other way: a set with the passphrase
@@ -372,7 +363,7 @@ fn an_unfinished_switch_is_offered_and_finished_by_remove_or_set() {
 
 /// A keychain item that will not go is said (what it is, never its name);
 /// the switch stands. No identity in the keychain: nothing happens.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
 fn a_key_left_behind_is_said_and_no_identity_changes_nothing() {
     let profile = Profile::new();
@@ -401,7 +392,7 @@ fn a_key_left_behind_is_said_and_no_identity_changes_nothing() {
 }
 
 /// A vault entry no key of this profile has: `remove` changes nothing.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
 fn remove_refuses_a_vault_entry_it_does_not_know() {
     let profile = Profile::new();
@@ -448,8 +439,21 @@ fn every_vault_entry_names_its_keychain_item() {
     );
 }
 
+/// The iPhone app's unlock secret (docs/IOS.md section 5): 32 random bytes
+/// as base64url without padding, 43 characters nobody types. The rules for
+/// a new passphrase take it, whatever its bytes.
+#[test]
+fn the_iphone_apps_random_unlock_secret_passes_the_rules() {
+    use base64::Engine as _;
+    for fill in [[0x00u8; 32], [0xff; 32], [0x5a; 32], [0xa5; 32]] {
+        let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fill);
+        assert_eq!(secret.len(), 43);
+        assert_eq!(check_new(secret.as_bytes()), Ok(()), "{secret}");
+    }
+}
+
 /// With the gate shut nothing is offered; the lab's file backends are
-/// refused; macOS offers set, then change or remove.
+/// refused; macOS and iOS offer set, then change or remove.
 #[test]
 fn what_is_offered_follows_the_gate_the_lab_and_the_system() {
     use crate::security_gate::set_lab_for_this_thread;
@@ -467,7 +471,7 @@ fn what_is_offered_follows_the_gate_the_lab_and_the_system() {
         assert_eq!(remove(dd, FIRST), Err(PassError::Refused(LAB_FILES.into())));
     }
     let here = offer_on_this_system(dd);
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
         assert_eq!(here, Offer::Set);
         crate::keystore_select::switch_marker(dd, true).unwrap();
         assert_eq!(offer_on_this_system(dd), Offer::ChangeOrRemove);
@@ -479,4 +483,47 @@ fn what_is_offered_follows_the_gate_the_lab_and_the_system() {
         assert_eq!(here, Offer::No(KEYRING_PROFILE));
     }
     set_lab_for_this_thread(SecGate::LocalProtection, None);
+}
+
+/// On the iOS Simulator (`xcrun simctl spawn`; docs/IOS.md section 10):
+/// the data-protection keychain itself. A set moves every key into the
+/// vault and deletes the keychain items; a remove writes them back with the
+/// protection every Raven item has (`cku`: after the first unlock, this
+/// device only; never synchronized) and the identity marker
+/// `ios-keychain`.
+#[cfg(target_os = "ios")]
+#[test]
+fn on_ios_the_keys_move_between_the_keychain_and_the_vault() {
+    let profile = Profile::new();
+    let dd = profile.dd();
+    let keychain = platform::Keychain;
+    for (item, value) in &profile.items {
+        keychain.put(item, value).unwrap();
+    }
+    let moved = set_with(dd, FIRST, &keychain, &vault(dd, FIRST)).unwrap();
+    assert_eq!(moved.keys, 5);
+    assert!(moved.left.is_empty(), "{:?}", moved.left);
+    for (item, _) in &profile.items {
+        assert!(keychain.get(item).unwrap().is_none(), "{item:?}");
+    }
+    assert_eq!(offer_on_this_system(dd), Offer::ChangeOrRemove);
+    let back = remove_with(dd, FIRST, &keychain, &vault(dd, FIRST)).unwrap();
+    assert_eq!(back.keys, 5);
+    assert_eq!(
+        profile.identity_marker(),
+        Some(IdentityStoreBackend::IosKeychain)
+    );
+    for (item, value) in &profile.items {
+        let held = keychain.get(item).unwrap();
+        assert_eq!(
+            held.as_deref().map(|v| &v[..]),
+            Some(&value[..]),
+            "{item:?}"
+        );
+        let (class, synced) =
+            crate::apple_keychain::protection(item.service, &item.account).unwrap();
+        assert_eq!(class, "cku", "{item:?}");
+        assert!(!synced, "{item:?}");
+        assert!(keychain.delete(item).unwrap());
+    }
 }

@@ -281,6 +281,30 @@ pub(crate) fn start(data_dir: &Path) -> bool {
     locked
 }
 
+/// Lock v2 while no node of this process serves `data_dir` (the iPhone
+/// app's launch while it says asleep, or a lock while paused: the embedded
+/// host's `lock_while_stopped`): the secrets this process holds go and the
+/// lock is held, so the next [`start`] finds it and starts locked, whatever
+/// the keystore. `false` while the gate is shut: nothing is held.
+#[cfg(any(test, all(unix, feature = "embedded")))]
+pub(crate) fn hold_before_start(data_dir: &Path) -> bool {
+    if !live() {
+        return false;
+    }
+    if !is_locked() {
+        drop_secrets(data_dir);
+        eprintln!("raven-node lock: locked before the start");
+    }
+    true
+}
+
+/// Whether this process holds `data_dir` locked, a node running or not
+/// (the embedded host's `held_locked`). `None` while the gate is shut.
+#[cfg(any(test, all(unix, feature = "embedded")))]
+pub(crate) fn held(data_dir: &Path) -> Option<bool> {
+    live().then(|| is_locked() && raven_core::local_lock::engaged(data_dir))
+}
+
 /// IPC `Lock`: drop every secret and stop the network work. Locked already:
 /// the same answer.
 pub(crate) async fn lock(data_dir: &Path) -> Result<LockReply, Held> {

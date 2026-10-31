@@ -480,6 +480,26 @@ pub fn nearby_permission() -> Option<&'static str> {
     None
 }
 
+/// Lock v2 while no node runs for `data_dir` in this process (the app's
+/// launch while it says asleep, or a lock while paused): the lock is held
+/// by the process, so the next start of a node for the profile (a full one,
+/// the background one or a mail check's) starts locked, whatever its
+/// keystore. `Ok(false)` while the gate is shut: nothing is held. Refused
+/// while a node runs: its IPC `Lock` locks it.
+pub fn lock_while_stopped(data_dir: &Path) -> Result<bool, String> {
+    let _turn = turn();
+    if running_for(data_dir) {
+        return Err("a node runs for this profile: its IPC Lock locks it".into());
+    }
+    Ok(crate::lock::hold_before_start(data_dir))
+}
+
+/// Lock v2 as this process holds it for `data_dir`, a node running or not.
+/// `None` while the gate is shut.
+pub fn held_locked(data_dir: &Path) -> Option<bool> {
+    crate::lock::held(data_dir)
+}
+
 /// The pause ends; nothing is started (the caller starts the node its own
 /// way, e.g. through the CLI's start with its refusals).
 pub fn end_pause() {

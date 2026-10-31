@@ -116,8 +116,12 @@ signal: its pid is the app's own).
 ## 3. The app's lifecycle
 
 1. **Launch.** Set `RAVEN_DATA_DIR` (section 4) before the first
-   `raven_call`. Then `profile.state`, and `identity.create` for a new
-   profile; `node.start` (or `node.resume` after a pause). Start an
+   `raven_call`. When the app says Raven is asleep (Lock v2, its gate
+   live), call `lock.now` first: with the node not started yet the lock is
+   held in the process, so nothing below loads a key and `node.start`
+   starts the node locked (`lock.unlock` after Face ID opens it). Then
+   `profile.state`, and `identity.create` for a new profile; `node.start`
+   (or `node.resume` after a pause). Start an
    `NWPathMonitor` and call `network.path` with the current kind of network
    now and at every change (section 6: Tor on Wi-Fi only).
 2. **To the background** (`sceneDidEnterBackground`): inside
@@ -204,9 +208,25 @@ profile folder): `app.raven.node.identity` (the identity seed, add-only),
 privacy pack's at-rest key). The identity's backend marker is
 `ios-keychain`. `raven erase`'s code deletes them on iOS too.
 
-Not on iOS: a Raven passphrase (Lock v2 moves the keys into a passphrase
-vault on macOS and Linux). On a phone the passcode protects the keychain;
-the offer says so.
+A Raven passphrase (Lock v2, its gate `lock_v2`) works on iOS as on
+macOS: `lock.set_passphrase` moves every key above into the passphrase
+vault (`keystore.vault`) and deletes the keychain items; the identity's
+marker becomes `passphrase-vault`, and a profile with one always starts
+locked (no passphrase file on a phone). `lock.remove_passphrase` writes
+the items back with the protection above and the marker `ios-keychain`.
+Only errSecItemNotFound (-25300) counts as an absent item: any other
+status fails the move, and an interrupted set or remove is finished by
+either op (the same code as on macOS, `raven_passphrase`). What opens the
+vault is the app's to keep (owner decision 2026-10-31): a random unlock
+secret nobody types, 32 bytes from `SecRandomCopyBytes` given to the
+engine as base64url without padding (43 characters, within the rules of
+`check_new`), in one Keychain item of the app's own (never an
+`app.raven.node.*` service) with `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`
+and `.userPresence` (Face ID, Touch ID or the passcode; not
+`.biometryCurrentSet`, which a new face would make unusable for good). It
+is never in a file, a log or a backup. If the person turns the phone's
+passcode off, iOS deletes that item and Raven's keys can no longer be
+opened on this phone: the app's enabling sheet says so.
 
 Before the first unlock after a restart every keychain read fails
 (`errSecInteractionNotAllowed`, -25308): the node does not start and the
@@ -404,6 +424,9 @@ node stays paused, `node.resume`, and a direct delivery again.
 | `messages.handoff`, `via_name`, `held_by`, mail check `names` | `net_handoff` (three `raven-node` programs), `net_custody`, the end-to-end test (`names`) | – | not yet |
 | iOS Keychain backend (add-only, read, update, `cku` protection, not synchronized, account listing, identity marker `ios-keychain`) | – | `apple_keychain::tests` | not yet |
 | Container-relative profile binding | – | `paths::tests` | not yet |
+| Raven passphrase: the switch to the vault and back (a keychain in memory) | `raven_passphrase::tests` | the same tests (not run yet) | not yet |
+| Raven passphrase against the data-protection keychain (`cku` back after a remove, marker `ios-keychain`) | – | `on_ios_the_keys_move_between_the_keychain_and_the_vault` (not run yet) | not yet |
+| Lock v2 held while the embedded node is stopped (`lock.now`, then a locked start) | `lock_v2_embedded` | not yet | not yet |
 | `RavenClient.xcframework` (release) linked by Xcode's clang into a C program: new identity in the Keychain, node started, paused, mail check, resumed, stopped | – | `simulator_smoke.sh` | not yet |
 | Local Network permission, background refresh, file protection, App Store signing | – | – | not yet |
 | Bluetooth nearby | – | no Bluetooth | not built |

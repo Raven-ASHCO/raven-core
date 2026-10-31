@@ -111,6 +111,21 @@ pub(crate) fn end_pause() {
     node::end_pause()
 }
 
+/// `lock.now` with no node running here (Lock v2): the lock is held in this
+/// process and the next start is locked. `Ok(false)`: the gate is shut.
+pub(crate) fn lock_while_stopped(data_dir: &Path) -> Result<bool, String> {
+    node::lock_while_stopped(data_dir)
+}
+
+/// Lock v2 as this process holds it while no node runs for `data_dir`
+/// (`None`: a node runs, it says itself, or the gate is shut).
+pub(crate) fn held_while_stopped(data_dir: &Path) -> Option<bool> {
+    if node::running_for(data_dir) {
+        return None;
+    }
+    node::held_locked(data_dir)
+}
+
 pub(crate) fn state_word() -> &'static str {
     node::status().state.word()
 }

@@ -30,6 +30,8 @@ pub(crate) use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
 
+#[cfg(all(test, target_os = "ios"))]
+pub(crate) use ios::protection;
 #[cfg(target_os = "ios")]
 pub(crate) use ios::{
     accounts, add_generic_password, delete_generic_password, get_generic_password,

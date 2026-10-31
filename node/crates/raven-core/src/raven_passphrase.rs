@@ -52,9 +52,6 @@ pub const LAB_FILES: &str = "This profile keeps its keys in the lab's files \
 /// Windows keeps the keys in files only the user's account opens (DPAPI).
 pub const NOT_ON_WINDOWS: &str = "A Raven passphrase is not available on Windows yet. Your \
      Raven keys are protected by your Windows account.";
-/// iOS keeps the keys in the data-protection keychain (the phone's passcode).
-pub const NOT_ON_IOS: &str = "A Raven passphrase is not available on iPhone and iPad: \
-     the phone's own passcode protects Raven's keys there.";
 /// A GNU/Linux profile with its keys in the desktop keyring.
 pub const KEYRING_PROFILE: &str = "This profile keeps its keys in your desktop keyring. A \
      Raven passphrase is chosen when a profile is made (RAVEN_KEYSTORE_BACKEND=vault).";
@@ -148,7 +145,10 @@ pub fn offer(data_dir: &Path) -> Offer {
     offer_on_this_system(data_dir)
 }
 
-#[cfg(target_os = "macos")]
+/// macOS and iOS: set, then change or remove (the keys move between the
+/// keychain and the vault; on iOS the app keeps what opens it behind Face
+/// ID, docs/IOS.md section 5).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn offer_on_this_system(data_dir: &Path) -> Offer {
     if crate::keystore_select::has_passphrase(data_dir).unwrap_or(false)
         || unfinished(data_dir).unwrap_or(false)
@@ -162,13 +162,6 @@ fn offer_on_this_system(data_dir: &Path) -> Offer {
 #[cfg(windows)]
 fn offer_on_this_system(_data_dir: &Path) -> Offer {
     Offer::No(NOT_ON_WINDOWS)
-}
-
-/// iOS: the phone's own passcode protects the keychain items (after the
-/// first unlock); a Raven passphrase is not offered there (docs/IOS.md).
-#[cfg(target_os = "ios")]
-fn offer_on_this_system(_data_dir: &Path) -> Offer {
-    Offer::No(NOT_ON_IOS)
 }
 
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
@@ -518,6 +511,14 @@ fn rebind(
         .map_err(|e| PassError::Failed(e.redacted_display()))
 }
 
+/// Where the identity reads its seed again after a [`remove`]: this
+/// system's keychain (the login keychain on macOS, the data-protection
+/// keychain on iOS; no other system offers a remove).
+#[cfg(target_os = "ios")]
+const KEYCHAIN_BACKEND: IdentityStoreBackend = IdentityStoreBackend::IosKeychain;
+#[cfg(not(target_os = "ios"))]
+const KEYCHAIN_BACKEND: IdentityStoreBackend = IdentityStoreBackend::MacosKeychain;
+
 /// [`set`] with its keychain and vault passed in.
 pub(crate) fn set_with(
     data_dir: &Path,
@@ -643,7 +644,7 @@ pub(crate) fn remove_with(
         PassError::Failed("the vault holds no identity key; nothing was changed".into())
     })?;
     crate::keystore_select::switch_marker(data_dir, false).map_err(PassError::Failed)?;
-    rebind(data_dir, IdentityStoreBackend::MacosKeychain, &seed)?;
+    rebind(data_dir, KEYCHAIN_BACKEND, &seed)?;
     if let Err(e) = remove_vault_file(data_dir) {
         moved.left.push(format!("the passphrase vault ({e})"));
     }
@@ -727,8 +728,63 @@ mod platform {
     }
 }
 
+// ── The data-protection keychain (iOS) ──────────────────────────────────────
+
+/// The same items in the app's own keychain (`crate::apple_keychain`). iOS
+/// shows no access dialogs, so there is no guard. An item a remove writes
+/// back gets the protection every Raven item is added with (after the first
+/// unlock, this device only, never synchronized).
+#[cfg(target_os = "ios")]
+mod platform {
+    use super::{Item, Kind, LoginStore};
+    use zeroize::Zeroizing;
+
+    /// errSecItemNotFound: the only status that proves no such item. Before
+    /// the first unlock after a restart every call fails with
+    /// errSecInteractionNotAllowed (-25308): the move fails, nothing is
+    /// taken as absent.
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
+
+    pub(super) struct Keychain;
+
+    // Each method says it is iOS's for scripts/keychain_guard_check.sh: the
+    // data-protection keychain shows no access dialog, so there is no
+    // guarded(...) around its calls.
+    impl LoginStore for Keychain {
+        #[cfg(target_os = "ios")]
+        fn get(&self, item: &Item) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+            match crate::apple_keychain::get_generic_password(item.service, &item.account) {
+                Ok(value) => Ok(Some(Zeroizing::new(value))),
+                Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+                Err(e) => Err(format!("keychain read failed: {e}")),
+            }
+        }
+
+        #[cfg(target_os = "ios")]
+        fn put(&self, item: &Item, value: &[u8]) -> Result<(), String> {
+            crate::apple_keychain::set_generic_password(item.service, &item.account, value)
+                .map_err(|e| format!("keychain update failed: {e}"))
+        }
+
+        #[cfg(target_os = "ios")]
+        fn delete(&self, item: &Item) -> Result<bool, String> {
+            match crate::apple_keychain::delete_generic_password(item.service, &item.account) {
+                Ok(()) => Ok(true),
+                Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(false),
+                Err(e) => Err(format!("keychain delete failed: {e}")),
+            }
+        }
+
+        #[cfg(target_os = "ios")]
+        fn accounts(&self, _kind: Kind, service: &'static str) -> Result<Vec<String>, String> {
+            crate::apple_keychain::accounts(service)
+                .map_err(|e| format!("keychain search failed: {e}"))
+        }
+    }
+}
+
 /// No login keychain to move keys out of here ([`offer`] refuses first).
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 mod platform {
     use super::{Item, Kind, LoginStore};
     use zeroize::Zeroizing;

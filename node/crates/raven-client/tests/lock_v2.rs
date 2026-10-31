@@ -59,8 +59,8 @@ fn a_lock_lets_go_of_the_identity_and_the_events_until_the_unlock() {
     let b = Peer::new("Reader");
 
     // The Raven passphrase: the lab's file backends take none, and the ops
-    // say so (on a real profile: Windows, iPhone and keyring profiles the
-    // same way). No passphrase comes back in any answer.
+    // say so (on a real profile: Windows and keyring profiles the same
+    // way). No passphrase comes back in any answer.
     let pass = b.ok("lock.passphrase_state", json!({}));
     assert_eq!(pass["available"], true, "{pass}");
     assert_eq!(pass["lab"], true, "{pass}");

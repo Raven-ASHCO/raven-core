@@ -120,7 +120,7 @@ changes. Fields marked `?` may be missing.
 | `contacts.set_routes` | `{address, internet?, p2p?, via?: [..], clear?: [..], custodians?: [address], hide_ip?}` | `{contact: Contact, routes: ContactRoutes}` |
 | `security.status` | – | `SecurityStatus` (`raven security`, read-only) |
 | `lock.state` | – | `LockState` |
-| `lock.now` | – | `LockState` (Lock v2: raven-node keeps running and forgets its keys) |
+| `lock.now` | – | `LockState` (Lock v2: raven-node keeps running and forgets its keys; the app's own node stopped or paused: the lock is held in the process and its next start is locked) |
 | `lock.unlock` | `{passphrase?}` | `LockState` + `{note?}` |
 | `lock.passphrase_state` | – | `PassphraseState` (`raven passphrase`, read-only) |
 | `lock.set_passphrase` | `{new, old?}` | `PassphraseState` + `{note}` (without `old`: sets one, `raven passphrase set`; with `old`: changes it, `raven passphrase change`) |
@@ -457,7 +457,12 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   serves it: `lock.now` keeps raven-node running without its keys, `lock.unlock` opens it (with the
   Raven passphrase when the profile has one; the passphrase goes only to raven-node). Where the node
   does not serve it (no node, an older one, the gate shut) both answer `NOT_AVAILABLE_YET` naming
-  `raven lock` / `raven unlock`. `updates.status` is `raven update status`; installing stays in the
+  `raven lock` / `raven unlock`. The one exception is the app's own node (embedded, docs/IOS.md)
+  while it is stopped or paused, with the gate live: `lock.now` then holds the lock in the process
+  (the engine and the node load no key), and the next `node.start` or `node.resume` starts the node
+  locked, a keychain profile too: the iPhone app's launch while it says asleep calls `lock.now`
+  first. `lock.unlock` needs the node running (`NODE_NOT_RUNNING`: start it first; it starts
+  locked). `updates.status` is `raven update status`; installing stays in the
   CLI (`raven update install`).
 - **While Lock v2 holds the profile** the engine holds no key either. It learns of a lock from
   `lock.now`, `lock.state`, `profile.state` and the node's own status (the watcher's beat, a
@@ -469,8 +474,8 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   true}` and nothing is queued (no message text waits in the engine); `lock.state`, `lock.now`,
   `lock.unlock`, `lock.passphrase_state`, `node.status`, `node.start`, `node.stop`, `node.pause` and
   `node.resume` run (a node started then follows raven-node's rule: a passphrase profile's starts
-  locked, an embedded node stays locked across a pause, a keychain profile's new raven-node process
-  starts unlocked); every other op that reads the profile, `lock.set_passphrase` and
+  locked, an embedded node stays locked across a pause and after a `lock.now` made while it was
+  stopped, a keychain profile's new raven-node process starts unlocked); every other op that reads the profile, `lock.set_passphrase` and
   `lock.remove_passphrase` included, is `PROFILE_LOCKED`. After the unlock the identity loads again
   and the first `events.poll` says `reset: true`: reload what the window shows. A profile with a
   Raven passphrase whose keys this engine's process cannot open yet (no passphrase file, and no
@@ -481,16 +486,16 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   happens.
 - **The Raven passphrase.** `lock.passphrase_state` says what `raven passphrase` offers this
   profile (it answers with the gate shut too: `available: false`, `offer: "none"`).
-  `lock.set_passphrase {new}` sets one (macOS: the keys move from the login keychain into a
-  passphrase vault; it also finishes a switch that stopped halfway, with the passphrase that switch
-  was started with), `lock.set_passphrase {new, old}` changes it (macOS, and GNU/Linux vault
-  profiles), `lock.remove_passphrase {old}` removes it (macOS: the keys go back into the login
-  keychain). raven-node is held locked while the keys move and unlocked after; a node that already
+  `lock.set_passphrase {new}` sets one (macOS and iOS: the keys move from the keychain, the login
+  keychain on macOS and the app's data-protection keychain on iOS, into a passphrase vault; it also
+  finishes a switch that stopped halfway, with the passphrase that switch was started with),
+  `lock.set_passphrase {new, old}` changes it (macOS, iOS, and GNU/Linux vault profiles),
+  `lock.remove_passphrase {old}` removes it (macOS and iOS: the keys go back into the keychain). raven-node is held locked while the keys move and unlocked after; a node that already
   runs locked is refused (`PROFILE_LOCKED`: unlock first). The passphrases go in these fields only,
   are checked by raven-core's own rules (the CLI's), are never returned, logged or kept, and are
   wiped once used. Refusals: the gate shut is `NOT_AVAILABLE_YET` naming `raven passphrase` (as
   `lock.now` names `raven lock`); a system or profile where a Raven passphrase does not apply
-  (Windows, iPhone and iPad, a desktop-keyring profile, the lab's file backends) is
+  (Windows, a desktop-keyring profile, the lab's file backends) is
   `NOT_ON_THIS_SYSTEM` with raven-core's words; a wrong `old` is `PASSPHRASE_WRONG`; a `new` that
   breaks a rule, or an op this profile does not offer now (a set where one is set, a remove without
   one), is `BAD_REQUEST` with the reason in `message`. A forgotten Raven passphrase cannot be

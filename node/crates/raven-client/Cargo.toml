@@ -46,3 +46,10 @@ tempfile = { workspace = true }
 name = "embedded"
 path = "tests/embedded.rs"
 required-features = ["embedded-node"]
+
+# Lock v2 with the embedded node stopped (the iPhone app's launch while it
+# says asleep): tests/lock_v2_embedded.rs.
+[[test]]
+name = "lock_v2_embedded"
+path = "tests/lock_v2_embedded.rs"
+required-features = ["embedded-node"]

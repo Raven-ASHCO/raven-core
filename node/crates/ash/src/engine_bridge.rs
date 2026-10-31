@@ -1763,7 +1763,7 @@ pub enum PassphraseChange {
 pub enum PassphraseRefused {
     /// Not in this build, on this system or for this profile (raven-core's
     /// words: `raven_passphrase::NOT_IN_THIS_VERSION`, `NOT_ON_WINDOWS`,
-    /// `NOT_ON_IOS`, `KEYRING_PROFILE`, `LAB_FILES`).
+    /// `KEYRING_PROFILE`, `LAB_FILES`).
     NotOffered(String),
     /// Not what this profile can do now: it has one already, or none.
     NotNow(String),

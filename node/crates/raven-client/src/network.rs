@@ -1971,7 +1971,7 @@ impl Inner {
         let dir = self.data_dir()?.to_path_buf();
         let g = gate("lock_v2");
         let node = if g.live {
-            bridge::lock_v2_state(&dir)
+            bridge::lock_v2_state(&dir).or_else(|| self.lock_held_here(&dir))
         } else {
             None
         };
@@ -2000,6 +2000,11 @@ impl Inner {
             return Err(crate::engine::not_in_the_app("lock.now", LOCK_CLI));
         }
         if bridge::lock_v2_state(&dir).is_none() {
+            // The app's own node, stopped or paused: the lock is held in
+            // this process and its next start is locked.
+            if let Some(held) = self.lock_while_stopped(&dir) {
+                return held;
+            }
             return Err(ApiError::new(
                 code::NOT_AVAILABLE_YET,
                 "Lock while running needs Raven's background program running, in a version that \
@@ -2031,6 +2036,14 @@ impl Inner {
             return Err(crate::engine::not_in_the_app("lock.unlock", "raven unlock"));
         }
         let pass = secret_arg(args, "passphrase")?;
+        if self.lock_held_here(&dir).is_some() {
+            return Err(ApiError::new(
+                code::NODE_NOT_RUNNING,
+                "Start Raven first: it starts locked, then unlock it.",
+                "lock.unlock: the app's node is stopped or paused; node.start or node.resume \
+                 starts it locked",
+            ));
+        }
         match bridge::unlock(&dir, pass.as_deref().map(|p| &p[..])) {
             bridge::Unlocked::Opened(lines) => {
                 // A Raven passphrase profile whose raven-node runs in a
@@ -2055,6 +2068,42 @@ impl Inner {
                 m,
             )),
         }
+    }
+
+    /// The app's own node, stopped or paused (embedded mode): Lock v2 as
+    /// this process holds it ([`crate::embedded::held_while_stopped`]).
+    /// `None` while a node runs, with the gate shut, and for a program.
+    fn lock_held_here(&self, dir: &Path) -> Option<bool> {
+        #[cfg(feature = "embedded-node")]
+        if crate::node::embedded_mode() {
+            return crate::embedded::held_while_stopped(dir);
+        }
+        let _ = dir;
+        None
+    }
+
+    /// `lock.now` with the app's own node stopped or paused (the launch
+    /// while the app says asleep): this engine and the process hold the
+    /// lock, and the next `node.start` or `node.resume` starts the node
+    /// locked. `None` when no such node is here.
+    fn lock_while_stopped(&self, dir: &Path) -> Option<OpResult> {
+        #[cfg(feature = "embedded-node")]
+        if self.lock_held_here(dir).is_some() {
+            return Some(match crate::embedded::lock_while_stopped(dir) {
+                Ok(true) => {
+                    self.note_locked(true);
+                    self.lock_state()
+                }
+                Ok(false) => Err(crate::engine::not_in_the_app("lock.now", LOCK_CLI)),
+                Err(e) => Err(ApiError::new(
+                    code::NODE_NOT_RUNNING,
+                    "Raven's background program didn't lock. Try again.",
+                    e,
+                )),
+            });
+        }
+        let _ = dir;
+        None
     }
 
     /// `lock.passphrase_state`: what the Raven passphrase offers this
@@ -2202,7 +2251,7 @@ fn why_word(why: &str) -> &'static str {
     } else if why == raven_passphrase::LAB_FILES {
         "lab_files"
     } else {
-        // NOT_ON_WINDOWS, NOT_ON_IOS.
+        // NOT_ON_WINDOWS.
         "not_on_this_system"
     }
 }
@@ -2210,8 +2259,11 @@ fn why_word(why: &str) -> &'static str {
 /// What the profile has and can do, in the app's words (`raven passphrase`
 /// says the same with its commands).
 fn passphrase_lines(view: &bridge::PassphraseView) -> Vec<String> {
-    let has =
-        "This profile has a Raven passphrase: Raven's keys on this computer open only with it.";
+    let has = if cfg!(target_os = "ios") {
+        "This profile has a Raven passphrase: Raven's keys on this phone open only with it."
+    } else {
+        "This profile has a Raven passphrase: Raven's keys on this computer open only with it."
+    };
     let mut lines: Vec<String> = match &view.offer {
         Offer::Set => vec![
             "This profile has no Raven passphrase.".into(),

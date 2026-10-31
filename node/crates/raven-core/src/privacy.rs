@@ -1722,15 +1722,16 @@ pub const LOCKED_V2_SCREEN: &str =
 
 /// Lock v2: what a lock does not protect on a profile without a Raven
 /// passphrase (UX copy; design C): its keys are in this computer's login
-/// store, open to anyone who can log in as the user. macOS can switch to a
-/// Raven passphrase (Settings).
+/// store, open to anyone who can log in as the user. macOS and iOS can
+/// switch to a Raven passphrase (Settings).
 pub fn keys_open_to_login_text() -> &'static str {
     if cfg!(target_os = "macos") {
         "On this computer, your Raven keys are in your login keychain. Anyone who can log in as \
          you can open them. Lock your screen too, or set a Raven passphrase (Settings)."
     } else if cfg!(target_os = "ios") {
         "On this phone, your Raven keys are in its keychain, open once the phone was unlocked \
-         after it started. Use a passcode on the phone."
+         after it started. Anyone who unlocks this phone can open them: turn on Lock with Face \
+         ID in Settings to protect them."
     } else if cfg!(windows) {
         "On this computer, your Raven keys are protected by your Windows account. Anyone who \
          can log in as you can open them. Lock your screen too."

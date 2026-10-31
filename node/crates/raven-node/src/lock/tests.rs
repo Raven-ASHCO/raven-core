@@ -290,6 +290,46 @@ fn a_profile_locked_in_this_process_stays_locked_at_the_next_start() {
     assert!(!is_locked());
 }
 
+/// The app's launch while asleep (Lock v2 on iOS): a lock taken while no
+/// node runs is held by the process, so the next start finds it and starts
+/// locked, a keychain profile too; the unlock lets the next start be
+/// unlocked again.
+#[test]
+fn a_lock_before_the_start_makes_the_start_locked() {
+    let _state = crate::lan_direct::listener_state_test_lock();
+    let _gate = GateOpen::new();
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path();
+    std::fs::write(dd.join("identity.backend"), "locked-file\n").unwrap();
+    assert!(!passphrase_profile(dd));
+    assert_eq!(held(dd), Some(false));
+    assert!(hold_before_start(dd));
+    assert!(is_locked() && raven_core::local_lock::engaged(dd));
+    assert_eq!(held(dd), Some(true));
+    assert!(start(dd), "it starts locked");
+    assert_eq!(status(), Some(true));
+    runtime().block_on(async {
+        let opened = unlock_with(dd, None, |_, _| panic!("no vault is asked"))
+            .await
+            .unwrap();
+        assert!(!opened.locked);
+    });
+    assert!(!start(dd), "unlocked: it starts unlocked");
+}
+
+/// With the gate shut a lock before the start holds nothing.
+#[test]
+fn with_the_gate_shut_a_lock_before_the_start_holds_nothing() {
+    let _state = crate::lan_direct::listener_state_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path();
+    std::fs::write(dd.join("identity.backend"), "locked-file\n").unwrap();
+    assert!(!hold_before_start(dd));
+    assert_eq!(held(dd), None);
+    assert!(!is_locked() && !raven_core::local_lock::engaged(dd));
+    assert!(!start(dd));
+}
+
 /// The service's LAN listener under `supervise_unlocked` with a sealed
 /// profile: a lock closes it (a dial is refused), ends the link it held,
 /// drops its identity (no `Arc` of it is left), the at-rest keys and the
