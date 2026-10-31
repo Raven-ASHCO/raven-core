@@ -16712,11 +16712,11 @@ pub fn run() {
                     eprintln!("{{\"error\":\"no_identity\"}}");
                     std::process::exit(1);
                 }
-                if card || peer_id {
-                    eprintln!("no identity — run `raven init` first");
-                    std::process::exit(1);
-                }
-                println!("no identity — run init");
+                // Plain, --words, --card or --peer-id alike: what was asked
+                // for does not exist yet, so say how to make it and fail
+                // (a script's `raven whoami | awk …` must not read success).
+                eprintln!("no identity — run `raven init` first");
+                std::process::exit(1);
             }
             Err(e) => {
                 // A hard failure (not just "no identity yet"): never exit 0.

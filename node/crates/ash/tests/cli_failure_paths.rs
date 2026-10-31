@@ -1380,3 +1380,39 @@ fn marker_blocks_every_other_entry_point() {
         .collect();
     assert_eq!(names, ["erase_in_progress"], "nothing was written");
 }
+
+/// `ash whoami` before `ash init`: every form fails with exit 1 and names
+/// the command that makes the identity, on stderr (`--card` and `--peer-id`
+/// always did; the plain form printed "no identity — run init" and exited
+/// 0, so `ash whoami | awk '/^invite/…'` read success).
+#[test]
+fn whoami_without_an_identity_fails_and_names_init() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["whoami"][..],
+        &["whoami", "--words"],
+        &["whoami", "--card"],
+        &["whoami", "--peer-id"],
+    ] {
+        let mut c = ash(dir.path());
+        c.args(args);
+        let o = run(c, "");
+        let err = text(&o.stderr);
+        assert_eq!(code(&o), 1, "{args:?}: {err}");
+        assert!(err.contains("run `raven init` first"), "{args:?}: {err}");
+        assert!(text(&o.stdout).is_empty(), "{args:?}: {}", text(&o.stdout));
+    }
+    // --json keeps its machine-readable error.
+    let mut c = ash(dir.path());
+    c.args(["whoami", "--json"]);
+    let o = run(c, "");
+    assert_eq!(code(&o), 1);
+    assert!(text(&o.stderr).contains("\"error\":\"no_identity\""));
+    // With an identity the plain form works as before.
+    plant_identity(dir.path());
+    let mut c = ash(dir.path());
+    c.arg("whoami");
+    let o = run(c, "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains("invite"), "{}", text(&o.stdout));
+}
