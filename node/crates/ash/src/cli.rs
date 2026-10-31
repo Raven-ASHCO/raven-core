@@ -1516,11 +1516,12 @@ Step by step: run `raven` and press A (Add a friend).
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
-    /// Remove a contact (and its pin) from this device's book — local only.
+    /// Remove a contact (and its pin) from this computer only.
     ///
-    /// The way to deliberately replace a pinned key (see KEY-CHANGE WARNING):
-    /// verify the new fingerprint out-of-band, remove the old row, then
-    /// `ash contact add … --verify-fp <new fingerprint>`.
+    /// To replace a verified contact's key on purpose (after a KEY-CHANGE
+    /// WARNING): remove them, add their new invite (`raven contact add
+    /// --card '<their new invite line>'`), then compare security words with
+    /// them again (`raven contact verify NAME`).
     Remove {
         #[arg(long)]
         tag: Option<String>,
@@ -3447,10 +3448,7 @@ fn cmd_whoami_card(
         );
     }
     if io::stderr().is_terminal() {
-        eprintln!(
-            "{C_DIM}Send this line to your friend; they run: raven contact add --card '<line>' \
-             (and compare the fingerprint with you before they pin it).{C_RESET}"
-        );
+        eprintln!("{C_DIM}{CARD_SEND_HINT}{C_RESET}");
     }
     Ok(())
 }
@@ -7431,6 +7429,27 @@ fn ask_petname_again(petname: String) -> String {
     read_answer_line()
 }
 
+/// `raven contact list` with nobody in it: how to add a friend and check
+/// their key, in the words the rest of Raven uses (a contact's fingerprint
+/// stays hidden until verified, so it is the security words that are
+/// compared).
+const EMPTY_CONTACT_LIST: [&str; 4] = [
+    "No contacts yet.",
+    "  Add a friend from their invite line (`raven whoami` on their computer):",
+    "    raven contact add --card '<their invite line>' --petname NAME",
+    "  Then compare security words with them by phone or in person: raven contact verify NAME",
+];
+
+/// Under `raven whoami --card` on a terminal: what the friend does with it.
+const CARD_SEND_HINT: &str = "Send this line to your friend; they run: raven contact add --card \
+     '<line>', then compare security words with you by phone or in person (raven contact verify \
+     NAME).";
+
+/// `raven contact set-addr` saved a route for a contact not verified yet.
+const UNVERIFIED_ROUTE_NOTE: &str = "note: an address is only a way to reach them; RAVEN still \
+     checks their key on every connection. Compare security words with them by phone or in \
+     person (raven contact verify NAME) before you rely on it.";
+
 fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
     let c = c();
     let contacts = load_contacts(data_dir)?;
@@ -7445,23 +7464,9 @@ fn cmd_contact_list(data_dir: &Path) -> Result<(), String> {
 
     if contacts.is_empty() {
         println!();
-        println!("{0}No contacts yet.{1}", c.dim, c.reset);
-        println!(
-            "  {0}rvn1… address  = durable identity (from QR / whoami){1}",
-            c.dim, c.reset
-        );
-        println!(
-            "  {0}@alias         = public Soft Unique tag{1}",
-            c.dim, c.reset
-        );
-        println!(
-            "  {0}petname        = your private label (e.g. \"Poline\"){1}",
-            c.dim, c.reset
-        );
-        println!(
-            "  {0}verify the fingerprint out-of-band before pinning{1}",
-            c.dim, c.reset
-        );
+        for line in EMPTY_CONTACT_LIST {
+            println!("{0}{line}{1}", c.dim, c.reset);
+        }
         return Ok(());
     }
 
@@ -10898,11 +10903,7 @@ fn cmd_contact_set_routes(
         }
     }
     if (!inet_now.is_empty() || !p2p_now.is_empty()) && !target.pinned {
-        println!(
-            "{C_DIM}note: an address is only a way to reach them; RAVEN still checks their key \
-             on every connection. Compare fingerprints and pin them (contact add --verify-fp) \
-             before you rely on it.{C_RESET}"
-        );
+        println!("{C_DIM}{UNVERIFIED_ROUTE_NOTE}{C_RESET}");
     }
     Ok(())
 }
@@ -31220,6 +31221,63 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "{next}"
         );
         assert!(!next.contains("echo"), "{next}");
+    }
+
+    /// A contact's fingerprint stays hidden until it is verified, and
+    /// verifying compares the 10 security words: the texts that say how to
+    /// check a friend's key say that, with a command that parses.
+    #[test]
+    fn key_checks_are_told_in_security_words() {
+        use clap::CommandFactory;
+        let mut texts: Vec<String> = EMPTY_CONTACT_LIST.iter().map(|l| l.to_string()).collect();
+        texts.push(CARD_SEND_HINT.into());
+        texts.push(UNVERIFIED_ROUTE_NOTE.into());
+        let mut cli = Cli::command();
+        let remove = cli
+            .find_subcommand_mut("contact")
+            .and_then(|c| c.find_subcommand_mut("remove"))
+            .expect("contact remove");
+        texts.push(remove.render_long_help().to_string());
+        for text in &texts {
+            for old in [
+                "fingerprint",
+                "out-of-band",
+                "Soft Unique",
+                "durable identity",
+            ] {
+                assert!(!text.contains(old), "{old:?} in {text}");
+            }
+        }
+        for text in [
+            EMPTY_CONTACT_LIST.join("\n"),
+            CARD_SEND_HINT.into(),
+            UNVERIFIED_ROUTE_NOTE.into(),
+            texts.last().unwrap().clone(),
+        ] {
+            assert!(
+                text.to_lowercase().contains("compare security words"),
+                "{text}"
+            );
+            assert!(text.contains("raven contact verify NAME"), "{text}");
+        }
+        // The empty list says how to add someone, as a command that parses.
+        assert!(EMPTY_CONTACT_LIST
+            .iter()
+            .any(|l| l.trim() == "raven contact add --card '<their invite line>' --petname NAME"));
+        for args in [
+            &[
+                "raven",
+                "contact",
+                "add",
+                "--card",
+                "raven:x",
+                "--petname",
+                "NAME",
+            ][..],
+            &["raven", "contact", "verify", "NAME"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
     }
 
     /// Every help page a person can reach, as `--help` prints it: no

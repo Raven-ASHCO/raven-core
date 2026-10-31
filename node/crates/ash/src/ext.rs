@@ -1916,8 +1916,9 @@ pub(super) fn is_noise_pin_mismatch(raw: &str) -> bool {
 /// tell that from another computer at the address).
 fn pin_reinstall_step(who: &str, sel: &str) -> String {
     format!(
-        "If {who} reinstalled RAVEN, get their new invite, compare the fingerprint with them by \
-         phone or in person, then `ash contact remove {sel}` and add them again."
+        "If {who} reinstalled RAVEN, get their new invite, run `ash contact remove {sel}` and \
+         add them again, then compare security words with them by phone or in person (`ash \
+         contact verify {sel}`)."
     )
 }
 
@@ -2351,9 +2352,9 @@ fn next_step(cause: Cause, ctx: &SendCtx, first_contact: bool, raw: &str) -> Str
             pin_reinstall_step(&who, &sel)
         ),
         Cause::WrongIdentity => format!(
-            "If {who} reinstalled RAVEN, get their new invite, compare the fingerprint with \
-             them by phone or in person, then `ash contact remove {sel}` and add them again. \
-             If only their address changed: {fix}."
+            "If {who} reinstalled RAVEN, get their new invite, run `ash contact remove {sel}` \
+             and add them again, then compare security words with them by phone or in person \
+             (`ash contact verify {sel}`). If only their address changed: {fix}."
         ),
         Cause::BadAddress => {
             format!("Save a valid one: ash contact set-dial {sel} --lan-dial 192.168.1.20:7420.")
@@ -10161,7 +10162,8 @@ mod send_outcome_tests {
                 vec![
                     "it is not Bob",
                     "its key is not the one you saved",
-                    "compare the fingerprint",
+                    "compare security words",
+                    "ash contact verify --petname Bob",
                     "ash contact remove --petname Bob",
                 ],
             ),
@@ -10300,8 +10302,9 @@ mod send_outcome_tests {
                     Bob's RAVEN, so RAVEN stopped before telling it who you are";
         let later = "It goes out when Bob connects to you, when you join another network, or \
                      when you save Bob's new address. If Bob reinstalled RAVEN, get their new \
-                     invite, compare the fingerprint with them by phone or in person, then `ash \
-                     contact remove --petname Bob` and add them again.";
+                     invite, run `ash contact remove --petname Bob` and add them again, then \
+                     compare security words with them by phone or in person (`ash contact \
+                     verify --petname Bob`).";
         let waits = "It waits until Bob connects to you or you change networks; if Bob \
                      reinstalled RAVEN, get their new invite and add them again.";
         let reinstall = "If Bob reinstalled RAVEN, get their new invite and add them again.";
@@ -10344,8 +10347,9 @@ mod send_outcome_tests {
             not_sent.contains(
                 "Send it again once Bob has connected to you, after you join another network, \
                  or after you save Bob's new address. If Bob reinstalled RAVEN, get their new \
-                 invite, compare the fingerprint with them by phone or in person, then `ash \
-                 contact remove --petname Bob` and add them again."
+                 invite, run `ash contact remove --petname Bob` and add them again, then \
+                 compare security words with them by phone or in person (`ash contact verify \
+                 --petname Bob`)."
             ),
             "{not_sent}"
         );

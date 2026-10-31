@@ -1432,7 +1432,8 @@ fn a_changed_address_is_flagged_as_a_different_computer() {
     let err = text(&o.stderr);
     assert_eq!(code(&o), 1, "{err}");
     assert!(err.contains("answered, but it is not Bob"), "{err}");
-    assert!(err.contains("compare the fingerprint"), "{err}");
+    assert!(err.contains("compare security words"), "{err}");
+    assert!(err.contains("ash contact verify --petname Bob"), "{err}");
     assert!(err.contains("ash contact remove --petname Bob"), "{err}");
     assert!(err.starts_with("NOT SENT: "), "{err}");
 }

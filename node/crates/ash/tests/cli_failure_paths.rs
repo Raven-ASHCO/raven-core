@@ -1416,3 +1416,30 @@ fn whoami_without_an_identity_fails_and_names_init() {
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
     assert!(text(&o.stdout).contains("invite"), "{}", text(&o.stdout));
 }
+
+/// `ash contact list` with nobody in it says how to add a friend and how to
+/// check their key (no "Soft Unique" or "verify the fingerprint
+/// out-of-band": a contact's fingerprint is hidden until verified).
+#[test]
+fn an_empty_contact_list_says_how_to_add_and_verify_a_friend() {
+    let dir = tempfile::tempdir().unwrap();
+    plant_identity(dir.path());
+    let mut c = ash(dir.path());
+    c.args(["contact", "list"]);
+    let o = run(c, "");
+    assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(
+        out.contains("0 saved") && out.contains("No contacts yet."),
+        "{out}"
+    );
+    assert!(
+        out.contains("raven contact add --card '<their invite line>' --petname NAME"),
+        "{out}"
+    );
+    assert!(out.contains("compare security words"), "{out}");
+    assert!(
+        !out.contains("Soft Unique") && !out.contains("fingerprint"),
+        "{out}"
+    );
+}
