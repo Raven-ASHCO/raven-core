@@ -385,11 +385,11 @@ struct Cli {
 enum Commands {
     /// Create local identity (prints address + pub hex + fingerprint only).
     Init,
-    /// Show public identity bits for data dir (never a seed). Your security
-    /// words only with --words.
+    /// Show your public identity: address, fingerprint and the invite line
+    /// to send a friend (never a seed). Your security words only with --words.
     Whoami {
-        /// Machine-readable public card only (`address` / `fingerprint` / `pub_hex`).
-        /// NON-RELEASE O6 M1 bind helper. No private key fields.
+        /// Machine-readable public card only (`address` / `fingerprint` /
+        /// `pub_hex`). No private key fields.
         #[arg(long, default_value_t = false, conflicts_with = "card")]
         json: bool,
         /// Show your 10 security words, to read aloud to a friend who checks
@@ -883,6 +883,7 @@ enum ChatsCommands {
     Pin {
         /// The contact: name, @tag or rvn1 address.
         name: Option<String>,
+        /// The contact's name, as `raven contact list` shows it.
         #[arg(long)]
         petname: Option<String>,
         /// A group instead: its name or the start of its id.
@@ -893,6 +894,7 @@ enum ChatsCommands {
     Unpin {
         /// The contact: name, @tag or rvn1 address.
         name: Option<String>,
+        /// The contact's name, as `raven contact list` shows it.
         #[arg(long)]
         petname: Option<String>,
         /// A group instead: its name or the start of its id.
@@ -1075,9 +1077,13 @@ enum OutboxCommands {
         mid: String,
     },
     /// Try to deliver it again now.
-    Retry { mid: String },
+    Retry {
+        /// Message id (8+ hex characters, as `raven outbox list` shows it).
+        mid: String,
+    },
     /// Stop trying to deliver it (it may already have arrived).
     Cancel {
+        /// Message id (8+ hex characters, as `raven outbox list` shows it).
         mid: String,
         /// Skip the typed confirmation (scripts).
         #[arg(long, default_value_t = false)]
@@ -1341,7 +1347,7 @@ A tag (@bob) is public and not unique: someone else may use the same one, so
 always check the security words. Never pass a seed or a private key: a card,
 an address and a public key are public.
 
-Step by step: run `raven` and pick Contacts.
+Step by step: run `raven` and press A (Add a friend).
 ")]
     Add {
         #[arg(
@@ -1364,42 +1370,42 @@ Step by step: run `raven` and pick Contacts.
         /// fingerprint.
         #[arg(long, value_name = "CARD|FILE")]
         card: Option<String>,
-        /// Your name for them, on this computer only.
-        #[arg(long, default_value = "", help = "Your name for them, e.g. Bob")]
+        /// Your name for them, e.g. Bob (on this computer only).
+        #[arg(long, default_value = "", hide_default_value = true)]
         petname: String,
-        /// Their public tag, e.g. sam (not unique: others may use it too).
-        #[arg(
-            long,
-            default_value = "",
-            help = "Their public @tag, if any (not unique)"
-        )]
+        /// Their public @tag, if any, e.g. sam (not unique: others may use it
+        /// too).
+        #[arg(long, default_value = "", hide_default_value = true)]
         tag: String,
         /// Legacy alias of --tag (deprecated).
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", hide_default_value = true)]
         alias: String,
         /// What they read out: their 10 security words or their old code
         /// (fingerprint). On a match they are saved as verified.
-        #[arg(
-            long,
-            visible_alias = "verify-words",
-            value_name = "WORDS|CODE",
-            help = "Their security words (or old code) to pin Tag+key locally"
-        )]
+        #[arg(long, visible_alias = "verify-words", value_name = "WORDS|CODE")]
         verify_fp: Option<String>,
         /// Their prekey file, if they gave you one: checked against their key
         /// and kept on this computer.
         #[arg(long)]
         prekey_file: Option<PathBuf>,
-        /// Their address on your network (host:port), if they gave you one.
+        /// Their address on your network (host:port), if they gave you one,
+        /// e.g. 192.168.1.20:7420.
         #[arg(
             long,
             default_value = "",
-            help = "Peer LAN listen host:port, e.g. 192.168.1.20:7420"
+            hide_default_value = true,
+            value_name = "HOST:PORT"
         )]
         lan_dial: String,
         /// Optional Internet address (Internet direct route), e.g. 203.0.113.7:7422,
         /// [2001:db8::7]:7422 or node.example.com:7422.
-        #[arg(long, default_value = "", value_name = "HOST:PORT", alias = "internet")]
+        #[arg(
+            long,
+            default_value = "",
+            hide_default_value = true,
+            value_name = "HOST:PORT",
+            alias = "internet"
+        )]
         internet_dial: String,
     },
     /// List contacts: petname first, @tag subtitle (never address-primary).
@@ -1448,7 +1454,7 @@ Step by step: run `raven` and pick Contacts.
         /// Target `@alias` or `rvn1…` address.
         target: String,
         /// Optional short message (sealed inside ciphertext).
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", hide_default_value = true)]
         message: String,
         /// When multiple alias claims: pick 1-based index (interactive if omitted).
         #[arg(long)]
@@ -1582,7 +1588,9 @@ Step by step: run `raven` and pick Contacts.
         petname: Option<String>,
         #[arg(long)]
         address: Option<String>,
-        #[arg(long, help = "Peer LAN listen host:port, e.g. 192.168.1.31:7420")]
+        /// Their new address on your network (host:port), e.g.
+        /// 192.168.1.31:7420.
+        #[arg(long, value_name = "HOST:PORT")]
         lan_dial: String,
     },
     /// Forget every saved way to reach a contact (its LAN, Internet and p2p
@@ -1702,9 +1710,7 @@ enum NodeCommands {
     ///   raven node p2p on --relay /ip4/198.51.100.7/tcp/7423/p2p/12D3KooW…
     ///
     ///   raven node p2p on --relay robin       (a friend who offers you a relay:
-    ///                                          their name or tag; no @ needed,
-    ///                                          which PowerShell would take for a
-    ///                                          splat)
+    ///                                          their name or tag; no @ needed)
     ///
     ///   raven node p2p off
     ///
@@ -1909,7 +1915,7 @@ enum OnOff {
 
 #[derive(Subcommand, Debug, Clone)]
 enum P2pState {
-    /// Run raven-node's libp2p host (P3) after its next restart.
+    /// Run raven-node's libp2p host after its next restart.
     On {
         /// A port (every interface, IPv4 + IPv6, TCP + QUIC) or IP:PORT.
         /// `relay` is retired: it saves 7423 instead (a node without a
@@ -2024,7 +2030,7 @@ enum RelayCommands {
         )]
         schedule: Option<String>,
         /// Your own note for this entry (never sent anywhere).
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", hide_default_value = true)]
         label: String,
     },
     /// Print the line a relay that is not your contact needs while your
@@ -2136,7 +2142,7 @@ enum CustodyState {
     },
     /// Counts only: objects held, bytes, released.
     Status,
-    /// Multi-hop custody (Phase 5): pass sealed messages on from one verified
+    /// Multi-hop custody: pass sealed messages on from one verified
     /// contact to another, and hold ones a friend passes on (off by default;
     /// works only while custody is on). `on` says what this computer sees.
     Handoff {
@@ -31214,6 +31220,68 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "{next}"
         );
         assert!(!next.contains("echo"), "{next}");
+    }
+
+    /// Every help page a person can reach, as `--help` prints it: no
+    /// `[default: ""]` (an empty default says nothing), no Windows shell
+    /// words outside a Windows build, no milestone names or developer
+    /// shorthand, and every argument says what it is for.
+    #[test]
+    fn no_help_page_shows_an_empty_default_windows_words_or_milestones() {
+        use clap::CommandFactory;
+        fn walk(cmd: &mut clap::Command, path: String, out: &mut Vec<(String, String)>) {
+            out.push((path.clone(), cmd.render_long_help().to_string()));
+            let names: Vec<String> = cmd
+                .get_subcommands()
+                .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+                .map(|c| c.get_name().to_string())
+                .collect();
+            for name in names {
+                let sub = cmd.find_subcommand_mut(&name).expect("listed");
+                walk(sub, format!("{path} {name}"), out);
+            }
+        }
+        let mut cli = Cli::command();
+        cli.build();
+        let mut pages = Vec::new();
+        walk(&mut cli, "ash".into(), &mut pages);
+        assert!(pages.len() > 150, "{} pages", pages.len());
+        for (path, help) in &pages {
+            assert!(!help.contains("[default: \"\"]"), "{path}: {help}");
+            if !cfg!(windows) {
+                assert!(!help.contains("PowerShell"), "{path}: {help}");
+            }
+            for dev in [
+                "NON-RELEASE",
+                "(P3)",
+                "(Phase 5)",
+                "Peer LAN listen",
+                "Tag+key",
+            ] {
+                assert!(!help.contains(dev), "{dev:?} in {path}: {help}");
+            }
+        }
+        // The arguments the person types most often say what they are.
+        let page = |path: &str| &pages.iter().find(|(p, _)| p == path).expect(path).1;
+        for (path, arg) in [
+            ("ash outbox retry", "Message id"),
+            ("ash outbox cancel", "Message id"),
+            ("ash chats pin", "as `raven contact list` shows it"),
+            ("ash chats unpin", "as `raven contact list` shows it"),
+            ("ash contact add", "Your name for them, e.g. Bob"),
+            ("ash contact add", "Their address on your network"),
+            ("ash contact add", "10 security words"),
+            ("ash contact set-dial", "Their new address on your network"),
+            ("ash whoami", "the invite line"),
+            // The full-screen app has no Contacts menu: A adds a friend.
+            ("ash contact add", "press A (Add a friend)"),
+        ] {
+            assert!(
+                page(path).contains(arg),
+                "{arg:?} in {path}: {}",
+                page(path)
+            );
+        }
     }
 
     /// A Windows console ends typed input at Ctrl-Z, then Enter; Ctrl-D there
