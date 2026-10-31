@@ -45,8 +45,8 @@ void  raven_free(char *response);             /* frees a string returned by rave
   else the CLI's own lookup. Each app ships raven-node in that place.
 - **Opening the profile:** before every operation that touches the profile the engine does what the
   CLI does before every command. A profile whose erase or key change (`raven privacy rotate-meta`)
-  did not finish is refused (`PROFILE_UNREADABLE`, the message names the command that finishes it)
-  and nothing is written. The profile's at-rest key is loaded (a sealed profile can't be read
+  did not finish is refused (`PROFILE_UNREADABLE`; its `detail` names the command that finishes
+  it, the message none) and nothing is written. The profile's at-rest key is loaded (a sealed profile can't be read
   without it; raven-node seals a release build's profile at its start) and what is still plain is
   sealed where the build seals. Without the key, reading the friends list, the history or the
   settings fails with `KEYCHAIN_DENIED`.
@@ -141,9 +141,10 @@ changes. Fields marked `?` may be missing.
 | `chats.pin` | `{address \| group, pinned: bool}` | `{pinned}` |
 
 Until the apps offer them, `privacy.lock`, `privacy.encrypt` and `privacy.erase` return the error
-`NOT_AVAILABLE_YET` (the message names the CLI command: `raven lock`, `raven privacy seal-now`,
-`raven erase`) and change nothing. `privacy.unlock` is the Locked screen's Unlock: it clears the lock
-as `raven unlock` first does, and never touches Raven's login item.
+`NOT_AVAILABLE_YET` (its `detail` names the CLI command: `raven lock`, `raven privacy seal-now`,
+`raven erase`; the message names none, as no app installs a `raven` command) and change nothing.
+`privacy.unlock` is the Locked screen's Unlock: it clears the lock as `raven unlock` first does, and
+never touches Raven's login item.
 
 ### Checking words and the old code
 
@@ -456,15 +457,16 @@ the app is what `raven status`, `raven doctor` and the terminal app show, and th
   same while the notice is open, whatever else is noted or resolved). `lock.*` is Lock v2 where the running raven-node
   serves it: `lock.now` keeps raven-node running without its keys, `lock.unlock` opens it (with the
   Raven passphrase when the profile has one; the passphrase goes only to raven-node). Where the node
-  does not serve it (no node, an older one, the gate shut) both answer `NOT_AVAILABLE_YET` naming
-  `raven lock` / `raven unlock`. The one exception is the app's own node (embedded, docs/IOS.md)
-  while it is stopped or paused, with the gate live: `lock.now` then holds the lock in the process
+  does not serve it (no node, an older one, the gate shut) both answer `NOT_AVAILABLE_YET`, their
+  `detail` naming `raven lock` / `raven unlock`. The one exception is the app's own node
+  (embedded, docs/IOS.md) while it is stopped or paused, with the gate live: `lock.now` then holds the lock in the process
   (the engine and the node load no key), and the next `node.start` or `node.resume` starts the node
   locked, a keychain profile too: the iPhone app's launch while it says asleep calls `lock.now`
   first. `lock.unlock` with that node still stopped or paused ends the pause and starts it
   (locked) first, then opens it, so the wake after Face ID needs no `node.start` of its own.
   `updates.status` is `raven update status`; installing stays in the
-  CLI (`raven update install`).
+  CLI (`raven update install`), and `install_text` says that the app doesn't install, without the
+  command.
 - **While Lock v2 holds the profile** the engine holds no key either. It learns of a lock from
   `lock.now`, `lock.state`, `profile.state` and the node's own status (the watcher's beat, a
   `node.*` op), so a lock made elsewhere (`raven lock`, the terminal app, a wake from sleep) counts
@@ -648,10 +650,12 @@ NearbyStatus { state: "held" | "node_held" | "not_running" | "live", enabled, ba
              iOS only after node.pause {nearby: "keep"}. advertising_for: only the friends this
              app asked nearby.contact to advertise for, by your names for them, while their time
              runs (raven-node forgets them when it restarts); a friend's advert chosen by the
-             outbox or background mail is not listed. texts: the consent shown before
-             network.set {nearby: true} (on iOS the iPhone's words) and before
-             nearby_background_mail; on iOS the background row and the words after the app was
-             swiped away)
+             outbox or background mail is not listed. rows: `raven nearby status`'s rows; on
+             iOS in the iPhone's words (this iPhone, iOS's Settings, no command). texts: the
+             consent shown before network.set {nearby: true} and before nearby_background_mail
+             (on iOS both in the iPhone's words; neither names a `raven` command, and
+             NetworkStatus.texts.nearby_background_mail is the same text); on iOS the
+             background row and the words after the app was swiped away)
 Carrier   { id, name, state: "on" | "off" | "preview" | "lab" | "not_on_this_os", reason,
             lab: bool, gate: "<NAME>_PRODUCTION_ENABLED", lab_switches: ["RAVEN_LAB_..."],
             can_set: bool, setting?: bool, running?: bool, detail? }
@@ -770,8 +774,8 @@ A `receipt` comes only after Raven verified the friend's signed receipt, and alw
 `NOT_ON_THIS_SYSTEM` (`lock.set_passphrase` / `lock.remove_passphrase` where a Raven passphrase does
 not apply, and `nearby.permission` outside iOS), and for the nearby ops `NEARBY_NOT_RUNNING`,
 `NEARBY_BAD_REQUEST` and `NEARBY_POLICY` (see "Bluetooth nearby"). Each comes with a
-plain-English `message` that names one next step; the technical text
-goes in `detail`.
+plain-English `message` that names one next step, never a terminal command (no app installs
+`raven`); the technical text, with the CLI's command where one helps, goes in `detail`.
 
 Groups add `GROUP_NOT_FOUND`, `GROUP_NOT_ADMIN` (only the admin adds and removes),
 `GROUP_NOT_MEMBER` (you left or were removed), `GROUP_TOO_LARGE` (more than 16 members),
@@ -782,7 +786,7 @@ is your friend); a member who is not a friend is `NOT_A_CONTACT`, a message over
 
 - "Not sent, meet first" and "time ran out" are message states (`not_sent_meet_first`,
   `time_ran_out`), not errors: no operation returns them as error codes.
-- `CONTACT_BLOCKED`: v1 has no unblock operation; the message names the CLI's `raven contact unblock`.
+- `CONTACT_BLOCKED`: the message says to unblock the friend first (`contacts.unblock`).
 - `NAME_CLASH` also covers a name that only looks like a verified friend's name.
 
 ## Mocks

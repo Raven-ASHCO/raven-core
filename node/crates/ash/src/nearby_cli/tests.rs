@@ -290,6 +290,204 @@ fn a_radio_that_did_not_start_names_the_real_fix() {
     }
 }
 
+/// A text the iPhone app shows: raven-node runs inside the app there, with
+/// no terminal, no `raven` command, no raven-node to restart and no
+/// RavenNearby helper, so a text names none of them, nor a computer.
+fn assert_iphone_words(text: &str) {
+    for word in [
+        "computer",
+        "raven-node",
+        "raven ",
+        "`",
+        "sudo",
+        "RAVEN_",
+        "RavenNearby",
+        "doctor",
+        "laptop",
+        "/etc/",
+    ] {
+        assert!(!text.contains(word), "{word}: {text}");
+    }
+}
+
+/// [`status_rows_on`] as `label: value` lines.
+fn rows_on(view: &NearbyView, device: Device) -> Vec<String> {
+    status_rows_on(view, device)
+        .into_iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect()
+}
+
+/// The owner's iPhone said "off: turn Bluetooth on in this computer's
+/// settings": on an iPhone every radio text names this iPhone and iOS's
+/// own Settings (the iPhone app shows these rows in its Settings).
+#[test]
+fn iphone_radio_texts_name_this_iphone_and_its_settings() {
+    let radio = |state: &str, roles: &[&str]| {
+        rows_on(
+            &NearbyView::Live(info(state, roles, "random")),
+            Device::Iphone,
+        )[1]
+        .clone()
+    };
+    assert_eq!(radio("powered_on", &["central", "peripheral"]), "radio: on");
+    assert_eq!(
+        radio("powered_on", &["central"]),
+        "radio: on, central only: this iPhone can only connect to contacts that advertise"
+    );
+    assert_eq!(
+        radio("off", &[]),
+        "radio: off: turn Bluetooth on in Settings > Bluetooth"
+    );
+    assert_eq!(
+        radio("unauthorized", &[]),
+        "radio: not allowed: allow Bluetooth for Raven in Settings > Privacy & Security > \
+         Bluetooth > Raven"
+    );
+    assert_eq!(
+        radio("unsupported", &[]),
+        "radio: no Bluetooth LE on this iPhone"
+    );
+    assert_eq!(
+        radio("no_backend", &[]),
+        "radio: no Bluetooth support in this build of Raven"
+    );
+    assert_eq!(
+        radio("helper_unavailable", &[]),
+        "radio: Raven's Bluetooth part did not start: Raven tries again by itself (if this \
+         stays, update Raven)"
+    );
+    assert_eq!(
+        radio("service_down", &[]),
+        "radio: Bluetooth is not ready on this iPhone: Raven tries again by itself"
+    );
+    assert_eq!(
+        radio("local_state", &[]),
+        "radio: Raven's own state is not ready (identity, sessions or storage space): Raven \
+         tries again by itself"
+    );
+    for state in raven_core::ipc::NEARBY_RADIO_STATES {
+        for roles in [&["central", "peripheral"][..], &["central"], &[]] {
+            assert_iphone_words(&radio(state, roles));
+        }
+    }
+    // A computer keeps its own words.
+    let mut off = info("off", &[], "unknown");
+    assert_eq!(
+        rows_on(&NearbyView::Live(off.clone()), Device::Computer)[1],
+        "radio: off: turn Bluetooth on in this computer's settings"
+    );
+    off.radio = "unauthorized".into();
+    assert_eq!(
+        rows_on(&NearbyView::Live(off), Device::Computer)[1],
+        "radio: not allowed: allow Bluetooth for Raven in this computer's privacy settings (on \
+         macOS: RavenNearby), then restart raven-node"
+    );
+}
+
+/// The other rows the iPhone app shows: off, on while its raven-node does
+/// not run (or does not run nearby), background mail on, and a fixed
+/// address, with no command and no computer; the held row and the counts
+/// are the computer's.
+#[test]
+fn iphone_rows_name_no_command_and_no_computer() {
+    let mut off = info("off", &[], "unknown");
+    off.enabled = false;
+    assert_eq!(
+        rows_on(&NearbyView::Live(off), Device::Iphone),
+        ["state: off (verified contacts only)"]
+    );
+    assert_eq!(
+        rows_on(&NearbyView::NotRunning { saved: None }, Device::Iphone),
+        ["state: off (verified contacts only)"]
+    );
+    assert_eq!(
+        rows_on(
+            &NearbyView::NotRunning { saved: Some(true) },
+            Device::Iphone
+        ),
+        [
+            "state: on; Raven's background program is not running: nearby needs it (it starts \
+             when you send)"
+        ]
+    );
+    assert_eq!(
+        rows_on(&NearbyView::NodeHeld { saved: Some(true) }, Device::Iphone),
+        [
+            "state: Raven's background program does not run nearby (held there, or too old: \
+             update Raven)"
+        ]
+    );
+    let mut busy = info("powered_on", &["central", "peripheral"], "random");
+    busy.in_range = 2;
+    busy.pipes = 1;
+    busy.advertising = 1;
+    busy.rotating = 1;
+    busy.background_mail = true;
+    let busy_rows = rows_on(&NearbyView::Live(busy), Device::Iphone);
+    assert_eq!(
+        busy_rows,
+        [
+            "state: on (verified contacts only)",
+            "radio: on",
+            "address: random, changing (nothing fixed is advertised)",
+            "in range: 2 contacts in range now, 1 connected; advertising for 1 (only while you \
+             have something to send or mail waits)",
+            "background: mail on: also advertises for contacts this iPhone keeps or has mail \
+             for"
+        ]
+    );
+    let public = rows_on(
+        &NearbyView::Live(info("powered_on", &["central", "peripheral"], "public")),
+        Device::Iphone,
+    );
+    assert_eq!(
+        public[2],
+        "address: nearby inactive: this iPhone would use a fixed Bluetooth address, so it \
+         neither advertises nor connects"
+    );
+    for row in busy_rows.iter().chain(&public) {
+        assert_iphone_words(row);
+    }
+    assert_eq!(
+        rows_on(&NearbyView::Held { saved: Some(true) }, Device::Iphone),
+        rows(&NearbyView::Held { saved: Some(true) })
+    );
+    // This build's rows are a computer's (the tests run on one).
+    let live = NearbyView::Live(info("off", &[], "unknown"));
+    assert_eq!(status_rows(&live), status_rows_on(&live, Device::Computer));
+    assert_eq!(Device::HERE, Device::Computer);
+}
+
+/// The apps' consents (the engine's texts): the CLI's disclosure, without
+/// a `raven` command (neither app installs one) and without "shown once"
+/// (an app asks before each turn-on). The CLI keeps its commands.
+#[test]
+fn the_apps_consents_name_no_command() {
+    let cli = consent_text("Studio");
+    let app = app_consent_text("Studio");
+    assert_eq!(
+        app,
+        cli.replace(" (or after `raven nearby on`)", "").replace(
+            "This is shown once. Turn nearby off any time: raven nearby disable",
+            "Turn nearby off any time in Network."
+        )
+    );
+    assert_ne!(app, cli);
+    let tail_cli = "It works only while nearby itself is on (raven nearby enable). Turn it off \
+                    any\ntime: raven nearby background-mail off";
+    let tail_app = "It works only while nearby itself is on. Turn it off any time in Network.";
+    assert_eq!(
+        BACKGROUND_MAIL_CONSENT_APP.strip_suffix(tail_app),
+        BACKGROUND_MAIL_CONSENT.strip_suffix(tail_cli)
+    );
+    assert!(BACKGROUND_MAIL_CONSENT_APP.strip_suffix(tail_app).is_some());
+    for text in [app.as_str(), BACKGROUND_MAIL_CONSENT_APP] {
+        assert!(!text.contains("raven "), "{text}");
+        assert!(!text.contains('`'), "{text}");
+    }
+}
+
 /// `raven doctor`: one keyed line, and the fix when the radio needs the
 /// user (held: the flag named).
 #[test]

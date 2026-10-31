@@ -80,11 +80,29 @@ const NOT_RUNNING: &str = "raven-node is not running: nearby needs it (it starts
 /// computer's Bluetooth name `name` and model), what someone who recorded a
 /// contact's Bluetooth ID can learn (review nearby-4), and who may use it.
 pub(super) fn consent_text(name: &str) -> String {
+    consent_with(
+        name,
+        " (or after `raven nearby on`)",
+        "This is shown once. Turn nearby off any time: raven nearby disable",
+    )
+}
+
+/// [`consent_text`] as the desktop app shows it before `network.set
+/// {nearby: true}` (the engine's `texts.nearby`): no `raven` command (the
+/// app installs none) and not "shown once" (the app asks before each
+/// turn-on).
+pub(super) fn app_consent_text(name: &str) -> String {
+    consent_with(name, "", "Turn nearby off any time in Network.")
+}
+
+/// The consent with what follows its first item's "to send to a contact"
+/// and its last line.
+fn consent_with(name: &str, after_on: &str, last: &str) -> String {
     format!(
         "Nearby (Bluetooth) lets your verified contacts in radio range get your messages with \
          no network at all:\n\
          \x20 - nearby devices can see a random Bluetooth ID, which changes every 15 minutes, \
-         only while you have something to send to a contact (or after `raven nearby on`);\n\
+         only while you have something to send to a contact{after_on};\n\
          \x20 - this computer connects, from a random Bluetooth address, to a contact whose ID \
          it sees; someone who recorded that contact's ID in the last 30 minutes can play it \
          back to learn that this computer is in range (at most twice per recorded ID);\n\
@@ -92,20 +110,17 @@ pub(super) fn consent_text(name: &str) -> String {
          its model;\n\
          \x20 - only your verified contacts can use it, and messages stay end-to-end \
          encrypted.\n\
-         This is shown once. Turn nearby off any time: raven nearby disable",
+         {last}",
         sanitize_terminal_line(name)
     )
 }
 
-/// What `raven nearby background-mail on` asks (owner decision OD-C8; offline
-/// mesh carry research, Phase 0): what a radio neighbour then sees without
-/// any send of the user's (an advert while mail waits, so that this
-/// computer keeps or waits with mail for someone, and for how long), who
-/// can use it, the replay a recorded ID allows (as `raven nearby enable`
-/// says, review nearby-4), the battery, and that it needs nearby itself.
-/// Off by default, and asked like the custody consents: on a terminal only
-/// `y` / `yes` turns it on; off a terminal it needs `--yes`.
-pub(super) const BACKGROUND_MAIL_CONSENT: &str = "\
+/// What background mail reveals: [`BACKGROUND_MAIL_CONSENT`] and
+/// [`BACKGROUND_MAIL_CONSENT_APP`] without their last line (one text, so the
+/// two say the same).
+macro_rules! background_mail_disclosure {
+    () => {
+        "\
 Advertise over Bluetooth while mail waits (background mail)?
 While this computer keeps sealed mail for a verified contact (as their mail
 friend), or has a message or a receipt waiting for them, nearby also advertises
@@ -120,9 +135,32 @@ for that contact on its own, not only while you send:
 - Someone who recorded that contact's ID in the last 30 minutes can play it back
   to learn that this computer is in range (at most twice per recorded ID).
 - Bluetooth keeps scanning while background mail is on (more battery on a
-  laptop).
+  laptop)."
+    };
+}
+
+/// What `raven nearby background-mail on` asks (owner decision OD-C8; offline
+/// mesh carry research, Phase 0): what a radio neighbour then sees without
+/// any send of the user's (an advert while mail waits, so that this
+/// computer keeps or waits with mail for someone, and for how long), who
+/// can use it, the replay a recorded ID allows (as `raven nearby enable`
+/// says, review nearby-4), the battery, and that it needs nearby itself.
+/// Off by default, and asked like the custody consents: on a terminal only
+/// `y` / `yes` turns it on; off a terminal it needs `--yes`.
+pub(super) const BACKGROUND_MAIL_CONSENT: &str = concat!(
+    background_mail_disclosure!(),
+    "
 It works only while nearby itself is on (raven nearby enable). Turn it off any
-time: raven nearby background-mail off";
+time: raven nearby background-mail off"
+);
+
+/// [`BACKGROUND_MAIL_CONSENT`] as the desktop app shows it (the engine's
+/// `texts.nearby_background_mail`): no `raven` command (the app installs
+/// none).
+pub(super) const BACKGROUND_MAIL_CONSENT_APP: &str = concat!(
+    background_mail_disclosure!(),
+    "\nIt works only while nearby itself is on. Turn it off any time in Network."
+);
 
 /// Off a terminal without `--yes`: nothing is asked and nothing changes.
 pub(super) const BACKGROUND_NEEDS_YES: &str = "background mail needs your consent and stdin is \
@@ -228,8 +266,31 @@ pub(super) fn view_with(
     }
 }
 
+/// What the rows are said on: an iPhone (raven-node runs inside the iPhone
+/// app, which has no terminal, no `raven` command, no raven-node to
+/// restart and no RavenNearby helper: its fixes are in iOS's Settings) or a
+/// computer (macOS, Windows, Linux: the CLI, and the desktop app, which
+/// shows these rows under Technical details).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Device {
+    Iphone,
+    Computer,
+}
+
+impl Device {
+    /// This build's.
+    pub(super) const HERE: Device = if cfg!(target_os = "ios") {
+        Device::Iphone
+    } else {
+        Device::Computer
+    };
+}
+
 /// The radio state in words, with what to do about it.
-fn radio_text(info: &NearbyStatusInfo) -> String {
+fn radio_text(info: &NearbyStatusInfo, device: Device) -> String {
+    if device == Device::Iphone {
+        return iphone_radio_text(info);
+    }
     match info.radio.as_str() {
         "powered_on" if info.roles.iter().any(|r| r == "peripheral") => "on".into(),
         "powered_on" => {
@@ -259,11 +320,39 @@ fn radio_text(info: &NearbyStatusInfo) -> String {
     }
 }
 
+/// [`radio_text`] on an iPhone. `helper_unavailable` there is the app's
+/// own Bluetooth part (no usage description in its build, or an internal
+/// error after which it tries again), never a helper.
+fn iphone_radio_text(info: &NearbyStatusInfo) -> String {
+    match info.radio.as_str() {
+        "powered_on" if info.roles.iter().any(|r| r == "peripheral") => "on".into(),
+        "powered_on" => {
+            "on, central only: this iPhone can only connect to contacts that advertise".into()
+        }
+        "off" => "off: turn Bluetooth on in Settings > Bluetooth".into(),
+        "unauthorized" => "not allowed: allow Bluetooth for Raven in Settings > Privacy & \
+                           Security > Bluetooth > Raven"
+            .into(),
+        "unsupported" => "no Bluetooth LE on this iPhone".into(),
+        "no_backend" => "no Bluetooth support in this build of Raven".into(),
+        "helper_unavailable" => "Raven's Bluetooth part did not start: Raven tries again by \
+                                 itself (if this stays, update Raven)"
+            .into(),
+        "service_down" => {
+            "Bluetooth is not ready on this iPhone: Raven tries again by itself".into()
+        }
+        "local_state" => "Raven's own state is not ready (identity, sessions or storage space): \
+                          Raven tries again by itself"
+            .into(),
+        other => sanitize_terminal_line(other),
+    }
+}
+
 /// The address the radio would use on the air, while it is on. A fixed
 /// public address keeps nearby inactive: no advert and no connect (owner
 /// decision O5-12, review nearby-1: a connect shows the address as an advert
 /// does); Windows does not say which address it uses.
-fn address_text(info: &NearbyStatusInfo) -> Option<&'static str> {
+fn address_text(info: &NearbyStatusInfo, device: Device) -> Option<&'static str> {
     if info.radio != "powered_on" {
         return None;
     }
@@ -271,6 +360,10 @@ fn address_text(info: &NearbyStatusInfo) -> Option<&'static str> {
         "random" if info.roles.iter().any(|r| r == "peripheral") => {
             Some("random, changing (nothing fixed is advertised)")
         }
+        "public" if device == Device::Iphone => Some(
+            "nearby inactive: this iPhone would use a fixed Bluetooth address, so it neither \
+             advertises nor connects",
+        ),
         "public" if cfg!(windows) => Some(
             "nearby inactive: Windows may use this PC's fixed Bluetooth address, so it neither \
              advertises nor connects until that is ruled out (row N7w)",
@@ -286,6 +379,16 @@ fn address_text(info: &NearbyStatusInfo) -> Option<&'static str> {
 
 /// The off row: how to turn it on.
 const OFF_ROW: &str = "off (turn on: raven nearby enable; verified contacts only)";
+/// [`OFF_ROW`] on an iPhone: the app's switch turns it on.
+const OFF_ROW_IPHONE: &str = "off (verified contacts only)";
+/// [`NOT_RUNNING`] on an iPhone: its raven-node is the app's own.
+const NOT_RUNNING_IPHONE: &str = "Raven's background program is not running: nearby needs it (it \
+    starts when you send)";
+/// The row of a running raven-node that does not run nearby.
+const NODE_HELD_ROW: &str = "raven-node does not run nearby (held there, or too old: update it)";
+/// [`NODE_HELD_ROW`] on an iPhone.
+const NODE_HELD_ROW_IPHONE: &str = "Raven's background program does not run nearby (held there, \
+    or too old: update Raven)";
 
 /// The first row of the BLUETOOTH NEARBY section: whether it is on.
 const STATE_LABEL: &str = "state";
@@ -294,11 +397,21 @@ const STATE_LABEL: &str = "state";
 /// is on (OD-C8).
 const BACKGROUND_ON_ROW: &str = "mail on: also advertises for contacts this computer keeps or \
     has mail for (raven nearby background-mail off)";
+/// [`BACKGROUND_ON_ROW`] on an iPhone.
+const BACKGROUND_ON_ROW_IPHONE: &str =
+    "mail on: also advertises for contacts this iPhone keeps or has mail for";
 
 /// The rows of the BLUETOOTH NEARBY section of `raven status` and `raven
-/// nearby status` (label, value). Held with nothing saved: none (a release build's
-/// status is as before).
+/// nearby status` (label, value), as this build says them. Held with
+/// nothing saved: none (a release build's status is as before).
 pub(super) fn status_rows(view: &NearbyView) -> Vec<(&'static str, String)> {
+    status_rows_on(view, Device::HERE)
+}
+
+/// [`status_rows`] in `device`'s words.
+pub(super) fn status_rows_on(view: &NearbyView, device: Device) -> Vec<(&'static str, String)> {
+    let phone = device == Device::Iphone;
+    let off_row = if phone { OFF_ROW_IPHONE } else { OFF_ROW };
     match view {
         NearbyView::Held { saved: None } => Vec::new(),
         NearbyView::Held { saved: Some(_) } => vec![(
@@ -307,22 +420,28 @@ pub(super) fn status_rows(view: &NearbyView) -> Vec<(&'static str, String)> {
         )],
         NearbyView::NodeHeld { .. } => vec![(
             STATE_LABEL,
-            "raven-node does not run nearby (held there, or too old: update it)".into(),
+            if phone {
+                NODE_HELD_ROW_IPHONE
+            } else {
+                NODE_HELD_ROW
+            }
+            .into(),
         )],
         NearbyView::NotRunning { saved } => vec![(
             STATE_LABEL,
             match saved {
+                Some(true) if phone => format!("on; {NOT_RUNNING_IPHONE}"),
                 Some(true) => format!("on; {NOT_RUNNING}"),
-                _ => OFF_ROW.into(),
+                _ => off_row.into(),
             },
         )],
-        NearbyView::Live(info) if !info.enabled => vec![(STATE_LABEL, OFF_ROW.into())],
+        NearbyView::Live(info) if !info.enabled => vec![(STATE_LABEL, off_row.into())],
         NearbyView::Live(info) => {
             let mut rows = vec![
                 (STATE_LABEL, "on (verified contacts only)".to_string()),
-                ("radio", radio_text(info)),
+                ("radio", radio_text(info, device)),
             ];
-            if let Some(addr) = address_text(info) {
+            if let Some(addr) = address_text(info, device) {
                 rows.push(("address", addr.into()));
             }
             if info.radio == "powered_on" {
@@ -346,7 +465,15 @@ pub(super) fn status_rows(view: &NearbyView) -> Vec<(&'static str, String)> {
                 rows.push(("in range", range));
             }
             if info.background_mail {
-                rows.push(("background", BACKGROUND_ON_ROW.into()));
+                rows.push((
+                    "background",
+                    if phone {
+                        BACKGROUND_ON_ROW_IPHONE
+                    } else {
+                        BACKGROUND_ON_ROW
+                    }
+                    .into(),
+                ));
             }
             rows
         }
@@ -389,11 +516,11 @@ pub(super) fn doctor_lines(view: &NearbyView) -> Vec<String> {
                 if info.background_mail { "yes" } else { "no" }
             )];
             if info.enabled {
-                let radio = radio_text(info);
+                let radio = radio_text(info, Device::HERE);
                 if info.radio == "powered_on" && info.address_privacy == "public" {
                     lines.push(format!(
                         "bluetooth_nearby_fix: {}",
-                        address_text(info).unwrap_or_default()
+                        address_text(info, Device::HERE).unwrap_or_default()
                     ));
                 } else if info.radio != "powered_on"
                     || !info.roles.iter().any(|r| r == "peripheral")

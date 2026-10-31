@@ -208,7 +208,13 @@ fn an_unfinished_erase_or_key_change_closes_the_profile() {
     std::fs::remove_file(&settings_file).unwrap();
     let state = ok(&a.client, "profile.state", json!({}));
     assert_eq!(state["state"], "unreadable", "{state}");
-    assert_eq!(state["reason"], raven_core::erase::UNFINISHED_TEXT);
+    // The apps install no `raven` command: the one that finishes it is in
+    // Details.
+    assert_eq!(
+        state["reason"],
+        "An erase of this Raven profile didn't finish, so Raven can't open it. Open Details."
+    );
+    assert_eq!(state["detail"], raven_core::erase::UNFINISHED_TEXT);
     for (op, args) in [
         ("identity.me", json!({})),
         ("contacts.list", json!({})),
@@ -238,6 +244,10 @@ fn an_unfinished_erase_or_key_change_closes_the_profile() {
     assert_eq!(state["state"], "unreadable", "{state}");
     assert_eq!(
         state["reason"],
+        "A key change of this Raven profile didn't finish, so Raven can't open it. Open Details."
+    );
+    assert_eq!(
+        state["detail"],
         raven_core::privacy::META_ROTATION_UNFINISHED_TEXT
     );
     let (friend, _) = invite(0x44);

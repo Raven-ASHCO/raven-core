@@ -875,14 +875,12 @@ pub(crate) fn locked_error(op: &str) -> ApiError {
     )
 }
 
-/// A privacy-pack action the app does not offer yet: the CLI command that
-/// does it.
+/// A privacy-pack action the app does not offer yet. The apps install no
+/// `raven` command, so only `detail` names the CLI command that does it.
 pub(crate) fn not_in_the_app(op: &str, command: &str) -> ApiError {
     ApiError::new(
         code::NOT_AVAILABLE_YET,
-        format!(
-            "This isn't in the Raven app yet. Run `{command}` in a terminal. Nothing was changed."
-        ),
+        "This isn't in the Raven app yet. Nothing was changed.",
         format!("{op}: not in the desktop app yet ({command})"),
     )
 }

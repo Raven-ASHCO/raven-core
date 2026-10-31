@@ -1354,13 +1354,15 @@ pub fn nearby_background_set(data_dir: &Path, on: bool) -> Result<Vec<String>, S
     super::nearby_cli::background_mail_with(data_dir, arg, false, |_| None).map_err(|r| r.text)
 }
 
-/// What `raven nearby background-mail on` asks (owner decision OD-C8).
-pub const NEARBY_BACKGROUND_MAIL_CONSENT: &str = super::nearby_cli::BACKGROUND_MAIL_CONSENT;
+/// What `raven nearby background-mail on` asks (owner decision OD-C8), in
+/// the desktop app's words (no `raven` command).
+pub const NEARBY_BACKGROUND_MAIL_CONSENT: &str = super::nearby_cli::BACKGROUND_MAIL_CONSENT_APP;
 
 /// What `raven nearby enable` shows once (owner decision O5-12), naming
-/// this computer's Bluetooth name as a device that connects reads it.
+/// this computer's Bluetooth name as a device that connects reads it, in
+/// the desktop app's words (no `raven` command).
 pub fn nearby_consent() -> String {
-    super::nearby_cli::consent_text(&super::nearby_cli::bluetooth_name())
+    super::nearby_cli::app_consent_text(&super::nearby_cli::bluetooth_name())
 }
 
 /// Bluetooth nearby as `raven nearby status` reads it.
@@ -1373,7 +1375,8 @@ pub struct NearbyView {
     pub saved: Option<bool>,
     /// What the running raven-node reports, while `live`.
     pub info: Option<raven_core::ipc::NearbyStatusInfo>,
-    /// The CLI's NEARBY rows (label, value).
+    /// The CLI's NEARBY rows (label, value), in this device's words (on an
+    /// iPhone: this iPhone, iOS's Settings and no command).
     pub rows: Vec<(&'static str, String)>,
 }
 

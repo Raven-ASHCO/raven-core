@@ -49,11 +49,25 @@ pub(crate) enum KeyLoad {
     Now,
 }
 
-/// A refusal of cli.rs's `run` as an API error: raven-core's sentence names
-/// the command that finishes what was left unfinished.
+/// A refusal of cli.rs's `run` as an API error. raven-core's sentence names
+/// the command that finishes what was left unfinished, which the apps
+/// don't install: it is the detail.
 pub(crate) fn closed_error(closed: &Closed) -> ApiError {
-    ApiError::new(code::PROFILE_UNREADABLE, closed.text(), closed.text())
+    let message = match closed {
+        Closed::EraseUnfinished(_) => {
+            "An erase of this Raven profile didn't finish, so Raven can't open it. Open Details."
+        }
+        Closed::MetaRotationUnfinished(_) => {
+            "A key change of this Raven profile didn't finish, so Raven can't open it. Open \
+             Details."
+        }
+    };
+    ApiError::new(code::PROFILE_UNREADABLE, message, closed.text())
 }
+
+/// `privacy.unlock` that could not clear the lock.
+pub(crate) const UNLOCK_FAILED: &str =
+    "Raven couldn't unlock. Try again; if it keeps happening, open Details.";
 
 /// The at-rest key of a sealed profile is not loaded in this process.
 pub(crate) fn key_missing_error(data_dir: &Path) -> ApiError {
@@ -223,13 +237,8 @@ impl Inner {
         if let Some(closed) = bridge::closed(dir) {
             return Err(closed_error(&closed));
         }
-        raven_core::privacy::set_unlocked(dir).map_err(|why| {
-            ApiError::new(
-                code::INTERNAL,
-                "Raven couldn't unlock. Run `raven unlock` in a terminal.",
-                why,
-            )
-        })?;
+        raven_core::privacy::set_unlocked(dir)
+            .map_err(|why| ApiError::new(code::INTERNAL, UNLOCK_FAILED, why))?;
         Ok(self.profile_state())
     }
 }
@@ -244,11 +253,12 @@ mod tests {
             raven_core::erase::UNFINISHED_TEXT.to_owned(),
         ));
         assert_eq!(erase.code, code::PROFILE_UNREADABLE);
-        assert_eq!(erase.message, raven_core::erase::UNFINISHED_TEXT);
+        assert_eq!(erase.detail, raven_core::erase::UNFINISHED_TEXT);
         let rotation = closed_error(&Closed::MetaRotationUnfinished(
             raven_core::privacy::META_ROTATION_UNFINISHED_TEXT.to_owned(),
         ));
-        assert!(rotation.message.contains("raven privacy rotate-meta"));
+        assert!(rotation.detail.contains("raven privacy rotate-meta"));
+        assert!(!rotation.message.contains("raven "), "{}", rotation.message);
 
         let dir = tempfile::tempdir().unwrap();
         let missing = key_missing_error(dir.path());

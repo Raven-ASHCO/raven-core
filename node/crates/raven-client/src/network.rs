@@ -289,6 +289,17 @@ const NEARBY_MACOS_ONLY_REASON: &str = if cfg!(target_os = "ios") {
 } else {
     "Not in this version of Raven on this computer: Bluetooth nearby is on macOS only so far."
 };
+
+/// Bluetooth nearby where there is no Bluetooth LE (the iOS Simulator has
+/// none), of this computer or, with `ios`, of this iPhone.
+fn nearby_not_here(ios: bool) -> &'static str {
+    if ios {
+        "This iPhone can't use Bluetooth nearby (no Bluetooth LE support for it)."
+    } else {
+        "This computer can't use Bluetooth nearby (no Bluetooth LE support for it)."
+    }
+}
+
 /// The plain sentence for a way on only through a lab switch.
 const LAB_REASON: &str = "On for testing only: a developer build's lab switch turned it on.";
 /// The plain sentence for a way the running raven-node uses while the saved
@@ -430,10 +441,7 @@ fn way(id: &'static str, facts: &NetFacts) -> Value {
     // the reason says the saved setting differs.
     let runs_unsaved = setting == Some(false) && running == Some(true);
     let (state, reason) = if not_here {
-        (
-            "not_on_this_os",
-            "This computer can't use Bluetooth nearby (no Bluetooth LE support for it).",
-        )
+        ("not_on_this_os", nearby_not_here(crate::nearby::IOS))
     } else if !g.live && id == "nearby" && !raven_core::NEARBY_PRODUCTION_ENABLED {
         ("preview", NEARBY_MACOS_ONLY_REASON)
     } else if !g.live {
@@ -859,7 +867,7 @@ pub(crate) fn network_view(dir: &Path, facts: &NetFacts) -> Value {
             "carry_for_friends": bridge::CARRY_FOR_FRIENDS_CONSENT,
             "friends_carry_mine": bridge::FRIENDS_CARRY_MINE_CONSENT,
             "handoff": bridge::HANDOFF_CONSENT,
-            "nearby_background_mail": bridge::NEARBY_BACKGROUND_MAIL_CONSENT,
+            "nearby_background_mail": crate::nearby::background_mail_consent(crate::nearby::IOS),
         },
     });
     if !p.internet_listen.is_empty() {
@@ -2325,6 +2333,10 @@ fn passphrase_error(op: &str, refused: bridge::PassphraseRefused) -> ApiError {
 
 // ── updates.status ─────────────────────────────────────────────────────────
 
+/// `updates.status`'s `install_text`: installing stays the CLI's (`raven
+/// update install`), which the apps don't install, so it names no command.
+const INSTALL_TEXT: &str = "The app shows what is ready; it doesn't install updates yet.";
+
 impl Inner {
     /// `updates.status`: `raven update status`, read-only. Installing stays
     /// the CLI's (`raven update install`).
@@ -2340,8 +2352,7 @@ impl Inner {
             "lab": gate("updates_from_friends").lab() || (advisory && !SecGate::Advisory.production()),
             "lines": plain_lines(view.lines),
             "install": "cli_only",
-            "install_text": "Install updates with `raven update install` in a terminal. The app \
-                             shows what is ready; it doesn't install yet.",
+            "install_text": INSTALL_TEXT,
         });
         if let Some(row) = view.net_row {
             v["summary"] = row.into();
@@ -2439,6 +2450,106 @@ mod tests {
         // Words that only look like a command stay.
         assert!(!has_command("Raven's background program isn't running."));
         assert!(!has_command("a dash-separated word"));
+    }
+
+    /// The macOS and iPhone apps install no `raven` command: no text they
+    /// show sends you to a terminal. What the app can do takes its place,
+    /// and the CLI's command stays in `detail` (Technical details).
+    #[test]
+    fn no_app_text_sends_you_to_a_terminal() {
+        let mut shown: Vec<String> = Vec::new();
+        let mut check = |text: &str, want: &str| {
+            assert_eq!(text, want);
+            shown.push(text.to_owned());
+        };
+        // A privacy-pack action the app does not offer yet.
+        let e = crate::engine::not_in_the_app("privacy.lock", "raven lock");
+        check(
+            &e.message,
+            "This isn't in the Raven app yet. Nothing was changed.",
+        );
+        assert_eq!(e.code, code::NOT_AVAILABLE_YET);
+        assert!(e.detail.contains("raven lock"), "{e:?}");
+        // updates.status.
+        check(
+            INSTALL_TEXT,
+            "The app shows what is ready; it doesn't install updates yet.",
+        );
+        // privacy.unlock that failed.
+        check(
+            crate::profile::UNLOCK_FAILED,
+            "Raven couldn't unlock. Try again; if it keeps happening, open Details.",
+        );
+        // An erase or a key change that did not finish: the CLI's sentence
+        // (which names the command that finishes it) is the detail.
+        for (closed, want) in [
+            (
+                bridge::Closed::EraseUnfinished(raven_core::erase::UNFINISHED_TEXT.into()),
+                "An erase of this Raven profile didn't finish, so Raven can't open it. Open \
+                 Details.",
+            ),
+            (
+                bridge::Closed::MetaRotationUnfinished(
+                    raven_core::privacy::META_ROTATION_UNFINISHED_TEXT.into(),
+                ),
+                "A key change of this Raven profile didn't finish, so Raven can't open it. Open \
+                 Details.",
+            ),
+        ] {
+            let e = crate::profile::closed_error(&closed);
+            check(&e.message, want);
+            assert_eq!(e.detail, closed.text());
+        }
+        // A blocked friend: the app has contacts.unblock.
+        check(
+            crate::envelope::default_message(code::CONTACT_BLOCKED),
+            "You blocked this friend, so nothing goes to them. Unblock them first.",
+        );
+        // Plain words of a send, a held message and a start.
+        let lan_off = "NOT SENT, nothing queued (technical: ipc LAN_OFF: LAN_OFF: raven lan off \
+                       is in effect (raven lan on))";
+        check(
+            &crate::explain::explain_send(lan_off, "Bob").1.next,
+            "Turn it back on in Network.",
+        );
+        check(
+            &crate::explain::explain_outbox_code("MAILBOX_OFF", "Bob").next,
+            "To use them, turn on Friends carry your messages in Network.",
+        );
+        let locked = crate::explain::explain_node_start(bridge::LOCKED_TEXT);
+        check(
+            &locked.headline,
+            "Raven is locked, so its background program doesn't run.",
+        );
+        check(&locked.next, "Unlock Raven to start it again.");
+        let erase = crate::explain::explain_node_start(bridge::ERASE_UNFINISHED_TEXT);
+        check(
+            &erase.headline,
+            "An erase of this Raven profile didn't finish.",
+        );
+        check(&erase.next, "Open Details.");
+        // Bluetooth nearby's consents, on a computer and on an iPhone.
+        shown.push(bridge::nearby_consent());
+        shown.push(bridge::NEARBY_BACKGROUND_MAIL_CONSENT.into());
+        shown.push(crate::nearby::background_mail_consent(true));
+        for text in &shown {
+            assert!(!has_command(text), "{text}");
+            assert!(!text.to_lowercase().contains("terminal"), "{text}");
+        }
+    }
+
+    /// Bluetooth nearby where there is no Bluetooth LE: an iPhone (the
+    /// Simulator has none) says so of itself, not of a computer.
+    #[test]
+    fn no_bluetooth_le_names_this_device() {
+        assert_eq!(
+            nearby_not_here(false),
+            "This computer can't use Bluetooth nearby (no Bluetooth LE support for it)."
+        );
+        assert_eq!(
+            nearby_not_here(true),
+            "This iPhone can't use Bluetooth nearby (no Bluetooth LE support for it)."
+        );
     }
 
     #[test]

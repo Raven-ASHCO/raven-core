@@ -53,6 +53,49 @@ const AFTER_SWIPE_IOS: &str = "Bluetooth stays off until you open Raven again.";
 /// Bluetooth.
 const BATTERY_IOS: &str = "Raven keeps Bluetooth listening while mail waits. This uses some \
      battery.";
+/// iOS: background mail's consent before its battery line, in the iPhone's
+/// words (the desktop's says "this computer" and names `raven` commands).
+const BACKGROUND_MAIL_IOS: &str = "Advertise over Bluetooth while mail waits (background mail)?\n\
+     While this iPhone keeps sealed mail for a verified friend (as their mail friend), or has a \
+     message or a receipt waiting for them, Bluetooth nearby also advertises for that friend on \
+     its own, not only while you send:\n\
+     - Nearby devices can see a random Bluetooth ID, which changes every 15 minutes, for as long \
+     as such mail waits (at most 2 friends at a time). They can't tell whom it is for, but they \
+     can see that this iPhone advertises, and so that it keeps or waits with mail for someone, \
+     and for how long.\n\
+     - Only that friend's device recognises the ID; it connects and collects the mail. Only your \
+     verified friends can, and the mail stays end-to-end encrypted: this iPhone can't read what \
+     it keeps for friends.\n\
+     - Someone who recorded that friend's ID in the last 30 minutes can play it back to learn \
+     that this iPhone is in range (at most twice per recorded ID).";
+/// iOS: how background mail's consent ends.
+const BACKGROUND_MAIL_END_IOS: &str =
+    "It works only while Bluetooth nearby itself is on. Turn it off any time in Settings.";
+
+/// Whether this build is the iPhone app's (the texts say the iPhone's
+/// words there).
+pub(crate) const IOS: bool = cfg!(target_os = "ios");
+
+/// The consent before `network.set {nearby_background_mail: true}`, as
+/// `nearby.status` and `network.status` give it: the desktop app's (no
+/// `raven` command), or with `ios` the iPhone's words.
+pub(crate) fn background_mail_consent(ios: bool) -> String {
+    if ios {
+        format!("{BACKGROUND_MAIL_IOS}\n- {BATTERY_IOS}\n{BACKGROUND_MAIL_END_IOS}")
+    } else {
+        bridge::NEARBY_BACKGROUND_MAIL_CONSENT.to_owned()
+    }
+}
+
+/// NEARBY_NOT_RUNNING's sentence: nearby's switch is on the Network page of
+/// a computer, in Settings on an iPhone (`ios`).
+fn not_running_text(ios: bool) -> &'static str {
+    if ios {
+        "Bluetooth nearby isn't running. Turn it on in Settings first."
+    } else {
+        "Bluetooth nearby isn't running. Turn it on in Network first."
+    }
+}
 
 /// What a NearbyControl refusal of raven-node is in the API.
 fn node_refusal(code: &str, message: String) -> ApiError {
@@ -62,10 +105,7 @@ fn node_refusal(code: &str, message: String) -> ApiError {
             "Raven's background program doesn't have Bluetooth nearby in this version. Nothing \
              was changed.",
         ),
-        "NEARBY_NOT_RUNNING" => (
-            code::NEARBY_NOT_RUNNING,
-            "Bluetooth nearby isn't running. Turn it on in Network first.",
-        ),
+        "NEARBY_NOT_RUNNING" => (code::NEARBY_NOT_RUNNING, not_running_text(IOS)),
         "NEARBY_POLICY" => (
             code::NEARBY_POLICY,
             "Raven couldn't save the Bluetooth nearby setting. Open Details to see why.",
@@ -164,14 +204,10 @@ impl Inner {
             .map(|(label, value)| json!({"label": label, "value": safety::line(value)}))
             .collect();
         let background = background_word();
-        let ios = cfg!(target_os = "ios");
+        let ios = IOS;
         let mut texts = json!({
             "nearby": if ios { CONSENT_IOS.to_owned() } else { bridge::nearby_consent() },
-            "nearby_background_mail": if ios {
-                format!("{}\n{BATTERY_IOS}", bridge::NEARBY_BACKGROUND_MAIL_CONSENT)
-            } else {
-                bridge::NEARBY_BACKGROUND_MAIL_CONSENT.to_owned()
-            },
+            "nearby_background_mail": background_mail_consent(ios),
         });
         if ios {
             texts["background"] = if background == "background" {
@@ -348,6 +384,54 @@ mod tests {
             assert_eq!(e.detail, "why");
             assert!(!e.message.is_empty());
         }
+        // Nearby's switch is on the Network page of a computer, in Settings
+        // on an iPhone.
+        assert_eq!(
+            not_running_text(false),
+            "Bluetooth nearby isn't running. Turn it on in Network first."
+        );
+        assert_eq!(
+            not_running_text(true),
+            "Bluetooth nearby isn't running. Turn it on in Settings first."
+        );
+        assert_eq!(
+            node_refusal("NEARBY_NOT_RUNNING", "why".into()).message,
+            not_running_text(cfg!(target_os = "ios"))
+        );
+    }
+
+    /// Background mail's consent on an iPhone: what the desktop's says, in
+    /// the iPhone's words (this iPhone, a friend's device, the battery) and
+    /// with no `raven` command; a computer's is the desktop app's.
+    #[test]
+    fn the_background_mail_consent_on_an_iphone_names_this_iphone() {
+        assert_eq!(
+            background_mail_consent(true),
+            "Advertise over Bluetooth while mail waits (background mail)?\n\
+             While this iPhone keeps sealed mail for a verified friend (as their mail friend), \
+             or has a message or a receipt waiting for them, Bluetooth nearby also advertises \
+             for that friend on its own, not only while you send:\n\
+             - Nearby devices can see a random Bluetooth ID, which changes every 15 minutes, for \
+             as long as such mail waits (at most 2 friends at a time). They can't tell whom it is \
+             for, but they can see that this iPhone advertises, and so that it keeps or waits \
+             with mail for someone, and for how long.\n\
+             - Only that friend's device recognises the ID; it connects and collects the mail. \
+             Only your verified friends can, and the mail stays end-to-end encrypted: this \
+             iPhone can't read what it keeps for friends.\n\
+             - Someone who recorded that friend's ID in the last 30 minutes can play it back to \
+             learn that this iPhone is in range (at most twice per recorded ID).\n\
+             - Raven keeps Bluetooth listening while mail waits. This uses some battery.\n\
+             It works only while Bluetooth nearby itself is on. Turn it off any time in Settings."
+        );
+        assert_eq!(
+            background_mail_consent(false),
+            bridge::NEARBY_BACKGROUND_MAIL_CONSENT
+        );
+        for ios in [true, false] {
+            let text = background_mail_consent(ios);
+            assert!(!text.contains("raven "), "{text}");
+            assert_eq!(text.contains("computer"), !ios, "{text}");
+        }
     }
 
     /// The iOS drafts are plain sentences that name no command.
@@ -359,6 +443,8 @@ mod tests {
             BACKGROUND_IOS,
             AFTER_SWIPE_IOS,
             BATTERY_IOS,
+            BACKGROUND_MAIL_IOS,
+            BACKGROUND_MAIL_END_IOS,
         ] {
             assert!(!t.contains("raven "), "{t}");
             assert!(t.ends_with('.'), "{t}");

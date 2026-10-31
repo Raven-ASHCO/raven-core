@@ -69,8 +69,7 @@ pub fn default_message(code: &str) -> &'static str {
         }
         code::NOT_A_CONTACT => "That friend isn't in your list. Add them first.",
         code::CONTACT_BLOCKED => {
-            "You blocked this friend on this computer, so nothing goes to them. Unblock them \
-             first (raven contact unblock)."
+            "You blocked this friend, so nothing goes to them. Unblock them first."
         }
         code::NAME_CLASH => {
             "You already have a friend with this name, or one that looks the same. Pick another \

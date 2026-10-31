@@ -120,10 +120,11 @@ fn cause_words(cause: Cause) -> Words {
             "Raven can't read its file of your friends' keys (lan_noise_pins.json), so it can't connect to anyone.",
             "Fix that file's owner or permissions in Raven's data folder, or move it aside.",
         ),
-        // `raven lan off`: nothing is dialled on the local network.
+        // `raven lan off`: nothing is dialled on the local network (the
+        // Network page turns it back on).
         Cause::LanOff => (
             "LAN is off on this computer, so Raven doesn't connect to {who} on your network.",
-            "Turn it back on with: raven lan on.",
+            "Turn it back on in Network.",
         ),
         Cause::Other => ("Raven couldn't send this message.", OPEN_DETAILS),
     }
@@ -243,9 +244,11 @@ fn outbox_code_words(code: &str) -> Words {
             "The friend {who} collects mail from doesn't hold messages for you, or not over the internet.",
             "Raven keeps trying {who} directly.",
         ),
+        // `raven custody use on` is the Network page's Friends carry your
+        // messages.
         "MAILBOX_OFF" => (
             "A friend could hold this for {who}, but friend mailboxes are off.",
-            "To use them, run `raven custody use on`.",
+            "To use them, turn on Friends carry your messages in Network.",
         ),
         // Sealed letters (Phase 5): why no friend holds the letter yet (the
         // terminal app's words, tui/errors.rs).
@@ -341,16 +344,18 @@ pub fn explain_node_unavailable(text: &str) -> Plain {
 }
 
 /// A start ext.rs refused before trying: `raven lock` stopped this profile,
-/// or an erase of it did not finish (the whole error is that text).
+/// or an erase of it did not finish (the whole error is that text). The
+/// apps install no `raven` command: the unlock is the app's own, and the
+/// command that finishes an erase stays in the technical text.
 fn start_refusal(text: &str) -> Option<Words> {
     match text.trim() {
         bridge::LOCKED_TEXT => Some((
-            "Raven is locked: `raven lock` stopped it.",
-            "Run `raven unlock` to start it again.",
+            "Raven is locked, so its background program doesn't run.",
+            "Unlock Raven to start it again.",
         )),
         bridge::ERASE_UNFINISHED_TEXT => Some((
             "An erase of this Raven profile didn't finish.",
-            "Run `raven erase` to finish it.",
+            OPEN_DETAILS,
         )),
         _ => None,
     }
@@ -692,13 +697,14 @@ mod tests {
             );
         }
         let locked = explain_node_start(bridge::LOCKED_TEXT);
-        assert!(locked.next.contains("raven unlock"), "{locked:?}");
+        assert_eq!(locked.next, "Unlock Raven to start it again.", "{locked:?}");
+        assert!(locked.technical.contains("raven unlock"), "{locked:?}");
         assert_eq!(
             explain_node_unavailable(bridge::LOCKED_TEXT).headline,
             locked.headline
         );
         assert!(explain_node_start(bridge::ERASE_UNFINISHED_TEXT)
-            .next
+            .technical
             .contains("raven erase"));
         let ended = format!(
             "NOT SENT: your secure connection with Bob has ended, and a new one needs you both \
