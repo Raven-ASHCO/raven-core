@@ -158,7 +158,7 @@ bytes stay 1.
   (5 s on the onion link) for an RRH1 a listener that was not due never sent.
   A listener of 0.1.0 already answers bit 11 (§3.3, §6.1), right after its
   RLB1; one from before bit 11 ignores it, and the dialer then waits as
-  before.
+  before. Owner decision 2026-11-01: the rule change is approved.
 
 ## Freeze record changes (2026-10-30, field test E3: LAN address over any authenticated link)
 
