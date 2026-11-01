@@ -1049,6 +1049,9 @@ pub(crate) mod netutil {
         /// The dial's connect wait ([`connect_dial_within`]; the p2p
         /// connect).
         pub(crate) connect: ConnectWait,
+        /// A send's check ([`crate::learning::DialMeta::send_check`]): its
+        /// link wakes no outbox attempt for the contact.
+        pub(crate) send_check: bool,
         /// When the dial began ([`Self::timing`]).
         started: tokio::time::Instant,
     }
@@ -1084,6 +1087,7 @@ pub(crate) mod netutil {
                 frames_sent: false,
                 collector: ReplyCollector::new(carrier, waits),
                 connect: ConnectWait::new(connect),
+                send_check: false,
                 started: tokio::time::Instant::now(),
             }
         }

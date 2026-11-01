@@ -1646,6 +1646,7 @@ pub(crate) async fn dial_with_meta(
         ONION_CONNECT_BUDGET,
     );
     progress.collector.set_race(meta.race);
+    progress.send_check = meta.send_check;
     let outcome = tokio::time::timeout(
         deadline,
         internet_direct::dial_session_on(

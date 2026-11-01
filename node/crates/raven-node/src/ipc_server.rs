@@ -1221,6 +1221,18 @@ where
     }
 }
 
+/// What raven-node knows of a program's dial of `frames` (`raven send`, an
+/// app's engine): one without frames is a send's check, whose link wakes no
+/// outbox attempt ([`crate::learning::DialMeta::send_check`], Tor messaging
+/// audit 2026-11, T13 a). Internet direct, p2p and Tor; a LAN dial wakes
+/// the outbox when the address answers, and a nearby dial takes no meta.
+fn send_dial_meta(frames: &[Vec<u8>]) -> crate::learning::DialMeta {
+    crate::learning::DialMeta {
+        send_check: frames.is_empty(),
+        ..crate::learning::DialMeta::default()
+    }
+}
+
 async fn handle_internet_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
     let IpcRequest::InternetDial {
         v,
@@ -1251,7 +1263,13 @@ async fn handle_internet_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
     if let Some(refusal) = refuse_custody_frames(v, &frames) {
         return refusal;
     }
-    let work = internet_direct::dial(data_dir, &internet_dial, &expected_pub_hex, &frames);
+    let work = internet_direct::dial_with_meta(
+        data_dir,
+        &internet_dial,
+        &expected_pub_hex,
+        &frames,
+        send_dial_meta(&frames),
+    );
     let outcome = tokio::time::timeout(INTERNET_DIAL_TIMEOUT, work).await;
     note_send_dial(
         raven_core::OutboxCarrier::Internet,
@@ -1308,7 +1326,13 @@ async fn handle_p2p_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
         return refusal;
     }
     // Same rules as the outbox: gate, verified contacts only (`p2p::dial`).
-    let work = crate::p2p::dial_with_path(data_dir, &multiaddr, &expected_pub_hex, &frames);
+    let work = crate::p2p::dial_with_path_meta(
+        data_dir,
+        &multiaddr,
+        &expected_pub_hex,
+        &frames,
+        send_dial_meta(&frames),
+    );
     let outcome = tokio::time::timeout(INTERNET_DIAL_TIMEOUT, work).await;
     note_send_dial(
         raven_core::OutboxCarrier::P2p,
@@ -1369,7 +1393,7 @@ async fn handle_onion_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
         &onion_dial,
         &expected_pub_hex,
         &frames,
-        crate::learning::DialMeta::default(),
+        send_dial_meta(&frames),
     );
     let within = raven_core::onion::ONION_DIAL_DEADLINE + Duration::from_secs(5);
     let started = std::time::Instant::now();
@@ -4020,5 +4044,76 @@ mod tests {
             "the two held back are counted"
         );
         assert_eq!(log.hit("#a", t0 + SEND_DIAL_LINES_WINDOW), Some(0));
+    }
+
+    /// T13 (a) (Tor messaging audit 2026-11): a send's check (an IPC dial
+    /// without frames) no longer wakes raven-node's outbox for the friend it
+    /// reached. The send's message dial follows at once and takes the
+    /// friend's earlier messages along; an outbox attempt the check woke
+    /// raced it for the friend's send lock and dialled the same messages
+    /// again. A send's dial with frames still wakes it, and so does a dial
+    /// raven-node makes itself.
+    #[tokio::test]
+    async fn an_ipc_send_check_wakes_no_outbox_attempt_for_the_friend() {
+        use crate::netutil::{Admission, PRODUCTION_INBOUND};
+        use crate::outbox::test_rig::{contacts, lab_backends};
+        if !lab_backends() || !raven_core::internet_direct_live_enabled() {
+            eprintln!("skipped: needs the lab backends and Internet direct");
+            return;
+        }
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let alice = raven_core::load_or_create_identity(a.path()).unwrap().0;
+        let bob = Arc::new(raven_core::load_or_create_identity(b.path()).unwrap().0);
+        let bob_hex = hex::encode(bob.public_key_bytes());
+        contacts(a.path(), &bob.public_key_bytes(), "", "", true);
+        contacts(b.path(), &alice.public_key_bytes(), "", "", true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap().to_string();
+        let (b_dir, bob_id) = (b.path().to_path_buf(), bob.clone());
+        let serving = tokio::spawn(async move {
+            let admission = Admission::new(PRODUCTION_INBOUND);
+            loop {
+                let (stream, from) = listener.accept().await.unwrap();
+                let mut slot = admission.try_admit(from.ip()).unwrap();
+                let (dd, id) = (b_dir.clone(), bob_id.clone());
+                tokio::spawn(async move {
+                    let _ = crate::internet_direct::serve_inbound_on(
+                        crate::internet_direct::INTERNET_LINK,
+                        dd,
+                        id,
+                        stream,
+                        PRODUCTION_INBOUND,
+                        &mut slot,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                });
+            }
+        });
+        let dial = |frames_b64: Vec<String>| IpcRequest::InternetDial {
+            v: IPC_VERSION,
+            internet_dial: at.clone(),
+            expected_pub_hex: bob_hex.clone(),
+            frames_b64,
+        };
+        let wakes = crate::internet_direct::outbox_wakes_for_test;
+        let before = wakes();
+        let answer = handle_internet_dial(a.path(), dial(Vec::new())).await;
+        assert!(
+            matches!(answer, IpcResponse::InternetDialResult { .. }),
+            "the check reached Bob: {answer:?}"
+        );
+        assert_eq!(wakes() - before, 0, "a send's check wakes no outbox attempt");
+        // A send's dial with a frame (one Bob refuses, after the link).
+        let junk = b64_encode(b"not an envelope");
+        let _ = handle_internet_dial(a.path(), dial(vec![junk])).await;
+        assert_eq!(wakes() - before, 1, "a send's dial with frames still does");
+        crate::internet_direct::dial(a.path(), &at, &bob_hex, &[])
+            .await
+            .expect("raven-node's own dial without frames reached Bob");
+        assert_eq!(wakes() - before, 2, "and so does raven-node's own");
+        serving.abort();
     }
 }

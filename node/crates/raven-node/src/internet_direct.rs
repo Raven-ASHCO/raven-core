@@ -1324,8 +1324,13 @@ where
     // no-op for its own dials and while it does not run).
     crate::renewal::note_live_link(expected, crate::renewal::LiveLink::Outbound);
     // It is reachable: what waits for it goes now, whatever this dial is for
-    // (E1; nothing while the outbox's own attempt for it runs).
-    crate::outbox::peer_back(expected);
+    // (E1; nothing while the outbox's own attempt for it runs). Not on a
+    // send's check (T13 a): the send's message dial follows at once and
+    // takes the earlier messages along, and an attempt woken now raced it
+    // for the friend's send lock and dialled the same ones again.
+    if !progress.send_check {
+        wake_outbox_for(expected);
+    }
     progress.collector.begin(peer_offer, frames)?;
     let mut hints = crate::hints::LinkCtl::inet(
         data_dir,
@@ -1351,6 +1356,26 @@ where
     // Its verified hello's link features: its capability floor (P6.29).
     hints.note_features();
     exchange_frames(&mut stream, &mut transport, frames, &mut hints, progress).await
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`wake_outbox_for`] calls on this thread (a `#[tokio::test]` runs its
+    /// tasks on it).
+    static OUTBOX_WAKES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// What waits for `contact` goes now ([`crate::outbox::peer_back`]).
+fn wake_outbox_for(contact: &[u8; 32]) {
+    #[cfg(test)]
+    OUTBOX_WAKES.with(|n| n.set(n.get() + 1));
+    crate::outbox::peer_back(contact);
+}
+
+/// How often a dial on this thread woke the outbox ([`wake_outbox_for`]).
+#[cfg(test)]
+pub(crate) fn outbox_wakes_for_test() -> u32 {
+    OUTBOX_WAKES.with(std::cell::Cell::get)
 }
 
 /// Dial `internet_dial` (`host:port`: an IP or a DNS name), complete
@@ -1446,6 +1471,7 @@ async fn dial_unchecked(
     let waits = crate::learning::waits(&expected, raven_core::OutboxCarrier::Internet);
     let mut progress = DialProgress::waiting("INTERNET", &waits);
     progress.collector.set_race(meta.race);
+    progress.send_check = meta.send_check;
     // A probe's own bound (learning's exploration): it ends here, observed.
     let deadline = meta.deadline(DIAL_DEADLINE);
     let outcome = tokio::time::timeout(

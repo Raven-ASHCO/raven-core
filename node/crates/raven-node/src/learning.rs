@@ -230,6 +230,12 @@ pub(crate) struct DialMeta {
     /// carrier's "happy eyeballs"): it claims the attempt when its link
     /// authenticated, or writes nothing.
     pub race: Option<crate::onion::race::RaceTicket>,
+    /// A send's check: a dial without frames that a program asked for over
+    /// IPC (`ipc_server`). Its link reaching the contact wakes no outbox
+    /// attempt for it (`outbox::peer_back`): the send's message dial follows
+    /// at once and takes the earlier messages along (Tor messaging audit
+    /// 2026-11, T13 a).
+    pub send_check: bool,
 }
 
 impl DialMeta {

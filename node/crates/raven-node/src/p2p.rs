@@ -2958,6 +2958,7 @@ pub(crate) async fn dial_with_path_meta(
     let waits = crate::learning::waits(&expected, OutboxCarrier::P2p);
     let mut progress = DialProgress::waiting(P2P_LINK.wire, &waits);
     progress.collector.set_race(meta.race);
+    progress.send_check = meta.send_check;
     let connect_wait = progress.connect.clone();
     let mut path = None;
     let mut relay = None;
