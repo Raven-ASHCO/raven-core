@@ -210,12 +210,30 @@ pub fn worth_another_connect(reply: &ConnectReply) -> bool {
 /// within)`: the helper uses a new isolation group, so Arti fetches the
 /// descriptor again and builds new circuits) when [`CONNECT_RETRY_MIN_LEFT`]
 /// is left after [`CONNECT_RETRY_PAUSE`]. Each try is bounded by what is
-/// left of `budget`; the error is the last try's.
+/// left of `budget`; the error is the last try's. (The Arti helper's
+/// self-check; a friend's connect is [`connect_in_groups`].)
+#[cfg_attr(not(feature = "tor-embedded"), allow(dead_code))]
+pub async fn connect_with_retry<T, F, Fut>(budget: Duration, connect: F) -> Result<T, ConnectReply>
+where
+    F: FnMut(bool, Duration) -> Fut,
+    Fut: Future<Output = Result<T, ConnectReply>>,
+{
+    tries(budget, connect).await.got
+}
+
+/// How [`tries`] went.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
-pub async fn connect_with_retry<T, F, Fut>(
-    budget: Duration,
-    mut connect: F,
-) -> Result<T, ConnectReply>
+struct Tries<T> {
+    got: Result<T, ConnectReply>,
+    /// The first try's error, if it failed.
+    first: Option<ConnectReply>,
+    /// A fresh try was made.
+    fresh: bool,
+}
+
+/// [`connect_with_retry`], and how its tries went.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+async fn tries<T, F, Fut>(budget: Duration, mut connect: F) -> Tries<T>
 where
     F: FnMut(bool, Duration) -> Fut,
     Fut: Future<Output = Result<T, ConnectReply>>,
@@ -226,18 +244,147 @@ where
             .await
             .unwrap_or_else(|_| Err(ConnectReply::Timeout("no circuit in time".into())))
     };
-    let first = bounded(budget, connect(false, budget)).await;
-    let err = match first {
-        Ok(t) => return Ok(t),
+    let err = match bounded(budget, connect(false, budget)).await {
+        Ok(t) => {
+            return Tries {
+                got: Ok(t),
+                first: None,
+                fresh: false,
+            }
+        }
         Err(e) => e,
     };
     let left = budget.saturating_sub(start.elapsed());
     if !worth_another_connect(&err) || left < CONNECT_RETRY_PAUSE + CONNECT_RETRY_MIN_LEFT {
-        return Err(err);
+        return Tries {
+            got: Err(err.clone()),
+            first: Some(err),
+            fresh: false,
+        };
     }
     tokio::time::sleep(CONNECT_RETRY_PAUSE).await;
     let left = budget.saturating_sub(start.elapsed());
-    bounded(left, connect(true, left)).await
+    Tries {
+        got: bounded(left, connect(true, left)).await,
+        first: Some(err),
+        fresh: true,
+    }
+}
+
+/// How long a friend's isolation group is kept after its last use
+/// ([`IsolationBook`]): as long as Arti keeps an onion service circuit
+/// nobody uses (tor-hsclient's `RETAIN_CIRCUIT_AFTER_LAST_USE`).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub const GROUP_KEPT: Duration = Duration::from_secs(10 * 60);
+
+/// The isolation group each friend's first connect try goes in, for one
+/// helper life (audit T6). Arti hands every connect of one group to one
+/// onion service the same rendezvous circuit while it looks open, and a
+/// circuit whose far end vanished with no DESTROY back still looks open.
+/// Every first try in the default group met it again and timed out, and
+/// only the fresh try (a new group) got through, in a group nobody used
+/// again. Now a fresh try that works makes its group the friend's, and a
+/// first try that timed out is never made in its group again.
+///
+/// Keyed by the friend's onion key. `G` is the helper's isolation token
+/// (Arti's `IsolationToken`; a number in the loopback helper); `None` is
+/// the default group. A friend unused for [`GROUP_KEPT`] is back in the
+/// default group (Arti dropped what it kept for it by then).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub struct IsolationBook<G> {
+    groups: std::collections::HashMap<[u8; 32], (G, tokio::time::Instant)>,
+    new_group: fn() -> G,
+}
+
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+impl<G: Clone + PartialEq> IsolationBook<G> {
+    /// An empty book; `new_group` makes a group no connect used yet.
+    pub fn new(new_group: fn() -> G) -> Self {
+        Self {
+            groups: std::collections::HashMap::new(),
+            new_group,
+        }
+    }
+
+    /// The group of a first try to `key` (`None`: the default group).
+    pub fn first_try(&mut self, key: &[u8; 32]) -> Option<G> {
+        let now = tokio::time::Instant::now();
+        self.groups
+            .retain(|_, (_, used)| now.saturating_duration_since(*used) < GROUP_KEPT);
+        self.groups.get_mut(key).map(|(group, used)| {
+            *used = now;
+            group.clone()
+        })
+    }
+
+    /// A group no connect used yet, for a fresh try.
+    pub fn new_group(&self) -> G {
+        (self.new_group)()
+    }
+
+    /// A fresh try to `key` in `group` opened a stream: later first tries
+    /// go in that group.
+    pub fn fresh_succeeded(&mut self, key: [u8; 32], group: G) {
+        self.groups
+            .insert(key, (group, tokio::time::Instant::now()));
+    }
+
+    /// A first try to `key` in `used` timed out: no later first try goes in
+    /// that group (nothing changes when another connect already moved the
+    /// friend on).
+    pub fn first_timed_out(&mut self, key: [u8; 32], used: Option<G>) {
+        if self.groups.get(&key).map(|(group, _)| group) == used.as_ref() {
+            let group = self.new_group();
+            self.groups
+                .insert(key, (group, tokio::time::Instant::now()));
+        }
+    }
+}
+
+/// [`connect_with_retry`] to the onion service `key`, its isolation groups
+/// from `book` (audit T6): the first try goes in the friend's group
+/// (`connect(Some(group), within)`, or `None`: the default group), the fresh
+/// one in a new group. A fresh try that works makes its group the friend's;
+/// a first try that timed out moves the friend to a new group whatever
+/// happens next. The book is shared by the helper's connects (its lock is
+/// never held across a try).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub async fn connect_in_groups<G, T, F, Fut>(
+    budget: Duration,
+    book: &std::sync::Mutex<IsolationBook<G>>,
+    key: [u8; 32],
+    mut connect: F,
+) -> Result<T, ConnectReply>
+where
+    G: Clone + PartialEq,
+    F: FnMut(Option<G>, Duration) -> Fut,
+    Fut: Future<Output = Result<T, ConnectReply>>,
+{
+    let lock = || {
+        book.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let (first, fresh) = {
+        let mut book = lock();
+        (book.first_try(&key), book.new_group())
+    };
+    let tried = tries(budget, |is_fresh, within| {
+        let group = if is_fresh {
+            Some(fresh.clone())
+        } else {
+            first.clone()
+        };
+        connect(group, within)
+    })
+    .await;
+    let mut book = lock();
+    if matches!(tried.first, Some(ConnectReply::Timeout(_))) {
+        book.first_timed_out(key, first);
+    }
+    if tried.fresh && tried.got.is_ok() {
+        book.fresh_succeeded(key, fresh);
+    }
+    tried.got
 }
 
 /// The reasons an onion service state may carry ([`Event::Service`]):
@@ -783,6 +930,140 @@ mod tests {
         let (got, tries, took) = run(vec![(100, Ok(3))]).await;
         assert!(matches!(got, Err(ConnectReply::Timeout(_))));
         assert_eq!((tries.len(), took), (1, 44));
+    }
+
+    /// A new group number for the tests' isolation books.
+    fn next_group() -> u32 {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Audit T6: a fresh try that worked is the friend's group from then
+    /// on; a first try that timed out is never made in its group again,
+    /// unless another dial already moved the friend on; each friend has its
+    /// own; one unused for [`GROUP_KEPT`] is back in the default group.
+    #[tokio::test(start_paused = true)]
+    async fn the_isolation_book_keeps_the_group_that_worked() {
+        let mut book = IsolationBook::new(next_group);
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        // Nothing known yet: the default group.
+        assert_eq!(book.first_try(&a), None);
+        // Its first try timed out: a new group from then on.
+        book.first_timed_out(a, None);
+        let moved = book.first_try(&a);
+        assert!(moved.is_some());
+        assert_eq!(book.first_try(&a), moved);
+        // A fresh try that worked: its group is the friend's.
+        let fresh = book.new_group();
+        assert_ne!(Some(fresh), moved);
+        book.fresh_succeeded(a, fresh);
+        assert_eq!(book.first_try(&a), Some(fresh));
+        // That group timed out too: a new one again.
+        book.first_timed_out(a, Some(fresh));
+        let again = book.first_try(&a);
+        assert!(again.is_some() && again != Some(fresh), "{again:?}");
+        // A timeout in a group the friend already left changes nothing.
+        book.first_timed_out(a, Some(fresh));
+        book.first_timed_out(a, None);
+        assert_eq!(book.first_try(&a), again);
+        // Another friend: its own (still the default group).
+        assert_eq!(book.first_try(&b), None);
+        // Kept while used; after GROUP_KEPT unused, the default group.
+        tokio::time::advance(GROUP_KEPT - Duration::from_secs(1)).await;
+        assert_eq!(book.first_try(&a), again);
+        tokio::time::advance(GROUP_KEPT).await;
+        assert_eq!(book.first_try(&a), None);
+    }
+
+    /// Audit T6 as the helpers connect: the circuit the default group
+    /// shares is dead (each try in it times out after 10 s, as Arti's BEGIN
+    /// that gets no CONNECTED). The first connect pays for it once: 10 s,
+    /// the pause, then the fresh try. The next ones go in that fresh group
+    /// at once. Before, each one met the dead circuit again (15 s each).
+    #[tokio::test(start_paused = true)]
+    async fn connects_after_a_dead_shared_circuit_reuse_the_fresh_group() {
+        use std::sync::{Arc, Mutex};
+        let book = Mutex::new(IsolationBook::new(next_group));
+        let key = [7u8; 32];
+        let tries: Arc<Mutex<Vec<Option<u32>>>> = Arc::default();
+        let connect = || {
+            let tries = tries.clone();
+            connect_in_groups(
+                Duration::from_secs(44),
+                &book,
+                key,
+                move |group, _within| {
+                    tries.lock().unwrap().push(group);
+                    async move {
+                        if group.is_none() {
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            return Err(ConnectReply::Timeout("tor timeout".into()));
+                        }
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        Ok(group)
+                    }
+                },
+            )
+        };
+        let mut took = Vec::new();
+        let mut used = Vec::new();
+        for _ in 0..3 {
+            let t = tokio::time::Instant::now();
+            used.push(connect().await.expect("connected"));
+            took.push(t.elapsed().as_secs());
+        }
+        assert_eq!(took, [15, 3, 3]);
+        let fresh = used[0];
+        assert!(fresh.is_some());
+        assert_eq!(used, [fresh, fresh, fresh]);
+        assert_eq!(*tries.lock().unwrap(), [None, fresh, fresh, fresh]);
+    }
+
+    /// The other ways a first try ends: one that timed out with no time
+    /// left for a fresh try still moves the friend to a new group; one that
+    /// failed otherwise (here a stale descriptor) keeps the friend's group
+    /// unless the fresh try works, which then becomes it.
+    #[tokio::test(start_paused = true)]
+    async fn a_first_try_that_failed_moves_the_friend_only_when_it_should() {
+        use std::sync::Mutex;
+        let book = Mutex::new(IsolationBook::new(next_group));
+        let key = [8u8; 32];
+        let fail = |e: ConnectReply, secs: u64| {
+            move |_group: Option<u32>, _within: Duration| {
+                let e = e.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    Err::<(), _>(e)
+                }
+            }
+        };
+        let timeout = ConnectReply::Timeout("tor timeout".into());
+        let gone = ConnectReply::Unreachable("rendezvous failed".into());
+        // Timed out after 35 s: no fresh try, but a new group next time.
+        let got = connect_in_groups(Duration::from_secs(44), &book, key, fail(timeout, 35)).await;
+        assert!(matches!(got, Err(ConnectReply::Timeout(_))));
+        let moved = book.lock().unwrap().first_try(&key);
+        assert!(moved.is_some());
+        // Unreachable, and the fresh try failed too: the group stays.
+        let got =
+            connect_in_groups(Duration::from_secs(44), &book, key, fail(gone.clone(), 1)).await;
+        assert_eq!(got, Err(gone.clone()));
+        assert_eq!(book.lock().unwrap().first_try(&key), moved);
+        // Unreachable, then the fresh try worked: its group is the friend's.
+        let got = connect_in_groups(Duration::from_secs(44), &book, key, |group, _| {
+            let gone = gone.clone();
+            async move {
+                if group == moved {
+                    Err(gone)
+                } else {
+                    Ok(group)
+                }
+            }
+        })
+        .await;
+        let fresh = got.expect("the fresh try");
+        assert!(fresh.is_some() && fresh != moved);
+        assert_eq!(book.lock().unwrap().first_try(&key), fresh);
     }
 
     #[test]

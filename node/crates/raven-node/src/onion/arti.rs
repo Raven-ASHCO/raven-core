@@ -22,8 +22,9 @@
 //! nowhere, and none of its events names an onion address of a friend.
 //!
 //! Arti's defaults, except: channel padding `reduced` (laptops and
-//! phones), at most [`MAX_STREAMS_PER_CIRCUIT`] streams per rendezvous
-//! circuit and an introduction rate limit sent to the introduction points.
+//! phones), no exit circuits built ahead of need, at most
+//! [`MAX_STREAMS_PER_CIRCUIT`] streams per rendezvous circuit and an
+//! introduction rate limit sent to the introduction points.
 //! No bridges, no pluggable transports, no proof-of-work, no experimental
 //! APIs.
 
@@ -34,7 +35,7 @@ use std::time::Duration;
 
 use arti_client::config::onion_service::OnionServiceConfigBuilder;
 use arti_client::config::{BoolOrAuto, TorClientConfigBuilder};
-use arti_client::{HasKind as _, StreamPrefs, TorClient};
+use arti_client::{HasKind as _, IsolationToken, StreamPrefs, TorClient};
 use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -249,10 +250,7 @@ async fn tor_main(
     events: Events,
     mut check_requests: mpsc::UnboundedReceiver<u64>,
 ) {
-    let mut builder =
-        TorClientConfigBuilder::from_directories(state_dir.join("state"), state_dir.join("cache"));
-    builder.channel().padding(tor_config::PaddingLevel::Reduced);
-    let config = match builder.build() {
+    let config = match client_config(&state_dir) {
         Ok(c) => c,
         Err(_) => return events.local("Tor configuration refused"),
     };
@@ -416,6 +414,23 @@ async fn tor_main(
     drop(service);
 }
 
+/// The Tor client's configuration: its state and cache under `state_dir`,
+/// Arti's defaults otherwise but for the module doc's.
+fn client_config(state_dir: &Path) -> Result<arti_client::TorClientConfig, String> {
+    let mut builder =
+        TorClientConfigBuilder::from_directories(state_dir.join("state"), state_dir.join("cache"));
+    builder.channel().padding(tor_config::PaddingLevel::Reduced);
+    // No exit circuits built ahead of need (audit S9): Raven opens onion
+    // streams only. With no circuit counted as enough, Arti's launcher
+    // builds none (its threshold), not even the DNS ones it predicts
+    // whatever the ports.
+    builder
+        .preemptive_circuits()
+        .disable_at_threshold(0)
+        .set_initial_predicted_ports(vec![]);
+    builder.build().map_err(|e| e.to_string())
+}
+
 /// An Arti error kind as a short fixed tag, and whether its cause is on
 /// this computer (never Arti's message, which may name a relay or a path).
 fn kind_tag(kind: arti_client::ErrorKind) -> (&'static str, bool) {
@@ -526,6 +541,10 @@ async fn accept_connects(
     client: Arc<TorClient<PreferredRuntime>>,
     token: [u8; proto::TOKEN_LEN],
 ) {
+    // Each friend's isolation group, for this helper life (audit T6).
+    let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(
+        IsolationToken::new,
+    )));
     loop {
         let Ok((mut stream, peer)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -534,7 +553,7 @@ async fn accept_connects(
         if !peer.ip().is_loopback() {
             continue;
         }
-        let client = client.clone();
+        let (client, book) = (client.clone(), book.clone());
         tokio::spawn(async move {
             let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
             let read = tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut req));
@@ -548,17 +567,20 @@ async fn accept_connects(
             let _ = stream.set_nodelay(true);
             let target = tor_hscrypto::pk::HsId::from(hs_id);
             let addr = onion_text(&target);
-            // One more try with fresh circuits (a new isolation group: Arti
-            // fetches the descriptor again) after a failure worth it, within
-            // the same wait (field test round 8: a friend's node had just
-            // restarted).
-            let opened = proto::connect_with_retry(CONNECT_WAIT, |fresh, _within| {
+            // The first try in the friend's isolation group (the default
+            // one until a fresh try worked or a first try timed out), one
+            // more with fresh circuits (a new group: Arti fetches the
+            // descriptor again) after a failure worth it, within the same
+            // wait (field test round 8: a friend's node had just restarted).
+            // Arti hands every connect of one group the same rendezvous
+            // circuit while it looks open, a dead one too (audit T6).
+            let opened = proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, |group, _within| {
                 let (client, addr) = (client.clone(), addr.clone());
                 async move {
                     let mut prefs = StreamPrefs::new();
                     prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
-                    if fresh {
-                        prefs.new_isolation_group();
+                    if let Some(group) = group {
+                        prefs.set_isolation(group);
                     }
                     client
                         .connect_with_prefs((addr.as_str(), port), &prefs)
@@ -735,4 +757,21 @@ fn connect_reply(kind: arti_client::ErrorKind) -> ConnectReply {
 fn onion_text(hs_id: &tor_hscrypto::pk::HsId) -> String {
     use safelog::DisplayRedacted as _;
     hs_id.display_unredacted().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit S9: Raven opens onion streams only, so its Tor client builds
+    /// no exit circuits ahead of need (Arti's defaults keep two for ports
+    /// 80 and 443, and DNS ones, rebuilt in every helper life).
+    #[test]
+    fn the_client_builds_no_exit_circuits_ahead() {
+        let config = client_config(Path::new("/nonexistent/raven-tor")).unwrap();
+        let preemptive: &arti_client::config::circ::PreemptiveCircuitConfig = config.as_ref();
+        let text = format!("{preemptive:?}");
+        assert!(text.contains("disable_at_threshold: 0"), "{text}");
+        assert!(text.contains("initial_predicted_ports: []"), "{text}");
+    }
 }

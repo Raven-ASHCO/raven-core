@@ -575,6 +575,121 @@ fn tor_several_friends_both_ways_at_once_no_send_waits_for_another() {
     }
 }
 
+/// How long a try on the dead shared circuit of
+/// [`tor_after_a_dead_shared_circuit_later_sends_reuse_the_fresh_one`]
+/// waits, in ms (Arti's stream connect timeout is 10 s).
+const STALE_MS: u64 = 4000;
+
+/// `p`'s Tor helper's connect counts (`RAVEN_LAB_TOR_LOOPBACK_COUNT=1`):
+/// (connect requests, tries, tries that met the dead shared circuit).
+fn tor_counts(p: &Peer) -> (u64, u64, u64) {
+    let text =
+        std::fs::read_to_string(p.path.join("tor").join("loopback_connects")).unwrap_or_default();
+    let count = |name: &str| {
+        text.split_whitespace()
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0)
+    };
+    (count("connects"), count("tries"), count("stale"))
+}
+
+/// T6 of the Tor messaging audit (2026-11): the rendezvous circuit A's Tor
+/// helper shares by default to B is dead (B's network path vanished and no
+/// DESTROY came back). The first Tor dial pays for it once: its first try
+/// times out, and the helper's fresh try (a new isolation group) gets
+/// through. Every later send reuses that fresh group, about as fast as a
+/// send on a warm link. Before, every Tor dial met the dead circuit again
+/// (the stale wait, a 2 s pause and a new rendezvous), twice per message:
+/// its check, then the message.
+#[test]
+fn tor_after_a_dead_shared_circuit_later_sends_reuse_the_fresh_one() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    // Only A's helper has the dead circuit (the helpers read the knobs at
+    // their start; lab_env clears every lab switch the first time).
+    common::lab_env();
+    std::env::set_var("RAVEN_LAB_TOR_LOOPBACK_STALE_MS", STALE_MS.to_string());
+    std::env::set_var("RAVEN_LAB_TOR_LOOPBACK_COUNT", "1");
+    let (a_side, a_cards) = tor_peers(&["Tor A"]);
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK_STALE_MS");
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK_COUNT");
+    let (b_side, b_cards) = tor_peers(&["Tor B"]);
+    let (a, b) = (&a_side[0], &b_side[0]);
+    a.befriend(b, Some(&b_cards[0]));
+    b.befriend(a, Some(&a_cards[0]));
+
+    let began = Instant::now();
+    first_message(a, b, "hello B past a dead circuit");
+    let first = began.elapsed();
+    let at_first = tor_counts(a);
+    let took: Vec<Duration> = (1..=3)
+        .map(|i| one_alone(a, b, &format!("past a dead circuit {i}")))
+        .collect();
+    let counts = tor_counts(a);
+    eprintln!(
+        "past a dead shared circuit: the first message {first:?} {at_first:?}, \
+         then {took:?} {counts:?} (connects, tries, stale)"
+    );
+    assert!(at_first.2 >= 1, "the knob met no dial: {at_first:?}");
+    assert_eq!(
+        counts.2,
+        at_first.2,
+        "a later dial met the dead circuit again: {took:?} {counts:?}\n{}",
+        a.service_log()
+    );
+    // Not one later dial paid the stale wait, the pause and a new
+    // rendezvous.
+    let one_stale_dial =
+        Duration::from_millis(STALE_MS + 2000 + RENDEZVOUS_MS.parse::<u64>().unwrap());
+    for t in &took {
+        assert!(*t < one_stale_dial, "{took:?} {counts:?}");
+    }
+}
+
+/// The iPhone app's node starts again when the app comes back, and its Tor
+/// is ready a moment later (audit T7; the loopback helper's bootstrap takes
+/// 3 s here). A message written at once is delivered: its Tor dials wait
+/// for Tor to be ready, instead of failing with ONION_NOT_READY at once and
+/// leaving the message to the outbox (Waiting).
+#[test]
+fn tor_a_send_while_its_tor_still_starts_waits_for_it() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    a.stop();
+    std::env::set_var("RAVEN_LAB_TOR_LOOPBACK_READY_MS", "3000");
+    a.start();
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK_READY_MS");
+    assert_ne!(a.carrier("tor")["running"], true, "Tor was ready at once");
+
+    let began = Instant::now();
+    let m = a.send_until(
+        b,
+        "written while Tor starts",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(120),
+    );
+    let took = began.elapsed();
+    eprintln!("a send while Tor starts: {} in {took:?}", m["state"]);
+    assert_eq!(
+        m["state"],
+        "delivered",
+        "{m}\n--- A ---\n{}",
+        a.service_log()
+    );
+    assert!(b.wait_incoming(a, "written while Tor starts", Duration::from_secs(30)));
+}
+
 /// T1 (c) of the Tor messaging audit (2026-11): the Tor stream of A's
 /// message drops right after A wrote it (B took the message; its ACK never
 /// came back on that link). That read as B refusing it: no second try, and

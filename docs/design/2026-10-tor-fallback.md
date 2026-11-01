@@ -206,7 +206,7 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
 | Wait | Direct (today) | Onion |
 |---|---|---|
 | Head start of the direct paths | - | 1.5 s (`ONION_HEAD_START`) |
-| Connect (Tor circuit to the service, rendezvous) | 5 s per address, 20 s per dial | 45 s (`ONION_CONNECT_BUDGET`); first contact is typically 10-30 s. Within it the helper tries once more, 2 s after a failure (no descriptor, not running, introduction or rendezvous failed, timeout) with 14 s or more left, in a new isolation group (fresh descriptor, fresh circuits): field test round 8, the first sends to a friend whose node had just restarted failed on the client's cached view of the old service |
+| Connect (Tor circuit to the service, rendezvous) | 5 s per address, 20 s per dial | 45 s (`ONION_CONNECT_BUDGET`); first contact is typically 10-30 s. Within it the helper tries once more, 2 s after a failure (no descriptor, not running, introduction or rendezvous failed, timeout) with 14 s or more left, in a new isolation group (fresh descriptor, fresh circuits): field test round 8, the first sends to a friend whose node had just restarted failed on the client's cached view of the old service. A fresh try that works makes its group the friend's for the connects that follow in that helper life, and a first try that timed out is never made in its group again (audit T6: Arti hands every connect of one group the same rendezvous circuit while it looks open, a dead one too, so each dial paid the timeout, the pause and a new rendezvous); a friend unused for 10 min is back in the default group |
 | Whole dial | 40-45 s | 75 s (`ONION_DIAL_DEADLINE`) |
 | Frame I/O | 30 s | 30 s |
 | First reply / idle reply | 30 s / 2 s | 30 s / 5 s |
