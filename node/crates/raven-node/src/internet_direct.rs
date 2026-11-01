@@ -686,9 +686,57 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
     // A contact: what happens on this link from here on is about its path.
     slot.contact_admitted();
     deadline += gate_started.elapsed();
+    // Our RLB1 offer, route hints and HAVE need nothing of the dialer's
+    // offer: the gate admitted its verified hello key as a contact, and its
+    // offer must bind exactly that key (checked below, before any frame).
+    // So they leave right behind our hello, and the dialer's offer and ours
+    // cross at once instead of one after the other: one round trip less on
+    // every link (Tor messaging audit 2026-11, T15). Their local work is
+    // added back to the deadline, as the gate's is.
+    let local_started = tokio::time::Instant::now();
+    let local = {
+        let dd = data_dir.clone();
+        let id = identity.clone();
+        blocking(move || encode_local_offer(&dd, &id)).await?
+    };
+    // Route hints (RRH1): to a dialer whose hello accepts them, when it is
+    // due one or asked for them (spec §3.3); one-way, never a reply. Decided
+    // on the gate's admission: `trusted` below repeats it for the same key.
+    let keys = crate::hints::LinkKeys::new(remote_ed, &identity);
+    let mut hints = crate::hints::LinkCtl::inet(
+        &data_dir,
+        link.carrier,
+        crate::hints::Role::Listener,
+        keys,
+        rrh1,
+        peer_caps,
+        link_peer_id.clone(),
+    )
+    .with_knock(knocked.showed(&remote_ed))
+    .with_update(crate::update_exchange::UpdateLink::inet(
+        &data_dir,
+        link.carrier,
+        true,
+        remote_ed,
+        offers.contains(LinkFeatures::RUP1),
+        peer_caps,
+    ));
+    let our_hints = hints.outgoing().await;
+    // RUP1 (P6.49): our HAVE, after RRH1, to a pinned contact whose hello
+    // set bit 10; one-way, never a reply.
+    let our_have = hints.update().outgoing().await;
+    deadline += local_started.elapsed();
     let offer = tokio::time::timeout_at(deadline, async {
         write_inet_frame(&mut stream, &mut transport, &our_hello).await?;
         transport.pad = pad_after_hellos(offers, peer_caps);
+        write_inet_frame(&mut stream, &mut transport, &local).await?;
+        if let Some(ours) = &our_hints {
+            write_inet_frame(&mut stream, &mut transport, ours).await?;
+            hints.written();
+        }
+        if let Some(have) = &our_have {
+            write_inet_frame(&mut stream, &mut transport, have).await?;
+        }
         read_inet_frame(&mut stream, &mut transport).await
     })
     .await;
@@ -698,9 +746,8 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         }
         Err(_) => return Err(HANDSHAKE_TIMEOUT.into()),
     };
-    let (peer, local, trusted) = {
+    let (peer, trusted) = {
         let dd = data_dir.clone();
-        let id = identity.clone();
         blocking(move || {
             let peer = parse_peer_offer(&peer_offer)?;
             if !rlb1_matches_noise_identity(&peer, &remote_ed) {
@@ -713,7 +760,6 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
             remember_ephemeral_peer(&dd, &peer).inspect_err(|_| {
                 crate::clock_notes::offer_refused(&remote_ed, &peer);
             })?;
-            let local = encode_local_offer(&dd, &id)?;
             // Fail closed: an unreadable contact book trusts nobody.
             let trusted = raven_core::lan_dispatch::peer_is_trusted(&dd, &peer).unwrap_or(false);
             // Friend custody: a contact's mail may later come from a custodian
@@ -721,7 +767,7 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
             if trusted && raven_core::custody_gate::CustodyGates::current().live {
                 let _ = raven_core::lan_dispatch::remember_inbound_contact(&dd, &peer);
             }
-            Ok((peer, local, trusted))
+            Ok((peer, trusted))
         })
         .await?
     };
@@ -769,42 +815,9 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
             };
             crate::learning::inbound(&remote_ed, link.carrier, via_relay, false);
         }
-    }
-    write_inet_frame(&mut stream, &mut transport, &local).await?;
-    // Route hints (RRH1): only to a dialer whose hello asked for them;
-    // one-way, never a reply.
-    let keys = crate::hints::LinkKeys::new(remote_ed, &identity);
-    let mut hints = crate::hints::LinkCtl::inet(
-        &data_dir,
-        link.carrier,
-        crate::hints::Role::Listener,
-        keys,
-        rrh1,
-        peer_caps,
-        link_peer_id,
-    )
-    .with_knock(knocked.showed(&remote_ed))
-    .with_update(crate::update_exchange::UpdateLink::inet(
-        &data_dir,
-        link.carrier,
-        true,
-        remote_ed,
-        offers.contains(LinkFeatures::RUP1),
-        peer_caps,
-    ));
-    if trusted {
-        if let Some(ours) = hints.outgoing().await {
-            write_inet_frame(&mut stream, &mut transport, &ours).await?;
-            hints.written();
-        }
         hints.note_link().await;
         // Its verified hello's link features: its capability floor (P6.29).
         hints.note_features();
-    }
-    // RUP1 (P6.49): our HAVE, after RRH1, to a pinned contact whose hello
-    // set bit 10; one-way, never a reply.
-    if let Some(have) = hints.update().outgoing().await {
-        write_inet_frame(&mut stream, &mut transport, &have).await?;
     }
 
     let mut frames_seen = 0u32;
@@ -2327,10 +2340,22 @@ mod tests {
         let theirs = read_inet_frame(&mut client, &mut t).await.unwrap();
         assert!(parse_peer_offer(&theirs).is_ok(), "a contact gets our RLB1");
 
-        let mut held = Vec::new();
-        while let Some(s) = admission.try_admit(ip) {
-            held.push(s);
-        }
+        // The listener's RLB1 leaves with its hello (T15), before it reads
+        // ours: the slot moves once our offer is read and verified.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let held = loop {
+            let mut held = Vec::new();
+            while let Some(s) = admission.try_admit(ip) {
+                held.push(s);
+            }
+            if held.len() == PRODUCTION_LIMITS.max_handshaking_per_ip
+                || tokio::time::Instant::now() > deadline
+            {
+                break held;
+            }
+            drop(held);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         assert_eq!(
             held.len(),
             PRODUCTION_LIMITS.max_handshaking_per_ip,
@@ -3619,4 +3644,248 @@ mod tests {
         }
         crate::update_exchange::gates_for_test(None);
     }
+
+    // ── Round trips on a slow link (Tor messaging audit 2026-11) ───────
+
+    /// Tor's reply waits (the onion dial's own).
+    const TOR_WAITS: ReplyWaits = ReplyWaits {
+        first: netutil::PRODUCTION_REPLY_WAITS.first,
+        idle: raven_core::onion::ONION_REPLY_IDLE,
+    };
+
+    /// One way of [`latent_link`]: each chunk arrives `latency` after it was
+    /// read, an end of stream too.
+    async fn arrive_late(
+        mut from: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        mut to: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        latency: Duration,
+    ) {
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<(tokio::time::Instant, Option<Vec<u8>>)>();
+        let read = async move {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let got = match from.read(&mut buf).await {
+                    Ok(n) if n > 0 => Some(buf[..n].to_vec()),
+                    _ => None,
+                };
+                let end = got.is_none();
+                if tx
+                    .send((tokio::time::Instant::now() + latency, got))
+                    .is_err()
+                    || end
+                {
+                    return;
+                }
+            }
+        };
+        let write = async move {
+            while let Some((at, bytes)) = rx.recv().await {
+                tokio::time::sleep_until(at).await;
+                match bytes {
+                    Some(bytes) if to.write_all(&bytes).await.is_ok() => {}
+                    _ => break,
+                }
+            }
+            let _ = to.shutdown().await;
+        };
+        tokio::join!(read, write);
+    }
+
+    /// A dialer's end and a listener's end of a link whose bytes arrive
+    /// `one_way` after they were written, both ways (a Tor circuit, as the
+    /// loopback helper's latency knob makes one). Under paused time a dial
+    /// on it lasts its round trips times 2 × `one_way`, plus the waits it
+    /// sits out: local work takes no time.
+    fn latent_link(one_way: Duration) -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+        let (dialer, a) = tokio::io::duplex(1 << 18);
+        let (b, listener) = tokio::io::duplex(1 << 18);
+        let (a_read, a_write) = tokio::io::split(a);
+        let (b_read, b_write) = tokio::io::split(b);
+        tokio::spawn(arrive_late(a_read, b_write, one_way));
+        tokio::spawn(arrive_late(b_read, a_write, one_way));
+        (dialer, listener)
+    }
+
+    /// Two verified friends with a confirmed session: Alice (`a`) dials,
+    /// Bob (`b`) listens. `None` (skipped) without the lab backends.
+    struct Friends {
+        a: tempfile::TempDir,
+        b: tempfile::TempDir,
+        alice: Identity,
+        bob: Arc<Identity>,
+        key_ab: raven_core::indexed_session_store::IndexedSessionRecordKey,
+    }
+
+    impl Friends {
+        fn new() -> Option<Self> {
+            use crate::outbox::test_rig::{contacts, lab_backends, pair};
+            if !lab_backends() {
+                return None;
+            }
+            let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let alice = raven_core::load_or_create_identity(a.path()).unwrap().0;
+            let bob = raven_core::load_or_create_identity(b.path()).unwrap().0;
+            for (dir, me) in [(a.path(), &alice), (b.path(), &bob)] {
+                raven_core::device_cert::ensure_local_device_certificate(
+                    dir,
+                    me,
+                    raven_core::paths::PRIMARY_DEVICE_ID,
+                )
+                .unwrap();
+                raven_core::ensure_local_prekey(dir, me).unwrap();
+            }
+            contacts(a.path(), &bob.public_key_bytes(), "", "", true);
+            contacts(b.path(), &alice.public_key_bytes(), "", "", true);
+            let a_bundle = raven_core::lan_dispatch::local_bundle(a.path(), &alice).unwrap();
+            let b_bundle = raven_core::lan_dispatch::local_bundle(b.path(), &bob).unwrap();
+            cache_peer_bundle(a.path(), &b_bundle).unwrap();
+            cache_peer_bundle(b.path(), &a_bundle).unwrap();
+            let key_ab = pair(a.path(), &alice, b.path(), &bob, &a_bundle, &b_bundle);
+            Some(Self {
+                a,
+                b,
+                alice,
+                bob: Arc::new(bob),
+                key_ab,
+            })
+        }
+
+        /// Alice's sealed message `text` to Bob, as `raven send` stages it.
+        fn alice_seals(&self, text: &str) -> Vec<u8> {
+            seal(self.a.path(), &self.alice, &self.key_ab, text)
+        }
+
+        /// Alice dials Bob's real onion listener on a link of `one_way`
+        /// latency with `frames`: how long the dial took and its replies,
+        /// once Bob's listener ended cleanly.
+        async fn alice_dials(
+            &self,
+            one_way: Duration,
+            frames: &[Vec<u8>],
+        ) -> (Duration, Vec<Vec<u8>>) {
+            let (client, server_side) = latent_link(one_way);
+            let (b_dir, bob) = (self.b.path().to_path_buf(), self.bob.clone());
+            let server = tokio::spawn(async move {
+                let mut slot = test_slot();
+                serve_inbound_on(
+                    ONION_LINK,
+                    b_dir,
+                    bob,
+                    server_side,
+                    PRODUCTION_LIMITS,
+                    &mut slot,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            });
+            let mut stream = Some(client);
+            let mut progress = DialProgress::new("ONION", TOR_WAITS);
+            let began = tokio::time::Instant::now();
+            dial_session_on(
+                ONION_LINK,
+                self.a.path(),
+                || {
+                    let s = stream.take();
+                    async move { s.ok_or_else(|| "one stream only".to_string()) }
+                },
+                &self.bob.public_key_bytes(),
+                frames,
+                None,
+                &mut progress,
+            )
+            .await
+            .expect("the dial reaches Bob");
+            let took = began.elapsed();
+            listener_result(server).await.expect("Bob's listener ends cleanly");
+            (took, progress.collector.into_replies())
+        }
+    }
+
+    impl Drop for Friends {
+        fn drop(&mut self) {
+            crate::hints::forget_told(self.a.path());
+            crate::hints::forget_told(self.b.path());
+        }
+    }
+
+    /// `identity`'s sealed message `text` under the session `key` (as `raven
+    /// send` stages it).
+    fn seal(
+        dir: &Path,
+        identity: &Identity,
+        key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
+        text: &str,
+    ) -> Vec<u8> {
+        use raven_core::indexed_session_store::{AuthorizedEndpointDevice, IndexedSessionStore};
+        let now = raven_core::clock::now_ms();
+        let (cert, registry) = raven_core::device_cert::ensure_local_device_certificate(
+            dir,
+            identity,
+            raven_core::paths::PRIMARY_DEVICE_ID,
+        )
+        .unwrap();
+        let device = AuthorizedEndpointDevice::authorize(&cert, identity, &registry, now).unwrap();
+        let mut store = IndexedSessionStore::open(dir).unwrap();
+        let end = store.session_expires_at(key).unwrap();
+        let mut sealed = None;
+        let _ = store.send_message_envelope(
+            key,
+            text,
+            &device,
+            now,
+            (now + 3_600_000).min(end),
+            now,
+            &mut rand::rngs::OsRng,
+            &mut |_digest: &[u8; 32], bytes: &[u8]| {
+                sealed = Some(bytes.to_vec());
+                Err(())
+            },
+        );
+        sealed.expect("sealed")
+    }
+
+    /// `took` in round trips of a link of `one_way` latency, rounded down.
+    fn round_trips(took: Duration, one_way: Duration) -> u128 {
+        took.as_nanos() / (2 * one_way.as_nanos())
+    }
+
+    /// T15: the listener's RLB1 offer leaves right behind its hello, with
+    /// its route hints when the dialer asked, so the dialer's offer and the
+    /// listener's no longer cross one after the other. A send's Tor check
+    /// takes 2 round trips (Noise messages 1 and 2; message 3 with the
+    /// dialer's hello, answered by the listener's hello, RLB1 and RRH1), not
+    /// 3, and still reads the friend's RRH1; the message's own link takes 3
+    /// (the third: the dialer's RLB1 and the message, answered by the ACK),
+    /// not 4.
+    #[tokio::test(start_paused = true)]
+    async fn the_listeners_offer_rides_with_its_hello_one_round_trip_less_per_link() {
+        let _live = crate::hints::LiveForTest::set(true);
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        let one_way = Duration::from_millis(300);
+        let bob = f.bob.public_key_bytes();
+        assert!(crate::hints::holds_no_hints(f.a.path(), &bob));
+        let (check, _) = f.alice_dials(one_way, &[]).await;
+        assert!(
+            !crate::hints::holds_no_hints(f.a.path(), &bob),
+            "the check read Bob's RRH1"
+        );
+        assert_eq!(
+            round_trips(check, one_way),
+            2,
+            "a Tor check took {check:?} on a link of {one_way:?} each way"
+        );
+        let (send, replies) = f.alice_dials(one_way, &[f.alice_seals("over Tor")]).await;
+        assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1, "a sealed ACK");
+        assert_eq!(
+            round_trips(send, one_way),
+            3,
+            "a message's link took {send:?} on a link of {one_way:?} each way"
+        );
+    }
+
 }
