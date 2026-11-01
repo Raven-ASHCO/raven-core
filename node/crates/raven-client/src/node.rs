@@ -417,8 +417,15 @@ impl Inner {
     }
 
     /// The start a send makes before it dials (under the node gate, so it
-    /// never races `node.start`).
+    /// never races `node.start`). The app's own full node already running
+    /// (the iPhone app in the front) needs no start: the send goes at once,
+    /// without waiting for the gate a mail check or a start holds (audit
+    /// T9: every send waited for the 20 s mail check on opening).
     pub(crate) fn ensure_node_for_send(&self) -> Result<(), String> {
+        if self.full_node_runs_here() {
+            self.after_node_start();
+            return Ok(());
+        }
         let started = {
             let _gate = lock(&self.node_gate);
             self.ensure_node_locked().map(|_| ())
@@ -460,7 +467,12 @@ impl Inner {
         };
         self.after_node_start();
         match started {
-            Ok(after) => Ok(self.status_value(&after, false)),
+            Ok(after) => {
+                // Sends held back while it was paused go now (or wait on
+                // for the unlock).
+                self.release_held_sends();
+                Ok(self.status_value(&after, false))
+            }
             Err(why) => Err(start_error(&why)),
         }
     }
@@ -521,8 +533,9 @@ impl Inner {
 
     /// `node.pause` (the app goes to the background; embedded node only):
     /// the node stops cleanly (listeners closed, Tor's circuits gone) and
-    /// stays stopped until `node.resume`; a send or `node.start` meanwhile
-    /// is refused. Extra field `was_running`.
+    /// stays stopped until `node.resume`; a `node.start` meanwhile is
+    /// refused, and a send is held back until the resume (messages.rs
+    /// `release_held_sends`). Extra field `was_running`.
     pub(crate) fn node_pause(&self, args: &Args) -> OpResult {
         let keep = match args.opt_str("nearby")? {
             None | Some("stop") => false,
@@ -606,9 +619,17 @@ impl Inner {
             let max = crate::embedded::MAIL_CHECK_MAX_BUDGET;
             let budget = Duration::from_millis(budget_ms).clamp(Duration::from_secs(1), max);
             let listen = self.listen_for_start(&dir);
-            let checked = {
-                let _gate = lock(&self.node_gate);
-                crate::embedded::check_mail(&dir, &listen, budget)
+            // A node that runs is only asked for a fetch pass: nothing to
+            // start, so no node gate (a send or a pause meanwhile waits for
+            // nothing; audit T9). Else under the gate: a small node may
+            // start for the check.
+            let checked = match crate::embedded::check_mail_if_running(&dir, &listen, budget) {
+                Ok(Some(done)) => Ok(done),
+                Ok(None) => {
+                    let _gate = lock(&self.node_gate);
+                    crate::embedded::check_mail(&dir, &listen, budget)
+                }
+                Err(why) => Err(why),
             };
             let r = checked.map_err(|why| {
                 ApiError::new(
@@ -693,6 +714,9 @@ impl Inner {
         self.note_probe(&p, false);
         // An unlock made elsewhere: the identity loads again here.
         self.reload_after_unlock();
+        // Sends held back by a pause or a lock that ended (a resume or an
+        // unlock seen only now) go again.
+        self.release_held_sends();
         // The profile as an operation opens it (profile.rs): nothing is read
         // while it is closed (or locked: no identity then), and a key
         // raven-node's start made necessary is loaded.
@@ -701,6 +725,31 @@ impl Inner {
             self.refresh_groups();
         }
     }
+}
+
+impl Inner {
+    /// This profile's whole node runs in this process (embedded only; not
+    /// a mail check's small node nor the background node).
+    fn full_node_runs_here(&self) -> bool {
+        #[cfg(feature = "embedded-node")]
+        if embedded_mode() {
+            return self
+                .data_dir()
+                .is_ok_and(crate::embedded::full_node_runs_for);
+        }
+        false
+    }
+}
+
+/// `node.pause` holds this profile's own node (embedded only): a send
+/// meanwhile is held back until `node.resume`.
+pub(crate) fn paused_here(inner: &Inner) -> bool {
+    #[cfg(feature = "embedded-node")]
+    if embedded_mode() {
+        return inner.data_dir().is_ok_and(crate::embedded::paused_for);
+    }
+    let _ = inner;
+    false
 }
 
 /// The watcher: about once a second while someone polls.

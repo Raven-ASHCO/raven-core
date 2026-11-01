@@ -317,8 +317,9 @@ On iOS (and on macOS or Linux with the engine's `embedded-node` feature and
 connection instead of the socket file, and `node.stop` stops it in process.
 `NodeStatus` then has `embedded: true`, `paused`, and `state` may be `paused`,
 `mail_check` or `background`. `node.pause` stops it cleanly and holds it stopped (a
-`node.start` or a send meanwhile is refused, its detail starting with
-`PAUSED`) until `node.resume`. With `nearby: "keep"` (an app built with the
+`node.start` meanwhile is refused, its detail starting with `PAUSED`) until `node.resume`. A send
+whose turn comes meanwhile, or while Lock v2 holds the profile, is held back: it stays `sending`
+with nothing dialled or written, and goes once `node.resume` (or the unlock) lets it. With `nearby: "keep"` (an app built with the
 `bluetooth-central` and `bluetooth-peripheral` background modes) it then starts a small
 background node (`state: background`, `paused: true`): IPC, the outbox, collecting from and
 passing on for friends, and Bluetooth nearby, scanning only for the friends it names (iOS requires

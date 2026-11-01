@@ -108,9 +108,11 @@ and Neighbour"); and `NetworkStatus.tor.percent` is Tor's start percentage
 (release builds too).
 
 `NodeStatus` gains `embedded: true`, `paused`, and `state` `paused` or
-`mail_check`. While paused, `node.start` and a send are refused (the
-detail starts with `PAUSED`): such a message is `failed` with nothing
-written, and `messages.retry` sends it once the app is open again. `node.stop` stops the node in process (never a
+`mail_check`. While paused, `node.start` is refused (the detail starts
+with `PAUSED`). A send whose turn comes while paused, or while Lock v2
+holds the profile, is held back: it stays `sending` with nothing dialled
+or written, and goes when `node.resume` starts the node again (or at the
+unlock). `node.stop` stops the node in process (never a
 signal: its pid is the app's own).
 
 ## 3. The app's lifecycle
@@ -127,17 +129,28 @@ signal: its pid is the app's own).
    `NWPathMonitor` and call `network.path` with the current kind of network
    now and at every change (section 6: Tor on Wi-Fi only).
 2. **To the background** (`sceneDidEnterBackground`): inside
-   `beginBackgroundTask`, first `messages.handoff {"budget_ms": 5000}` when
+   `beginBackgroundTask`, first let a send still `sending` end, and unless
+   the lock came down and Raven sleeps, wait for a quick return: both
+   together for up to 15 s, never into the last 15 s iOS gives. A return
+   meanwhile keeps the node (and Tor's circuits) running: no hand off, no
+   pause. Then `messages.handoff {"budget_ms": 5000}` when
    a message of yours waits (it leaves sealed copies with friends who hold
    mail, so they keep trying while the phone sleeps; it returns within its
-   budget), then `node.pause`. The pause closes the listeners, sends the p2p
+   budget), then `node.pause`. A send the pause still meets is held back,
+   not failed (section 2). The pause closes the listeners, sends the p2p
    host's goodbyes, ends Tor's circuits and its helper, saves what learning
    saw, and flushes the security ledger: about a second, eight at most. The
    node holds no socket while the app is suspended.
-3. **Back to the foreground** (`sceneWillEnterForeground`): `node.resume`.
+3. **Back to the foreground** (`sceneWillEnterForeground`): `network.path`
+   with the kind of network now (so Tor on Wi-Fi only holds on mobile data
+   from the start), then `node.resume`.
    The node listens on the profile's own port again (the one it picked), so
    friends' saved addresses still work; Tor's guard and directory caches
-   are in the profile, so it is ready again in seconds.
+   are in the profile, so it is ready again in seconds, and an onion dial
+   meanwhile waits for it (up to 8 s). Call `messages.retry` for what waits
+   at once and again when `NetworkStatus.tor.phase` turns `ready`. A
+   `mail.check` in the front takes a short budget (the app gives 5000 ms):
+   the running node fetches by itself, and nothing waits for the check.
 4. **Background refresh** (`BGAppRefreshTask`, about 30 s): call
    `mail.check {"budget_ms": 25000}` off the main thread, then
    `setTaskCompleted(success:)` and schedule the next request. It returns
@@ -154,7 +167,8 @@ signal: its pid is the app's own).
 for the check (IPC, the outbox worker and the custody fetcher; no listener,
 no Tor, no p2p host, no radio), waits for one full fetch pass over the
 friends who hold mail, and stops it. On a running node it asks for a fetch
-pass now and waits for it. It is refused while the profile is locked or
+pass now and waits for it; a send, a start, a pause or a resume meanwhile
+waits for nothing. It is refused while the profile is locked or
 being erased.
 
 ## 4. Where the profile lives

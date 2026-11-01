@@ -93,6 +93,12 @@ pub(crate) enum Outcome {
     NodeUnavailable,
     /// Stopped before it ran.
     Stopped,
+    /// Held back, nothing dialled or written: the app's own node is paused
+    /// (the iPhone app in the background) or Lock v2 holds the profile
+    /// ([`explain::held_back`]). Never kept as a send's outcome: the job
+    /// goes back to the queue (it reads Sending) and runs again after
+    /// `node.resume` or the unlock ([`Inner::release_held_sends`]).
+    HeldBack,
 }
 
 impl Outcome {
@@ -1322,10 +1328,26 @@ impl Inner {
     /// worker for everybody held a message to one friend until a Tor send to
     /// another ended (the owner's four-device test, 2026-11-01).
     fn enqueue_send(&self, id: &str, peer: &str) -> Result<(), ApiError> {
-        let mut queues = lock(&self.send_queues);
+        self.enqueue_locked(&mut lock(&self.send_queues), id, peer, false)
+    }
+
+    /// [`Self::enqueue_send`] with the queues held; `first`: before the
+    /// friend's other waiting sends (one that was held back goes in the
+    /// order it was written).
+    fn enqueue_locked(
+        &self,
+        queues: &mut SendQueues,
+        id: &str,
+        peer: &str,
+        first: bool,
+    ) -> Result<(), ApiError> {
         if let Some(queue) = queues.by_peer.get_mut(peer) {
             // Its worker runs: it takes this one after those before it.
-            queue.push_back(id.to_owned());
+            if first {
+                queue.push_front(id.to_owned());
+            } else {
+                queue.push_back(id.to_owned());
+            }
             return Ok(());
         }
         queues
@@ -1340,6 +1362,48 @@ impl Inner {
             return Err(ApiError::internal(format!("send worker: {e}")));
         }
         Ok(())
+    }
+
+    /// Whether a send would be held back now ([`Outcome::HeldBack`]): Lock
+    /// v2 holds the profile, or `node.pause` holds the app's own node.
+    pub(crate) fn sends_held_back(&self) -> bool {
+        self.locked() || crate::node::paused_here(self)
+    }
+
+    /// A send the worker held back ([`Outcome::HeldBack`]; `raw` says why)
+    /// waits with the others until [`Self::release_held_sends`]. A pause
+    /// that ended meanwhile (its resume let the others go before this one
+    /// came back) lets it go again at once; a lock refusal always waits for
+    /// the unlock (or the watcher's next look).
+    fn hold_send(&self, id: &str, peer: &str, raw: &str) {
+        let by_lock = raw.contains(raven_core::privacy::LOCKED_V2_TEXT) || self.locked();
+        let mut queues = lock(&self.send_queues);
+        if by_lock
+            || self.sends_held_back()
+            || self.enqueue_locked(&mut queues, id, peer, true).is_err()
+        {
+            queues.held.push((id.to_owned(), peer.to_owned()));
+        }
+    }
+
+    /// The node runs and the profile is open again (`node.resume`,
+    /// `node.start`, the unlock, the watcher's look): every send held back
+    /// goes to its friend's worker again, before that friend's newer ones,
+    /// in the order they were written. Nothing while anything still holds
+    /// them back. `true`: some went.
+    pub(crate) fn release_held_sends(&self) -> bool {
+        let mut queues = lock(&self.send_queues);
+        if queues.held.is_empty() || self.sends_held_back() {
+            return false;
+        }
+        let held = std::mem::take(&mut queues.held);
+        // Newest first, each before the rest: the oldest ends up first.
+        for (id, peer) in held.into_iter().rev() {
+            if self.enqueue_locked(&mut queues, &id, &peer, true).is_err() {
+                queues.held.push((id, peer));
+            }
+        }
+        true
     }
 
     /// One send, on the worker: the background program first (as a send
@@ -1358,6 +1422,19 @@ impl Inner {
             (p.peer.clone(), p.body.clone())
         };
         let (outcome, raw) = self.send_now(&job.0, &job.1);
+        if outcome == Outcome::HeldBack {
+            // Nothing was tried: it reads Sending again and waits for the
+            // resume or the unlock, with no row written for it.
+            {
+                let mut book = lock(&self.book);
+                if let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) {
+                    p.job = Job::Queued;
+                    p.raw.clone_from(&raw);
+                }
+            }
+            self.hold_send(id, &job.0, &raw);
+            return;
+        }
         {
             let mut book = lock(&self.book);
             if let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) {
@@ -1420,6 +1497,11 @@ impl Inner {
         }
         let identity = match self.identity() {
             Ok(id) => id,
+            // Lock v2 came after the send was asked for: it waits for the
+            // unlock.
+            Err(e) if e.code == code::PROFILE_LOCKED && self.locked() => {
+                return (Outcome::HeldBack, e.detail)
+            }
             Err(e) => return (Outcome::NotSent { meet_first: false }, e.detail),
         };
         let dir = match self.data_dir() {
@@ -1427,6 +1509,9 @@ impl Inner {
             Err(e) => return (Outcome::NotSent { meet_first: false }, e.detail),
         };
         if let Err(why) = self.ensure_node_for_send() {
+            if explain::held_back(&why) {
+                return (Outcome::HeldBack, why);
+            }
             return (Outcome::NodeUnavailable, why);
         }
         match bridge::send_to_contact(&dir, &identity, peer, body) {
@@ -1457,6 +1542,8 @@ impl Inner {
                     format!("delivered with a signed receipt over {}", done.dial),
                 )
             }
+            // The node was paused or locked on the way (nothing staged).
+            Err(text) if explain::held_back(&text) => (Outcome::HeldBack, text),
             Err(text) => {
                 let outcome = match explain::explain_send(&text, "").0 {
                     OutcomeKind::Waiting { background } => Outcome::Waiting {
@@ -1932,6 +2019,9 @@ pub(crate) fn deadline_words(expires_at_ms: u64, now_ms: u64) -> String {
 #[derive(Debug, Default)]
 pub(crate) struct SendQueues {
     pub(crate) by_peer: HashMap<String, VecDeque<String>>,
+    /// Sends held back ([`Outcome::HeldBack`]) until the node runs and the
+    /// profile is open again: (id, friend), in the order they were held.
+    pub(crate) held: Vec<(String, String)>,
 }
 
 /// One friend's send worker: its sends one at a time, in the order they
@@ -2087,6 +2177,30 @@ mod tests {
         );
         assert!(!status.contains("meet first"), "{status}");
         assert!(!action.is_empty());
+    }
+
+    /// The iPhone app locks "now" (Lock v2) with a send still queued behind
+    /// another to the same friend (audit T4): its turn comes while locked.
+    /// It is held back, not refused ("Not sent", a failed row): it reads
+    /// Sending, nothing is written, and it waits with the held sends for
+    /// the unlock, which a lock still in place does not give.
+    #[test]
+    fn a_send_whose_turn_comes_while_locked_is_held_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Inner::new(Ok(dir.path().to_path_buf()));
+        inner.hold_locked_for_test();
+        lock(&inner.book).pendings.push(pending(Job::Queued, None));
+        inner.run_send_job("pending-1");
+        {
+            let book = lock(&inner.book);
+            let p = &book.pendings[0];
+            assert_eq!((p.job, &p.outcome), (Job::Queued, &None), "{}", p.raw);
+            assert!(p.bound_mid.is_none(), "no failed row");
+        }
+        let held = lock(&inner.send_queues).held.clone();
+        assert_eq!(held, [("pending-1".to_owned(), "aa".to_owned())]);
+        assert!(!inner.release_held_sends(), "still locked");
+        assert_eq!(lock(&inner.send_queues).held.len(), 1);
     }
 
     /// E1: "Waiting for win-c · until –". A message that starts waiting

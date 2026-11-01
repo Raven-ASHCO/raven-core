@@ -2064,6 +2064,8 @@ impl Inner {
                 }
                 self.note_locked(false);
                 self.reload_after_unlock();
+                // Sends held back by the lock go now.
+                self.release_held_sends();
                 let mut v = self.lock_state()?;
                 v["note"] = plain_lines(lines).join(" ").into();
                 Ok(v)
