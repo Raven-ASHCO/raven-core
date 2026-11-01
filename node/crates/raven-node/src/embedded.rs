@@ -56,6 +56,8 @@ const MAIL_CHECK_STOP_RESERVE: Duration = Duration::from_secs(3);
 /// The longest budget a mail check accepts (iOS gives a background refresh
 /// about 30 s in all).
 pub const MAIL_CHECK_MAX_BUDGET: Duration = Duration::from_secs(28);
+/// This computer only, any free port.
+const ANY_LOOPBACK_PORT: &str = "127.0.0.1:0";
 
 /// What [`start`] runs.
 #[derive(Clone, Debug)]
@@ -67,10 +69,15 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
-    /// The profile in `data_dir`, its LAN listener on `lan_listen`.
+    /// The profile in `data_dir`, its LAN listener on `lan_listen`. The
+    /// mock BLE bridge, which no friend reaches, takes any free loopback
+    /// port, as the CLI's start gives the program (ash ext.rs
+    /// `node_service_command`): never 7421, which Raven reserves.
     pub fn new(data_dir: impl Into<PathBuf>, lan_listen: impl Into<String>) -> Self {
+        let mut service = ServiceOptions::new(data_dir.into(), lan_listen);
+        service.ble_listen = ANY_LOOPBACK_PORT.into();
         Self {
-            service: ServiceOptions::new(data_dir.into(), lan_listen),
+            service,
             workers: DEFAULT_WORKERS,
         }
     }
@@ -570,4 +577,21 @@ fn block_on_small<F: std::future::Future>(f: F) -> Result<F::Output, String> {
         .build()
         .map(|rt| rt.block_on(f))
         .map_err(|e| format!("no runtime for the wait: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The node inside an app binds no port Raven reserves (7420-7427): its
+    /// mock BLE bridge, which no friend reaches, takes any free loopback
+    /// port, as the CLI's start gives the program (ash ext.rs
+    /// `node_service_command`).
+    #[test]
+    fn the_embedded_node_takes_no_reserved_port() {
+        let config = NodeConfig::new("/nonexistent/profile", "127.0.0.1:0");
+        let ble: std::net::SocketAddr = config.service.ble_listen.parse().unwrap();
+        assert!(ble.ip().is_loopback(), "{ble}");
+        assert_eq!(ble.port(), 0, "{ble}");
+    }
 }
