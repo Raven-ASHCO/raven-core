@@ -774,6 +774,7 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
     // Only a local contact leaves the pre-auth caps for a slot a newcomer cannot
     // displace: a bound RLB1 offer proves possession of *a* key, and anyone can
     // self-sign a bundle (see `lan_direct::handle_inbound`).
+    let mut seen = SeenLater::default();
     if trusted {
         slot.authenticated();
         // M0: its link authenticated its static (before the dial-back),
@@ -783,9 +784,9 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
                 .record(&data_dir, &identity, remote_ed, remote_static, None)
                 .await;
         }
-        // A contact that reaches us is online now: retry what we owe it.
-        crate::outbox::peer_seen(&remote_ed);
-        crate::custody::peer_seen(&remote_ed);
+        // A contact that reaches us is online now: retry what we owe it,
+        // at its first frame, or after the link if it carries none (T13 e).
+        seen.contact = Some(remote_ed);
         // Over Tor: our onion service is reachable (`raven status`), and
         // Tor links with this friend work (T8: the outbox tries it again
         // soon when it goes away for a moment).
@@ -859,6 +860,8 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
             }
             continue;
         }
+        // A frame for us: the contact is here for more than a check.
+        seen.now();
         // A custody handoff FORWARD left here is handed on at once (P5.21).
         let handoff = raven_core::friend_custody::is_handoff_request(&frame);
         let close_before_ack = lab_close_before_ack(&frame);
@@ -1359,6 +1362,74 @@ where
     // Its verified hello's link features: its capability floor (P6.29).
     hints.note_features();
     exchange_frames(&mut stream, &mut transport, frames, &mut hints, progress).await
+}
+
+/// A contact's authenticated link that carried no frame wakes what waits
+/// for it this long after the link closed ([`SeenLater`]).
+const SEEN_AFTER_EMPTY_LINK: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+thread_local! {
+    /// [`contact_reached_us`] calls on this thread (a `#[tokio::test]` runs
+    /// its tasks on it).
+    static INBOUND_WAKES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// An authenticated contact reached us: it is online, so the outbox dials
+/// back what it owes it and custody looks at it ([`crate::outbox::peer_seen`],
+/// [`crate::custody::peer_seen`]).
+fn contact_reached_us(contact: &[u8; 32]) {
+    #[cfg(test)]
+    INBOUND_WAKES.with(|n| n.set(n.get() + 1));
+    crate::outbox::peer_seen(contact);
+    crate::custody::peer_seen(contact);
+}
+
+/// When an authenticated inbound link wakes what waits for its contact
+/// ([`contact_reached_us`]): at its first frame for us, or, when it carries
+/// none, [`SEEN_AFTER_EMPTY_LINK`] after it closed (T13 e, Tor messaging
+/// audit 2026-11). A link without frames is mostly a friend's send check,
+/// and its message link follows at once: a dial-back right at the check
+/// crossed it, both sides dialling each other at the same moment, and the
+/// message link brings what the friend has anyway. A link of route hints
+/// only, a renewal or update probe waits the same few seconds.
+#[derive(Default)]
+struct SeenLater {
+    contact: Option<[u8; 32]>,
+}
+
+impl SeenLater {
+    /// The link carries a frame: now.
+    fn now(&mut self) {
+        if let Some(contact) = self.contact.take() {
+            contact_reached_us(&contact);
+        }
+    }
+}
+
+impl Drop for SeenLater {
+    /// The link ended without a frame (or with an error before one).
+    fn drop(&mut self) {
+        let Some(contact) = self.contact.take() else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    tokio::time::sleep(SEEN_AFTER_EMPTY_LINK).await;
+                    contact_reached_us(&contact);
+                });
+            }
+            Err(_) => contact_reached_us(&contact),
+        }
+    }
+}
+
+/// How often an inbound link on this thread woke what waits for its
+/// contact ([`contact_reached_us`]).
+#[cfg(test)]
+pub(crate) fn inbound_wakes_for_test() -> u32 {
+    INBOUND_WAKES.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -2623,6 +2694,69 @@ mod tests {
             crate::renewal::queued_for_test(&dialer.public_key_bytes()),
             "the listener queued the contact that reached it"
         );
+    }
+
+    /// One dial from `a_dir` of `frames` to `responder`, served by
+    /// `b_dir`'s listener over an in-memory link, until both ends ended.
+    async fn one_link(a_dir: &Path, b_dir: &Path, responder: &Arc<Identity>, frames: &[Vec<u8>]) {
+        let (client, server_side) = tokio::io::duplex(1 << 18);
+        let (data_dir, resp) = (b_dir.to_path_buf(), responder.clone());
+        let server = tokio::spawn(async move {
+            let mut slot = test_slot();
+            serve_inbound(data_dir, resp, server_side, PRODUCTION_LIMITS, &mut slot).await
+        });
+        let mut stream = Some(client);
+        let mut progress = DialProgress::new("INTERNET", FAST);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(20),
+            dial_session_on(
+                INTERNET_LINK,
+                a_dir,
+                || {
+                    let s = stream.take();
+                    async move { s.ok_or_else(|| "one stream only".to_string()) }
+                },
+                &responder.public_key_bytes(),
+                frames,
+                None,
+                &mut progress,
+            ),
+        )
+        .await
+        .expect("the dial ends");
+        let _ = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the listener ends");
+    }
+
+    /// T13 (e) (Tor messaging audit 2026-11): a friend's send check (its
+    /// link without frames) woke our outbox's dial-back and the custody
+    /// kick the moment it authenticated, so our dial crossed the message
+    /// link the friend opens right after it, and both sides dialled each
+    /// other at once. A link that carries no frame now wakes them 5 s after
+    /// it closed; one that carries a frame, at its first frame, as before.
+    #[tokio::test]
+    async fn a_link_without_frames_wakes_the_dial_back_only_after_it_closed() {
+        if !lab_backend_available() {
+            return;
+        }
+        let (a_dir, b_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let dialer = raven_core::load_or_create_identity(a_dir.path()).unwrap().0;
+        let responder = Arc::new(bob());
+        write_contacts(b_dir.path(), &[&dialer]);
+        write_contacts(a_dir.path(), &[&responder]);
+        let before = inbound_wakes_for_test();
+        one_link(a_dir.path(), b_dir.path(), &responder, &[]).await;
+        assert_eq!(
+            inbound_wakes_for_test() - before,
+            0,
+            "neither while the link ran nor when it closed"
+        );
+        tokio::time::sleep(SEEN_AFTER_EMPTY_LINK + Duration::from_millis(500)).await;
+        assert_eq!(inbound_wakes_for_test() - before, 1, "after it closed");
+        let junk = b"not an envelope".to_vec();
+        one_link(a_dir.path(), b_dir.path(), &responder, &[junk]).await;
+        assert_eq!(inbound_wakes_for_test() - before, 2, "at its first frame");
     }
 
     /// A send's Tor check (a dial without frames over the onion link) never
