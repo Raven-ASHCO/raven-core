@@ -108,9 +108,11 @@ and Neighbour"); and `NetworkStatus.tor.percent` is Tor's start percentage
 (release builds too).
 
 `NodeStatus` gains `embedded: true`, `paused`, and `state` `paused` or
-`mail_check`. While paused, `node.start` and a send are refused (the
-detail starts with `PAUSED`): such a message is `failed` with nothing
-written, and `messages.retry` sends it once the app is open again. `node.stop` stops the node in process (never a
+`mail_check`. While paused, `node.start` is refused (the detail starts
+with `PAUSED`). A send whose turn comes while paused, or while Lock v2
+holds the profile, is held back: it stays `sending` with nothing dialled
+or written, and goes when `node.resume` starts the node again (or at the
+unlock). `node.stop` stops the node in process (never a
 signal: its pid is the app's own).
 
 ## 3. The app's lifecycle

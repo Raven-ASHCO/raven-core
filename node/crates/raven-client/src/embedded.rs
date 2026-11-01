@@ -130,6 +130,12 @@ pub(crate) fn state_word() -> &'static str {
     node::status().state.word()
 }
 
+/// `node.pause` holds `data_dir` and no node runs for it (the background
+/// node that keeps Bluetooth nearby takes sends: not paused for them).
+pub(crate) fn paused_for(data_dir: &Path) -> bool {
+    node::status().state == node::State::Paused && node::paused_for(data_dir)
+}
+
 pub(crate) fn check_mail(
     data_dir: &Path,
     listen: &str,

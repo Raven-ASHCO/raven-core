@@ -16,6 +16,9 @@
 //! next message delivered directly; A paused keeping Bluetooth nearby (the
 //! small background node) and resumed again.
 //!
+//! A send whose turn comes while A is paused (and then locked by Lock v2)
+//! waits and goes after the resume (and the unlock).
+//!
 //! `tor_in_process_bootstraps` (ignored: it needs the Tor network) runs
 //! real Arti in an engine's process until Tor is ready.
 
@@ -24,7 +27,7 @@ mod common;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use raven_client::Client;
@@ -279,6 +282,14 @@ impl Peer {
     }
 }
 
+/// One test at a time: each runs its node in this process (one per
+/// process) and sets the process's lab switches.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// This process as an embedded engine with no raven-node program to find.
 fn embedded_env() {
     common::lab_env();
@@ -312,6 +323,7 @@ fn embedded_peer_process() {
 
 #[test]
 fn embedded_engines_end_to_end() {
+    let _one = one_at_a_time();
     if !cfg!(debug_assertions) {
         eprintln!("skipped: a release engine reads no lab switch");
         return;
@@ -525,6 +537,131 @@ fn embedded_engines_end_to_end() {
     let stopped = a.ok("node.stop", json!({}));
     assert_eq!(stopped["stop"], "stopped", "{stopped}");
     assert_eq!(stopped["running"], false, "{stopped}");
+}
+
+/// A and B on the local network, nothing else (no Tor, no custody): A in
+/// this process, B a peer process; friends, nodes started, a first message
+/// A to B delivered. `lab`: more lab switches, set for both.
+fn two_on_lan(root: &Path, lab: &[&str]) -> (Peer, Peer) {
+    embedded_env();
+    std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    // No Tor anywhere: its gate is open in this build.
+    std::env::set_var("RAVEN_LAB_TOR", "0");
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK");
+    for switch in lab {
+        std::env::set_var(switch, "1");
+    }
+    let dir = |n: &str| root.join(n);
+    let b = Peer::new("B", dir("b"), Box::new(Remote::spawn(&dir("b"), &[])));
+    let a = Peer::new("A", dir("a"), Box::new(Client::with_data_dir(dir("a"))));
+    a.befriend(&b);
+    b.befriend(&a);
+    let (la, lb) = (a.start(), b.start());
+    a.set_lan(&b, &lb);
+    b.set_lan(&a, &la);
+    let id = a.send(&b, "hello before the pause");
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}");
+    (a, b)
+}
+
+/// Stops this process's node when the test ends, failed or not: the next
+/// test starts one of its own.
+struct StopsNode<'a>(&'a Peer);
+
+impl Drop for StopsNode<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.raw("node.stop", json!({}));
+    }
+}
+
+/// The message `id` to `friend`, as `messages.history` shows it now.
+fn message(a: &Peer, friend: &Peer, id: &str) -> Value {
+    let history = a.ok(
+        "messages.history",
+        json!({"address": friend.address(), "limit": 50}),
+    );
+    history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == id)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// The iPhone app leaves the foreground with a send still queued (audit
+/// T4): the send's turn comes while `node.pause` holds the node. It is not
+/// refused ("Not sent" with PAUSED in its details, nothing dialled): it
+/// stays Sending, nothing is written for it, and it goes out once
+/// `node.resume` starts the node again.
+#[test]
+fn a_send_whose_turn_comes_while_paused_goes_out_after_the_resume() {
+    let _one = one_at_a_time();
+    if !cfg!(debug_assertions) {
+        eprintln!("skipped: a release engine reads no lab switch");
+        return;
+    }
+    let root = common::short_dir();
+    let (a, b) = two_on_lan(root.path(), &[]);
+    let _stops = StopsNode(&a);
+
+    a.ok("node.pause", json!({}));
+    let id = a.send(&b, "written as the app left");
+    // Its turn came at once, while paused; give a refusal time to show.
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        let m = message(&a, &b, &id);
+        assert_eq!(m["state"], "sending", "{m}\n{}", a.log());
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(!b.has_incoming(&a, "written as the app left"));
+
+    a.ok("node.resume", json!({}));
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}\n{}", a.log());
+    b.wait_incoming(&a, "written as the app left", Duration::from_secs(30));
+}
+
+/// The same with Lock v2 (the iPhone app's lock set to "now", audit T4):
+/// a send held back by the pause is still held when the node starts again
+/// locked (it is not refused as locked: "Not sent"), and it goes out after
+/// the unlock.
+#[test]
+fn a_send_held_by_the_pause_and_the_lock_goes_out_after_the_unlock() {
+    let _one = one_at_a_time();
+    if !cfg!(debug_assertions) {
+        eprintln!("skipped: a release engine reads no lab switch");
+        return;
+    }
+    let root = common::short_dir();
+    let lock_switch = raven_core::security_gate::LAB_LOCAL_PROTECTION;
+    struct Unset(&'static str);
+    impl Drop for Unset {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+    let _unset = Unset(lock_switch);
+    let (a, b) = two_on_lan(root.path(), &[lock_switch]);
+    let _stops = StopsNode(&a);
+
+    a.ok("node.pause", json!({}));
+    let id = a.send(&b, "written as the lock came down");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(message(&a, &b, &id)["state"], "sending");
+    // The app locks (Lock v2) in the background, then comes back: the
+    // node starts locked, and the send's turn comes again while locked.
+    assert_eq!(a.ok("lock.now", json!({}))["locked"], true);
+    let st = a.ok("node.resume", json!({}));
+    assert_eq!(st["running"], true, "{st}");
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(!b.has_incoming(&a, "written as the lock came down"));
+
+    assert_eq!(a.ok("lock.unlock", json!({}))["locked"], false);
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}\n{}", a.log());
+    b.wait_incoming(&a, "written as the lock came down", Duration::from_secs(30));
 }
 
 /// Real Arti inside an engine's process (feature `tor-embedded`) until Tor

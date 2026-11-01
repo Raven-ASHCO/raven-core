@@ -447,6 +447,12 @@ impl Inner {
         lock(&self.keys).locked
     }
 
+    /// Tests: Lock v2 holds the profile, whatever the gate of this build.
+    #[cfg(test)]
+    pub(crate) fn hold_locked_for_test(&self) {
+        lock(&self.keys).locked = true;
+    }
+
     /// Lock v2 as the engine just learned it: from `lock.now`, `lock.unlock`
     /// or `lock.state`, or from the node's Status (the watcher's beat, a
     /// node op), so a lock or an unlock made elsewhere (`raven lock`, the

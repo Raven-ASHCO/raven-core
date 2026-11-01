@@ -323,6 +323,26 @@ pub fn never_reached(outcome: &str) -> bool {
     )
 }
 
+/// A send refused for a reason that ends by itself when the app is back,
+/// with nothing dialled or written: the app's own node is paused
+/// (raven-node's embedded `PAUSED_TEXT`, the iPhone app in the background)
+/// or Lock v2 holds the profile (`LOCKED_V2_TEXT`). Such a send waits for
+/// the resume or the unlock instead of ending "Not sent".
+pub fn held_back(text: &str) -> bool {
+    text.contains(raven_core::privacy::LOCKED_V2_TEXT) || paused(text)
+}
+
+#[cfg(feature = "embedded-node")]
+fn paused(text: &str) -> bool {
+    text.contains(raven_node::embedded::PAUSED_TEXT)
+}
+
+/// No node runs in this process without the feature: none is paused.
+#[cfg(not(feature = "embedded-node"))]
+fn paused(_: &str) -> bool {
+    false
+}
+
 /// Why raven-node holds a message, from its outbox `last_error_code`.
 pub fn explain_outbox_code(code: &str, who: &str) -> Plain {
     plain(outbox_code_words(code.trim()), who, code)
@@ -602,6 +622,35 @@ pub fn fill(template: &str, who: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A send refused by this device's own pause or Lock v2 waits (audit
+    /// T4), whether the refusal came at the node's start or from the CLI's
+    /// send; every other refusal still ends the send.
+    #[test]
+    fn only_the_pause_and_lock_v2_hold_a_send_back() {
+        let locked = format!(
+            "NOT SENT, nothing queued: {}",
+            raven_core::privacy::LOCKED_V2_TEXT
+        );
+        assert!(held_back(&locked), "{locked}");
+        #[cfg(feature = "embedded-node")]
+        {
+            let paused = raven_node::embedded::PAUSED_TEXT;
+            assert!(held_back(paused));
+            let in_send = format!(
+                "local raven-node service is not running and could not be started: {paused}"
+            );
+            assert!(held_back(&in_send), "{in_send}");
+        }
+        for ended in [
+            bridge::LOCKED_TEXT,
+            "NOT SENT, nothing queued: no secure connection with this contact yet",
+            "local raven-node service is not running and could not be started: the node did \
+             not come up within 30 s",
+        ] {
+            assert!(!held_back(ended), "{ended}");
+        }
+    }
 
     #[test]
     fn outcome_prefixes_say_where_a_message_stands() {

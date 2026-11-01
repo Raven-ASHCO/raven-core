@@ -460,7 +460,12 @@ impl Inner {
         };
         self.after_node_start();
         match started {
-            Ok(after) => Ok(self.status_value(&after, false)),
+            Ok(after) => {
+                // Sends held back while it was paused go now (or wait on
+                // for the unlock).
+                self.release_held_sends();
+                Ok(self.status_value(&after, false))
+            }
             Err(why) => Err(start_error(&why)),
         }
     }
@@ -521,8 +526,9 @@ impl Inner {
 
     /// `node.pause` (the app goes to the background; embedded node only):
     /// the node stops cleanly (listeners closed, Tor's circuits gone) and
-    /// stays stopped until `node.resume`; a send or `node.start` meanwhile
-    /// is refused. Extra field `was_running`.
+    /// stays stopped until `node.resume`; a `node.start` meanwhile is
+    /// refused, and a send is held back until the resume (messages.rs
+    /// `release_held_sends`). Extra field `was_running`.
     pub(crate) fn node_pause(&self, args: &Args) -> OpResult {
         let keep = match args.opt_str("nearby")? {
             None | Some("stop") => false,
@@ -693,6 +699,9 @@ impl Inner {
         self.note_probe(&p, false);
         // An unlock made elsewhere: the identity loads again here.
         self.reload_after_unlock();
+        // Sends held back by a pause or a lock that ended (a resume or an
+        // unlock seen only now) go again.
+        self.release_held_sends();
         // The profile as an operation opens it (profile.rs): nothing is read
         // while it is closed (or locked: no identity then), and a key
         // raven-node's start made necessary is loaded.
@@ -701,6 +710,19 @@ impl Inner {
             self.refresh_groups();
         }
     }
+}
+
+/// `node.pause` holds this profile's own node (embedded only): a send
+/// meanwhile is held back until `node.resume`.
+pub(crate) fn paused_here(inner: &Inner) -> bool {
+    #[cfg(feature = "embedded-node")]
+    if embedded_mode() {
+        return inner
+            .data_dir()
+            .is_ok_and(|dir| crate::embedded::paused_for(dir));
+    }
+    let _ = inner;
+    false
 }
 
 /// The watcher: about once a second while someone polls.
