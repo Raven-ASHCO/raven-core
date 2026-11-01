@@ -6761,6 +6761,23 @@ mod send_path_tests {
         assert!(send_lock_waiting_text("Bob", PEER_SEND_LOCK_WAIT).contains("at most 120s"));
     }
 
+    /// T13 (d), Tor messaging audit 2026-11: a send that gave up waiting for
+    /// the friend's send lock is another send in progress ("wait a
+    /// moment"), never "Raven couldn't send this message" (the engine
+    /// showed Failed).
+    #[test]
+    fn a_send_lock_timeout_is_a_send_in_progress() {
+        use super::super::ext::{classify_cause, Cause};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = [9u8; 32];
+        let _held = PeerSendLock::acquire_within(dir.path(), &peer, Duration::ZERO).unwrap();
+        let err = match acquire_send_lock_within(dir.path(), &peer, Duration::from_millis(50)) {
+            Ok(_) => panic!("lock must be held"),
+            Err(e) => e,
+        };
+        assert_eq!(classify_cause(&err), Cause::SendInProgress, "{err}");
+    }
+
     #[test]
     fn send_failure_line_distinguishes_queued_unconfirmed_and_refused() {
         let ctx = SendCtx {

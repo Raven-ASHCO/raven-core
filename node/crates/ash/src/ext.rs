@@ -1832,7 +1832,12 @@ pub(super) fn classify_cause(raw: &str) -> Cause {
         Cause::TooLarge
     } else if has(&["violates the bounded application policy"]) {
         Cause::BadCharacters
-    } else if has(&["earlier outbound object must be retried"]) {
+    } else if has(&[
+        "earlier outbound object must be retried",
+        // T13 (d): the send lock stayed taken past the send's wait
+        // (`pair_init_lab::acquire_send_lock_within`): another send runs.
+        "was still running after",
+    ]) {
         Cause::SendInProgress
     } else if has(&["message is empty"]) {
         Cause::EmptyMessage
