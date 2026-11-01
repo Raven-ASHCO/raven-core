@@ -191,10 +191,11 @@ impl<'a> SendLockHold<'a> {
 /// memory); an older or busy one: the send probes as before.
 const CONTACT_REACH_WAIT: Duration = Duration::from_millis(700);
 
-/// How long the RLB1 probe may take when the message can be queued anyway (a
-/// confirmed session exists): `raven send` then ends within about 10 s and
-/// raven-node's outbox keeps trying. A first message still waits for the
-/// full dial, since it cannot be queued.
+/// How long the RLB1 probe may take when the message can wait anyway (a
+/// confirmed session exists to queue it under, or the long message horizon
+/// parks it): `raven send` then ends within about 10 s and raven-node's
+/// outbox keeps trying. A first message that can do neither still waits for
+/// the full dial.
 const QUEUEABLE_PROBE_TIMEOUT: Duration = Duration::from_secs(7);
 /// The IPC wait of every other dial (just above the daemon's 45 s dial cap).
 const DIAL_IPC_TIMEOUT: Duration = Duration::from_secs(50);
@@ -203,8 +204,9 @@ const DIAL_IPC_TIMEOUT: Duration = Duration::from_secs(50);
 const FIRST_MESSAGE_PROBES: usize = 3;
 const FIRST_MESSAGE_PROBE_PAUSE: Duration = Duration::from_secs(1);
 
-/// Whether a first message (`first_message`: no session to queue it under,
-/// so a failed probe is NOT SENT) probes its routes again after `errors`:
+/// Whether a message with no session to queue it under (`first_message`: a
+/// failed probe is NOT SENT, or it is parked) probes its routes again after
+/// `errors`:
 /// only when one of them shows that the friend's computer answered and then
 /// closed the link (it refused us for now, as a contact book still held
 /// while its key loads after a start or an unlock does, or the link closed
@@ -1764,8 +1766,14 @@ pub fn run_pair_init_and_send_routes(
         .leaving_out(&ctx.unrecorded);
     // With a confirmed session the message can be queued for raven-node's
     // outbox whatever the probe says, so an unreachable peer costs ~10 s here,
-    // not a full dial timeout. A first message needs the probe's answer.
-    let first_message = !matches!(offline_send_target(data_dir, &peer_pub), Ok(Some(_)));
+    // not a full dial timeout. Without one, with the long message horizon on,
+    // it can wait too: it is parked ([`park_new_message`]) and raven-node sets
+    // up the connection (T10, Tor messaging audit 2026-11: after a 24 h
+    // session ended every send waited out Tor's full check and ignored what
+    // raven-node saw lately). Only a message that can do neither needs the
+    // probe's answer.
+    let can_queue = matches!(offline_send_target(data_dir, &peer_pub), Ok(Some(_)));
+    let first_message = !can_queue && park_device(data_dir, &peer_pub).is_none();
     let probe_timeout = if first_message {
         DIAL_IPC_TIMEOUT
     } else {
@@ -1848,7 +1856,7 @@ pub fn run_pair_init_and_send_routes(
             break;
         }
         if round > 0 {
-            if answered.is_some() || !probe_again(first_message, &probe_errors) {
+            if answered.is_some() || !probe_again(!can_queue, &probe_errors) {
                 break;
             }
             std::thread::sleep(FIRST_MESSAGE_PROBE_PAUSE);
@@ -2001,11 +2009,7 @@ pub fn run_pair_init_and_send_routes(
     let reset_live = session_reset_live_enabled();
     let cert_renewed =
         reset_live && reset_prepass(data_dir, id, &peer_bundle, &route, peer_pub_hex, ctx);
-    let existing = if reset_live {
-        find_sendable_peer_session(data_dir, &peer_bundle.cert.device_ed_pub)?
-    } else {
-        find_confirmed_peer_session(data_dir, &peer_bundle.cert.device_ed_pub)?
-    };
+    let existing = session_for_new_message(data_dir, &peer_bundle.cert.device_ed_pub)?;
     let record_key = if let Some(existing) = existing {
         existing
     } else {
@@ -2033,35 +2037,38 @@ pub fn run_pair_init_and_send_routes(
         // Field test E3 round 2 (a message LOST): Tor answered the check,
         // then this PairInit over Tor timed out, and the message was NOT
         // SENT. One that can wait is parked instead ([`pair_init_lost`]).
-        let replies =
-            match ipc_carrier_dial_patient(data_dir, carrier, peer, peer_pub_hex, &[init_frame]) {
-                Ok(replies) => replies,
-                Err(e) => {
-                    return pair_init_lost(
-                        data_dir, id, &peer_pub, text, carrier, &e, ctx, &handoff,
-                    )
+        // T10 (2), Tor messaging audit 2026-11: a PairInit whose
+        // PairResponse did not come back (a dial error that is not the
+        // friend refusing, or no PairResponse among the replies) is sent
+        // once more, the same bytes, within PAIR_INIT_AGAIN_WITHIN: the
+        // friend answers an exact replay from its cache (PairInit §6). A
+        // lost PairResponse left the friend holding a session this side
+        // never finished, and the friend's messages under it were refused.
+        let started = Instant::now();
+        let dial_init = || {
+            pair_response_of(
+                ipc_carrier_dial_patient(
+                    data_dir,
+                    carrier,
+                    peer,
+                    peer_pub_hex,
+                    std::slice::from_ref(&init_frame),
+                ),
+                carrier,
+            )
+        };
+        let response = match dial_init() {
+            Err(e) if !is_peer_refusal(&e) && started.elapsed() < PAIR_INIT_AGAIN_WITHIN => {
+                dial_init()
+            }
+            other => other,
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                return pair_init_lost(data_dir, id, &peer_pub, text, carrier, &e, ctx, &handoff)
                     .map(|()| route.clone())
-                }
-            };
-        let Some(response) = first_pair_response(&replies) else {
-            let kinds: Vec<String> = replies
-                .iter()
-                .map(|f| {
-                    if parse_peer_offer(f).is_ok() {
-                        "rlb1".into()
-                    } else {
-                        format!("{:?}", classify_packed_envelope(f))
-                    }
-                })
-                .collect();
-            let e = format!(
-                "WAITING_FOR_PAIR_RESPONSE: no PairResponse on {} ({} frames: {})",
-                carrier.label(),
-                replies.len(),
-                kinds.join(",")
-            );
-            return pair_init_lost(data_dir, id, &peer_pub, text, carrier, &e, ctx, &handoff)
-                .map(|()| route.clone());
+            }
         };
         let mut store = IndexedSessionStore::open(data_dir).map_err(|e| e.redacted_display())?;
         let now = now_ms();
@@ -2204,6 +2211,37 @@ pub fn run_pair_init_and_send_routes(
             None => Err(error),
         },
     }
+}
+
+/// A PairInit that failed within this is sent once more (T10 2): the
+/// second try of a Tor message dial's own (§9).
+const PAIR_INIT_AGAIN_WITHIN: Duration = ONION_SECOND_TRY_WITHIN;
+
+/// The PairResponse among a PairInit dial's `replies`, or why there is none
+/// (the dial's error, or `WAITING_FOR_PAIR_RESPONSE` with what came back).
+fn pair_response_of(
+    replies: Result<Vec<Vec<u8>>, String>,
+    carrier: DialCarrier,
+) -> Result<raven_core::PairResponse, String> {
+    let replies = replies?;
+    first_pair_response(&replies).ok_or_else(|| {
+        let kinds: Vec<String> = replies
+            .iter()
+            .map(|f| {
+                if parse_peer_offer(f).is_ok() {
+                    "rlb1".into()
+                } else {
+                    format!("{:?}", classify_packed_envelope(f))
+                }
+            })
+            .collect();
+        format!(
+            "WAITING_FOR_PAIR_RESPONSE: no PairResponse on {} ({} frames: {})",
+            carrier.label(),
+            replies.len(),
+            kinds.join(",")
+        )
+    })
 }
 
 /// Refusal for a LAN send to an unverified contact at an address that is not
@@ -2802,15 +2840,33 @@ fn offline_send_target(
     if bundle.cert.user_ed_pub != *peer_pub && bundle.cert.device_ed_pub != *peer_pub {
         return Ok(None);
     }
-    let found = if session_reset_live_enabled() {
-        find_sendable_peer_session(data_dir, &bundle.cert.device_ed_pub)?
-    } else {
-        find_confirmed_peer_session(data_dir, &bundle.cert.device_ed_pub)?
-    };
-    let Some(record_key) = found else {
+    let Some(record_key) = session_for_new_message(data_dir, &bundle.cert.device_ed_pub)? else {
         return Ok(None);
     };
     Ok(Some((bundle.cert, record_key)))
+}
+
+/// The newest session a new message to `device` may be sealed under:
+/// confirmed (and, with session reset live, not retired), and still live
+/// [`raven_core::horizon::HORIZON_TARGET_MIN_REMAINING_MS`] from now (T10 4,
+/// Tor messaging audit 2026-11: a message sealed in a session's last
+/// minutes was refused once the link and the clocks took longer, and the
+/// end has no margin of its own). A session about to end takes none: the
+/// send sets up a new one, or the message waits for one.
+fn session_for_new_message(
+    data_dir: &Path,
+    device: &[u8; 32],
+) -> Result<Option<IndexedSessionRecordKey>, String> {
+    let mut store = IndexedSessionStore::open(data_dir).map_err(|e| e.redacted_display())?;
+    let live_until = now_ms().saturating_add(raven_core::horizon::HORIZON_TARGET_MIN_REMAINING_MS);
+    let found = if session_reset_live_enabled() {
+        store
+            .find_sendable_sessions_for_peer_at(device, live_until)
+            .map(|keys| keys.into_iter().next())
+    } else {
+        store.find_confirmed_session_for_peer_at(device, live_until)
+    };
+    found.map_err(|e| e.redacted_display())
 }
 
 /// Confirmed sessions with the contact exist, but every one was retired by a
@@ -3028,11 +3084,21 @@ fn park_new_message(
     ctx: &SendCtx,
     handoff: &OutboxHandoff<'_>,
 ) -> Option<Result<(), String>> {
+    let device = park_device(data_dir, peer_pub)?;
+    Some(park_new_message_for(
+        data_dir, id, &device, text, carrier, probe_err, ctx, handoff,
+    ))
+}
+
+/// The device a message to `peer_pub` with no session to queue it under is
+/// parked for ([`park_new_message`]): the contact's cached certificate's
+/// (checked against the contact), else the contact's own key, a primary
+/// device's. `None`: it cannot be parked: the long message horizon is off,
+/// the key is no current contact, or its identity or lineage is revoked.
+fn park_device(data_dir: &Path, peer_pub: &[u8; 32]) -> Option<[u8; 32]> {
     if !raven_core::horizon::horizon_live_enabled() {
         return None;
     }
-    // The contact's device key: its cached certificate's (checked against
-    // the contact), else the contact's own key, a primary device's.
     let bundle = load_cached_peer_bundle(data_dir, peer_pub)
         .ok()
         .flatten()
@@ -3050,12 +3116,7 @@ fn park_new_message(
         || bundle
             .as_ref()
             .is_some_and(|b| peer_lineage_denied(data_dir, &b.cert).unwrap_or(true));
-    if revoked {
-        return None;
-    }
-    Some(park_new_message_for(
-        data_dir, id, &device, text, carrier, probe_err, ctx, handoff,
-    ))
+    (!revoked).then_some(device)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3891,6 +3952,20 @@ fn send_indexed_text(
                     // Sealed under a session the (reachable) peer refuses while a
                     // newer one exists: it can never be accepted, and left alone it
                     // would block every later send until its envelope expires.
+                    // With the long horizon on it waits instead (T10 4): parked,
+                    // it is sealed again into a current session (the next
+                    // send's, or raven-node's horizon step) until its deadline.
+                    if let Ok(Some(_)) = raven_core::outbox::park_expired_message(
+                        data_dir,
+                        &mut store,
+                        recipient,
+                        &earlier_row.message_id,
+                        Some(&earlier_row.session_id),
+                        never_left,
+                        now,
+                    ) {
+                        continue;
+                    }
                     match give_up_row(
                         data_dir,
                         &mut store,
@@ -6124,6 +6199,13 @@ mod send_path_tests {
         /// For each dial that carried a message: was the sender's per-peer
         /// send lock free while it ran?
         lock_free: std::sync::Mutex<Vec<bool>>,
+        /// Frame-less dials (a send's check) the peer saw.
+        probes: AtomicUsize,
+        /// PairInits the peer takes whose PairResponse never comes back.
+        drop_pair_responses: AtomicUsize,
+        /// raven-node's `ContactReach` says the LAN route failed 3 s ago
+        /// (else it is an older raven-node that does not know it).
+        reach_failed: std::sync::atomic::AtomicBool,
     }
 
     impl Faults {
@@ -6350,6 +6432,21 @@ mod send_path_tests {
                     .write_all(&encode_response(&IpcResponse::Pong { v: IPC_VERSION }).unwrap());
                 return;
             }
+            Ok(IpcRequest::ContactReach { .. }) if faults.reach_failed.load(Ordering::SeqCst) => {
+                let answer = IpcResponse::ContactReach {
+                    v: IPC_VERSION,
+                    lan_seen_s: None,
+                    failed: vec![raven_core::ipc::RouteFailure {
+                        carrier: "lan_dial".into(),
+                        route: 0,
+                        age_s: 3,
+                        error: "lan connect: cannot connect to <address> (timed out)".into(),
+                    }],
+                    tor_busy: false,
+                };
+                let _ = stream.write_all(&encode_response(&answer).unwrap());
+                return;
+            }
             Ok(IpcRequest::LanDial { frames_b64, .. }) => ("LAN", frames_b64),
             Ok(IpcRequest::OnionDial { frames_b64, .. }) => ("ONION", frames_b64),
             _ => ("LAN", Vec::new()),
@@ -6385,6 +6482,15 @@ mod send_path_tests {
                     )
             };
             let messages = frames.iter().filter(|f| is_chat(f)).count();
+            if frames.is_empty() {
+                faults.probes.fetch_add(1, Ordering::SeqCst);
+            }
+            let is_pair_init = |f: &[u8]| {
+                matches!(
+                    classify_packed_envelope(f),
+                    PairInitOobClassify::PairInit(_)
+                )
+            };
             if messages > 0 {
                 faults.message_dials.lock().unwrap().push(frames.len());
                 let free =
@@ -6419,6 +6525,9 @@ mod send_path_tests {
                     }
                     match dispatch_frame(peer.b_dir, peer.bob, peer.a_bundle, peer.alice_pub, f) {
                         Ok(more) if is_chat(f) && fire(&faults.drop_acks) => drop(more),
+                        Ok(more) if is_pair_init(f) && fire(&faults.drop_pair_responses) => {
+                            drop(more)
+                        }
                         Ok(more) => replies.extend(more.iter().map(|r| b64(r))),
                         Err(_) => {
                             // The daemon closes on a dispatch error: the dialer
@@ -6638,6 +6747,71 @@ mod send_path_tests {
         assert_eq!(rig.bob_inbox().len(), 17);
     }
 
+    /// T10 (Tor messaging audit, 2026-11): once the 24 h session ended,
+    /// every send took the first-message path, as if the message could not
+    /// wait: Tor's full check (85 s), and what raven-node saw lately was
+    /// ignored. With the long horizon on it can wait (it is parked): a
+    /// send whose every way failed moments ago parks it at once instead of
+    /// dialling again.
+    #[test]
+    fn after_its_session_ended_a_send_honours_what_raven_node_saw_lately() {
+        let _horizon = HorizonOn::set(true);
+        // Long enough for the PairInit on a loaded machine.
+        raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(Some(8_000));
+        let rig = Rig::new(0xB0);
+        rig.send("hello").unwrap();
+        raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(None);
+        let ended = std::time::Instant::now() + Duration::from_secs(20);
+        while rig.alice_sessions() > 0 {
+            assert!(std::time::Instant::now() < ended, "the session never ended");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        rig.set_mode(DOWN);
+        rig.faults.reach_failed.store(true, Ordering::SeqCst);
+        let probes = rig.faults.probes.load(Ordering::SeqCst);
+
+        let err = rig.send("after the end").unwrap_err();
+        assert!(err.starts_with(super::super::ext::QUEUED_PREFIX), "{err}");
+        assert!(err.contains("HORIZON_PARKED"), "{err}");
+        assert_eq!(
+            rig.faults.probes.load(Ordering::SeqCst),
+            probes,
+            "not dialled again"
+        );
+    }
+
+    /// T10 (2): the friend answered the check, the PairInit of the new
+    /// session went out, and its PairResponse was lost: the message was
+    /// parked, and the friend held a session this side never finished. The
+    /// same PairInit is sent once more (the friend answers an exact replay
+    /// from its cache), and the message goes out.
+    #[test]
+    fn a_lost_pair_response_is_asked_for_again_with_the_same_pair_init() {
+        let rig = Rig::new(0xB2);
+        rig.faults.drop_pair_responses.store(1, Ordering::SeqCst);
+        rig.send("hello")
+            .expect("delivered after the PairInit's replay");
+        assert_eq!(rig.alice_sessions(), 1);
+        assert_eq!(rig.bob_inbox(), vec!["hello"]);
+        assert_eq!(rig.faults.drop_pair_responses.load(Ordering::SeqCst), 0);
+    }
+
+    /// T10 (4): no margin at a session's end: a message sealed in its last
+    /// minutes was refused once the link and the clocks took longer. A
+    /// session with less than 10 minutes left takes no new message: the
+    /// send sets up a new one.
+    #[test]
+    fn a_session_about_to_end_takes_no_new_message() {
+        raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(Some(5 * 60_000));
+        let rig = Rig::new(0xB4);
+        rig.send("hello").unwrap();
+        raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(None);
+        assert_eq!(rig.alice_sessions(), 1);
+        rig.send("in its last minutes").unwrap();
+        assert_eq!(rig.alice_sessions(), 2, "a new session");
+        assert_eq!(rig.bob_inbox(), vec!["hello", "in its last minutes"]);
+    }
+
     /// The new message's dial with its earlier messages fits one IPC
     /// request (base64, the new message at its largest).
     #[test]
@@ -6747,12 +6921,11 @@ mod send_path_tests {
         raven_core::horizon::set_lab_horizon_for_this_thread(None);
     }
 
-    /// A row sealed under a session the reachable peer refuses, while a newer
-    /// confirmed session exists, can never be delivered: it is abandoned (marked
-    /// failed) instead of blocking every send until its envelope expires.
-    #[test]
-    fn row_on_a_superseded_session_that_the_peer_refuses_is_abandoned() {
-        let rig = Rig::new(0x84);
+    /// A rig whose "stuck on the old session" is queued under a session a
+    /// newer confirmed one (a re-pair) superseded, and whose peer refuses
+    /// that row's retry once (it lost that session).
+    fn superseded_rig(seed: u8) -> Rig {
+        let rig = Rig::new(seed);
         rig.send("hello").unwrap();
         rig.set_mode(DOWN);
         let queued = rig.send("stuck on the old session").unwrap_err();
@@ -6781,9 +6954,18 @@ mod send_path_tests {
                 .unwrap();
         }
         assert_eq!(rig.alice_sessions(), old_sessions + 1);
-        // The peer refuses the old row's retry once (it lost that session), then
-        // accepts the new message on the new session.
         rig.faults.refuse_messages.store(1, Ordering::SeqCst);
+        rig
+    }
+
+    /// A row sealed under a session the reachable peer refuses, while a newer
+    /// confirmed session exists, can never be delivered: without the long
+    /// horizon it is abandoned (marked failed) instead of blocking every
+    /// send until its envelope expires.
+    #[test]
+    fn row_on_a_superseded_session_that_the_peer_refuses_is_abandoned() {
+        let _horizon = HorizonOn::set(false);
+        let rig = superseded_rig(0x84);
         rig.send("on the new session")
             .expect("not blocked by the stale row");
         assert_eq!(rig.alice_pending(), 0);
@@ -6795,6 +6977,33 @@ mod send_path_tests {
             "{history:?}"
         );
         assert_eq!(rig.bob_inbox(), vec!["hello", "on the new session"]);
+    }
+
+    /// T10 (4), Tor messaging audit 2026-11: with the long horizon on, that
+    /// row waits instead (parked), and is sealed again into the current
+    /// session and delivered: it was marked failed ("send it again").
+    #[test]
+    fn row_on_a_superseded_session_that_the_peer_refuses_waits_with_the_horizon() {
+        let _horizon = HorizonOn::set(true);
+        let rig = superseded_rig(0x8e);
+        rig.send("on the new session")
+            .expect("not blocked by the stale row");
+        let history = rig.alice_history();
+        assert!(
+            !history.iter().any(|(_, state)| state == "failed"),
+            "{history:?}"
+        );
+        rig.send("later").unwrap();
+        assert_eq!(
+            rig.bob_inbox(),
+            vec![
+                "hello",
+                "later",
+                "on the new session",
+                "stuck on the old session"
+            ]
+        );
+        assert_eq!(rig.alice_pending(), 0);
     }
 
     /// C (ash side): a queued message whose ACK already came back another way
