@@ -618,6 +618,11 @@ struct Inner {
     /// When a sign that the contact is back last made what waits for it due
     /// ([`peer_back`], [`Inner::back_now`]).
     last_back_kick: HashMap<[u8; 32], Instant>,
+    /// A sign that the contact is back came while its attempt was in flight
+    /// (S7, Tor messaging audit 2026-11): what waits for it goes as soon as
+    /// that attempt ends, if it reached nobody ([`Inner::apply`]). Only ever
+    /// peers in flight.
+    back_after: HashSet<[u8; 32]>,
     /// When a contact's custody offer or announced custodians last made
     /// everything due ([`custodians_changed`]).
     last_custody_kick: Option<Instant>,
@@ -1558,9 +1563,12 @@ impl Inner {
     /// the dial-back window): what waits for it (objects or owed ACKs) is
     /// due now, its backoff started over under [`PEER_RESTART_COOLDOWN`], at
     /// most once per [`MIN_RETRY`] (not the custody fetch's once a minute).
-    /// Nothing while an attempt for it is in flight (that attempt is what
-    /// reached it, or ends soon) or while nothing waits for it. `true` when
-    /// it kicked.
+    /// Nothing while nothing waits for it. While an attempt for it is in
+    /// flight, nothing now: that attempt's own dial may be the sign (it
+    /// reached the contact), or it is still dialling a way that will not
+    /// answer (a Tor connect running out); kept for when it ends, and acted
+    /// on then if it reached nobody (S7, [`Self::apply`]). `true` when it
+    /// kicked.
     fn back_now(&mut self, peer: &[u8; 32], now: Instant) -> bool {
         let waits = self
             .entries
@@ -1571,7 +1579,11 @@ impl Inner {
             .last_back_kick
             .get(peer)
             .is_some_and(|t| now.saturating_duration_since(*t) < MIN_RETRY);
-        if !waits || recent || self.in_flight.contains(peer) {
+        if !waits || recent {
+            return false;
+        }
+        if self.in_flight.contains(peer) {
+            self.back_after.insert(*peer);
             return false;
         }
         self.last_back_kick.insert(*peer, now);
@@ -1967,6 +1979,9 @@ impl Inner {
     /// ([`Self::network_proven_now`]).
     fn apply(&mut self, peer: &[u8; 32], report: PeerReport, now: Instant, wall: u64) -> usize {
         self.in_flight.remove(peer);
+        // A sign that it is back came meanwhile (S7): acted on below, once
+        // this attempt's results are in, if the attempt reached nobody.
+        let back_meanwhile = self.back_after.remove(peer) && report.missed_silently();
         match report.lan_wakeable {
             Some(true) => {
                 self.lan_wakeable.insert(*peer);
@@ -2194,6 +2209,11 @@ impl Inner {
                     ack.next_due = ack.next_due.min(now);
                 }
             }
+        }
+        // The contact showed itself another way while this attempt dialled
+        // in vain (S7): what waits for it goes now.
+        if back_meanwhile {
+            self.back_now(peer, now);
         }
         // F5: Internet and p2p deliveries say nothing about the local network,
         // nor does a LAN one to a public or loopback address.
@@ -2489,6 +2509,28 @@ impl PeerReport {
                 Some(_) => None,
                 None => self.held.map(|code| ("held", code)),
             })
+    }
+
+    /// The attempt reached nobody, and its dials met silence: nobody
+    /// answered, no route, nothing listening, Tor could not reach the
+    /// contact or was not ready ([`Self::not_reached`]). Nothing in it was a
+    /// sign of the contact (S7: a dial of its own that reached the contact
+    /// wrote or was refused).
+    fn missed_silently(&self) -> bool {
+        matches!(
+            self.not_reached(),
+            Some((way, why)) if way != "held"
+                && matches!(
+                    why,
+                    code::NOT_REACHABLE
+                        | code::NO_ROUTE
+                        | code::NOT_LISTENING
+                        | code::ONION_UNREACHABLE
+                        | code::ONION_NOT_READY
+                        | code::NEARBY_NOT_IN_RANGE
+                        | code::NEARBY_BUSY
+                )
+        )
     }
 
     /// `raven-node outbox: delivered N (<carrier>[, <path>]); contact #ab12`,
@@ -6635,6 +6677,7 @@ impl Drop for RunningGuard {
         inner.in_flight.clear();
         inner.net_changed.clear();
         inner.clear_pins_after.clear();
+        inner.back_after.clear();
         drop(inner);
         // Its identity goes with it (a lock, Lock v2).
         *worker_ctx() = None;
@@ -9891,6 +9934,47 @@ mod tests {
                 assert!(last >= Duration::from_secs(30), "{last:?}");
             } else {
                 assert!(last > Duration::from_secs(45), "{seen} {tor}: {waits:?}");
+            }
+        }
+    }
+
+    /// S7 (Tor messaging audit 2026-11): a sign that a contact is back
+    /// (another dial of ours reached it, its LAN address answered) while
+    /// an attempt for it was in flight was dropped. When that attempt then
+    /// reached nobody (its Tor connect ran out while the friend came back),
+    /// what waits for it sat out its backoff. Now it is due as soon as such
+    /// an attempt ends; one that reached the contact (its own dial is a
+    /// sign that it is back) keeps its result.
+    #[test]
+    fn a_sign_that_a_contact_is_back_during_its_attempt_is_not_lost() {
+        let t0 = Instant::now();
+        let wall = 1_000_000_000u64;
+        let bob = [0xB0; 32];
+        for reached in [false, true] {
+            let mut inner = Inner::default();
+            inner.merge(vec![sched_row(1, 0xB0, wall + DAY)], 0, t0, wall);
+            inner.entries.get_mut(&[1; 32]).unwrap().failures = 8;
+            assert!(inner.take_due(t0).iter().any(|w| w.peer == bob));
+            let back = t0 + Duration::from_secs(20);
+            assert!(!inner.back_now(&bob, back), "in flight: nothing yet");
+            let outcome = if reached {
+                Outcome::Sent {
+                    carrier: Some(OutboxCarrier::Onion),
+                    code: code::NO_ACK_YET,
+                }
+            } else {
+                Outcome::Unreachable {
+                    carrier: Some(OutboxCarrier::Onion),
+                    code: code::ONION_UNREACHABLE,
+                }
+            };
+            let end = back + Duration::from_secs(24);
+            inner.apply(&bob, report_for([1; 32], outcome), end, wall);
+            let e = &inner.entries[&[1; 32]];
+            if reached {
+                assert!(e.next_due > end + RETRY_MAX / 4, "its own backoff");
+            } else {
+                assert_eq!((e.failures, e.next_due), (0, end), "due when it ended");
             }
         }
     }
