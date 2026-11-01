@@ -17,6 +17,10 @@ use serde_json::{json, Value};
 /// How long one connect through the loopback helper takes, in ms (a warm
 /// Tor link in the field).
 const RENDEZVOUS_MS: &str = "1500";
+/// A slower Tor for the tests that tell "side by side" from "one after
+/// the other" (connect ms, one-way ms): a send alone takes about 7 s, so
+/// one that waits for another takes about 14.
+const SLOW_TOR: (&str, &str) = ("2500", "150");
 
 /// One test at a time: each starts its own raven-nodes, and their timings
 /// are what the tests measure.
@@ -359,9 +363,11 @@ fn tor_sends_to_two_friends_one_after_the_other_both_deliver_at_once() {
             a.service_log()
         );
     }
-    // The engine sends one after the other: the second ends within two
-    // sends alone, with room for a slow machine, but well inside one Tor
-    // reply wait more per check.
+    // Each within about one send alone (each friend's sends have a worker
+    // of their own: tor_several_friends_both_ways_at_once_no_send_waits_for_another
+    // tells side by side from one after the other); within two at most,
+    // with room for a slow machine, but well inside one Tor reply wait more
+    // per check.
     let first = done[to_b.as_str()];
     let both = done[to_c.as_str()];
     assert!(
@@ -513,4 +519,58 @@ fn tor_burst_both_ways_every_message_arrives() {
         last < alone * 3 + Duration::from_secs(6),
         "the burst took {last:?}, one alone {alone:?}: {seen:#?}"
     );
+}
+
+/// Several friends at once, both ways (the owner's four-device test,
+/// 2026-11-01: "it must be seamless, with one friend and with several
+/// friends"): A writes to B and to C while B and C write to A. Every
+/// message is delivered and arrives about as fast as one send alone: A's
+/// message to C does not wait for A's message to B to end, nor the other
+/// way round (sends to one friend keep their order; sends to different
+/// friends go side by side).
+#[test]
+fn tor_several_friends_both_ways_at_once_no_send_waits_for_another() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (connect, latency) = SLOW_TOR;
+    let (peers, cards) = tor_peers_with(&[
+        ("Tor A", connect, latency),
+        ("Tor B", connect, latency),
+        ("Tor C", connect, latency),
+    ]);
+    let (a, b, c) = (&peers[0], &peers[1], &peers[2]);
+    a.befriend(b, Some(&cards[1]));
+    a.befriend(c, Some(&cards[2]));
+    b.befriend(a, Some(&cards[0]));
+    c.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    first_message(a, c, "hello C over tor");
+    first_message(b, a, "hello A from B");
+    first_message(c, a, "hello A from C");
+    let alone = one_alone(a, b, "A alone").max(one_alone(b, a, "B alone"));
+
+    let (seen, _) = sends_at_once(
+        &[
+            (a, b, "A to B with C"),
+            (a, c, "A to C with B"),
+            (b, a, "B to A with C"),
+            (c, a, "C to A with B"),
+        ],
+        Duration::from_secs(200),
+    );
+    eprintln!("several friends at once (one send alone {alone:?}): {seen:#?}");
+    all_delivered(&seen, alone, &[a, b, c]);
+    for (text, s) in &seen {
+        let (ended, arrived) = (s.ended.unwrap(), s.arrived.unwrap());
+        assert!(
+            ended < alone + Duration::from_secs(4),
+            "{text} took {ended:?} to be delivered, one alone {alone:?}: {seen:#?}"
+        );
+        assert!(
+            arrived < alone + Duration::from_secs(4),
+            "{text} took {arrived:?} to arrive, one alone {alone:?}: {seen:#?}"
+        );
+    }
 }

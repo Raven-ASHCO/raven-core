@@ -19,8 +19,7 @@
 //! moves a marker (never back), and an `unread` event follows every change
 //! of a count, the terminal app's reads among them.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::mpsc;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1295,7 +1294,7 @@ impl Inner {
             "send_started",
             json!({"id": pending.id, "address": pending.address}),
         );
-        self.enqueue_send(&pending.id)?;
+        self.enqueue_send(&pending.id, &pending.peer)?;
         let view = View {
             id: pending.id.clone(),
             mid: None,
@@ -1317,26 +1316,30 @@ impl Inner {
         Ok(json!({"message": view.json()}))
     }
 
-    /// Hands a send to the worker (started the first time).
-    fn enqueue_send(&self, id: &str) -> Result<(), ApiError> {
-        let mut tx = lock(&self.send_tx);
-        for _ in 0..2 {
-            if tx.is_none() {
-                let (sender, receiver) = mpsc::channel::<String>();
-                let me = self.me.clone();
-                std::thread::Builder::new()
-                    .name("raven-client-send".into())
-                    .spawn(move || send_worker(me, receiver))
-                    .map_err(|e| ApiError::internal(format!("send worker: {e}")))?;
-                *tx = Some(sender);
-            }
-            match tx.as_ref().map(|s| s.send(id.to_owned())) {
-                Some(Ok(())) => return Ok(()),
-                // The worker is gone (it panicked): start a new one.
-                _ => *tx = None,
-            }
+    /// Hands a send to `peer`'s worker: after that friend's sends asked for
+    /// before it, beside every other friend's (a worker per friend while it
+    /// has sends; the send lock is per friend too, `PeerSendLock`). One
+    /// worker for everybody held a message to one friend until a Tor send to
+    /// another ended (the owner's four-device test, 2026-11-01).
+    fn enqueue_send(&self, id: &str, peer: &str) -> Result<(), ApiError> {
+        let mut queues = lock(&self.send_queues);
+        if let Some(queue) = queues.by_peer.get_mut(peer) {
+            // Its worker runs: it takes this one after those before it.
+            queue.push_back(id.to_owned());
+            return Ok(());
         }
-        Err(ApiError::internal("the send worker could not be started"))
+        queues
+            .by_peer
+            .insert(peer.to_owned(), VecDeque::from([id.to_owned()]));
+        let (me, friend) = (self.me.clone(), peer.to_owned());
+        let started = std::thread::Builder::new()
+            .name("raven-client-send".into())
+            .spawn(move || send_worker(me, friend));
+        if let Err(e) = started {
+            queues.by_peer.remove(peer);
+            return Err(ApiError::internal(format!("send worker: {e}")));
+        }
+        Ok(())
     }
 
     /// One send, on the worker: the background program first (as a send
@@ -1514,7 +1517,7 @@ impl Inner {
                     "send_started",
                     json!({"id": view.id, "address": view.address}),
                 );
-                self.enqueue_send(&view.id)?;
+                self.enqueue_send(&view.id, &view.peer)?;
                 let (_, again) = self.find_view(&view.id)?;
                 Ok(json!({"message": again.json(), "changed": true}))
             }
@@ -1923,11 +1926,31 @@ pub(crate) fn deadline_words(expires_at_ms: u64, now_ms: u64) -> String {
     format!("{span} from now")
 }
 
-/// The send worker: one send at a time, in the order they were asked for.
-fn send_worker(me: std::sync::Weak<Inner>, jobs: mpsc::Receiver<String>) {
-    while let Ok(id) = jobs.recv() {
+/// The sends waiting for each friend (its key, lowercase), in the order
+/// they were asked for. A friend is here while its worker runs: the one
+/// that takes the last of them away ends that worker.
+#[derive(Debug, Default)]
+pub(crate) struct SendQueues {
+    pub(crate) by_peer: HashMap<String, VecDeque<String>>,
+}
+
+/// One friend's send worker: its sends one at a time, in the order they
+/// were asked for, until none waits.
+fn send_worker(me: std::sync::Weak<Inner>, peer: String) {
+    loop {
         let Some(inner) = me.upgrade() else {
             return;
+        };
+        let id = {
+            let mut queues = lock(&inner.send_queues);
+            match queues.by_peer.get_mut(&peer).map(VecDeque::pop_front) {
+                Some(Some(id)) => id,
+                // None waits: the next send to this friend starts a worker.
+                _ => {
+                    queues.by_peer.remove(&peer);
+                    return;
+                }
+            }
         };
         let run =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.run_send_job(&id)));

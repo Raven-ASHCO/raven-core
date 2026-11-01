@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -17,7 +16,7 @@ use serde_json::{json, Map, Value};
 use crate::envelope::{self, code, ApiError, Args, OpResult};
 use crate::events::EventHub;
 use crate::explain::{self, IdentityProblem};
-use crate::messages::MessageBook;
+use crate::messages::{MessageBook, SendQueues};
 use crate::node::{NodeMemory, WatcherState};
 use crate::profile::{self, OpenState};
 use crate::safety;
@@ -120,7 +119,9 @@ pub(crate) struct Inner {
     settings: Mutex<SettingsState>,
     pub(crate) caches: Mutex<Caches>,
     pub(crate) book: Mutex<MessageBook>,
-    pub(crate) send_tx: Mutex<Option<Sender<String>>>,
+    /// The sends waiting for each friend, each friend's on a worker of its
+    /// own (messages.rs `enqueue_send`).
+    pub(crate) send_queues: Mutex<SendQueues>,
     pub(crate) watcher: Mutex<WatcherState>,
     /// Well-formed words that did not match, per friend, this session.
     pub(crate) mismatches: Mutex<HashMap<String, u32>>,
@@ -161,7 +162,7 @@ impl Inner {
             }),
             caches: Mutex::new(Caches::default()),
             book: Mutex::new(MessageBook::default()),
-            send_tx: Mutex::new(None),
+            send_queues: Mutex::new(SendQueues::default()),
             watcher: Mutex::new(WatcherState::default()),
             mismatches: Mutex::new(HashMap::new()),
             marks_unsaved: Mutex::new(ReadMarks::new()),
