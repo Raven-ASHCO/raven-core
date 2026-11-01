@@ -3860,17 +3860,21 @@ fn send_indexed_text(
         *dial_session.borrow_mut() = earlier_row.session_id;
         *dial_expected_digest.borrow_mut() = Some(earlier_row.object_digest);
         replies.borrow_mut().clear();
-        // T1 (a): a queued row of this send's session goes out with the new
-        // message, on its dial, while the dial has room for it; past that it
-        // waits for raven-node's outbox (kicked by this send), as one more
-        // link each would cost a Tor link each again.
+        // T1 (a): a row of this send's session goes out with the new
+        // message, on its dial, while the dial has room for it: a queued one
+        // as it is, a prepared one handed to the queue first (another send's
+        // whose own dial runs, or one the friend refused before), so no row
+        // takes a link of its own under the send lock (T13 b). Past the room
+        // a queued one waits for raven-node's outbox (kicked by this send),
+        // as one more link each would cost a Tor link each again; a prepared
+        // one goes on its own link, since it would hold the lane.
         let batched_bytes: usize = batch.borrow().iter().map(Vec::len).sum();
-        let ridable = resend && !own && row_key == *record_key;
+        let ridable = !own && !excluded && row_key == *record_key && link_down.borrow().is_none();
         let batchable = ridable
             && batch.borrow().len() < SEND_DIAL_EARLIER_MAX
             && batched_bytes + earlier_row.immutable_envelope_bytes.len()
                 <= SEND_DIAL_EARLIER_BYTES;
-        if ridable && !batchable {
+        if ridable && !batchable && resend {
             left_to_outbox += 1;
             if record.is_none() {
                 handoff.record(&earlier_row.message_id, expiry);
@@ -3908,6 +3912,7 @@ fn send_indexed_text(
                         preview: preview.clone(),
                         expiry,
                         recorded: record.is_some(),
+                        never_written: !resend && never_left,
                     });
                 }
                 continue;
@@ -4401,6 +4406,9 @@ struct Batched {
     expiry: u64,
     /// Its route record was there (else it is written again).
     recorded: bool,
+    /// A prepared row no carrier ever wrote, handed to the queue to ride
+    /// the dial: should no dial take it, it never left this computer.
+    never_written: bool,
 }
 
 /// What [`finish_batch`] needs: the store, the send's session and words,
@@ -4479,8 +4487,18 @@ fn finish_batch(end: BatchEnd<'_, '_>) {
         if dialled {
             // Sent again, no ACK yet: the outbox keeps resending it.
             let _ = end.handoff.note(&row.message_id, row.expiry);
-        } else if !row.recorded {
-            end.handoff.record(&row.message_id, row.expiry);
+        } else {
+            if !row.recorded {
+                end.handoff.record(&row.message_id, row.expiry);
+            }
+            if row.never_written {
+                let _ = raven_core::outbox::set_object_unsent(
+                    end.data_dir,
+                    &row.message_id,
+                    true,
+                    end.now,
+                );
+            }
         }
     }
 }
@@ -6752,8 +6770,15 @@ mod send_path_tests {
             2,
             "the earlier row waits, and this one"
         );
-        // Once the peer behaves, the next send delivers all of them.
+        // Once the peer behaves, the next send delivers all of them, on one
+        // link: the refused one is still prepared, and rides it too rather
+        // than a link of its own under the send lock (T13 b).
+        let before = rig.faults.message_dials().len();
         rig.send("third").unwrap();
+        assert_eq!(rig.faults.message_dials()[before..], [3]);
+        assert!(rig.faults.lock_free.lock().unwrap()[before..]
+            .iter()
+            .all(|free| *free));
         assert_eq!(
             rig.bob_inbox(),
             vec!["held back", "hello", "second", "third"]
@@ -6874,20 +6899,16 @@ mod send_path_tests {
     /// wait: Tor's full check (85 s), and what raven-node saw lately was
     /// ignored. With the long horizon on it can wait (it is parked): a
     /// send whose every way failed moments ago parks it at once instead of
-    /// dialling again.
+    /// dialling again. (The session here has 5 minutes left, so it takes no
+    /// new message (T10 4) and the send has none to queue under, as after
+    /// its end, with no timing to wait out.)
     #[test]
-    fn after_its_session_ended_a_send_honours_what_raven_node_saw_lately() {
+    fn with_no_session_to_queue_under_a_send_honours_what_raven_node_saw_lately() {
         let _horizon = HorizonOn::set(true);
-        // Long enough for the PairInit on a loaded machine.
-        raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(Some(8_000));
+        raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(Some(5 * 60_000));
         let rig = Rig::new(0xB0);
         rig.send("hello").unwrap();
         raven_core::lan_dispatch::set_lab_session_lifetime_for_this_thread(None);
-        let ended = std::time::Instant::now() + Duration::from_secs(20);
-        while rig.alice_sessions() > 0 {
-            assert!(std::time::Instant::now() < ended, "the session never ended");
-            std::thread::sleep(Duration::from_millis(200));
-        }
         rig.set_mode(DOWN);
         rig.faults.reach_failed.store(true, Ordering::SeqCst);
         let probes = rig.faults.probes.load(Ordering::SeqCst);
@@ -6991,8 +7012,15 @@ mod send_path_tests {
         let bob = rig.bob.public_key_bytes();
         rig.send("hello").unwrap();
         let held = PeerSendLock::acquire_within(rig.a.path(), &bob, Duration::ZERO).unwrap();
+        // Let go a second after the send's check (it asks for the lock right
+        // after it), however slow the machine.
+        let faults = Arc::clone(&rig.faults);
+        let probes = faults.probes.load(Ordering::SeqCst);
         let releaser = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(400));
+            while faults.probes.load(Ordering::SeqCst) == probes {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_secs(1));
             drop(held);
         });
         rig.send("behind the lock").unwrap();
