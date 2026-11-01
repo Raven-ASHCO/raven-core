@@ -331,6 +331,11 @@ impl TorHold {
                 self.held = None;
                 return TorStep::Kept;
             }
+            if c.added == 0 {
+                // Another one gone beside a default route that stayed: the
+                // held restart stands.
+                return TorStep::Nothing;
+            }
             // Another network instead of the one that went.
             self.held = None;
             return TorStep::Restart;
@@ -1963,6 +1968,23 @@ mod tests {
         st.event(down("2001:db8:1::5/64"), t);
         st.egress(tag("aa"), t + secs(1));
         assert_eq!(next(&mut st, &mut tor).1, TorStep::Nothing);
+        // A held restart stays held while another network goes beside a
+        // default route that stayed, and runs out as before.
+        let mut st = baseline(
+            t0,
+            &["192.168.0.16/24", "2001:db8:1::5/64", "172.18.0.1/16"],
+        );
+        let mut tor = TorHold::default();
+        tor.baseline(&st.view());
+        st.event(down(wifi), t);
+        let TorStep::Hold(Some(held)) = next(&mut st, &mut tor).1 else {
+            panic!("held")
+        };
+        st.egress(tag("aa"), t + secs(5));
+        st.event(down("172.18.0.1/16"), t + secs(12));
+        st.egress(tag("aa"), t + secs(13));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Nothing);
+        assert!(tor.ran_out(held));
         // A wake: at once.
         let (mut st, mut tor) = fresh();
         st.wake(t);
