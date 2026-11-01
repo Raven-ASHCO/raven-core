@@ -800,6 +800,170 @@ fn note_send_dial_after<T, E>(
     }
 }
 
+/// Lines [`SendDialNote`] writes per contact per [`SEND_DIAL_LINES_WINDOW`]:
+/// enough for a check, its retries and a send's message dials (the hint
+/// lines fold a contact's links per 30 s, which hid them).
+pub(crate) const SEND_DIAL_LINES: u32 = 20;
+pub(crate) const SEND_DIAL_LINES_WINDOW: Duration = Duration::from_secs(60);
+/// Contacts [`PerContactLog`] keeps apart at once (the rest share one).
+const SEND_DIAL_LOG_MAX: usize = 64;
+
+/// D1 (Tor messaging audit, 2026-11): one IPC send dial (a send's check or
+/// its message), for its log line. Counts only: the contact's tag of this
+/// run, the carrier, what the first frame is and how many frames went;
+/// never a key, an address or a route.
+pub(crate) struct SendDialNote {
+    carrier: raven_core::OutboxCarrier,
+    peer: [u8; 32],
+    frames: usize,
+    purpose: &'static str,
+}
+
+impl SendDialNote {
+    /// The note for `req`, when it is a send dial to a well-formed key.
+    pub(crate) fn of(req: &IpcRequest) -> Option<Self> {
+        use raven_core::OutboxCarrier;
+        let (carrier, peer, frames_b64) = match req {
+            IpcRequest::LanDial {
+                expected_pub_hex,
+                frames_b64,
+                ..
+            } => (OutboxCarrier::Lan, expected_pub_hex, frames_b64),
+            IpcRequest::InternetDial {
+                expected_pub_hex,
+                frames_b64,
+                ..
+            } => (OutboxCarrier::Internet, expected_pub_hex, frames_b64),
+            IpcRequest::P2pDial {
+                expected_pub_hex,
+                frames_b64,
+                ..
+            } => (OutboxCarrier::P2p, expected_pub_hex, frames_b64),
+            IpcRequest::NearbyDial {
+                expected_pub_hex,
+                frames_b64,
+                ..
+            } => (OutboxCarrier::Nearby, expected_pub_hex, frames_b64),
+            IpcRequest::OnionDial {
+                expected_pub_hex,
+                frames_b64,
+                ..
+            } => (OutboxCarrier::Onion, expected_pub_hex, frames_b64),
+            _ => return None,
+        };
+        let first: Vec<Vec<u8>> = frames_b64
+            .first()
+            .and_then(|f| base64_decode(f).ok())
+            .into_iter()
+            .collect();
+        Some(Self {
+            carrier,
+            peer: parse_hex_array::<32>(peer)?,
+            frames: frames_b64.len(),
+            purpose: crate::hints::dial_purpose(&first, false),
+        })
+    }
+
+    /// The line for this dial, answered with `response` after `took`;
+    /// `held_back`: dials to this contact whose lines were not written.
+    pub(crate) fn line(&self, response: &IpcResponse, took: Duration, held_back: u64) -> String {
+        let carried = match self.frames {
+            0 => self.purpose.to_string(),
+            1 => format!("{} (1 frame)", self.purpose),
+            n => format!("{} ({n} frames)", self.purpose),
+        };
+        let more = if held_back > 0 {
+            format!("; {held_back} more dials to it not logged in the last minute")
+        } else {
+            String::new()
+        };
+        let ended = match response {
+            IpcResponse::LanDialResult { frames_b64, .. }
+            | IpcResponse::InternetDialResult { frames_b64, .. }
+            | IpcResponse::P2pDialResult { frames_b64, .. }
+            | IpcResponse::NearbyDialResult { frames_b64, .. }
+            | IpcResponse::OnionDialResult { frames_b64, .. } => {
+                let n = frames_b64.len();
+                let replies = if n == 1 { "reply" } else { "replies" };
+                format!("answered in {} ms ({n} {replies}{more})", took.as_millis())
+            }
+            IpcResponse::Error { code, .. } => {
+                format!("failed in {} ms ({code}{more})", took.as_millis())
+            }
+            _ => format!("ended in {} ms (unexpected answer{more})", took.as_millis()),
+        };
+        format!(
+            "raven-node send: contact {}, {}, {carried}, {ended}",
+            crate::netutil::link_tag(&self.peer),
+            self.carrier.label()
+        )
+    }
+}
+
+/// At most [`SEND_DIAL_LINES`] events per key per [`SEND_DIAL_LINES_WINDOW`]
+/// (the send dial lines, per contact tag).
+pub(crate) struct PerContactLog {
+    /// Per key: when its window began, the lines written in it, and the
+    /// events held back since its last line.
+    state: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u32, u64)>>,
+}
+
+impl PerContactLog {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Count one event for `key` at `now`. `Some(n)`: write its line now,
+    /// `n` events having been held back since the last one.
+    pub(crate) fn hit(&self, key: &str, now: std::time::Instant) -> Option<u64> {
+        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !map.contains_key(key) && map.len() >= SEND_DIAL_LOG_MAX {
+            map.retain(|_, (at, _, held)| {
+                *held > 0 || now.saturating_duration_since(*at) < SEND_DIAL_LINES_WINDOW
+            });
+        }
+        let key = if !map.contains_key(key) && map.len() >= SEND_DIAL_LOG_MAX {
+            "others"
+        } else {
+            key
+        };
+        let (start, written, held) = map.entry(key.to_owned()).or_insert((now, 0, 0));
+        if now.saturating_duration_since(*start) >= SEND_DIAL_LINES_WINDOW {
+            *start = now;
+            *written = 0;
+        }
+        if *written >= SEND_DIAL_LINES {
+            *held += 1;
+            return None;
+        }
+        *written += 1;
+        Some(std::mem::take(held))
+    }
+}
+
+/// [`SendDialNote`]'s lines in this raven-node.
+static SEND_DIAL_LOG: std::sync::OnceLock<PerContactLog> = std::sync::OnceLock::new();
+
+/// Serve the send dial `req` with `serve`, then write its line (D1).
+async fn logged_send_dial<F>(req: IpcRequest, serve: impl FnOnce(IpcRequest) -> F) -> IpcResponse
+where
+    F: std::future::Future<Output = IpcResponse>,
+{
+    let note = SendDialNote::of(&req);
+    let started = std::time::Instant::now();
+    let response = serve(req).await;
+    if let Some(note) = note {
+        let log = SEND_DIAL_LOG.get_or_init(PerContactLog::new);
+        let tag = crate::netutil::link_tag(&note.peer);
+        if let Some(held_back) = log.hit(&tag, std::time::Instant::now()) {
+            eprintln!("{}", note.line(&response, started.elapsed(), held_back));
+        }
+    }
+    response
+}
+
 /// A dial error that says the route is down (dialling again soon only
 /// fails again): not reachable in time, no route, nothing listening there
 /// (a refused connect: the computer is up, its Raven is not), Tor could not
@@ -1444,12 +1608,22 @@ async fn dispatch(
             code: raven_core::ipc::LOCKED.into(),
             message: LOCKED_MESSAGE.into(),
         },
-        Ok(req @ IpcRequest::LanDial { .. }) => handle_lan_dial(data_dir, req).await,
+        Ok(req @ IpcRequest::LanDial { .. }) => {
+            logged_send_dial(req, |req| handle_lan_dial(data_dir, req)).await
+        }
         Ok(req @ IpcRequest::LanLocate { .. }) => handle_lan_locate(data_dir, req).await,
-        Ok(req @ IpcRequest::InternetDial { .. }) => handle_internet_dial(data_dir, req).await,
-        Ok(req @ IpcRequest::P2pDial { .. }) => handle_p2p_dial(data_dir, req).await,
-        Ok(req @ IpcRequest::NearbyDial { .. }) => handle_nearby_dial(data_dir, req).await,
-        Ok(req @ IpcRequest::OnionDial { .. }) => handle_onion_dial(data_dir, req).await,
+        Ok(req @ IpcRequest::InternetDial { .. }) => {
+            logged_send_dial(req, |req| handle_internet_dial(data_dir, req)).await
+        }
+        Ok(req @ IpcRequest::P2pDial { .. }) => {
+            logged_send_dial(req, |req| handle_p2p_dial(data_dir, req)).await
+        }
+        Ok(req @ IpcRequest::NearbyDial { .. }) => {
+            logged_send_dial(req, |req| handle_nearby_dial(data_dir, req)).await
+        }
+        Ok(req @ IpcRequest::OnionDial { .. }) => {
+            logged_send_dial(req, |req| handle_onion_dial(data_dir, req)).await
+        }
         // Long-poll: waits on the inbox generation, not on a pool thread.
         Ok(IpcRequest::AppInboxPage {
             v,
@@ -3742,5 +3916,109 @@ mod tests {
         let asked = tokio::time::Instant::now();
         assert_eq!(dispatch(&frame(&req), &dd, &fq).await, located(&[]));
         assert_eq!(tokio::time::Instant::now(), asked, "at once");
+    }
+
+    /// D1 (Tor messaging audit, 2026-11): an iPhone send left no trace of
+    /// its dials. Each IPC send dial now writes one counts-only line: the
+    /// contact's tag of this run (never its key), the carrier, what the dial
+    /// carried, how long it took and how it ended.
+    #[test]
+    fn each_ipc_send_dial_says_what_it_carried_and_how_it_ended() {
+        use raven_core::envelope::{EnvType, Envelope};
+        let peer = [0x5A; 32];
+        let key = hex::encode(peer);
+        let tag = crate::netutil::link_tag(&peer);
+        let check = IpcRequest::OnionDial {
+            v: IPC_VERSION,
+            onion_dial: "onion:ab".into(),
+            expected_pub_hex: key.clone(),
+            frames_b64: Vec::new(),
+        };
+        let note = SendDialNote::of(&check).expect("a send dial");
+        let answered = IpcResponse::OnionDialResult {
+            v: IPC_VERSION,
+            frames_b64: vec!["AA==".into()],
+        };
+        let line = note.line(&answered, Duration::from_millis(3_120), 0);
+        assert_eq!(
+            line,
+            format!(
+                "raven-node send: contact {tag}, onion_dial, no frames, answered in 3120 ms \
+                 (1 reply)"
+            )
+        );
+        assert!(!line.contains(&key), "{line}");
+        let missed = IpcResponse::Error {
+            v: IPC_VERSION,
+            code: "ONION_UNREACHABLE".into(),
+            message: "ONION_UNREACHABLE (the circuit failed)".into(),
+        };
+        assert_eq!(
+            note.line(&missed, Duration::from_millis(25_012), 3),
+            format!(
+                "raven-node send: contact {tag}, onion_dial, no frames, failed in 25012 ms \
+                 (ONION_UNREACHABLE; 3 more dials to it not logged in the last minute)"
+            )
+        );
+        use base64::Engine;
+        let message = Envelope {
+            env_type: EnvType::Message as u8,
+            flags: 0,
+            message_id: [1; 16],
+            routing_tag: [2; 16],
+            dest_device_hint: 0,
+            created_at: 1,
+            expires_at: u64::MAX / 2,
+            hop_limit: 4,
+            replication_budget: 1,
+            anti_replay_nonce: [3; 12],
+            ratchet_header_ciphertext: vec![],
+            message_ciphertext: vec![4; 8],
+            sender_authentication: vec![0; 64],
+        }
+        .pack();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&message);
+        let two = IpcRequest::LanDial {
+            v: IPC_VERSION,
+            lan_dial: "192.168.1.9:7420".into(),
+            expected_pub_hex: key.clone(),
+            frames_b64: vec![b64.clone(), b64],
+        };
+        let lan = SendDialNote::of(&two).expect("a send dial");
+        let got = IpcResponse::LanDialResult {
+            v: IPC_VERSION,
+            frames_b64: vec!["AA==".into(), "AA==".into(), "AA==".into()],
+        };
+        let line = lan.line(&got, Duration::from_millis(80), 0);
+        assert_eq!(
+            line,
+            format!(
+                "raven-node send: contact {tag}, lan_dial, message (2 frames), answered in 80 \
+                 ms (3 replies)"
+            )
+        );
+        assert!(!line.contains("192.168"), "never an address: {line}");
+        assert!(SendDialNote::of(&IpcRequest::Ping { v: IPC_VERSION }).is_none());
+    }
+
+    /// D1: at most [`SEND_DIAL_LINES`] lines a minute per contact; the dials
+    /// past them are counted on its next line, and another contact's lines
+    /// are not held back meanwhile.
+    #[test]
+    fn send_dial_lines_are_bounded_per_contact() {
+        let log = PerContactLog::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..SEND_DIAL_LINES {
+            assert_eq!(log.hit("#a", t0), Some(0));
+        }
+        assert_eq!(log.hit("#a", t0), None);
+        assert_eq!(log.hit("#a", t0 + Duration::from_secs(30)), None);
+        assert_eq!(log.hit("#b", t0), Some(0), "another contact");
+        assert_eq!(
+            log.hit("#a", t0 + SEND_DIAL_LINES_WINDOW),
+            Some(2),
+            "the two held back are counted"
+        );
+        assert_eq!(log.hit("#a", t0 + SEND_DIAL_LINES_WINDOW), Some(0));
     }
 }
