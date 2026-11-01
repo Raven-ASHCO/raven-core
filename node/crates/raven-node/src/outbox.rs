@@ -588,6 +588,9 @@ struct Inner {
     entries: BTreeMap<[u8; 32], Entry>,
     done: VecDeque<Entry>,
     in_flight: HashSet<[u8; 32]>,
+    /// Peers in flight whose attempt holds a message (not only owed ACKs,
+    /// ACK objects or a probe): what [`carrying`] counts (T3 b).
+    in_flight_messages: HashSet<[u8; 32]>,
     /// Kicked while an attempt was in flight: due again as soon as it ends.
     kicked: HashSet<[u8; 32]>,
     /// Explicitly kicked while in flight: also forget blocked routes.
@@ -1258,14 +1261,7 @@ pub(crate) fn carrying(data_dir: &Path, peer: &[u8; 32]) -> bool {
         if !inner.running {
             return false;
         }
-        if inner.in_flight.contains(peer)
-            || inner.entries.values().any(|e| {
-                e.recipient == *peer
-                    && e.kind == EndpointOutboundKind::Message
-                    && !e.is_probe()
-                    && matches!(e.state, EntryState::Queued | EntryState::Sent)
-            })
-        {
+        if inner.carries_message(peer) {
             return true;
         }
     }
@@ -1481,6 +1477,21 @@ impl Inner {
                 .or_insert_with(|| NETWORK_SPREAD.mul_f64(jitter()))
         });
         self.entries.len() + self.unsent_acks.len()
+    }
+
+    /// [`carrying`] as far as the worker's memory tells: an attempt for
+    /// `peer` that holds a message runs, or a message to it is tracked,
+    /// queued or sent. An attempt that only pushes ACKs we owe it carries
+    /// no message (T3 b, Tor messaging audit 2026-11: a send queued its
+    /// message behind one, as "Tor busy", RAVEN_ONION_CARRIER_V1 §9).
+    fn carries_message(&self, peer: &[u8; 32]) -> bool {
+        self.in_flight_messages.contains(peer)
+            || self.entries.values().any(|e| {
+                e.recipient == *peer
+                    && e.kind == EndpointOutboundKind::Message
+                    && !e.is_probe()
+                    && matches!(e.state, EntryState::Queued | EntryState::Sent)
+            })
     }
 
     /// [`tor_back`]: each contact with a live object whose last attempt
@@ -1991,6 +2002,14 @@ impl Inner {
                 let lane = (e.session_id, e.kind == EndpointOutboundKind::Ack);
                 (lane_start[&lane], lane, e.ratchet_index)
             });
+            // Riders included: does it carry a message (T3 b)?
+            if work
+                .entries
+                .iter()
+                .any(|e| e.kind == EndpointOutboundKind::Message && !e.is_probe())
+            {
+                self.in_flight_messages.insert(work.peer);
+            }
         }
         by_peer.into_values().collect()
     }
@@ -2038,6 +2057,7 @@ impl Inner {
     /// ([`Self::network_proven_now`]).
     fn apply(&mut self, peer: &[u8; 32], report: PeerReport, now: Instant, wall: u64) -> usize {
         self.in_flight.remove(peer);
+        self.in_flight_messages.remove(peer);
         // A sign that it is back came meanwhile (S7): acted on below, once
         // this attempt's results are in, if the attempt reached nobody.
         let back_meanwhile = self.back_after.remove(peer) && report.missed_silently();
@@ -6734,6 +6754,7 @@ impl Drop for RunningGuard {
         let mut inner = lock(&outbox().inner);
         inner.running = false;
         inner.in_flight.clear();
+        inner.in_flight_messages.clear();
         inner.net_changed.clear();
         inner.clear_pins_after.clear();
         inner.back_after.clear();
@@ -9995,6 +10016,65 @@ mod tests {
                 assert!(last > Duration::from_secs(45), "{seen} {tor}: {waits:?}");
             }
         }
+    }
+
+    /// T3 (b) (Tor messaging audit 2026-11): "the outbox already carries a
+    /// message to the friend" (a send then queues instead of waiting for
+    /// Tor again, RAVEN_ONION_CARRIER_V1 §9) counted any attempt in flight,
+    /// also one that only pushed ACKs we owe the friend: a send then
+    /// queued its message behind an attempt that carried none. Now only an
+    /// attempt that holds a message counts, besides a message that waits.
+    #[test]
+    fn only_an_attempt_that_holds_a_message_carries_one() {
+        let t0 = Instant::now();
+        let wall = 1_000_000_000u64;
+        let bob = [0xB0; 32];
+        let mut inner = Inner::default();
+        assert!(!inner.carries_message(&bob));
+        // Owed ACKs only, in flight.
+        inner
+            .unsent_acks
+            .insert([7; 32], owed(bob, 0, t0, wall + DAY));
+        assert!(inner.take_due(t0).iter().any(|w| w.peer == bob));
+        assert!(!inner.carries_message(&bob), "owed ACKs only");
+        let acked = PeerReport {
+            acks_done: vec![[7; 32]],
+            ..PeerReport::default()
+        };
+        inner.apply(&bob, acked, t0, wall);
+        // A prepared ACK object of ours, in flight: no message either.
+        let ack_row = ScanRow {
+            kind: EndpointOutboundKind::Ack,
+            ..sched_row(2, 0xB0, wall + DAY)
+        };
+        let seq = inner.scan_seq();
+        inner.merge(vec![ack_row], seq, t0, wall);
+        assert!(inner.take_due(t0).iter().any(|w| w.peer == bob));
+        assert!(!inner.carries_message(&bob), "an ACK object");
+        inner.apply(
+            &bob,
+            report_for([2; 32], Outcome::Held(code::STORE)),
+            t0,
+            wall,
+        );
+        // A message held back (not queued), in flight: its attempt holds it.
+        let seq = inner.scan_seq();
+        inner.merge(vec![sched_row(1, 0xB0, wall + DAY)], seq, t0, wall);
+        inner.entries.get_mut(&[1; 32]).unwrap().state = EntryState::Held;
+        assert!(!inner.carries_message(&bob), "held, not in flight");
+        let later = t0 + RETRY_MAX * 2;
+        assert!(inner.take_due(later).iter().any(|w| w.peer == bob));
+        assert!(inner.carries_message(&bob), "in flight with a message");
+        inner.apply(
+            &bob,
+            report_for([1; 32], Outcome::Held(code::STORE)),
+            later,
+            wall,
+        );
+        assert!(!inner.carries_message(&bob));
+        // A queued message counts, in flight or not.
+        inner.entries.get_mut(&[1; 32]).unwrap().state = EntryState::Queued;
+        assert!(inner.carries_message(&bob));
     }
 
     /// T11 (Tor messaging audit 2026-11): our own Tor works again (a
