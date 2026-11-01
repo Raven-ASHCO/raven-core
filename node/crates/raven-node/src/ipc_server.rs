@@ -791,6 +791,9 @@ fn note_send_dial_after<T, E>(
         return;
     };
     match outcome {
+        // Tor not ready on this computer (T17, Tor messaging audit 2026-11):
+        // nothing about the friend's route, neither way.
+        Ok(Err(e)) if not_ready_here(e) => {}
         Ok(Err(e)) if silent_failure(e) => {
             crate::delivery_paths::route_failed_after(&peer, carrier, dial, e, took);
         }
@@ -967,17 +970,23 @@ where
 /// A dial error that says the route is down (dialling again soon only
 /// fails again): not reachable in time, no route, nothing listening there
 /// (a refused connect: the computer is up, its Raven is not), Tor could not
-/// reach the contact or is not ready on this computer.
+/// reach the contact. Tor not ready on this computer is not one
+/// ([`not_ready_here`]).
 fn silent_failure(e: &str) -> bool {
     use crate::outbox::code;
     matches!(
         crate::outbox::dial_error_code(e),
-        code::NOT_REACHABLE
-            | code::NO_ROUTE
-            | code::NOT_LISTENING
-            | code::ONION_UNREACHABLE
-            | code::ONION_NOT_READY
+        code::NOT_REACHABLE | code::NO_ROUTE | code::NOT_LISTENING | code::ONION_UNREACHABLE
     )
+}
+
+/// A dial error about this computer, not the contact's route: Tor is not
+/// ready here (starting, blocked). As the outbox has it, never route
+/// evidence (T17, Tor messaging audit 2026-11: kept as the friend's Tor
+/// failure, it made the next send leave Tor out for 2 min after Tor was
+/// ready).
+fn not_ready_here(e: &str) -> bool {
+    crate::outbox::dial_error_code(e) == crate::outbox::code::ONION_NOT_READY
 }
 
 /// IPC error code for a forward-queue enqueue failure: only a full queue is
@@ -2079,7 +2088,6 @@ mod tests {
             "lan connect: cannot connect to 192.0.2.7:7420 (Connection refused)",
             "P2P_UNREACHABLE: no route to the contact",
             "ONION_UNREACHABLE: the contact's onion service did not answer over Tor",
-            "ONION_NOT_READY: Tor is not ready on this computer yet",
         ] {
             assert!(silent_failure(e), "{e}");
         }
@@ -2087,9 +2095,43 @@ mod tests {
             "LINK_NOT_ACCEPTED: the peer closed the link",
             "rlb1 offer identity mismatch",
             "lan_dial_peer_closed",
+            // This computer's Tor, not the contact's route (T17).
+            "ONION_NOT_READY: Tor is not ready on this computer yet",
         ] {
             assert!(!silent_failure(e), "{e}");
         }
+    }
+
+    /// T17 (Tor messaging audit 2026-11): "Tor is not ready on this computer"
+    /// says nothing about the friend's Tor route. A send's dial that met it
+    /// leaves no failed route for the next send (which then left Tor out
+    /// for 2 min after Tor was ready), and is no Tor link that worked
+    /// either: a Tor dial to the friend running meanwhile still counts as
+    /// Tor tried lately.
+    #[test]
+    fn tor_not_ready_here_is_not_the_friends_tor_failure() {
+        use raven_core::OutboxCarrier;
+        let not_ready = "ONION_NOT_READY: Tor is not ready on this computer yet";
+        let note = |peer: &[u8; 32]| {
+            note_send_dial::<(), ()>(
+                OutboxCarrier::Onion,
+                &format!("onion:{}", hex::encode(&peer[..8])),
+                &hex::encode(peer),
+                &Ok(Err(not_ready.to_string())),
+            );
+        };
+        let friend = [0x17; 32];
+        note(&friend);
+        assert!(
+            crate::delivery_paths::failed_routes(&friend).is_empty(),
+            "no failed route kept"
+        );
+        assert!(!crate::delivery_paths::tor_tried_lately(&friend));
+        // Nor a Tor link that worked: the outbox's Tor dial still runs.
+        let dialling = [0x18; 32];
+        let _dial = crate::delivery_paths::onion_dial_started(&dialling);
+        note(&dialling);
+        assert!(crate::delivery_paths::tor_tried_lately(&dialling));
     }
 
     /// E2 r38 (field K4): mac-a's computer on the LAN, its Raven stopped.
