@@ -1260,6 +1260,7 @@ impl Inner {
             ));
         }
         check_text(&text)?;
+        send_note(&c.pub_hex, "a send asked");
         // The first look at the profile only notes what is there: take it
         // before this send exists, so its receipt is always news.
         let _ = self.refresh(Duration::from_millis(1500));
@@ -1300,7 +1301,11 @@ impl Inner {
             "send_started",
             json!({"id": pending.id, "address": pending.address}),
         );
-        self.enqueue_send(&pending.id, &pending.peer)?;
+        let before = self.enqueue_send(&pending.id, &pending.peer)?;
+        send_note(
+            &pending.peer,
+            &format!("{} accepted, {before} before it", pending.id),
+        );
         let view = View {
             id: pending.id.clone(),
             mid: None,
@@ -1327,7 +1332,8 @@ impl Inner {
     /// has sends; the send lock is per friend too, `PeerSendLock`). One
     /// worker for everybody held a message to one friend until a Tor send to
     /// another ended (the owner's four-device test, 2026-11-01).
-    fn enqueue_send(&self, id: &str, peer: &str) -> Result<(), ApiError> {
+    /// `Ok`: how many of the friend's sends wait before it.
+    fn enqueue_send(&self, id: &str, peer: &str) -> Result<usize, ApiError> {
         self.enqueue_locked(&mut lock(&self.send_queues), id, peer, false)
     }
 
@@ -1340,15 +1346,16 @@ impl Inner {
         id: &str,
         peer: &str,
         first: bool,
-    ) -> Result<(), ApiError> {
+    ) -> Result<usize, ApiError> {
         if let Some(queue) = queues.by_peer.get_mut(peer) {
             // Its worker runs: it takes this one after those before it.
+            let before = if first { 0 } else { queue.len() };
             if first {
                 queue.push_front(id.to_owned());
             } else {
                 queue.push_back(id.to_owned());
             }
-            return Ok(());
+            return Ok(before);
         }
         queues
             .by_peer
@@ -1361,7 +1368,7 @@ impl Inner {
             queues.by_peer.remove(peer);
             return Err(ApiError::internal(format!("send worker: {e}")));
         }
-        Ok(())
+        Ok(0)
     }
 
     /// Whether a send would be held back now ([`Outcome::HeldBack`]): Lock
@@ -1377,13 +1384,24 @@ impl Inner {
     /// the unlock (or the watcher's next look).
     fn hold_send(&self, id: &str, peer: &str, raw: &str) {
         let by_lock = raw.contains(raven_core::privacy::LOCKED_V2_TEXT) || self.locked();
-        let mut queues = lock(&self.send_queues);
-        if by_lock
-            || self.sends_held_back()
-            || self.enqueue_locked(&mut queues, id, peer, true).is_err()
-        {
-            queues.held.push((id.to_owned(), peer.to_owned()));
-        }
+        let held = {
+            let mut queues = lock(&self.send_queues);
+            if by_lock
+                || self.sends_held_back()
+                || self.enqueue_locked(&mut queues, id, peer, true).is_err()
+            {
+                queues.held.push((id.to_owned(), peer.to_owned()));
+                Some(queues.held.len())
+            } else {
+                None
+            }
+        };
+        let Some(waiting) = held else {
+            send_note(peer, &format!("{id} goes again at once"));
+            return;
+        };
+        let why = if by_lock { "locked" } else { "paused" };
+        send_note(peer, &format!("{id} held back ({why}), {waiting} held"));
     }
 
     /// The node runs and the profile is open again (`node.resume`,
@@ -1401,6 +1419,8 @@ impl Inner {
         for (id, peer) in held.into_iter().rev() {
             if self.enqueue_locked(&mut queues, &id, &peer, true).is_err() {
                 queues.held.push((id, peer));
+            } else {
+                send_note(&peer, &format!("{id} goes again"));
             }
         }
         true
@@ -1417,11 +1437,25 @@ impl Inner {
             if p.job != Job::Queued {
                 return;
             }
+            let waited = p.started.elapsed();
             p.job = Job::Running;
             p.started = Instant::now();
-            (p.peer.clone(), p.body.clone())
+            (p.peer.clone(), p.body.clone(), waited)
         };
+        send_note(
+            &job.0,
+            &format!("{id} started after {} ms", job.2.as_millis()),
+        );
+        let began = Instant::now();
         let (outcome, raw) = self.send_now(&job.0, &job.1);
+        send_note(
+            &job.0,
+            &format!(
+                "{id} ended {} after {} ms",
+                outcome_word(&outcome),
+                began.elapsed().as_millis()
+            ),
+        );
         if outcome == Outcome::HeldBack {
             // Nothing was tried: it reads Sending again and waits for the
             // resume or the unlock, with no row written for it.
@@ -2011,6 +2045,40 @@ pub(crate) fn deadline_words(expires_at_ms: u64, now_ms: u64) -> String {
         _ => format!("about {} hours", (minutes + 30) / 60),
     };
     format!("{span} from now")
+}
+
+/// One line about a send in the node's log, in counts and words only (D1 b,
+/// Tor messaging audit 2026-11: an iPhone keeps no other trace of a send,
+/// and the W4v-f-1 live test could not tell where one stopped): the friend
+/// is named by the tag the node's log gives it, never by its key or
+/// address, and never with the text. Only where the node runs in this
+/// process (the iPhone app): elsewhere raven-node keeps its own log.
+pub(crate) fn send_note(peer_hex: &str, line: &str) {
+    #[cfg(feature = "embedded-node")]
+    if crate::node::embedded_mode() {
+        let key = hex::decode(peer_hex.trim())
+            .ok()
+            .and_then(|k| <[u8; 32]>::try_from(k).ok());
+        if let Some(key) = key {
+            raven_node::embedded::send_note(&key, &format!("engine: {line}"));
+        }
+    }
+    #[cfg(not(feature = "embedded-node"))]
+    let _ = (peer_hex, line);
+}
+
+/// How a send ended, in one word for [`send_note`].
+fn outcome_word(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Delivered { .. } => "delivered",
+        Outcome::Waiting { .. } => "waiting",
+        Outcome::Sent => "sent",
+        Outcome::NotSent { meet_first: true } => "not_sent_meet_first",
+        Outcome::NotSent { .. } => "not_sent",
+        Outcome::NodeUnavailable => "node_unavailable",
+        Outcome::Stopped => "stopped",
+        Outcome::HeldBack => "held_back",
+    }
 }
 
 /// The sends waiting for each friend (its key, lowercase), in the order

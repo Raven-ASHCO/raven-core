@@ -666,6 +666,23 @@ fn send_while_paused() {
     let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
     assert_eq!(m["state"], "delivered", "{m}\n{}", a.log());
     b.wait_incoming(&a, "written as the app left", Duration::from_secs(30));
+
+    // The node's log says what the send path did (the W4v-f-1 live test
+    // could not tell where a send stopped), by the friend's tag and in
+    // counts only: never the text or the friend's address.
+    let log = a.log();
+    for said in [
+        "engine: a send asked".to_owned(),
+        format!("engine: {id} accepted, 0 before it"),
+        format!("engine: {id} ended held_back"),
+        format!("engine: {id} held back (paused), 1 held"),
+        format!("engine: {id} goes again"),
+        format!("engine: {id} ended delivered"),
+    ] {
+        assert!(log.contains(&said), "no {said:?} in\n{log}");
+    }
+    assert!(!log.contains("written as the app left"), "{log}");
+    assert!(!log.contains(&b.address()), "{log}");
 }
 
 /// The same with Lock v2 (the iPhone app's lock set to "now", audit T4):
