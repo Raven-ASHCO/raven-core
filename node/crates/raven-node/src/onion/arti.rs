@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use arti_client::config::onion_service::OnionServiceConfigBuilder;
 use arti_client::config::{BoolOrAuto, TorClientConfigBuilder};
-use arti_client::{HasKind as _, StreamPrefs, TorClient};
+use arti_client::{HasKind as _, IsolationToken, StreamPrefs, TorClient};
 use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -526,6 +526,10 @@ async fn accept_connects(
     client: Arc<TorClient<PreferredRuntime>>,
     token: [u8; proto::TOKEN_LEN],
 ) {
+    // Each friend's isolation group, for this helper life (audit T6).
+    let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(
+        IsolationToken::new,
+    )));
     loop {
         let Ok((mut stream, peer)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -534,7 +538,7 @@ async fn accept_connects(
         if !peer.ip().is_loopback() {
             continue;
         }
-        let client = client.clone();
+        let (client, book) = (client.clone(), book.clone());
         tokio::spawn(async move {
             let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
             let read = tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut req));
@@ -548,17 +552,20 @@ async fn accept_connects(
             let _ = stream.set_nodelay(true);
             let target = tor_hscrypto::pk::HsId::from(hs_id);
             let addr = onion_text(&target);
-            // One more try with fresh circuits (a new isolation group: Arti
-            // fetches the descriptor again) after a failure worth it, within
-            // the same wait (field test round 8: a friend's node had just
-            // restarted).
-            let opened = proto::connect_with_retry(CONNECT_WAIT, |fresh, _within| {
+            // The first try in the friend's isolation group (the default
+            // one until a fresh try worked or a first try timed out), one
+            // more with fresh circuits (a new group: Arti fetches the
+            // descriptor again) after a failure worth it, within the same
+            // wait (field test round 8: a friend's node had just restarted).
+            // Arti hands every connect of one group the same rendezvous
+            // circuit while it looks open, a dead one too (audit T6).
+            let opened = proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, |group, _within| {
                 let (client, addr) = (client.clone(), addr.clone());
                 async move {
                     let mut prefs = StreamPrefs::new();
                     prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
-                    if fresh {
-                        prefs.new_isolation_group();
+                    if let Some(group) = group {
+                        prefs.set_isolation(group);
                     }
                     client
                         .connect_with_prefs((addr.as_str(), port), &prefs)

@@ -22,7 +22,14 @@
 //! - `RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT=1` (on every helper of a test):
 //!   every stream one helper connects to one "onion service" rides one
 //!   circuit, as Arti keeps a rendezvous circuit for the streams that follow
-//!   (the service side counts them under one circuit number).
+//!   (the service side counts them under one circuit number);
+//! - `RAVEN_LAB_TOR_LOOPBACK_STALE_MS=<ms>`: the circuit the default
+//!   isolation group shares is dead (the friend's network path vanished
+//!   with no DESTROY back, audit T6): a connect try in that group waits this
+//!   long and ends "tor timeout", as Arti's stream connect timeout ends a
+//!   BEGIN that gets no CONNECTED; a try in any other group works;
+//! - `RAVEN_LAB_TOR_LOOPBACK_COUNT=1`: the helper keeps its connect counts
+//!   in [`COUNT_FILE`] under its state directory ([`Counts`]).
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -40,10 +47,14 @@ const OBSOLETE_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_OBSOLETE";
 const DELAY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS";
 const LATENCY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS";
 const ONE_CIRCUIT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT";
+const STALE_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_STALE_MS";
+const COUNT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_COUNT";
 /// How long one connect may take, as the Arti helper's.
 const CONNECT_WAIT: Duration = Duration::from_secs(44);
 /// The loopback helper's onion key seed, under the state directory.
 const KEY_FILE: &str = "loopback_hs.key";
+/// Where [`COUNT_ENV`] keeps the connect counts, under the state directory.
+pub(crate) const COUNT_FILE: &str = "loopback_connects";
 
 /// Behaviour knobs (see the module doc).
 #[derive(Clone, Copy, Debug, Default)]
@@ -55,6 +66,80 @@ pub(crate) struct Knobs {
     /// [`ONE_CIRCUIT_ENV`]: this helper's client number, sent first on
     /// every stream it connects; the service side reads it.
     pub(crate) one_circuit: Option<u64>,
+    /// [`STALE_ENV`]: how long a try in the default isolation group waits
+    /// before it ends "tor timeout" (zero: that group works).
+    pub(crate) stale: Duration,
+    /// [`COUNT_ENV`].
+    pub(crate) count: bool,
+}
+
+/// One helper life's connect counts ([`COUNT_ENV`]), kept in [`COUNT_FILE`]
+/// as one line: `connects=N tries=N stale=N`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counts {
+    /// Connect requests from raven-node with the right token and port.
+    pub(crate) connects: u64,
+    /// Connect tries made for them (a first try, and a fresh one after a
+    /// failure worth it).
+    pub(crate) tries: u64,
+    /// Tries that met the dead shared circuit ([`STALE_ENV`]).
+    pub(crate) stale: u64,
+}
+
+impl Counts {
+    /// The counts in `state_dir` (all zero when there are none yet).
+    #[cfg(test)]
+    pub(crate) fn read(state_dir: &Path) -> Self {
+        let text = std::fs::read_to_string(state_dir.join(COUNT_FILE)).unwrap_or_default();
+        let mut counts = Self::default();
+        for (name, value) in text
+            .split_whitespace()
+            .filter_map(|pair| pair.split_once('='))
+        {
+            let value = value.parse().unwrap_or(0);
+            match name {
+                "connects" => counts.connects = value,
+                "tries" => counts.tries = value,
+                "stale" => counts.stale = value,
+                _ => {}
+            }
+        }
+        counts
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "connects={} tries={} stale={}\n",
+            self.connects, self.tries, self.stale
+        )
+    }
+}
+
+/// [`Counts`] as they change, written to `file` each time (`None`: not
+/// kept).
+#[derive(Clone)]
+struct Counter(Option<Arc<(PathBuf, std::sync::Mutex<Counts>)>>);
+
+impl Counter {
+    fn new(knobs: &Knobs, state_dir: &Path) -> Self {
+        Self(knobs.count.then(|| {
+            let file = state_dir.join(COUNT_FILE);
+            let _ = std::fs::remove_file(&file);
+            Arc::new((file, std::sync::Mutex::new(Counts::default())))
+        }))
+    }
+
+    fn add(&self, f: impl FnOnce(&mut Counts)) {
+        let Some(kept) = &self.0 else {
+            return;
+        };
+        let (file, counts) = &**kept;
+        let mut counts = counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut counts);
+        let _ = raven_core::paths::atomic_write_private(file, counts.line().as_bytes());
+    }
 }
 
 impl Knobs {
@@ -72,6 +157,8 @@ impl Knobs {
             delay: ms(DELAY_ENV),
             latency: ms(LATENCY_ENV),
             one_circuit: on(ONE_CIRCUIT_ENV).then(rand::random::<u64>),
+            stale: ms(STALE_ENV),
+            count: on(COUNT_ENV),
         }
     }
 }
@@ -209,6 +296,7 @@ pub(crate) async fn serve(
         config.port,
         Arc::new(registry.clone()),
         knobs,
+        Counter::new(&knobs, &state_dir),
     ));
     let _connecting = AbortOnDrop(connecting);
     send(
@@ -362,13 +450,17 @@ async fn accept_connects(
     port: u16,
     registry: Arc<PathBuf>,
     knobs: Knobs,
+    counter: Counter,
 ) {
     let (delay, latency, one_circuit) = (knobs.delay, knobs.latency, knobs.one_circuit);
+    // Each friend's isolation group, for this helper life (as the Arti
+    // helper's).
+    let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(new_group)));
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
             continue;
         };
-        let registry = registry.clone();
+        let (registry, counter, book) = (registry.clone(), counter.clone(), book.clone());
         tokio::spawn(async move {
             let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
             if stream.read_exact(&mut req).await.is_err() {
@@ -384,12 +476,23 @@ async fn accept_connects(
                     .await;
                 return;
             }
-            // As the Arti helper: one more try after a failure worth it
-            // (here the registry is read again, as Arti fetches the
-            // descriptor again).
-            let opened = proto::connect_with_retry(CONNECT_WAIT, |_fresh, _within| {
-                let registry = registry.clone();
+            counter.add(|c| c.connects += 1);
+            // As the Arti helper: the first try in the friend's isolation
+            // group, one more in a new group after a failure worth it (here
+            // the registry is read again, as Arti fetches the descriptor
+            // again).
+            let opened = proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, |group, _within| {
+                let (registry, counter) = (registry.clone(), counter.clone());
+                let dead = group.is_none() && !knobs.stale.is_zero();
                 async move {
+                    counter.add(|c| {
+                        c.tries += 1;
+                        c.stale += u64::from(dead);
+                    });
+                    if dead {
+                        tokio::time::sleep(knobs.stale).await;
+                        return Err(ConnectReply::Timeout("tor timeout".into()));
+                    }
                     tokio::time::sleep(delay).await;
                     let target = std::fs::read_to_string(registry.join(hex::encode(hs_id)))
                         .ok()
@@ -421,6 +524,12 @@ async fn accept_connects(
             relay(stream, out, latency).await;
         });
     }
+}
+
+/// A loopback isolation group no connect used yet.
+fn new_group() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Both ways between `a` and `b`, each chunk arriving `latency` after it

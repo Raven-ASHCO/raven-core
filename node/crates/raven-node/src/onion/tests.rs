@@ -257,6 +257,11 @@ struct Side {
 }
 
 async fn side(dir: &Path, registry: &Path) -> Side {
+    side_with(dir, registry, loopback::Knobs::default()).await
+}
+
+/// [`side`] with its loopback helper's `knobs`.
+async fn side_with(dir: &Path, registry: &Path, knobs: loopback::Knobs) -> Side {
     let identity = Arc::new(raven_core::load_identity_required(dir).unwrap());
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -273,13 +278,7 @@ async fn side(dir: &Path, registry: &Path) -> Side {
     let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
     let registry = registry.to_path_buf();
     let helper = tokio::spawn(async move {
-        let _ = loopback::serve(
-            Box::pin(helper_in),
-            Box::pin(helper_out),
-            registry,
-            loopback::Knobs::default(),
-        )
-        .await;
+        let _ = loopback::serve(Box::pin(helper_in), Box::pin(helper_out), registry, knobs).await;
     });
     let mut stdin: Pin<Box<dyn AsyncWrite + Send>> = Box::pin(to_helper);
     let config = proto::Config {
@@ -488,6 +487,12 @@ struct Friends {
 impl Friends {
     /// `None` (skipped) outside a lab run.
     async fn new() -> Option<Self> {
+        Self::with(loopback::Knobs::default()).await
+    }
+
+    /// [`Self::new`] with Alice's loopback helper's `knobs` (the one this
+    /// process dials through).
+    async fn with(alice_knobs: loopback::Knobs) -> Option<Self> {
         use crate::outbox::test_rig::{contacts, lab_backends, pair};
         if !lab_backends() || !raven_core::onion_live_enabled() {
             eprintln!("skipped: needs RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 (debug)");
@@ -514,7 +519,7 @@ impl Friends {
         raven_core::lan_dispatch::cache_peer_bundle(a.path(), &b_bundle).unwrap();
         raven_core::lan_dispatch::cache_peer_bundle(b.path(), &a_bundle).unwrap();
         let key_ab = pair(a.path(), &alice, b.path(), &bob, &a_bundle, &b_bundle);
-        let side_a = side(a.path(), registry.path()).await;
+        let side_a = side_with(a.path(), registry.path(), alice_knobs).await;
         let side_b = side(b.path(), registry.path()).await;
         *live_lock() = Some(Live {
             token: side_a.token,
@@ -536,11 +541,17 @@ impl Friends {
     /// Alice dials Bob's onion service with one sealed message.
     async fn alice_dials_bob(&self, text: &str) -> Result<Vec<Vec<u8>>, String> {
         let sealed = seal(self.a.path(), &self.alice, &self.key_ab, text);
+        self.alice_redials_bob(&sealed).await
+    }
+
+    /// Alice dials Bob's onion service with `sealed` (again: Bob answers
+    /// a copy with the same ACK).
+    async fn alice_redials_bob(&self, sealed: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         dial_with_meta(
             self.a.path(),
             &raven_core::onion::dial_for(&self.side_b.hs_id),
             &hex::encode(self.bob_pub),
-            &[sealed],
+            &[sealed.to_vec()],
             DialMeta::default(),
         )
         .await
@@ -630,6 +641,58 @@ async fn one_circuit_cannot_take_every_onion_slot() {
         .await
         .expect("a friend on another circuit gets in");
     assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+}
+
+/// Audit T6: the rendezvous circuit Alice's helper shares by default to
+/// Bob is dead (Bob's network path vanished and no DESTROY came back). The
+/// first dial pays for it once: its first try times out and the helper's
+/// fresh try (a new isolation group) delivers. The dials after it reuse
+/// that fresh group at once. Before, each of them met the dead circuit again
+/// (in the field: a 10 s timeout, a 2 s pause and a whole new rendezvous per
+/// dial).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let stale = Duration::from_secs(3);
+    let Some(f) = Friends::with(loopback::Knobs {
+        stale,
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    // One message, dialled three times (Bob answers each copy with its ACK).
+    let sealed = seal(f.a.path(), &f.alice, &f.key_ab, "past a dead circuit");
+    let mut took = Vec::new();
+    for _ in 0..3 {
+        let began = Instant::now();
+        let replies = f.alice_redials_bob(&sealed).await.expect("delivered");
+        took.push(began.elapsed());
+        assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+    }
+    let counts = loopback::Counts::read(&f.a.path().join(TOR_DIR));
+    eprintln!("three dials past a dead shared circuit: {took:?}, {counts:?}");
+    assert!(
+        took[0] >= stale + proto::CONNECT_RETRY_PAUSE,
+        "{took:?} {counts:?}"
+    );
+    for t in &took[1..] {
+        assert!(
+            *t < stale,
+            "a later dial met the dead circuit: {took:?} {counts:?}"
+        );
+    }
+    assert_eq!(
+        counts,
+        loopback::Counts {
+            connects: 3,
+            tries: 4,
+            stale: 1
+        },
+        "{took:?}"
+    );
 }
 
 /// Tor as a helper that is still starting says it ([`Phase::Starting`],
