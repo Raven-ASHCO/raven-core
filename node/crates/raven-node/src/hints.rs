@@ -300,6 +300,11 @@ pub(crate) struct LinkCtl {
     /// 11, [`raven_core::CAP_LINK_RRH1_ASK`]: it holds none of ours): told
     /// whether or not it is due (spec §6.1).
     asked: bool,
+    /// Our hello asked the peer for its RRH1 on this link (bit 11,
+    /// [`Self::with_ask_sent`]): a listener of 0.1.0 or later then sends it
+    /// right after its RLB1 offer, due or not. Not asked, it sends one only
+    /// when it is due (spec §6.1), which a dialer cannot know.
+    ask_sent: bool,
 }
 
 impl LinkCtl {
@@ -332,6 +337,7 @@ impl LinkCtl {
             update: crate::update_exchange::UpdateLink::off(),
             purpose: None,
             asked: false,
+            ask_sent: false,
         }
     }
 
@@ -356,6 +362,14 @@ impl LinkCtl {
     /// What this dial carries ([`dial_purpose`]): the hint log lines say it.
     pub(crate) fn with_purpose(mut self, purpose: &'static str) -> Self {
         self.purpose = Some(purpose);
+        self
+    }
+
+    /// An Internet, p2p, nearby or onion dial whose hello set bit 11
+    /// ([`raven_core::CAP_LINK_RRH1_ASK`]): the listener answers it, so a
+    /// dial without frames reads that RRH1 ([`Self::expects_peer_frame`]).
+    pub(crate) fn with_ask_sent(mut self, asked: bool) -> Self {
+        self.ask_sent = asked;
         self
     }
 
@@ -592,14 +606,19 @@ impl LinkCtl {
     }
 
     /// Should a dial without frames read the peer's RRH1 before it closes?
-    /// An announce link does (LAN), and so does a dial whose peer's hello
-    /// said it sends one (unread data at close can reset the connection).
+    /// Only when the peer will send one: an announce link does (LAN, its
+    /// message 3 asked), and so does an Internet, p2p, nearby or onion dial
+    /// whose hello asked with bit 11 to a listener whose hello accepts RRH1
+    /// (it answers right after its RLB1 offer). The listener's bit 8 alone
+    /// says it accepts ours, not that it sends: one that is not due sends
+    /// nothing, and a dial that waited for it sat out its whole reply wait
+    /// (2026-11, on loopback Tor: a send's Tor check took 7.6 s, not 2.6 s).
     pub(crate) fn expects_peer_frame(&self) -> bool {
         self.live
             && self.received == 0
             && match (self.role, self.carrier) {
                 (Role::Dialer, OutboxCarrier::Lan) => self.announce,
-                (Role::Dialer, _) => self.peer_accepts == Some(true),
+                (Role::Dialer, _) => self.ask_sent && self.peer_accepts == Some(true),
                 (Role::Listener, _) => false,
             }
     }
@@ -5429,12 +5448,22 @@ mod tests {
         let d = LinkCtl::lan_dialer(dd, keys, None, local_ip, true, true);
         assert!(d.expects_peer_frame());
 
-        // Internet and p2p: the dialer sends first when the listener's hello
-        // set the bit, and reads the listener's before it closes.
-        for carrier in [OutboxCarrier::Internet, OutboxCarrier::P2p] {
+        // Internet, p2p and the onion link: the dialer sends first when the
+        // listener's hello set the bit, and reads the listener's before it
+        // closes only when its own hello asked (bit 11): bit 8 alone says
+        // the listener takes ours, not that it sends one (2026-11: a Tor
+        // check sat out Tor's 5 s reply wait for an RRH1 that never came).
+        for carrier in [
+            OutboxCarrier::Internet,
+            OutboxCarrier::P2p,
+            OutboxCarrier::Onion,
+        ] {
             forget_told(dd);
-            let mut d = LinkCtl::inet(dd, carrier, Role::Dialer, keys, true, both, None);
-            assert!(d.expects_peer_frame());
+            let unasked = LinkCtl::inet(dd, carrier, Role::Dialer, keys, true, both, None);
+            assert!(!unasked.expects_peer_frame(), "{carrier:?}: not asked");
+            let mut d = LinkCtl::inet(dd, carrier, Role::Dialer, keys, true, both, None)
+                .with_ask_sent(true);
+            assert!(d.expects_peer_frame(), "{carrier:?}: asked");
             assert!(d.outgoing().await.is_some(), "{carrier:?}");
             assert_eq!(d.outgoing().await, None);
             assert!(d.take(&rrh1).await);
@@ -5455,6 +5484,11 @@ mod tests {
             assert_eq!(l.outgoing().await, None, "{carrier:?}: told lately");
             let mut d = LinkCtl::inet(dd, carrier, Role::Dialer, keys, true, both, None);
             assert_eq!(d.outgoing().await, None, "{carrier:?}: told lately");
+            // Asked (bit 11), a listener answers though it told lately: the
+            // RRH1 a check that asked reads (0.1.0's listener does the same).
+            let ask = both | raven_core::CAP_LINK_RRH1_ASK;
+            let mut l = LinkCtl::inet(dd, carrier, Role::Listener, keys, true, ask, None);
+            assert!(l.outgoing().await.is_some(), "{carrier:?}: asked");
         }
 
         // A third RRH1 floods; garbage with the magic is consumed too.

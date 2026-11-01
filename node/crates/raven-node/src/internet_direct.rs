@@ -1159,7 +1159,13 @@ where
     // We hold none of the contact's route hints (forgotten, or none since
     // our start): ask for its RRH1 on this link (field test E3: after
     // `forget-address` a friend at home stayed on Tor, never told again).
-    let offers = offers.with(LinkFeatures::RRH1_ASK, rrh1 && no_hints);
+    // A dial without frames (a send's check, an announce) asks too: it
+    // reads the listener's RRH1 and closes, so it must know whether one
+    // comes. Asked, a listener (0.1.0 and later) sends it right after its
+    // RLB1 offer; not asked, it sends one only when due, and the check sat
+    // out its reply wait for nothing (5 s on Tor).
+    let ask = rrh1 && (no_hints || frames.is_empty());
+    let offers = offers.with(LinkFeatures::RRH1_ASK, ask);
     progress.stage = STAGE_NOISE;
     let (mut stream, (remote_ed, peer_caps, mut transport, remote_static, knocked)) = {
         let (identity, pinned) = (&identity, pinned.as_ref());
@@ -1231,6 +1237,7 @@ where
         peer_caps,
         link_peer_id,
     )
+    .with_ask_sent(ask)
     .with_purpose(crate::hints::dial_purpose(frames, false))
     .with_knock(knocked)
     .with_update(crate::update_exchange::UpdateLink::inet(
@@ -2478,6 +2485,92 @@ mod tests {
         );
     }
 
+    /// A send's Tor check (a dial without frames over the onion link) never
+    /// waits for a route-hint frame the friend does not send (2026-11, on
+    /// loopback Tor: a check took 7.6 s instead of 2.6 s, Tor's 5 s reply wait
+    /// spent on an RRH1 the listener was not due to send), and still reads
+    /// the friend's RRH1: the first check learns the friend's route hints,
+    /// and a later one, while the friend has nothing new to tell, ends
+    /// without waiting Tor's reply wait.
+    #[tokio::test]
+    async fn a_tor_check_reads_the_friends_route_hints_and_never_waits_for_none() {
+        if !lab_backend_available() {
+            return;
+        }
+        let _live = crate::hints::LiveForTest::set(true);
+        let (a_dir, b_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let dialer = raven_core::load_or_create_identity(a_dir.path()).unwrap().0;
+        let friend = Arc::new(bob());
+        write_contacts(b_dir.path(), &[&dialer]);
+        write_contacts(a_dir.path(), &[&friend]);
+        let friend_key = friend.public_key_bytes();
+        let tor = ReplyWaits {
+            first: netutil::PRODUCTION_REPLY_WAITS.first,
+            idle: raven_core::onion::ONION_REPLY_IDLE,
+        };
+        let check = |a_dir: PathBuf, b_dir: PathBuf, friend: Arc<Identity>| async move {
+            let (client, server_side) = tokio::io::duplex(1 << 18);
+            let server = tokio::spawn(async move {
+                let mut slot = test_slot();
+                serve_inbound_on(
+                    ONION_LINK,
+                    b_dir,
+                    friend,
+                    server_side,
+                    PRODUCTION_LIMITS,
+                    &mut slot,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            });
+            let mut stream = Some(client);
+            let mut progress = DialProgress::new("ONION", tor);
+            let began = std::time::Instant::now();
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                dial_session_on(
+                    ONION_LINK,
+                    &a_dir,
+                    || {
+                        let s = stream.take();
+                        async move { s.ok_or_else(|| "one stream only".to_string()) }
+                    },
+                    &friend_key,
+                    &[],
+                    None,
+                    &mut progress,
+                ),
+            )
+            .await
+            .expect("the check ends")
+            .expect("the check reaches the friend");
+            let took = began.elapsed();
+            listener_result(server).await.expect("a clean end");
+            took
+        };
+        let (a, b) = (a_dir.path().to_path_buf(), b_dir.path().to_path_buf());
+        // First check: the friend tells its route hints (due: never told),
+        // and the check reads them.
+        assert!(crate::hints::holds_no_hints(&a, &friend_key));
+        let first = check(a.clone(), b.clone(), friend.clone()).await;
+        assert!(
+            !crate::hints::holds_no_hints(&a, &friend_key),
+            "the friend's RRH1 was read ({first:?})"
+        );
+        // The friend told us just now, and we hold its hints: nothing is
+        // due. The check must not sit out Tor's reply wait for a frame.
+        let again = check(a.clone(), b.clone(), friend.clone()).await;
+        assert!(
+            again < raven_core::onion::ONION_REPLY_IDLE,
+            "a Tor check waited {again:?} for a route hint (the first took {first:?})"
+        );
+        assert!(!crate::hints::holds_no_hints(&a, &friend_key));
+        crate::hints::forget_told(&a);
+        crate::hints::forget_told(&b);
+    }
+
     /// The dial side of the same rule: an Internet dial to a contact that is
     /// not verified is refused before anything is dialled (no listener here:
     /// a dial attempt would fail with a connect error instead).
@@ -2818,7 +2911,7 @@ mod tests {
         }
     }
 
-    /// A dial without frames whose listener's hello said it sends an RRH1
+    /// A dial without frames asks for the listener's RRH1 (bit 11) and
     /// reads it before closing (and sent its own first).
     #[tokio::test]
     async fn a_zero_frame_dial_reads_the_listeners_rrh1_before_closing() {
@@ -2845,7 +2938,8 @@ mod tests {
             true,
             BOTH,
             None,
-        );
+        )
+        .with_ask_sent(true);
         exchange_frames(&mut dialer, &mut t, &[], &mut hints, &mut progress)
             .await
             .unwrap();
