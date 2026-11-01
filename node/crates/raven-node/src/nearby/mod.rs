@@ -232,12 +232,28 @@ struct Running {
 }
 
 impl Running {
+    /// The engine's task ended (its radio went away); never, while none
+    /// runs. The engine stays here: [`Self::stop`] ends it.
+    async fn ended(&mut self) {
+        match self.engine.as_mut() {
+            Some((_, task)) => {
+                let _ = task.await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+
     async fn stop(&mut self) {
         let Some((handle, task)) = self.engine.take() else {
             return;
         };
         set_current(None);
         handle.stop();
+        // An ended task has nothing to wait for, and [`Self::ended`] may
+        // already have taken its result: polling it again panics.
+        if task.is_finished() {
+            return;
+        }
         let abort = task.abort_handle();
         if tokio::time::timeout(STOP_WAIT, task).await.is_err() {
             abort.abort();
@@ -327,18 +343,10 @@ pub(crate) async fn run(data_dir: PathBuf, background_life: bool) -> Result<(), 
             }
             (None, false) => {}
         }
-        let ended = async {
-            match running.engine.as_mut() {
-                Some((_, task)) => {
-                    let _ = task.await;
-                }
-                None => std::future::pending::<()>().await,
-            }
-        };
         tokio::select! {
             () = tokio::time::sleep(POLICY_POLL) => {}
             () = svc.wake.notified() => {}
-            () = ended => {}
+            () = running.ended() => {}
         }
     }
 }
@@ -1093,6 +1101,58 @@ mod tests {
             }
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         }
+    }
+
+    /// A radio that ends at once (the macOS helper that macOS stops with
+    /// SIGABRT when Bluetooth is not allowed for RavenNearby, or the iOS
+    /// in-process radio that stopped): its event queue closes, the engine
+    /// ends, the service sees that ([`Running::ended`]) and stops the engine
+    /// on its next turn. That stop must not poll the engine's task again:
+    /// tokio panics with "JoinHandle polled after completion", which ended
+    /// the whole service task on every radio that went away.
+    #[tokio::test]
+    async fn an_engine_whose_radio_ends_at_once_stops_without_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let ether = fake::Ether::new(fake::EtherParams::default());
+        let (unused, _unused) = mpsc::channel(radio::EVENT_QUEUE);
+        let radio = ether.radio("ends-at-once", unused);
+        // The queue's only sender goes at once, as the helper's does.
+        let (gone, events) = mpsc::channel(radio::EVENT_QUEUE);
+        drop(gone);
+        let identity = Arc::new(Identity::from_seed(&[0x5A; 32]));
+        let host = Arc::new(NodeHost {
+            data_dir: dir.path().to_path_buf(),
+            identity: Arc::clone(&identity),
+            admission: Admission::new(netutil::NEARBY_INBOUND),
+        });
+        let mut running = Running {
+            engine: Some(engine::spawn(
+                Box::new(radio),
+                events,
+                host,
+                identity.public_key_bytes(),
+                false,
+                false,
+            )),
+        };
+        tokio::time::timeout(Duration::from_secs(5), running.ended())
+            .await
+            .expect("the engine ends with its radio");
+        assert!(
+            running
+                .engine
+                .as_ref()
+                .is_some_and(|(_, task)| task.is_finished()),
+            "run's next turn stops it"
+        );
+        running.stop().await;
+        assert!(running.engine.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), running.ended())
+                .await
+                .is_err(),
+            "no engine: nothing ends"
+        );
     }
 
     /// A nearby dial names exactly the contact it is for, and only a
