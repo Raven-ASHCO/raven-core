@@ -4060,18 +4060,6 @@ pub(crate) fn earlier_undelivered_text(
     ])
 }
 
-/// An earlier message was sent again but its ACK has not come, so this one was
-/// not queued. Unlike a refusal its frames *were* written.
-pub(crate) fn earlier_unconfirmed_text(ctx: &SendCtx, preview: &str) -> String {
-    let who = ctx.who();
-    format!(
-        "NOT SENT: an earlier message{} to {who} was sent again, but {who} has not confirmed \
-         it yet (it may already have arrived), so this message was not queued. Wait a moment, \
-         then send again.",
-        spaced(preview)
-    )
-}
-
 // ── Clocks (cutoff pack CP.7, F10 / M11) ──────────────────────────────────
 //
 // Raven refuses what is dated more than five minutes in its future, and in a
@@ -13044,17 +13032,8 @@ mod send_outcome_tests {
             earlier_kept.contains("raven-node keeps trying the earlier one in the background"),
             "{earlier_kept}"
         );
-        let awaiting = earlier_unconfirmed_text(&ctx, "");
-        assert!(
-            awaiting.starts_with("NOT SENT: an earlier message to Bob was sent again"),
-            "{awaiting}"
-        );
-        assert!(
-            awaiting.contains("this message was not queued"),
-            "{awaiting}"
-        );
         // Only a verified ACK may say "delivered" (and it says it elsewhere).
-        for text in [&queued, &unconfirmed, &earlier, &awaiting] {
+        for text in [&queued, &unconfirmed, &earlier] {
             assert!(!text.contains("status delivered"), "{text}");
         }
     }
@@ -13068,7 +13047,6 @@ mod send_outcome_tests {
             unconfirmed_text(&ctx, "no sealed ACK", "", &next_send()),
             unconfirmed_text(&ctx, "no sealed ACK", "", &background()),
             earlier_undelivered_text(&ctx, "ipc LAN_DIAL: early eof", "", &next_send()),
-            earlier_unconfirmed_text(&ctx, ""),
             not_sent_text(&ctx, "ipc LAN_DIAL: early eof", false),
             "NOT SENT, nothing queued: another `ash send` to this peer from this profile was still running after 120s; try again shortly".to_string(),
             "send refused: x".to_string(),

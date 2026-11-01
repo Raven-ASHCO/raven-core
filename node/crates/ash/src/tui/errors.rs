@@ -111,7 +111,7 @@ const REMOTE_LAN_MARK: &str = "reached only at addresses on your local network";
 const VERIFIED_ONLY_MARK: &str = "lan_verified_only";
 /// pair_init_lab's `RESERVED_PREFIX_REFUSAL`.
 const RESERVED_MARK: &str = "the reserved prefix";
-/// ext.rs's `earlier_undelivered_text` and `earlier_unconfirmed_text`.
+/// ext.rs's `earlier_undelivered_text`.
 const EARLIER_MARK: &str = "not sent: an earlier message";
 /// ext.rs's `queue_full_text`.
 const QUEUE_FULL_MARK: &str = "are already waiting until";
@@ -1811,14 +1811,6 @@ mod tests {
             ),
             (
                 bridge::earlier_undelivered_text(&ctx, "_dial_peer_closed", "\"hi\"", &retry(true)),
-                (
-                    "An earlier message to Bob is still being sent.",
-                    "Wait for it.",
-                    Action::Wait,
-                ),
-            ),
-            (
-                bridge::earlier_unconfirmed_text(&ctx, ""),
                 (
                     "An earlier message to Bob is still being sent.",
                     "Wait for it.",

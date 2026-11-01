@@ -1992,7 +1992,6 @@ fn bridge_api_pins() {
         bridge::unconfirmed_text;
     let _: fn(&bridge::SendCtx, &str, &str, &bridge::RetryNote) -> String =
         bridge::earlier_undelivered_text;
-    let _: fn(&bridge::SendCtx, &str) -> String = bridge::earlier_unconfirmed_text;
     let _: fn(&bridge::SendCtx, usize) -> String = bridge::queue_full_text;
     let _: fn(&bridge::SendCtx) -> String = bridge::offline_stage_full_text;
     let _: fn(&bridge::SendCtx) -> String = bridge::peer_reset_unreachable_text;

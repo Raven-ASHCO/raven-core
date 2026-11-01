@@ -742,9 +742,9 @@ pub(super) use super::super::ext::first_message_rule;
 // the app gets them.
 #[cfg(test)]
 pub(super) use super::super::ext::{
-    earlier_unconfirmed_text, earlier_undelivered_text, not_sent_text, offline_stage_full_text,
-    peer_reset_unreachable_text, queue_full_text, queued_text, send_ctx, unconfirmed_text,
-    verified_only_text, RetryNote, SendCtx,
+    earlier_undelivered_text, not_sent_text, offline_stage_full_text, peer_reset_unreachable_text,
+    queue_full_text, queued_text, send_ctx, unconfirmed_text, verified_only_text, RetryNote,
+    SendCtx,
 };
 #[cfg(test)]
 pub(super) use super::super::pair_init_lab::{

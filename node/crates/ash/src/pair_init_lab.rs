@@ -20,11 +20,12 @@ use raven_core::lan_dispatch::{
     find_sendable_peer_session, load_cached_peer_bundle, parse_peer_offer, wrap_pair_init,
 };
 use raven_core::outbox::{
-    abandon_undelivered_to_peer, clear_object_routes, envelope_expires_at,
-    finish_outbound_delivered, first_ack_frame, give_up_outbound, outbound_already_delivered,
-    park_or_give_up_expired, peer_lineage_denied, record_object_routes, record_outbound_delivered,
-    send_lock_busy, CarrierChoice, DeliveryPath, ExpiredMessage, GiveUp, OutboxCarrier,
-    OutboxRoute, PeerSendLock, ACK_FOR_ANOTHER_MESSAGE, CONTACT_NOT_VERIFIED, HISTORY_FAILED,
+    abandon_undelivered_to_peer, accept_sealed_ack, ack_frames, clear_object_routes,
+    envelope_expires_at, finish_outbound_delivered, first_ack_frame, give_up_outbound,
+    outbound_already_delivered, park_or_give_up_expired, peer_lineage_denied, record_object_routes,
+    record_outbound_delivered, send_lock_busy, CarrierChoice, DeliveryPath, ExpiredMessage, GiveUp,
+    OutboxCarrier, OutboxRoute, PeerSendLock, ACK_FOR_ANOTHER_MESSAGE, CONTACT_NOT_VERIFIED,
+    HISTORY_FAILED,
 };
 use raven_core::pair_init_lan_oob::{classify_packed_envelope, PairInitOobClassify};
 use raven_core::paths::PRIMARY_DEVICE_ID;
@@ -36,10 +37,9 @@ use raven_core::session_reset::{
 };
 
 use super::ext::{
-    earlier_unconfirmed_text, earlier_undelivered_text, friendly_send_error, not_sent_text,
-    offline_stage_full_text, parked_text, peer_reset_unreachable_text, queue_full_text,
-    queued_text, quoted_preview, recorded_locally_failed_text, unconfirmed_text, ResetWhy,
-    RetryNote, SendCtx,
+    earlier_undelivered_text, friendly_send_error, not_sent_text, offline_stage_full_text,
+    parked_text, peer_reset_unreachable_text, queue_full_text, queued_text, quoted_preview,
+    recorded_locally_failed_text, unconfirmed_text, ResetWhy, RetryNote, SendCtx,
 };
 use super::trace_delivery;
 
@@ -53,8 +53,15 @@ const PEER_CERT_CACHE: &str = "peer_device_certs.json";
 const MAX_PEER_CERT_CACHE_KEYS: usize = 256;
 /// Longest one `ash send` waits for another send from this profile to the same
 /// peer (another `ash send`, or raven-node's outbox retrying it; see
-/// [`acquire_send_lock`]).
-const PEER_SEND_LOCK_WAIT: Duration = Duration::from_secs(120);
+/// [`acquire_send_lock`]). A quarter of the 120 s it was, since no send
+/// holds the lock across its message dial any more ([`SendLockHold`], T13
+/// b): store work holds it, and an earlier row's own dial, a PairInit or a
+/// session reset step. A burst of sends to one friend from several programs
+/// still waits on each other's store work.
+const PEER_SEND_LOCK_WAIT: Duration = Duration::from_secs(30);
+/// How long a send waits to take the lock again after a dial, to record
+/// what came back ([`SendLockHold::around`]).
+const SEND_LOCK_RETAKE_WAIT: Duration = Duration::from_secs(30);
 /// Messages that may wait for one unreachable peer at once (queued or sent
 /// without an ACK). Well inside the receiver's skipped-key window
 /// (`MAX_SKIPPED_KEYS`) and the shared outbound stage (`MAX_STAGE_ENTRIES`).
@@ -143,6 +150,41 @@ fn acquire_send_lock_within(
             format!("NOT SENT, nothing queued: send lock: {e}")
         }
     })
+}
+
+/// The friend's send lock as a send holds it (T13 b, Tor messaging audit
+/// 2026-11): for the store work, let go for each message dial, and taken
+/// again to record what came back, as raven-node's outbox holds it. A send
+/// held it across every Tor dial, so the outbox could not record its own
+/// dials' receipts meanwhile (and the ACKs owed to the friend backed off).
+/// A PairInit and a session reset step keep it (single writer).
+pub(crate) struct SendLockHold<'a> {
+    data_dir: &'a Path,
+    peer: [u8; 32],
+    held: std::cell::RefCell<Option<PeerSendLock>>,
+}
+
+impl<'a> SendLockHold<'a> {
+    pub(crate) fn new(data_dir: &'a Path, peer: [u8; 32], lock: PeerSendLock) -> Self {
+        Self {
+            data_dir,
+            peer,
+            held: std::cell::RefCell::new(Some(lock)),
+        }
+    }
+
+    /// `dial` with the lock let go, then taken again (waiting at most
+    /// [`SEND_LOCK_RETAKE_WAIT`]: raven-node's outbox and other sends hold
+    /// it for store work only). Should it not come back in time the send
+    /// records without it: each store write is a transaction of its own, and
+    /// an ACK recorded twice is a duplicate.
+    fn around<T>(&self, dial: impl FnOnce() -> T) -> T {
+        drop(self.held.borrow_mut().take());
+        let out = dial();
+        let again = PeerSendLock::acquire_within(self.data_dir, &self.peer, SEND_LOCK_RETAKE_WAIT);
+        *self.held.borrow_mut() = again.ok();
+        out
+    }
 }
 
 /// How long a send waits for raven-node's `ContactReach` (it answers from
@@ -1610,15 +1652,19 @@ const ONION_SECOND_TRY_WITHIN: Duration = Duration::from_secs(30);
 /// own: one that fails within `second_within` gets one more try at once
 /// (the same sealed envelope; a copy that did arrive is answered as a
 /// duplicate, never shown twice), and a failure says that Tor answered
-/// ([`ONION_CHECKED_THEN_LOST`]). A refusal is the friend's answer: as it
-/// came.
+/// ([`ONION_CHECKED_THEN_LOST`]), a link that closed after the write too
+/// (T1 c: the send's loop tells a superseded session's refusal apart).
 fn dial_after_tor_check<T>(
     second_within: Duration,
     mut dial: impl FnMut() -> Result<T, String>,
 ) -> Result<T, String> {
     let started = Instant::now();
     match dial() {
-        Err(e) if !is_peer_refusal(&e) => {
+        // T1 (c), Tor messaging audit 2026-11: a link that closed after the
+        // write (`_DIAL_PEER_CLOSED`) is a lost Tor link far more often than
+        // the friend refusing: it gets the second try too (§9), and a copy
+        // that did arrive is answered as a duplicate.
+        Err(e) => {
             let again = if started.elapsed() < second_within {
                 if super::ext::verbose() {
                     eprintln!(
@@ -1630,13 +1676,7 @@ fn dial_after_tor_check<T>(
             } else {
                 Err(e)
             };
-            again.map_err(|e| {
-                if is_peer_refusal(&e) {
-                    e
-                } else {
-                    format!("{ONION_CHECKED_THEN_LOST}: {e}")
-                }
-            })
+            again.map_err(|e| format!("{ONION_CHECKED_THEN_LOST}: {e}"))
         }
         other => other,
     }
@@ -1913,7 +1953,11 @@ pub fn run_pair_init_and_send_routes(
     // From here on the send reads and writes per-peer session state: serialise it
     // with every other `ash send` to this peer (see `PeerSendLock`). After the
     // probe, so an unreachable peer's timeouts are not serialised.
-    let _send_lock = acquire_send_lock_noting(data_dir, &peer_pub, &ctx.display_name())?;
+    let send_lock = SendLockHold::new(
+        data_dir,
+        peer_pub,
+        acquire_send_lock_noting(data_dir, &peer_pub, &ctx.display_name())?,
+    );
     let (route, peer_bundle) = match answered {
         Some(hit) => hit,
         // Peer asleep / unreachable on every route: the RLB1 probe is not needed
@@ -1937,6 +1981,7 @@ pub fn run_pair_init_and_send_routes(
                 probe_errors.join("; "),
                 &ctx,
                 &handoff,
+                &send_lock,
             )
             .map(|()| first.clone());
         }
@@ -2076,6 +2121,7 @@ pub fn run_pair_init_and_send_routes(
         None,
         ctx,
         &handoff,
+        &send_lock,
         &mut reset,
     );
     let error = match first {
@@ -2118,6 +2164,7 @@ pub fn run_pair_init_and_send_routes(
                 None,
                 ctx,
                 &handoff,
+                &send_lock,
                 &mut again,
             );
             match (result, reset.own_mid) {
@@ -2795,6 +2842,7 @@ fn send_when_peer_unreachable(
     probe_err: String,
     ctx: &SendCtx,
     handoff: &OutboxHandoff<'_>,
+    lock: &SendLockHold<'_>,
 ) -> Result<(), String> {
     let (peer_cert, record_key) = match offline_send_target(data_dir, peer_pub) {
         Ok(Some(target)) => target,
@@ -2835,6 +2883,7 @@ fn send_when_peer_unreachable(
         Some(&probe_err),
         ctx,
         handoff,
+        lock,
         &mut SendReset::default(),
     )
 }
@@ -3253,6 +3302,8 @@ fn send_indexed_text(
     ctx: &SendCtx,
     // Where a message this send leaves undelivered goes: raven-node's outbox.
     handoff: &OutboxHandoff<'_>,
+    // The friend's send lock: let go for each message dial (T13 b).
+    lock: &SendLockHold<'_>,
     // Session reset: query a refusal once, restart once (see `SendReset`).
     reset: &mut SendReset,
 ) -> Result<(), String> {
@@ -3329,7 +3380,25 @@ fn send_indexed_text(
     // The exact Message bytes of the current dial (a session reset query
     // carries them when the peer refuses).
     let dial_bytes = std::cell::RefCell::new(None::<Vec<u8>>);
+    // T1 (a), Tor messaging audit 2026-11: each earlier queued message went
+    // out again on a link of its own before the new one (one Tor link per
+    // message). Those on this send's session are collected instead (their
+    // exact bytes, in order: `collect_only`) and go out on the new
+    // message's dial, before it (`carry_batch`), as raven-node's outbox
+    // puts several on one link.
+    let batch = std::cell::RefCell::new(Vec::<Vec<u8>>::new());
+    let collect_only = std::cell::Cell::new(false);
+    let carry_batch = std::cell::Cell::new(false);
+    let batch_dialled = std::cell::Cell::new(false);
+    // The dial that carried them wrote their frames: it was answered, the
+    // friend refused it, or its link closed after the write.
+    let batch_written = std::cell::Cell::new(false);
+    // T1 (c): the current dial's Tor link closed after the write, on this
+    // send's session: a lost link, not the friend refusing, but its frames
+    // left this computer.
+    let lost_after_write = std::cell::Cell::new(false);
     let mut dial = |digest: &[u8; 32], bytes: &[u8]| {
+        lost_after_write.set(false);
         let oversize = bytes.len() > raven_core::lan_noise::MAX_TRANSPORT_PLAINTEXT;
         if oversize {
             *dial_err.borrow_mut() = Some(format!(
@@ -3381,6 +3450,11 @@ fn send_indexed_text(
                 let _ = stage_guard.borrow_mut().take();
             }
         }
+        if collect_only.get() {
+            // It goes out with the new message, on its dial (T1 a).
+            batch.borrow_mut().push(bytes.to_vec());
+            return Ok(*digest);
+        }
         let skip_dial = link_down.borrow().clone().or_else(|| {
             handoff_only
                 .get()
@@ -3399,32 +3473,64 @@ fn send_indexed_text(
             }
             return Err(());
         }
-        let dial_once = || {
-            ipc_carrier_dial_reply_patient(
-                data_dir,
-                carrier,
-                lan_dial,
-                peer_pub_hex,
-                &[bytes.to_vec()],
-            )
-        };
-        let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
-        let dialled = if tor_checked {
-            dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once)
+        // The earlier queued messages collected for it go first (T1 a).
+        let carried: Vec<Vec<u8>> = if carry_batch.get() && !batch_dialled.get() {
+            batch.borrow().clone()
         } else {
-            dial_once()
+            Vec::new()
         };
+        let with_batch = !carried.is_empty();
+        let frames: Vec<Vec<u8>> = carried
+            .into_iter()
+            .chain(std::iter::once(bytes.to_vec()))
+            .collect();
+        let dial_once =
+            || ipc_carrier_dial_reply_patient(data_dir, carrier, lan_dial, peer_pub_hex, &frames);
+        let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
+        let run = || {
+            if tor_checked {
+                dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once)
+            } else {
+                dial_once()
+            }
+        };
+        // T13 (b): the new message's dial runs with the send lock let go
+        // (its row is sealed and staged: another send retries it, at most,
+        // and the store takes the first handoff). An earlier row's own dial
+        // keeps it: another send's new message must not be sealed between
+        // this loop and this send's own.
+        let dialled = if carry_batch.get() {
+            lock.around(run)
+        } else {
+            run()
+        };
+        batch_dialled.set(batch_dialled.get() || with_batch);
         match dialled {
             Ok(reply) => {
                 *replies.borrow_mut() = reply.frames;
                 dial_path.set(reply.path);
+                batch_written.set(batch_written.get() || with_batch);
                 if let Some(mid) = dial_mid.get() {
                     let _ = raven_core::outbox::set_object_unsent(data_dir, &mid, false, now);
                 }
                 Ok(*digest)
             }
             Err(e) => {
-                let refused = is_peer_refusal(&e);
+                let closed = is_peer_refusal(&e);
+                // T1 (c): over Tor a link that closed after the write, on
+                // this send's session, is a lost link (its second try ran in
+                // `dial_after_tor_check`), not the friend refusing; a row of
+                // a superseded session keeps the refusal it was.
+                let lost =
+                    closed && carrier == DialCarrier::Onion && *dial_session.borrow() == session_id;
+                let refused = closed && !lost;
+                lost_after_write.set(lost);
+                batch_written.set(batch_written.get() || (with_batch && closed));
+                if lost {
+                    if let Some(mid) = dial_mid.get() {
+                        let _ = raven_core::outbox::set_object_unsent(data_dir, &mid, false, now);
+                    }
+                }
                 if refused {
                     // The peer took the frames, then refused them: written. A
                     // prepared row stays prepared, so its route record says
@@ -3501,6 +3607,8 @@ fn send_indexed_text(
     // Agent payloads (app channel) belong to raven-node's worker: never
     // dialled, abandoned or counted here (design §8.7).
     let app_rows = app_message_ids(data_dir, recipient);
+    // The earlier rows collected for the new message's dial (T1 a).
+    let mut batched: Vec<Batched> = Vec::new();
     for (earlier_row, resend) in earlier {
         if earlier_row.kind != EndpointOutboundKind::Message {
             continue;
@@ -3602,6 +3710,24 @@ fn send_indexed_text(
         *dial_session.borrow_mut() = earlier_row.session_id;
         *dial_expected_digest.borrow_mut() = Some(earlier_row.object_digest);
         replies.borrow_mut().clear();
+        // T1 (a): a queued row of this send's session goes out with the new
+        // message, on its dial, while the dial has room for it; past that it
+        // waits for raven-node's outbox (kicked by this send), as one more
+        // link each would cost a Tor link each again.
+        let batched_bytes: usize = batch.borrow().iter().map(Vec::len).sum();
+        let ridable = resend && !own && row_key == *record_key;
+        let batchable = ridable
+            && batch.borrow().len() < SEND_DIAL_EARLIER_MAX
+            && batched_bytes + earlier_row.immutable_envelope_bytes.len()
+                <= SEND_DIAL_EARLIER_BYTES;
+        if ridable && !batchable {
+            if record.is_none() {
+                handoff.record(&earlier_row.message_id, expiry);
+            }
+            continue;
+        }
+        collect_only.set(batchable);
+        let collected = batch.borrow().len();
         let result = if resend {
             store.resend_queued_endpoint_outbound(
                 &row_key,
@@ -3619,12 +3745,28 @@ fn send_indexed_text(
                 &mut dial,
             )
         };
+        collect_only.set(false);
         match result {
+            Ok(row) if batchable => {
+                // Collected (or nothing to send: it is no longer awaiting
+                // its ACK): it goes out with the new message.
+                if batch.borrow().len() > collected {
+                    batched.push(Batched {
+                        message_id: row.message_id,
+                        session_id: earlier_row.session_id,
+                        preview: preview.clone(),
+                        expiry,
+                        recorded: record.is_some(),
+                    });
+                }
+                continue;
+            }
             Ok(row) => {
                 if queued_offline.replace(false) {
                     // Handed (back) to the outbox queue, nothing taken on the
                     // wire: it stays queued, ahead of this message. A prepared
-                    // row was never written by a carrier at all: say so.
+                    // row was never written by a carrier at all: say so (a
+                    // Tor link that closed after the write did write it).
                     if !resend {
                         if record.is_none() {
                             handoff.record(&row.message_id, expiry);
@@ -3632,7 +3774,7 @@ fn send_indexed_text(
                         let _ = raven_core::outbox::set_object_unsent(
                             data_dir,
                             &row.message_id,
-                            true,
+                            !lost_after_write.get(),
                             now,
                         );
                     }
@@ -3673,9 +3815,10 @@ fn send_indexed_text(
                         &note(),
                     ));
                 } else {
-                    // Sent again, no ACK yet: the outbox keeps resending it.
+                    // Sent again, no ACK yet: the outbox keeps resending it,
+                    // and it never holds the new message back (T1 b: it said
+                    // NOT SENT, "has not confirmed it yet").
                     let _ = note();
-                    return Err(earlier_unconfirmed_text(ctx, &preview));
                 }
             }
             Err(raven_core::IndexedSessionStoreError::NotFound)
@@ -3761,6 +3904,26 @@ fn send_indexed_text(
                     }
                     continue;
                 }
+                if is_peer_refusal(&detail) {
+                    // T1 (b): the friend refused it (it took the frames and
+                    // closed). It never fails the new message (NOT SENT: "an
+                    // earlier message ... is still undelivered"): it is handed
+                    // to raven-node's outbox, a prepared one to the queue so
+                    // it does not hold the lane, and the new message waits
+                    // with it rather than being refused the same way.
+                    if !resend {
+                        let _ = store.retry_endpoint_outbound(
+                            &row_key,
+                            &earlier_row.object_digest,
+                            &local_device,
+                            now,
+                            &mut |d: &[u8; 32], _: &[u8]| Ok(*d),
+                        );
+                    }
+                    let _ = note();
+                    *link_down.borrow_mut() = Some(detail);
+                    continue;
+                }
                 return Err(earlier_undelivered_text(ctx, &detail, &preview, &note()));
             }
         }
@@ -3776,186 +3939,366 @@ fn send_indexed_text(
     handoff_only.set(false);
     dial_mid.set(None);
     *dial_err.borrow_mut() = None;
-    if let Some(mid) = reset.own_mid {
-        // This text already went out above as its re-sealed copy: never seal
-        // it a second time.
-        if own_delivered {
-            return Ok(());
-        }
-        return Err(queued_text(
-            ctx,
-            &format!(
-                "{}; mid={}…",
-                raven_core::session_reset::code::PEER_RESET,
-                hex::encode(&mid[..4])
-            ),
-            &quoted_preview(text),
-            &handoff.note_own(&mid, expires),
-        ));
-    }
-    // Whatever the loop above could not deliver still waits, ahead of this
-    // message (parked ones too): bound how many may wait for one peer.
-    let waiting = waiting_for_peer(data_dir, &store, recipient)?;
-    if waiting >= MAX_QUEUED_PER_PEER {
-        return Err(queue_full_text(ctx, waiting));
-    }
-    if link_down.borrow().is_some() {
-        // This message will only be queued.
-        offline_stage_room(data_dir, text, ctx)?;
-    }
-    *history_queue_text.borrow_mut() = Some(text.to_string());
-    *dial_session.borrow_mut() = session_id;
-    *dial_expected_digest.borrow_mut() = None;
-    // Lock+capacity held until stage write inside dial (or send fails).
-    *stage_guard.borrow_mut() = Some(
-        raven_core::OutboundStageSendGuard::acquire(data_dir, text, now).map_err(|e| match e {
-            raven_core::ChatHistoryError::TooLarge => {
-                "outbound stage capacity exceeded".to_string()
+    // The new message's dial carries the earlier rows collected above (T1
+    // a); the ACKs among its replies that its own outcome went through.
+    carry_batch.set(true);
+    let handled_acks = std::cell::RefCell::new(Vec::<usize>::new());
+    let outcome = (|| -> Result<(), String> {
+        if let Some(mid) = reset.own_mid {
+            // This text already went out above as its re-sealed copy: never seal
+            // it a second time.
+            if own_delivered {
+                return Ok(());
             }
-            other => other.to_string(),
-        })?,
-    );
-    let outbound = match store.send_message_envelope(
-        record_key,
-        text,
-        &local_device,
-        now,
-        expires,
-        now,
-        &mut rng,
-        &mut dial,
-    ) {
-        Ok(row) => {
-            let _ = stage_guard.borrow_mut().take();
-            row
+            return Err(queued_text(
+                ctx,
+                &format!(
+                    "{}; mid={}…",
+                    raven_core::session_reset::code::PEER_RESET,
+                    hex::encode(&mid[..4])
+                ),
+                &quoted_preview(text),
+                &handoff.note_own(&mid, expires),
+            ));
         }
-        Err(e) => {
-            let detail = dial_err
-                .borrow()
-                .clone()
-                .unwrap_or_else(|| e.redacted_display());
-            let binding = failed_binding.borrow_mut().take();
-            let _ = stage_guard.borrow_mut().take();
-            // A binding that was prepared but never staged means the staging step
-            // itself failed (chat history unreadable, Keychain denied, history locked,
-            // ...). The body and the reserved outbound row may be half-written, and a
-            // row left pending would be delivered silently by the NEXT send, so a user
-            // who retypes the text as advised would send it twice. Abandon it, so that
-            // "nothing was queued" is true.
-            if stage_or_body_handoff_failure(&detail)
-                || (binding.is_some() && !staged_for_retry.get())
-            {
-                if let Some((sid, digest, mid)) = binding {
-                    abandon_prepared_binding(
-                        data_dir,
-                        &mut store,
-                        &peer_cert.device_ed_pub,
-                        &sid,
-                        &digest,
-                        &mid,
-                    )?;
+        // Whatever the loop above could not deliver still waits, ahead of this
+        // message (parked ones too): bound how many may wait for one peer.
+        let waiting = waiting_for_peer(data_dir, &store, recipient)?;
+        if waiting >= MAX_QUEUED_PER_PEER {
+            return Err(queue_full_text(ctx, waiting));
+        }
+        if link_down.borrow().is_some() {
+            // This message will only be queued.
+            offline_stage_room(data_dir, text, ctx)?;
+        }
+        *history_queue_text.borrow_mut() = Some(text.to_string());
+        *dial_session.borrow_mut() = session_id;
+        *dial_expected_digest.borrow_mut() = None;
+        // Lock+capacity held until stage write inside dial (or send fails).
+        *stage_guard.borrow_mut() = Some(
+            raven_core::OutboundStageSendGuard::acquire(data_dir, text, now).map_err(
+                |e| match e {
+                    raven_core::ChatHistoryError::TooLarge => {
+                        "outbound stage capacity exceeded".to_string()
+                    }
+                    other => other.to_string(),
+                },
+            )?,
+        );
+        let outbound = match store.send_message_envelope(
+            record_key,
+            text,
+            &local_device,
+            now,
+            expires,
+            now,
+            &mut rng,
+            &mut dial,
+        ) {
+            Ok(row) => {
+                let _ = stage_guard.borrow_mut().take();
+                row
+            }
+            Err(e) => {
+                let detail = dial_err
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| e.redacted_display());
+                let binding = failed_binding.borrow_mut().take();
+                let _ = stage_guard.borrow_mut().take();
+                // A binding that was prepared but never staged means the staging step
+                // itself failed (chat history unreadable, Keychain denied, history locked,
+                // ...). The body and the reserved outbound row may be half-written, and a
+                // row left pending would be delivered silently by the NEXT send, so a user
+                // who retypes the text as advised would send it twice. Abandon it, so that
+                // "nothing was queued" is true.
+                if stage_or_body_handoff_failure(&detail)
+                    || (binding.is_some() && !staged_for_retry.get())
+                {
+                    if let Some((sid, digest, mid)) = binding {
+                        abandon_prepared_binding(
+                            data_dir,
+                            &mut store,
+                            &peer_cert.device_ed_pub,
+                            &sid,
+                            &digest,
+                            &mid,
+                        )?;
+                    }
+                    return Err(detail);
                 }
-                return Err(detail);
-            }
-            if let (true, false, Some((_, _, mid)), Some(bytes)) = (
-                reset.enabled,
-                reset.queried,
-                binding,
-                dial_bytes.borrow().clone(),
-            ) {
-                if staged_for_retry.get() && is_peer_refusal(&detail) {
-                    reset.queried = true;
-                    if query_retires_session(
-                        data_dir,
-                        id,
-                        &local_cert.device_ed_pub,
-                        recipient,
-                        carrier,
-                        lan_dial,
-                        peer_pub_hex,
-                        &mut store,
-                        &bytes,
-                    ) {
-                        reset.restart = true;
-                        reset.own_mid = Some(mid);
-                        return Err(detail);
+                if let (true, false, Some((_, _, mid)), Some(bytes)) = (
+                    reset.enabled,
+                    reset.queried,
+                    binding,
+                    dial_bytes.borrow().clone(),
+                ) {
+                    if staged_for_retry.get() && is_peer_refusal(&detail) {
+                        reset.queried = true;
+                        if query_retires_session(
+                            data_dir,
+                            id,
+                            &local_cert.device_ed_pub,
+                            recipient,
+                            carrier,
+                            lan_dial,
+                            peer_pub_hex,
+                            &mut store,
+                            &bytes,
+                        ) {
+                            reset.restart = true;
+                            reset.own_mid = Some(mid);
+                            return Err(detail);
+                        }
                     }
                 }
+                return Err(match binding {
+                    // Only this call's own dial can have staged this message.
+                    Some((_, _, mid)) if staged_for_retry.get() => queued_text(
+                        ctx,
+                        &format!("{detail}; mid={}…", hex::encode(&mid[..4])),
+                        &quoted_preview(text),
+                        &handoff.note_own(&mid, expires),
+                    ),
+                    _ => not_sent_nothing_queued(ctx, &detail),
+                });
             }
-            return Err(match binding {
-                // Only this call's own dial can have staged this message.
-                Some((_, _, mid)) if staged_for_retry.get() => queued_text(
-                    ctx,
-                    &format!("{detail}; mid={}…", hex::encode(&mid[..4])),
-                    &quoted_preview(text),
-                    &handoff.note_own(&mid, expires),
-                ),
-                _ => not_sent_nothing_queued(ctx, &detail),
-            });
-        }
-    };
+        };
 
-    let mid = hex::encode(&outbound.message_id[..4]);
-    if queued_offline.get() {
-        // Nothing went on the wire: queued for raven-node's outbox, behind any
-        // earlier message to this peer. Marked unsent before the kick, so the
-        // worker never lists it as sent.
-        let detail = dial_err.borrow().clone().unwrap_or_default();
-        handoff.record_own(&outbound.message_id, expires);
-        let _ = raven_core::outbox::set_object_unsent(data_dir, &outbound.message_id, true, now);
-        return Err(queued_text(
-            ctx,
-            &format!("{detail}; mid={mid}…"),
-            &quoted_preview(text),
-            &handoff.note_own(&outbound.message_id, expires),
-        ));
-    }
-    trace_delivery::trace_event(
-        "ash/pair_init_lab.rs:send_indexed_text",
-        "TRACE_INDEXED_MESSAGE_DIALED",
-        "WAITING_FOR_ENDPOINT_ACK",
-        Some(&mid),
-        Some(carrier.label()),
-    );
-    if let Some(ack) = first_ack_frame(&replies.borrow()) {
-        finish_outbound_delivered(
-            data_dir,
-            &mut store,
-            record_key,
-            peer_cert,
-            &session_id,
-            &outbound.object_digest,
-            &outbound.message_id,
-            ack,
-            now,
-            carrier.outbox(),
-        )
-        .map_err(|e| {
-            finish_failure_text(
+        let mid = hex::encode(&outbound.message_id[..4]);
+        if queued_offline.get() {
+            // Nothing went on the wire: queued for raven-node's outbox, behind any
+            // earlier message to this peer. Marked unsent before the kick, so the
+            // worker never lists it as sent.
+            let detail = dial_err.borrow().clone().unwrap_or_default();
+            handoff.record_own(&outbound.message_id, expires);
+            // A Tor link that closed after the write (T1 c) did write it.
+            let _ = raven_core::outbox::set_object_unsent(
+                data_dir,
+                &outbound.message_id,
+                !lost_after_write.get(),
+                now,
+            );
+            return Err(queued_text(
+                ctx,
+                &format!("{detail}; mid={mid}…"),
+                &quoted_preview(text),
+                &handoff.note_own(&outbound.message_id, expires),
+            ));
+        }
+        trace_delivery::trace_event(
+            "ash/pair_init_lab.rs:send_indexed_text",
+            "TRACE_INDEXED_MESSAGE_DIALED",
+            "WAITING_FOR_ENDPOINT_ACK",
+            Some(&mid),
+            Some(carrier.label()),
+        );
+        // Its own ACK among those that came back: the earlier messages on its
+        // dial (T1 a) have theirs, each recorded for its own message
+        // (`ACK_FOR_ANOTHER_MESSAGE`); only a verified ACK that names it says
+        // "delivered".
+        let acks: Vec<Vec<u8>> = ack_frames(&replies.borrow())
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect();
+        let mut failure = None;
+        let mut acked = false;
+        for (i, ack) in acks.iter().enumerate() {
+            handled_acks.borrow_mut().push(i);
+            match finish_outbound_delivered(
+                data_dir,
+                &mut store,
+                record_key,
+                peer_cert,
+                &session_id,
+                &outbound.object_digest,
+                &outbound.message_id,
+                ack,
+                now,
+                carrier.outbox(),
+            ) {
+                Ok(()) => {
+                    acked = true;
+                    break;
+                }
+                Err(e) => {
+                    failure.get_or_insert(e);
+                }
+            }
+        }
+        if acked {
+            // Only a verified ACK gets here: "delivered" means the receiver confirmed.
+            ctx.say_delivered(carrier.label(), dial_path.get(), &outbound.message_id);
+            trace_delivery::trace_event(
+                "ash/pair_init_lab.rs:send_indexed_text",
+                "TRACE_ENDPOINT_ACK_ACCEPTED",
+                "DELIVERED",
+                Some(&mid),
+                Some("accept_ack_envelope"),
+            );
+            return Ok(());
+        }
+        match failure {
+            // Its dial carried no earlier message: the one ACK that came back
+            // was its own, and what went wrong with it says so.
+            Some(e) if batched.is_empty() => Err(finish_failure_text(
                 ctx,
                 &e,
                 &quoted_preview(text),
                 &handoff.note_own(&outbound.message_id, expires),
-            )
-        })?;
-        // Only a verified ACK gets here: "delivered" means the receiver confirmed.
-        ctx.say_delivered(carrier.label(), dial_path.get(), &outbound.message_id);
-        trace_delivery::trace_event(
-            "ash/pair_init_lab.rs:send_indexed_text",
-            "TRACE_ENDPOINT_ACK_ACCEPTED",
-            "DELIVERED",
-            Some(&mid),
-            Some("accept_ack_envelope"),
-        );
-    } else {
-        return Err(unconfirmed_text(
-            ctx,
-            &format!("WAITING_FOR_ENDPOINT_ACK: no sealed ACK came back; mid={mid}…"),
-            &quoted_preview(text),
-            &handoff.note_own(&outbound.message_id, expires),
-        ));
+            )),
+            _ => Err(unconfirmed_text(
+                ctx,
+                &format!("WAITING_FOR_ENDPOINT_ACK: no sealed ACK came back; mid={mid}…"),
+                &quoted_preview(text),
+                &handoff.note_own(&outbound.message_id, expires),
+            )),
+        }
+    })();
+    finish_batch(BatchEnd {
+        data_dir,
+        store: &mut store,
+        record_key,
+        peer_cert,
+        session_id: &session_id,
+        carrier,
+        ctx,
+        handoff,
+        rows: &batched,
+        // The new message's dial did not carry them (it was refused before
+        // it, or never sealed): they go on a link of their own, unless the
+        // link is down.
+        dial: (!batched.is_empty() && !batch_dialled.get() && link_down.borrow().is_none()).then(
+            || {
+                let frames = batch.borrow().clone();
+                let dial_once = || {
+                    ipc_carrier_dial_reply_patient(
+                        data_dir,
+                        carrier,
+                        lan_dial,
+                        peer_pub_hex,
+                        &frames,
+                    )
+                };
+                let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
+                lock.around(|| {
+                    if tor_checked {
+                        dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once)
+                    } else {
+                        dial_once()
+                    }
+                })
+            },
+        ),
+        replies: &replies.borrow(),
+        handled: &handled_acks.borrow(),
+        written: batch_written.get(),
+        dialled: batch_dialled.get(),
+        now,
+    });
+    outcome
+}
+
+/// At most this many earlier queued messages ride the new message's dial
+/// (T1 a): with it, raven-node's outbox cap on one link (16 frames). The
+/// rest wait for the outbox.
+const SEND_DIAL_EARLIER_MAX: usize = 15;
+const _: () = assert!(SEND_DIAL_EARLIER_MAX < 16);
+/// And at most this many bytes of them: the dial's IPC request (base64,
+/// with the new message at its largest) stays inside
+/// [`raven_core::ipc::MAX_IPC_FRAME`].
+const SEND_DIAL_EARLIER_BYTES: usize = 96 * 1024;
+
+/// An earlier queued message collected for the new message's dial (T1 a).
+struct Batched {
+    message_id: [u8; 16],
+    session_id: [u8; 32],
+    preview: String,
+    expiry: u64,
+    /// Its route record was there (else it is written again).
+    recorded: bool,
+}
+
+/// What [`finish_batch`] needs: the store, the send's session and words,
+/// and how the earlier rows' dial went.
+struct BatchEnd<'a, 'h> {
+    data_dir: &'a Path,
+    store: &'a mut IndexedSessionStore,
+    record_key: &'a IndexedSessionRecordKey,
+    peer_cert: &'a DeviceCertificate,
+    session_id: &'a [u8; 32],
+    carrier: DialCarrier,
+    ctx: &'a SendCtx,
+    handoff: &'a OutboxHandoff<'h>,
+    rows: &'a [Batched],
+    /// Their own dial, when the new message's did not carry them.
+    dial: Option<Result<DialReply, String>>,
+    /// The new message's dial's replies, and which of its ACKs the new
+    /// message's outcome went through already.
+    replies: &'a [Vec<u8>],
+    handled: &'a [usize],
+    /// The new message's dial carried them and wrote them.
+    written: bool,
+    dialled: bool,
+    now: u64,
+}
+
+/// The earlier rows that went out on the new message's dial (T1 a), or on
+/// their own: each one whose ACK came back is delivered (said once), and
+/// each one still waiting is handed to raven-node's outbox, which sends it
+/// again until its ACK. None of them changes the new message's outcome
+/// (T1 b).
+fn finish_batch(end: BatchEnd<'_, '_>) {
+    if end.rows.is_empty() {
+        return;
     }
-    Ok(())
+    let recipient = &end.peer_cert.device_ed_pub;
+    let (replies, handled, written, dialled): (Vec<Vec<u8>>, &[usize], bool, bool) = match end.dial
+    {
+        Some(Ok(reply)) => (reply.frames, &[], true, true),
+        Some(Err(e)) => (Vec::new(), &[], is_peer_refusal(&e), true),
+        None => (end.replies.to_vec(), end.handled, end.written, end.dialled),
+    };
+    for (i, ack) in ack_frames(&replies).into_iter().enumerate() {
+        if handled.contains(&i) {
+            continue;
+        }
+        if let Ok(mid) = accept_sealed_ack(
+            end.data_dir,
+            end.store,
+            end.record_key,
+            end.peer_cert,
+            ack,
+            end.carrier.outbox(),
+        ) {
+            let _ =
+                record_outbound_delivered(end.data_dir, end.store, recipient, end.session_id, &mid);
+        }
+    }
+    for row in end.rows {
+        let delivered =
+            outbound_already_delivered(end.store, &row.session_id, &row.message_id, recipient)
+                .unwrap_or(false);
+        if delivered {
+            let _ = clear_object_routes(end.data_dir, &[row.message_id]);
+            end.ctx.say_earlier_delivered(&row.preview);
+            continue;
+        }
+        if written {
+            let _ = raven_core::outbox::set_object_unsent(
+                end.data_dir,
+                &row.message_id,
+                false,
+                end.now,
+            );
+        }
+        if dialled {
+            // Sent again, no ACK yet: the outbox keeps resending it.
+            let _ = end.handoff.note(&row.message_id, row.expiry);
+        } else if !row.recorded {
+            end.handoff.record(&row.message_id, row.expiry);
+        }
+    }
 }
 
 /// The detail of an earlier message the store refuses although its envelope
@@ -4561,12 +4904,17 @@ mod tests {
         let (got, tries) = run(vec![Err(lost)], Duration::ZERO);
         assert_eq!(tries, 1);
         assert!(got.unwrap_err().starts_with(ONION_CHECKED_THEN_LOST));
-        // The friend refused: its answer as it came, no second try.
-        let refused = format!("ipc: {PEER_REFUSED_CODE}: closed");
-        let (got, tries) = run(vec![Err(refused.as_str())], soon);
-        assert_eq!((got, tries), (Err(refused.clone()), 1));
-        let (got, tries) = run(vec![Err(lost), Err(refused.as_str())], soon);
-        assert_eq!((got, tries), (Err(refused), 2));
+        // T1 (c): the link closed after the write (a dropped circuit far
+        // more often than the friend refusing): the second try as well, and
+        // the words say Tor answered; the code stays in the text.
+        let closed = format!("ipc: ONION{PEER_REFUSED_CODE}: closed");
+        let (got, tries) = run(vec![Err(closed.as_str()), Ok(3)], soon);
+        assert_eq!((got, tries), (Ok(3), 2));
+        let (got, tries) = run(vec![Err(closed.as_str()), Err(closed.as_str())], soon);
+        assert_eq!(tries, 2);
+        let e = got.unwrap_err();
+        assert!(e.starts_with(ONION_CHECKED_THEN_LOST), "{e}");
+        assert!(is_peer_refusal(&e), "{e}");
     }
 
     /// Field test E3 round 2: a send's Tor check ended after 5.2 s with
@@ -5587,6 +5935,11 @@ mod revocation_and_offline_tests {
             dial: "127.0.0.1:9".into(),
         }];
         let handoff = OutboxHandoff::new(dir.path(), &routes, peer_pub, None);
+        let lock = SendLockHold::new(
+            dir.path(),
+            peer_pub,
+            acquire_send_lock(dir.path(), &peer_pub).unwrap(),
+        );
         let err = send_when_peer_unreachable(
             dir.path(),
             &local,
@@ -5602,6 +5955,7 @@ mod revocation_and_offline_tests {
                 .into(),
             &bob_ctx(dir.path()),
             &handoff,
+            &lock,
         )
         .unwrap_err();
         assert!(err.starts_with("NOT SENT: "), "{err}");
@@ -5758,6 +6112,24 @@ mod send_path_tests {
         /// Dials that carry frames and that the peer's listener sheds at the
         /// handshake (none of the frames reaches it), before it accepts again.
         shed_frame_dials: AtomicUsize,
+        /// Message frames the peer takes whose ACK never comes back (a late
+        /// ACK, or one the link lost).
+        drop_acks: AtomicUsize,
+        /// Dials with frames whose link closes once the peer took them all,
+        /// before any reply comes back (a Tor circuit that dropped).
+        close_after_write: AtomicUsize,
+        /// What the peer saw: the frame count of each dial that carried a
+        /// message, in order.
+        message_dials: std::sync::Mutex<Vec<usize>>,
+        /// For each dial that carried a message: was the sender's per-peer
+        /// send lock free while it ran?
+        lock_free: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl Faults {
+        fn message_dials(&self) -> Vec<usize> {
+            self.message_dials.lock().unwrap().clone()
+        }
     }
 
     /// Fire one unit of a fault counter: decrement it if positive.
@@ -5781,10 +6153,23 @@ mod send_path_tests {
         bob: Identity,
         mode: Arc<AtomicU8>,
         faults: Arc<Faults>,
+        /// How Alice reaches Bob: the LAN (`127.0.0.1:9`) or Tor (Bob's
+        /// onion route).
+        carrier: DialCarrier,
+        route: String,
     }
 
     impl Rig {
         fn new(seed: u8) -> Self {
+            Self::on(seed, DialCarrier::Lan)
+        }
+
+        /// Alice reaches Bob over Tor only (a verified contact).
+        fn onion(seed: u8) -> Self {
+            Self::on(seed, DialCarrier::Onion)
+        }
+
+        fn on(seed: u8, carrier: DialCarrier) -> Self {
             lab_backends();
             let a = short_tempdir();
             let b = short_tempdir();
@@ -5795,10 +6180,24 @@ mod send_path_tests {
             let a_bundle = local_bundle(a.path(), &alice).unwrap();
             let bob_pub = bob.public_key_bytes();
             let alice_pub = alice.public_key_bytes();
-            std::fs::write(a.path().join("contacts.json"), contacts_json(&bob_pub)).unwrap();
-            std::fs::write(b.path().join("contacts.json"), contacts_json(&alice_pub)).unwrap();
+            let book = |peer: &[u8; 32]| {
+                let json = contacts_json(peer);
+                if carrier == DialCarrier::Lan {
+                    json
+                } else {
+                    json.replace(r#""pinned":false"#, r#""pinned":true"#)
+                }
+            };
+            std::fs::write(a.path().join("contacts.json"), book(&bob_pub)).unwrap();
+            std::fs::write(b.path().join("contacts.json"), book(&alice_pub)).unwrap();
             let mode = Arc::new(AtomicU8::new(UP));
             let faults = Arc::new(Faults::default());
+            let route = match carrier {
+                DialCarrier::Onion => raven_core::onion::dial_for(
+                    &Identity::from_seed(&[seed.wrapping_add(2); 32]).public_key_bytes(),
+                ),
+                _ => "127.0.0.1:9".to_string(),
+            };
 
             let listener = UnixListener::bind(raven_core::default_socket_path(a.path())).unwrap();
             let (b_dir, bob2, m, f) = (
@@ -5807,10 +6206,19 @@ mod send_path_tests {
                 mode.clone(),
                 faults.clone(),
             );
+            let a_dir = a.path().to_path_buf();
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { return };
-                    serve_one(&mut stream, &b_dir, &bob2, &a_bundle, &alice_pub, &m, &f);
+                    let peer = Peer {
+                        b_dir: &b_dir,
+                        bob: &bob2,
+                        a_bundle: &a_bundle,
+                        alice_pub: &alice_pub,
+                        a_dir: &a_dir,
+                        bob_pub: &bob_pub,
+                    };
+                    serve_one(&mut stream, &peer, &m, &f);
                 }
             });
             Self {
@@ -5820,6 +6228,8 @@ mod send_path_tests {
                 bob,
                 mode,
                 faults,
+                carrier,
+                route,
             }
         }
 
@@ -5833,17 +6243,21 @@ mod send_path_tests {
         }
 
         fn send_recording(&self, text: &str, choice: Option<CarrierChoice>) -> Result<(), String> {
+            let route = DialRoute {
+                carrier: self.carrier,
+                dial: self.route.clone(),
+            };
             run_pair_init_and_send_on(
                 self.a.path(),
                 &self.alice,
-                "127.0.0.1:9",
+                &self.route,
                 &hex::encode(self.bob.public_key_bytes()),
                 text,
-                DialCarrier::Lan,
+                self.carrier,
                 &SendCtx {
                     name: "Peer".into(),
                     selector: "--petname Peer".into(),
-                    dial: "127.0.0.1:9".into(),
+                    dial: ctx_dial(&route),
                     data_dir: Some(self.a.path().to_path_buf()),
                     choice,
                     ..SendCtx::default()
@@ -5907,16 +6321,20 @@ mod send_path_tests {
         }
     }
 
-    /// One framed `IpcRequest` in, one framed `IpcResponse` out.
-    fn serve_one(
-        stream: &mut UnixStream,
-        b_dir: &Path,
-        bob: &Identity,
-        a_bundle: &raven_core::LanBundle,
-        alice_pub: &[u8; 32],
-        mode: &AtomicU8,
-        faults: &Faults,
-    ) {
+    /// Bob's side of the fake daemon, and what it checks on Alice's.
+    struct Peer<'a> {
+        b_dir: &'a Path,
+        bob: &'a Identity,
+        a_bundle: &'a raven_core::LanBundle,
+        alice_pub: &'a [u8; 32],
+        /// Alice's profile and Bob's key: the send lock it looks at.
+        a_dir: &'a Path,
+        bob_pub: &'a [u8; 32],
+    }
+
+    /// One framed `IpcRequest` in, one framed `IpcResponse` out: a LAN dial
+    /// or a Tor dial, Bob's dispatcher behind it.
+    fn serve_one(stream: &mut UnixStream, peer: &Peer<'_>, mode: &AtomicU8, faults: &Faults) {
         let mut len = [0u8; 4];
         if stream.read_exact(&mut len).is_err() {
             return;
@@ -5926,62 +6344,105 @@ mod send_path_tests {
         if stream.read_exact(&mut frame[4..]).is_err() {
             return;
         }
+        let (label, frames_b64) = match decode_request(&frame) {
+            Ok(IpcRequest::Ping { .. }) => {
+                let _ = stream
+                    .write_all(&encode_response(&IpcResponse::Pong { v: IPC_VERSION }).unwrap());
+                return;
+            }
+            Ok(IpcRequest::LanDial { frames_b64, .. }) => ("LAN", frames_b64),
+            Ok(IpcRequest::OnionDial { frames_b64, .. }) => ("ONION", frames_b64),
+            _ => ("LAN", Vec::new()),
+        };
+        let onion = label == "ONION";
+        let is_dial = matches!(
+            decode_request(&frame),
+            Ok(IpcRequest::LanDial { .. } | IpcRequest::OnionDial { .. })
+        );
         let error = |message: &str| IpcResponse::Error {
             v: IPC_VERSION,
-            code: "LAN_DIAL".into(),
+            code: format!("{label}_DIAL"),
             message: message.into(),
         };
-        let response = match decode_request(&frame) {
-            Ok(IpcRequest::Ping { .. }) => IpcResponse::Pong { v: IPC_VERSION },
-            Ok(IpcRequest::LanDial { frames_b64, .. }) => {
-                let frames: Vec<Vec<u8>> = frames_b64
-                    .iter()
-                    .map(|s| base64::engine::general_purpose::STANDARD.decode(s).unwrap())
-                    .collect();
-                let mode = mode.load(Ordering::SeqCst);
-                let shed = !frames.is_empty() && fire(&faults.shed_frame_dials);
-                if mode == DOWN {
-                    error("lan connect: cannot connect to 127.0.0.1:9 (connection refused)")
-                } else if shed {
-                    // The listener hung up in the middle of the handshake: nothing
-                    // of ours was processed.
-                    error(
-                        "peer closed the connection during the handshake (3 attempts); the \
-                         peer may be at its connection limit or may not be a RAVEN node",
+        let peer_closed = PEER_CLOSED_TEXT.replacen("LAN", label, 1);
+        let response = if !is_dial {
+            error("unsupported request")
+        } else {
+            let frames: Vec<Vec<u8>> = frames_b64
+                .iter()
+                .map(|s| base64::engine::general_purpose::STANDARD.decode(s).unwrap())
+                .collect();
+            // A Message envelope (a PairInit rides one too), and a chat
+            // message.
+            let is_message = |f: &[u8]| {
+                Envelope::unpack(f).is_some_and(|e| e.env_type == EnvType::Message as u8)
+            };
+            let is_chat = |f: &[u8]| {
+                is_message(f)
+                    && matches!(
+                        classify_packed_envelope(f),
+                        PairInitOobClassify::NotPairInitOob
                     )
+            };
+            let messages = frames.iter().filter(|f| is_chat(f)).count();
+            if messages > 0 {
+                faults.message_dials.lock().unwrap().push(frames.len());
+                let free =
+                    PeerSendLock::acquire_within(peer.a_dir, peer.bob_pub, Duration::ZERO).is_ok();
+                faults.lock_free.lock().unwrap().push(free);
+            }
+            let mode = mode.load(Ordering::SeqCst);
+            let shed = !frames.is_empty() && fire(&faults.shed_frame_dials);
+            if mode == DOWN {
+                error(if onion {
+                    "ONION_UNREACHABLE (the onion service did not answer)"
                 } else {
-                    let offer = encode_local_offer(b_dir, bob).unwrap();
-                    let mut replies = vec![b64(&offer)];
-                    let mut failure = None;
-                    for f in &frames {
-                        let is_message = Envelope::unpack(f)
-                            .is_some_and(|e| e.env_type == EnvType::Message as u8);
-                        let refused =
-                            mode == REFUSE_ALL || (is_message && fire(&faults.refuse_messages));
-                        if refused {
-                            failure = Some(PEER_CLOSED_TEXT.to_string());
+                    "lan connect: cannot connect to 127.0.0.1:9 (connection refused)"
+                })
+            } else if shed {
+                // The listener hung up in the middle of the handshake: nothing
+                // of ours was processed.
+                error(
+                    "peer closed the connection during the handshake (3 attempts); the \
+                     peer may be at its connection limit or may not be a RAVEN node",
+                )
+            } else {
+                let offer = encode_local_offer(peer.b_dir, peer.bob).unwrap();
+                let mut replies = vec![b64(&offer)];
+                let mut failure = None;
+                for f in &frames {
+                    let refused =
+                        mode == REFUSE_ALL || (is_message(f) && fire(&faults.refuse_messages));
+                    if refused {
+                        failure = Some(peer_closed.clone());
+                        break;
+                    }
+                    match dispatch_frame(peer.b_dir, peer.bob, peer.a_bundle, peer.alice_pub, f) {
+                        Ok(more) if is_chat(f) && fire(&faults.drop_acks) => drop(more),
+                        Ok(more) => replies.extend(more.iter().map(|r| b64(r))),
+                        Err(_) => {
+                            // The daemon closes on a dispatch error: the dialer
+                            // sees a silent peer.
+                            failure = Some(peer_closed.clone());
                             break;
                         }
-                        match dispatch_frame(b_dir, bob, a_bundle, alice_pub, f) {
-                            Ok(more) => replies.extend(more.iter().map(|r| b64(r))),
-                            Err(_) => {
-                                // The daemon closes on a dispatch error: the dialer
-                                // sees a silent peer.
-                                failure = Some(PEER_CLOSED_TEXT.to_string());
-                                break;
-                            }
-                        }
-                    }
-                    match failure {
-                        Some(text) => error(&text),
-                        None => IpcResponse::LanDialResult {
-                            v: IPC_VERSION,
-                            frames_b64: replies,
-                        },
                     }
                 }
+                if failure.is_none() && !frames.is_empty() && fire(&faults.close_after_write) {
+                    failure = Some(peer_closed.clone());
+                }
+                match failure {
+                    Some(text) => error(&text),
+                    None if onion => IpcResponse::OnionDialResult {
+                        v: IPC_VERSION,
+                        frames_b64: replies,
+                    },
+                    None => IpcResponse::LanDialResult {
+                        v: IPC_VERSION,
+                        frames_b64: replies,
+                    },
+                }
             }
-            _ => error("unsupported request"),
         };
         let _ = stream.write_all(&encode_response(&response).unwrap());
     }
@@ -6039,8 +6500,9 @@ mod send_path_tests {
     }
 
     /// A refused retry of a row on the *current* session is kept (the refusal may
-    /// be transient), the error names the likely cause, and the new text is not
-    /// queued.
+    /// be transient), and since T1 (Tor messaging audit, 2026-11) it no longer
+    /// fails the new message ("NOT SENT: an earlier message ..."): the new one
+    /// waits too, both for raven-node's outbox, and the reason is the refusal.
     #[test]
     fn refused_retry_on_the_current_session_keeps_the_row_and_says_why() {
         let rig = Rig::new(0x82);
@@ -6052,19 +6514,191 @@ mod send_path_tests {
         rig.faults.refuse_messages.store(1, Ordering::SeqCst);
 
         let err = rig.send("second").unwrap_err();
-        assert!(err.starts_with("NOT SENT: an earlier message"), "{err}");
-        assert!(
-            err.contains("\"held back\""),
-            "shows the text, not an id: {err}"
+        assert!(err.starts_with(super::super::ext::QUEUED_PREFIX), "{err}");
+        assert!(err.contains("PEER_CLOSED"), "{err}");
+        assert_eq!(
+            rig.alice_pending(),
+            2,
+            "the earlier row waits, and this one"
         );
-        assert!(err.contains("this message was not queued"), "{err}");
-        assert!(err.contains("without saying why"), "{err}");
-        assert!(err.contains("not have you in their contacts"), "{err}");
-        assert_eq!(rig.alice_pending(), 1, "the earlier row stays queued");
-        // Once the peer behaves, the next send delivers both, in order.
+        // Once the peer behaves, the next send delivers all of them.
         rig.send("third").unwrap();
-        assert_eq!(rig.bob_inbox(), vec!["held back", "hello", "third"]);
+        assert_eq!(
+            rig.bob_inbox(),
+            vec!["held back", "hello", "second", "third"]
+        );
         assert_eq!(rig.alice_pending(), 0);
+    }
+
+    /// The outcome of a send that must never say NOT SENT: queued (Waiting)
+    /// or sent without its ACK yet (Sent), or delivered.
+    fn assert_not_failed(outcome: &Result<(), String>) {
+        if let Err(e) = outcome {
+            assert!(
+                e.starts_with(super::super::ext::QUEUED_PREFIX)
+                    || e.starts_with(super::super::ext::UNCONFIRMED_PREFIX),
+                "{e}"
+            );
+        }
+    }
+
+    /// T1 (Tor messaging audit, 2026-11): the friend answered the check, the
+    /// send went out again with an earlier message whose ACK did not come
+    /// back, and the NEW message ended "NOT SENT: an earlier message ... has
+    /// not confirmed it yet". With a confirmed session an earlier message
+    /// never fails the new one: it goes out and is delivered, and the
+    /// earlier one waits for its ACK (raven-node's outbox sends it again).
+    #[test]
+    fn an_earlier_message_whose_ack_stays_away_never_fails_the_new_one() {
+        let rig = Rig::new(0xA0);
+        rig.send("hello").unwrap();
+        rig.set_mode(DOWN);
+        let queued = rig.send("held back").unwrap_err();
+        assert!(queued.starts_with("not delivered yet"), "{queued}");
+        rig.set_mode(UP);
+        rig.faults.drop_acks.store(1, Ordering::SeqCst);
+
+        let outcome = rig.send("the new one");
+        assert_not_failed(&outcome);
+        assert_eq!(outcome, Ok(()), "its own ACK came back");
+        assert_eq!(rig.bob_inbox(), vec!["held back", "hello", "the new one"]);
+        let waiting = rig.alice_waiting();
+        assert_eq!(waiting.len(), 1, "the earlier one still waits for its ACK");
+        // The next send delivers it.
+        rig.send("later").unwrap();
+        assert_eq!(rig.alice_pending(), 0);
+    }
+
+    /// T1: the same when the link closes right after the frames were
+    /// written (a dropped stream; on the LAN raven-node calls it a close):
+    /// the earlier message no longer fails the new one, which waits.
+    #[test]
+    fn an_earlier_message_whose_link_closed_after_the_write_never_fails_the_new_one() {
+        let rig = Rig::new(0xA2);
+        rig.send("hello").unwrap();
+        rig.set_mode(DOWN);
+        let queued = rig.send("held back").unwrap_err();
+        assert!(queued.starts_with("not delivered yet"), "{queued}");
+        rig.set_mode(UP);
+        rig.faults.close_after_write.store(1, Ordering::SeqCst);
+
+        let outcome = rig.send("the new one");
+        assert!(outcome.is_err(), "no ACK came back");
+        assert_not_failed(&outcome);
+        rig.send("later").unwrap();
+        assert_eq!(
+            rig.bob_inbox(),
+            vec!["held back", "hello", "later", "the new one"]
+        );
+        assert_eq!(rig.alice_pending(), 0);
+    }
+
+    /// T1 (a): every earlier message to the friend was re-dialled on a Tor
+    /// link of its own before the new one (one link per message). They now
+    /// go out with the new message on one link, in order, as raven-node's
+    /// outbox sends them.
+    #[test]
+    fn the_earlier_messages_go_out_with_the_new_one_on_one_link() {
+        let rig = Rig::new(0xA4);
+        rig.send("hello").unwrap();
+        rig.set_mode(DOWN);
+        assert!(rig.send("one").is_err());
+        assert!(rig.send("two").is_err());
+        assert_eq!(rig.alice_pending(), 2);
+        rig.set_mode(UP);
+        let before = rig.faults.message_dials().len();
+
+        rig.send("three").unwrap();
+        let dials = rig.faults.message_dials()[before..].to_vec();
+        assert_eq!(dials, [3], "one link, three frames");
+        assert_eq!(rig.bob_inbox(), vec!["hello", "one", "three", "two"]);
+        assert_eq!(rig.alice_pending(), 0);
+        assert!(rig
+            .alice_history()
+            .iter()
+            .all(|(_, state)| state == "delivered"));
+    }
+
+    /// T1 (a): one link carries at most 16 frames, as raven-node's outbox
+    /// puts on one: the earlier messages past them wait for the outbox
+    /// (kicked by the send), never a link each again.
+    #[test]
+    fn at_most_sixteen_frames_ride_one_link_the_rest_wait_for_the_outbox() {
+        let rig = Rig::new(0xAC);
+        rig.send("hello").unwrap();
+        rig.set_mode(DOWN);
+        for i in 0..16 {
+            assert!(rig.send(&format!("queued {i:02}")).is_err());
+        }
+        rig.set_mode(UP);
+        let before = rig.faults.message_dials().len();
+        rig.send("the new one").unwrap();
+        assert_eq!(rig.faults.message_dials()[before..], [16]);
+        assert_eq!(rig.alice_pending(), 1, "the last one waits for the outbox");
+        assert_eq!(rig.bob_inbox().len(), 17);
+    }
+
+    /// The new message's dial with its earlier messages fits one IPC
+    /// request (base64, the new message at its largest).
+    #[test]
+    fn the_earlier_messages_and_the_largest_new_one_fit_one_ipc_request() {
+        let raw = SEND_DIAL_EARLIER_BYTES + raven_core::lan_noise::MAX_TRANSPORT_PLAINTEXT;
+        let b64 = raw.div_ceil(3) * 4;
+        let framing = 64 * (SEND_DIAL_EARLIER_MAX + 1) + 1024;
+        assert!(b64 + framing < raven_core::ipc::MAX_IPC_FRAME, "{b64}");
+    }
+
+    /// T1 (c): over Tor a link that closes after the write is a lost link
+    /// (a dropped circuit far more often than a friend refusing): the
+    /// message dial gets its second try at once, and its copy that did
+    /// arrive is answered as a duplicate. It read as the friend's refusal:
+    /// no second try, and the message waited.
+    #[test]
+    fn over_tor_a_close_after_the_write_gets_the_second_try() {
+        let rig = Rig::onion(0xA6);
+        rig.send("hello over tor").unwrap();
+        rig.faults.close_after_write.store(1, Ordering::SeqCst);
+        let before = rig.faults.message_dials().len();
+
+        rig.send("second over tor")
+            .expect("delivered on the second try");
+        assert_eq!(rig.faults.message_dials()[before..], [1, 1]);
+        assert_eq!(rig.bob_inbox(), vec!["hello over tor", "second over tor"]);
+        assert_eq!(rig.alice_pending(), 0);
+    }
+
+    /// T1 (c) with an earlier message: over Tor it is the same lost link,
+    /// never the earlier message failing the new one.
+    #[test]
+    fn over_tor_an_earlier_message_closed_after_the_write_never_fails_the_new_one() {
+        let rig = Rig::onion(0xA8);
+        rig.send("hello over tor").unwrap();
+        rig.set_mode(DOWN);
+        assert!(rig.send("held back").is_err());
+        rig.set_mode(UP);
+        rig.faults.close_after_write.store(2, Ordering::SeqCst);
+
+        let outcome = rig.send("the new one");
+        assert_not_failed(&outcome);
+        rig.send("later").unwrap();
+        assert_eq!(
+            rig.bob_inbox(),
+            vec!["held back", "hello over tor", "later", "the new one"]
+        );
+    }
+
+    /// T13 (b): a send held the friend's send lock across every Tor dial,
+    /// so raven-node's outbox could not record what it got back (and the
+    /// ACKs we owe the friend backed off) while it ran. The lock is held for
+    /// the store work only, as the outbox holds it: free while a message
+    /// dial runs.
+    #[test]
+    fn the_send_lock_is_free_while_a_message_dial_runs() {
+        let rig = Rig::new(0xAA);
+        rig.send("hello").unwrap();
+        rig.send("second").unwrap();
+        let free = rig.faults.lock_free.lock().unwrap().clone();
+        assert_eq!(free, [true, true], "free during each message dial");
     }
 
     /// Review C-time-deadlines-1: a message the contact read and refused
@@ -6540,12 +7174,12 @@ mod send_path_tests {
             assert_eq!(alice_record(&rig, &one_mid).unwrap().choice, first);
             assert_eq!(alice_record(&rig, &two_mid).unwrap().choice, second);
             // The next send (the other kind) redials "one" first; the peer
-            // refuses it, so that send re-notes it for the outbox and stops.
+            // refuses it, so that send re-notes it for the outbox, and its
+            // own message waits too (T1 b: it was NOT SENT).
             rig.faults.shed_frame_dials.store(0, Ordering::SeqCst);
             rig.faults.refuse_messages.store(1, Ordering::SeqCst);
             let err = rig.send_choosing("three", second).unwrap_err();
-            assert!(err.starts_with("NOT SENT: an earlier message"), "{err}");
-            assert!(err.contains("\"one\""), "{err}");
+            assert!(err.starts_with(super::super::ext::QUEUED_PREFIX), "{err}");
             assert_eq!(
                 alice_record(&rig, &one_mid).unwrap().choice,
                 first,
@@ -6604,14 +7238,15 @@ mod send_path_tests {
         );
 
         // A carrier writes it (the contact reads and refuses it): it may have
-        // arrived once its time ran out.
+        // arrived once its time ran out. So may the new message that went
+        // out behind it on the same link and waits since (T1 b).
         rig.set_mode(UP);
         rig.faults.refuse_messages.store(1, Ordering::SeqCst);
         let _ = rig.send("next").unwrap_err();
         assert!(alice_record(&rig, &row.message_id).is_some_and(|r| !r.unsent));
         assert_eq!(
             line(expired).as_deref(),
-            Some("Waiting messages: none (1 was sent but not confirmed in time and may have arrived).")
+            Some("Waiting messages: none (2 were sent but not confirmed in time and may have arrived).")
         );
         raven_core::horizon::set_lab_horizon_for_this_thread(None);
     }
@@ -6770,14 +7405,14 @@ mod send_path_tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(lines.len(), 1);
         assert!(err.starts_with("NOT SENT, nothing queued"), "{err}");
-        // The production bound is stated in the line and is finite.
-        assert!(send_lock_waiting_text("Bob", PEER_SEND_LOCK_WAIT).contains("at most 120s"));
+        // The production bound is stated in the line and is short: no send
+        // holds the lock across its message dial any more (T13 b).
+        assert!(send_lock_waiting_text("Bob", PEER_SEND_LOCK_WAIT).contains("at most 30s"));
     }
 
-    /// T13 (d), Tor messaging audit 2026-11: a send that gave up waiting for
-    /// the friend's send lock is another send in progress ("wait a
-    /// moment"), never "Raven couldn't send this message" (the engine
-    /// showed Failed).
+    /// T13 (d): a send that gave up waiting for the friend's send lock is
+    /// another send in progress ("wait a moment"), never "Raven couldn't
+    /// send this message" (the engine showed Failed).
     #[test]
     fn a_send_lock_timeout_is_a_send_in_progress() {
         use super::super::ext::{classify_cause, Cause};
@@ -6818,11 +7453,6 @@ mod send_path_tests {
         );
         assert_eq!(send_failure_line(&unconfirmed), unconfirmed);
         assert!(!unconfirmed.contains("send refused"), "{unconfirmed}");
-        // An *earlier* message awaiting its ACK means this one was not queued.
-        let earlier = earlier_unconfirmed_text(&ctx, "\"see you\"");
-        assert!(earlier.starts_with("NOT SENT"), "{earlier}");
-        assert!(earlier.contains("this message was not queued"), "{earlier}");
-        assert_eq!(send_failure_line(&earlier), earlier);
         // Text no sentence covers keeps the old refusal form, untouched inside...
         assert_eq!(
             send_failure_line("ATSAM_SESSION_REQUIRED: not the one bound"),
