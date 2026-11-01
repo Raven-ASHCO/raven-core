@@ -22,8 +22,9 @@
 //! nowhere, and none of its events names an onion address of a friend.
 //!
 //! Arti's defaults, except: channel padding `reduced` (laptops and
-//! phones), at most [`MAX_STREAMS_PER_CIRCUIT`] streams per rendezvous
-//! circuit and an introduction rate limit sent to the introduction points.
+//! phones), no exit circuits built ahead of need, at most
+//! [`MAX_STREAMS_PER_CIRCUIT`] streams per rendezvous circuit and an
+//! introduction rate limit sent to the introduction points.
 //! No bridges, no pluggable transports, no proof-of-work, no experimental
 //! APIs.
 
@@ -249,10 +250,7 @@ async fn tor_main(
     events: Events,
     mut check_requests: mpsc::UnboundedReceiver<u64>,
 ) {
-    let mut builder =
-        TorClientConfigBuilder::from_directories(state_dir.join("state"), state_dir.join("cache"));
-    builder.channel().padding(tor_config::PaddingLevel::Reduced);
-    let config = match builder.build() {
+    let config = match client_config(&state_dir) {
         Ok(c) => c,
         Err(_) => return events.local("Tor configuration refused"),
     };
@@ -414,6 +412,23 @@ async fn tor_main(
     // and restarts the helper when it stops answering.
     events.error("onion service ended");
     drop(service);
+}
+
+/// The Tor client's configuration: its state and cache under `state_dir`,
+/// Arti's defaults otherwise but for the module doc's.
+fn client_config(state_dir: &Path) -> Result<arti_client::TorClientConfig, String> {
+    let mut builder =
+        TorClientConfigBuilder::from_directories(state_dir.join("state"), state_dir.join("cache"));
+    builder.channel().padding(tor_config::PaddingLevel::Reduced);
+    // No exit circuits built ahead of need (audit S9): Raven opens onion
+    // streams only. With no circuit counted as enough, Arti's launcher
+    // builds none (its threshold), not even the DNS ones it predicts
+    // whatever the ports.
+    builder
+        .preemptive_circuits()
+        .disable_at_threshold(0)
+        .set_initial_predicted_ports(vec![]);
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// An Arti error kind as a short fixed tag, and whether its cause is on
@@ -742,4 +757,21 @@ fn connect_reply(kind: arti_client::ErrorKind) -> ConnectReply {
 fn onion_text(hs_id: &tor_hscrypto::pk::HsId) -> String {
     use safelog::DisplayRedacted as _;
     hs_id.display_unredacted().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit S9: Raven opens onion streams only, so its Tor client builds
+    /// no exit circuits ahead of need (Arti's defaults keep two for ports
+    /// 80 and 443, and DNS ones, rebuilt in every helper life).
+    #[test]
+    fn the_client_builds_no_exit_circuits_ahead() {
+        let config = client_config(Path::new("/nonexistent/raven-tor")).unwrap();
+        let preemptive: &arti_client::config::circ::PreemptiveCircuitConfig = config.as_ref();
+        let text = format!("{preemptive:?}");
+        assert!(text.contains("disable_at_threshold: 0"), "{text}");
+        assert!(text.contains("initial_predicted_ports: []"), "{text}");
+    }
 }
