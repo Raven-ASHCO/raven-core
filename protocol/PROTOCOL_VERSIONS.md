@@ -144,6 +144,22 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-01, a frame-less dial asks for route hints)
+
+A behaviour change of a frozen sender rule, not of the wire format: no frame
+layout, entry type, caps bit or vector changed, and the RRH1 and RLX1 version
+bytes stay 1.
+
+- **Route Hints V1 (draft).** [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md)
+  §3.1 and §3.3: a dial without frames (a send's check, an announce link) on
+  Internet direct, p2p, nearby or the onion link also sets hello caps bit 11,
+  and reads the listener's RRH1 only when it asked. Before, it set bit 11 only
+  while it held no snapshot of the listener, and waited its whole reply wait
+  (5 s on the onion link) for an RRH1 a listener that was not due never sent.
+  A listener of 0.1.0 already answers bit 11 (§3.3, §6.1), right after its
+  RLB1; one from before bit 11 ignores it, and the dialer then waits as
+  before.
+
 ## Freeze record changes (2026-10-30, field test E3: LAN address over any authenticated link)
 
 One new optional RRH1 entry, with sender and receiver rules; the RRH1 and RLX1

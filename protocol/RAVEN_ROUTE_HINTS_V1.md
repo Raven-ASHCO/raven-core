@@ -77,13 +77,12 @@ any frame that is not RVN1 (§5.6).
   route hints on, a hello carries `CAP_INTERNET | CAP_LINK_RRH1 = 0x00000102`.
   With them off it carries `0x00000002`, byte-identical to earlier builds.
 - `CAP_LINK_RRH1_ASK = 0x00000800` (bit 11) means "send me your RRH1 on this
-  link" (§6.1). A side sets it only together with bit 8: on a link to a
+  link" (§6.1). A side sets it only together with bit 8, on a link to a
   contact of which it holds no snapshot (none since it started, or it forgot
-  them: `raven contact forget-address`, a new card, a removal), and on a
-  dial without frames (a send's check, an announce link, §3.3), which reads
-  the listener's RRH1 and closes. It is a request for this link, never a
-  capability: a later hello without it is no downgrade. Today only a dialer
-  sets it (it knows whom it dials, and what it carries, before its hello).
+  them: `raven contact forget-address`, a new card, a removal), or on a dial
+  without frames (§3.3). It is a request for this link, never a capability: a
+  later hello without it is no downgrade. Today only a dialer sets it (it
+  knows whom it dials before its hello).
 - Receivers MUST ignore unknown bits. Every build already does: only
   `CAP_INTERNET` is required. A build before bit 11 ignores the request and
   tells as §6.1 says without it.
@@ -160,17 +159,10 @@ travel as in [`RAVEN_TRANSPORT_INTERFACE_V1.md`](RAVEN_TRANSPORT_INTERFACE_V1.md
   other frame, if the listener's verified hello has bit 8 and the listener is
   due one (§6.1).
 - Bit 8 stays in every hello while route hints are live: a hello is a complete
-  showing of the sender's link features (Phase 6b P6.29). Bit 8 says the
-  listener takes RRH1, not that it sends one: unasked, one that is not due
-  never comes. So a frame-less dialer (a send's check, an announce link) asks
-  with bit 11, and reads the listener's RRH1 only when it asked; then the
-  listener sends it right after its RLB1 offer, and the dialer closes once it
-  came, at most its reply wait (2 s; 5 s on the onion link) after the offer.
-  A dialer that did not ask closes right after the RLB1 offers (2026-11, on
-  loopback Tor: a send's check sat out the 5 s reply wait for an RRH1 that
-  was not due, 7.6 s instead of 2.6 s). The bytes on the wire are those
-  of an ask since §6.1; a listener of 0.1.0 already answers bit 11, and one
-  from before bit 11 ignores it, and a dialer then waits as before.
+  showing of the sender's link features (Phase 6b P6.29). A frame-less dialer
+  (a send's check, an announce link) asks with bit 11 and reads the
+  listener's RRH1 for at most its reply wait (2 s), since one that is not due
+  never comes unasked; a dialer that did not ask reads none.
 
 **LAN direct.** The responder never signals in the handshake. Instead:
 - The listener sends its RRH1 right after its RLB1 offer, if the dialer's
