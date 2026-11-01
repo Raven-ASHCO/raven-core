@@ -1379,29 +1379,26 @@ fn probe_round<B: Send + 'static>(
     }
 }
 
-/// Tor's head start in a send's race (E2 r9 #1): the direct routes get
+/// Tor's head start in a send's race (E2 r9 #1, frozen §9 of
+/// RAVEN_ONION_CARRIER_V1): the direct routes get
 /// [`raven_core::onion::ONION_HEAD_START`] only while one of them is likely
 /// to answer: the friend was on an authenticated LAN link with raven-node
 /// lately (`lan_seen_s`: `Some(Some(s))` with `s` within
-/// [`LAN_SEEN_SPAN_S`]), the send plans a LAN address the beacon found or
-/// the friend told this computer (`lan_found`), or the plan tries a p2p or
-/// Internet route first because it carried the last message on this
-/// network (`direct_first`). A friend not seen on the LAN lately gets no
-/// LAN head start: Tor goes at once with the others (mac-b dialled a stale
-/// saved LAN address of a friend on another network first on every send).
-/// An older raven-node that cannot say (`lan_seen_s` `None`) keeps it.
-fn tor_head_start(
-    has_lan: bool,
-    lan_seen_s: Option<Option<u64>>,
-    lan_found: bool,
-    direct_first: bool,
-) -> Duration {
+/// [`LAN_SEEN_SPAN_S`]), or the plan tries a p2p or Internet route first
+/// because it carried the last message on this network (`direct_first`).
+/// A friend not seen on the LAN lately gets no LAN head start: Tor goes at
+/// once with the others (mac-b dialled a stale saved LAN address of a
+/// friend on another network first on every send). A LAN address the
+/// friend told this computer, or the last one it reached us from, is no
+/// such link either (S5: Tor waited 1.5 s for it whenever the plan held
+/// one, beyond §9). An older raven-node that cannot say (`lan_seen_s`
+/// `None`) keeps it.
+fn tor_head_start(has_lan: bool, lan_seen_s: Option<Option<u64>>, direct_first: bool) -> Duration {
     let lan_likely = has_lan
-        && (lan_found
-            || match lan_seen_s {
-                None => true,
-                Some(seen) => seen.is_some_and(|s| s <= LAN_SEEN_SPAN_S),
-            });
+        && match lan_seen_s {
+            None => true,
+            Some(seen) => seen.is_some_and(|s| s <= LAN_SEEN_SPAN_S),
+        };
     if lan_likely || direct_first {
         raven_core::onion::ONION_HEAD_START
     } else {
@@ -1795,7 +1792,6 @@ pub fn run_pair_init_and_send_routes(
     let head_start = tor_head_start(
         routes.iter().any(|r| r.carrier == DialCarrier::Lan),
         reach.as_ref().map(|r| r.lan_seen_s),
-        !ctx.unrecorded.is_empty(),
         probe_plan
             .order
             .first()
@@ -4501,15 +4497,17 @@ mod tests {
     fn tor_gets_no_head_start_for_a_friend_not_seen_on_the_lan_lately() {
         let head = raven_core::onion::ONION_HEAD_START;
         let zero = Duration::ZERO;
-        assert_eq!(tor_head_start(true, Some(Some(30)), false, false), head);
-        assert_eq!(tor_head_start(true, Some(Some(3_600)), false, false), zero);
-        assert_eq!(tor_head_start(true, Some(None), false, false), zero);
-        // A LAN address the beacon found, or the friend told, just now.
-        assert_eq!(tor_head_start(true, Some(None), true, false), head);
+        assert_eq!(tor_head_start(true, Some(Some(30)), false), head);
+        assert_eq!(tor_head_start(true, Some(Some(3_600)), false), zero);
+        // S5 (Tor messaging audit, 2026-11): a learned LAN address in the
+        // plan (one the friend told, or the last one it reached us from) is
+        // no LAN link seen here lately: frozen §9 gives Tor no head start
+        // for it, so the plan's learned addresses are not asked about.
+        assert_eq!(tor_head_start(true, Some(None), false), zero);
         // An older raven-node.
-        assert_eq!(tor_head_start(true, None, false, false), head);
-        assert_eq!(tor_head_start(false, Some(Some(30)), false, false), zero);
-        assert_eq!(tor_head_start(false, Some(None), false, true), head);
+        assert_eq!(tor_head_start(true, None, false), head);
+        assert_eq!(tor_head_start(false, Some(Some(30)), false), zero);
+        assert_eq!(tor_head_start(false, Some(None), true), head);
     }
 
     /// E2 r40 (A): a send that can queue waits for Tor's check
