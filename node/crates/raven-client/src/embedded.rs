@@ -61,6 +61,8 @@ pub(crate) fn install() {
     ONCE.call_once(|| {
         raven_core::ipc::inproc::set_embedded_only();
         bridge::set_embedded_node(&EMBEDDED);
+        // The send path's notes into the node's log (D1 b).
+        bridge::set_send_note_sink(node::send_note);
     });
 }
 

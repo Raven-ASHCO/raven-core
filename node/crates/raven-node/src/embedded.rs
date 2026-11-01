@@ -404,6 +404,22 @@ fn open_log(dir: &Path) {
     crate::netutil::set_log_file(file.ok());
 }
 
+/// One note of the engine's send path in this node's log (D1 b, Tor
+/// messaging audit 2026-11: an iPhone keeps no stdout or stderr, so a send
+/// left no trace of its path): ash's send note sink points here. `line`
+/// holds counts, times and codes only; the friend is named by its short tag
+/// of this run, never its key.
+pub fn send_note(peer: &[u8; 32], line: &str) {
+    eprintln!("{}", send_note_line(peer, line));
+}
+
+fn send_note_line(peer: &[u8; 32], line: &str) -> String {
+    format!(
+        "raven-node send: contact {}, {line}",
+        crate::netutil::link_tag(peer)
+    )
+}
+
 /// Stops the node (if one runs) and waits for it, at most `wait`. The
 /// pause stays as it is. `true`: one was running.
 pub fn stop(wait: Duration) -> bool {
@@ -570,4 +586,25 @@ fn block_on_small<F: std::future::Future>(f: F) -> Result<F::Output, String> {
         .build()
         .map(|rt| rt.block_on(f))
         .map_err(|e| format!("no runtime for the wait: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D1 (b): a send note in the node's log names the friend by its tag,
+    /// never by its key.
+    #[test]
+    fn a_send_note_names_the_friend_by_its_tag() {
+        let peer = [0x6B; 32];
+        let line = send_note_line(&peer, "send lock: waited 2.1 s");
+        assert_eq!(
+            line,
+            format!(
+                "raven-node send: contact {}, send lock: waited 2.1 s",
+                crate::netutil::link_tag(&peer)
+            )
+        );
+        assert!(!line.contains(&hex::encode(peer)), "{line}");
+    }
 }
