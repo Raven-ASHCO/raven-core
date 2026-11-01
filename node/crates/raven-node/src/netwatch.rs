@@ -81,7 +81,10 @@
 //!   interfaces again, drops what it found on gone ones, starts every
 //!   contact's query interval over and sends a join round; nothing while its
 //!   gate is closed). Losing every network tells the beacon
-//!   too. One log line with counts only, never an address.
+//!   too. The Tor helper (lab, gated) starts over on stale paths, except
+//!   after a network gone with nothing in its place: then only if it stays
+//!   gone [`TOR_BLIP_HOLD`] ([`TorHold`]). One log line with counts only,
+//!   never an address.
 //! - **Current networks (lab):** each baseline, change and loss of every
 //!   network leaves the networks it settled on for [`on_link`]. While route
 //!   memory is live, the outbox skips a learned LAN address
@@ -151,6 +154,9 @@ const WAKE_SLACK: Duration = Duration::from_secs(30);
 const EGRESS_POLL: Duration = Duration::from_secs(30);
 /// A lab `egress` line carries 1 to this many lowercase hex digits.
 const LAB_EGRESS_MAX: usize = 64;
+/// A network gone with nothing in its place restarts the Tor helper only
+/// if it stays gone this long ([`TorHold`]).
+const TOR_BLIP_HOLD: Duration = Duration::from_secs(30);
 
 /// A watcher that cannot be opened or failed: one line an hour at most.
 static NETWATCH_LOG: netutil::LogLimiter = netutil::LogLimiter::new(Duration::from_secs(3600));
@@ -260,6 +266,130 @@ impl Change {
             || self.egress_moved
             || self.cause != Cause::Addresses
     }
+}
+
+/// What the Tor helper does about a change ([`TorHold`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TorStep {
+    /// Start over now ([`crate::onion::network_changed`]).
+    Restart,
+    /// A network went with nothing in its place: wait [`TOR_BLIP_HOLD`] for
+    /// it to come back. `Some(n)`: hold `n` starts now (its timer runs
+    /// out with [`TorHold::ran_out`]); `None`: one held already.
+    Hold(Option<u64>),
+    /// The networks that went are back within the hold: the helper stays.
+    Kept,
+    /// Nothing for Tor (networks only added, or gone beside a default
+    /// route that was read and stayed).
+    Nothing,
+}
+
+/// Whether a change restarts the Tor helper (T12, Tor messaging audit
+/// 2026-11; pure, the caller passes what settled). Arti handles neither a
+/// network change nor a wake (#2705, #594), so stale paths start it over.
+/// But a network that goes and comes back within seconds (an address blip)
+/// restarted a healthy helper too, and the next life started with no
+/// descriptor and no circuit: the Mac at 07:00Z had answered 1286 pings,
+/// then its self-checks failed for 41 min. So a network gone with nothing
+/// in its place (no network added, the default route not seen moving, not
+/// a wake) holds the restart for [`TOR_BLIP_HOLD`]: back within it, the
+/// helper stays; still gone, or another network in its place, it starts
+/// over then. Everything else that acts on a change (p2p, the outbox, the
+/// beacon) is as before.
+#[derive(Debug, Default)]
+struct TorHold {
+    /// The networks last settled on.
+    view: BTreeSet<IpNet>,
+    /// A held restart: the networks before they went, and its number.
+    held: Option<(BTreeSet<IpNet>, u64)>,
+    holds: u64,
+}
+
+impl TorHold {
+    /// The first view: nothing held.
+    fn baseline(&mut self, view: &[IpNet]) {
+        self.view = view.iter().copied().collect();
+        self.held = None;
+    }
+
+    /// Every network is gone: nothing held (the way back from no network
+    /// restarts Tor).
+    fn offline(&mut self) {
+        self.view.clear();
+        self.held = None;
+    }
+
+    /// The change `c`, leaving the networks `view`.
+    fn changed(&mut self, c: &Change, view: &[IpNet]) -> TorStep {
+        let now: BTreeSet<IpNet> = view.iter().copied().collect();
+        let before = std::mem::replace(&mut self.view, now.clone());
+        if !c.paths_stale() {
+            let Some((went_from, _)) = &self.held else {
+                return TorStep::Nothing;
+            };
+            if went_from.is_subset(&now) {
+                self.held = None;
+                return TorStep::Kept;
+            }
+            // Another network instead of the one that went.
+            self.held = None;
+            return TorStep::Restart;
+        }
+        let gone_only = c.cause == Cause::Addresses
+            && c.added == 0
+            && c.removed > 0
+            && !c.from_offline
+            && !c.egress_moved;
+        if !gone_only {
+            self.held = None;
+            return TorStep::Restart;
+        }
+        if self.held.is_some() {
+            return TorStep::Hold(None);
+        }
+        self.holds += 1;
+        self.held = Some((before, self.holds));
+        TorStep::Hold(Some(self.holds))
+    }
+
+    /// Hold `n`'s time is over: `true` when it still holds a restart (the
+    /// networks did not come back), which is then due now.
+    fn ran_out(&mut self, n: u64) -> bool {
+        if self.held.as_ref().is_some_and(|(_, held)| *held == n) {
+            self.held = None;
+            return true;
+        }
+        false
+    }
+}
+
+/// The service's task's [`TorHold`].
+static TOR_HOLD: Mutex<Option<TorHold>> = Mutex::new(None);
+
+fn with_tor_hold<T>(f: impl FnOnce(&mut TorHold) -> T) -> T {
+    f(TOR_HOLD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(TorHold::default))
+}
+
+/// Hold `n` of the Tor restart ([`TorHold`]): when [`TOR_BLIP_HOLD`] is
+/// over and the networks did not come back, the helper starts over.
+fn tor_restart_after_hold(n: u64) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        crate::onion::network_changed(false);
+        return;
+    };
+    runtime.spawn(async move {
+        tokio::time::sleep(TOR_BLIP_HOLD).await;
+        if with_tor_hold(|t| t.ran_out(n)) {
+            eprintln!(
+                "raven-node netwatch: a network stayed gone {} s; Tor starting over",
+                TOR_BLIP_HOLD.as_secs()
+            );
+            crate::onion::network_changed(false);
+        }
+    });
 }
 
 /// What a settled burst means.
@@ -815,6 +945,7 @@ fn act(s: Settled, view: &[IpNet]) {
     match s {
         Settled::Baseline { networks } => {
             set_view(view);
+            with_tor_hold(|t| t.baseline(view));
             // Route hints compare a wildcard listener's networks with the
             // ones it last told (a restart on another network, cutoff F8):
             // look now that they are known, not a TICK later.
@@ -823,6 +954,7 @@ fn act(s: Settled, view: &[IpNet]) {
         }
         Settled::Offline => {
             set_view(view);
+            with_tor_hold(TorHold::offline);
             // Auto-reach: what STUN discovery found belonged to the network
             // that went away.
             crate::autoreach::network_changed();
@@ -875,11 +1007,16 @@ fn act(s: Settled, view: &[IpNet]) {
             crate::learning::network_changed();
             // The Tor helper (lab, gated): Arti handles neither a network
             // change nor a wake (#2705, #594), so it starts over on stale
-            // paths; networks only added leave it alone.
-            if c.paths_stale() {
-                crate::onion::network_changed(c.cause == Cause::Wake);
+            // paths; networks only added leave it alone, and a network
+            // gone with nothing in its place waits to see whether it comes
+            // back ([`TorHold`]).
+            let tor = with_tor_hold(|t| t.changed(&c, view));
+            match tor {
+                TorStep::Restart => crate::onion::network_changed(c.cause == Cause::Wake),
+                TorStep::Hold(Some(n)) => tor_restart_after_hold(n),
+                TorStep::Hold(None) | TorStep::Kept | TorStep::Nothing => {}
             }
-            eprintln!("{}", change_line(&c, waiting, rehoming));
+            eprintln!("{}{}", change_line(&c, waiting, rehoming), tor_note(tor));
         }
         Settled::PathLoss => {
             // No network change (the view stays): the outbox keeps its
@@ -921,6 +1058,18 @@ fn change_line(c: &Change, waiting: Option<usize>, rehoming: bool) -> String {
     match waiting {
         Some(n) => format!("{head}: retrying {n} waiting now, backoff restarted{p2p}"),
         None => format!("{head}: outbox not running{p2p}"),
+    }
+}
+
+/// What the change line adds about the Tor helper ([`TorStep`]).
+fn tor_note(step: TorStep) -> String {
+    match step {
+        TorStep::Hold(Some(_)) => format!(
+            "; Tor kept unless that stays gone {} s",
+            TOR_BLIP_HOLD.as_secs()
+        ),
+        TorStep::Kept => "; it is back, Tor kept".into(),
+        TorStep::Restart | TorStep::Hold(None) | TorStep::Nothing => String::new(),
     }
 }
 
@@ -1733,6 +1882,103 @@ mod tests {
             P2pAction::Rehome(Rehome::Network),
             "never read (no p2p host)"
         );
+    }
+
+    /// T12 (Tor messaging audit 2026-11): a network that went and came
+    /// back seconds later (an address blip) restarted the Tor helper, even
+    /// a healthy one, and its next life started with no descriptor and no
+    /// circuit (the Mac at 07:00Z: a helper that had answered 1286 pings,
+    /// then 41 min of failing self-checks). A network gone with nothing in
+    /// its place now holds Tor's restart for TOR_BLIP_HOLD: back within it,
+    /// Tor is kept; still gone, Tor starts over then. A wake, the default
+    /// route moving, another network in its place and the way back from no
+    /// network restart it at once, as before; what else acts on a change
+    /// (p2p, the outbox) is as before.
+    #[test]
+    fn a_network_that_goes_and_comes_back_keeps_tor() {
+        let t0 = Instant::now();
+        let nets = ["192.168.0.16/24", "2001:db8:1::5/64"];
+        let wifi = "192.168.0.16/24";
+        let fresh = || {
+            let st = baseline(t0, &nets);
+            let mut tor = TorHold::default();
+            tor.baseline(&st.view());
+            (st, tor)
+        };
+        let next = |st: &mut NetState, tor: &mut TorHold| match settle_when_due(st).1 {
+            Some(Settled::Changed(c)) => (c.clone(), tor.changed(&c, &st.view())),
+            s => panic!("{s:?}"),
+        };
+        let t = t0 + secs(60);
+        // Gone, and back 10 s later (no default route read: no p2p host).
+        let (mut st, mut tor) = fresh();
+        st.event(down(wifi), t);
+        let (gone, step) = next(&mut st, &mut tor);
+        assert!(gone.paths_stale(), "p2p and the others act on it as before");
+        let TorStep::Hold(Some(blip)) = step else {
+            panic!("{step:?}")
+        };
+        st.event(up(wifi), t + secs(10));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Kept);
+        assert!(!tor.ran_out(blip), "nothing left to restart");
+        // Gone for good: Tor starts over when the hold runs out, once. A
+        // second network gone meanwhile starts no second hold.
+        let mut st = baseline(
+            t0,
+            &["192.168.0.16/24", "2001:db8:1::5/64", "172.18.0.1/16"],
+        );
+        let mut tor = TorHold::default();
+        tor.baseline(&st.view());
+        st.event(down(wifi), t);
+        let TorStep::Hold(Some(held)) = next(&mut st, &mut tor).1 else {
+            panic!("held")
+        };
+        st.event(down("172.18.0.1/16"), t + secs(12));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Hold(None));
+        assert!(tor.ran_out(held));
+        assert!(!tor.ran_out(held), "once");
+        // Another network in its place, in the same burst or later: at once.
+        let (mut st, mut tor) = fresh();
+        st.event(down(wifi), t);
+        st.event(up("172.20.10.2/28"), t + secs(1));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Restart);
+        let (mut st, mut tor) = fresh();
+        st.event(down(wifi), t);
+        let TorStep::Hold(Some(held)) = next(&mut st, &mut tor).1 else {
+            panic!("held")
+        };
+        st.event(up("172.20.10.2/28"), t + secs(15));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Restart);
+        assert!(!tor.ran_out(held));
+        // The default route moved with it: at once.
+        let (mut st, mut tor) = fresh();
+        st.egress(tag("aa"), t0 + secs(5));
+        st.event(down(wifi), t);
+        st.egress(tag("bb"), t + secs(1));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Restart);
+        // Gone beside a default route that was read and stayed: nothing
+        // for Tor, as before.
+        let (mut st, mut tor) = fresh();
+        st.egress(tag("aa"), t0 + secs(5));
+        st.event(down("2001:db8:1::5/64"), t);
+        st.egress(tag("aa"), t + secs(1));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Nothing);
+        // A wake: at once.
+        let (mut st, mut tor) = fresh();
+        st.wake(t);
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Restart);
+        // Back from no network: at once.
+        let (mut st, mut tor) = fresh();
+        st.event(down(wifi), t);
+        st.event(down("2001:db8:1::5/64"), t);
+        assert_eq!(settle_when_due(&mut st).1, Some(Settled::Offline));
+        tor.offline();
+        st.event(up(wifi), t + secs(20));
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Restart);
+        // Networks only added: nothing for Tor.
+        let (mut st, mut tor) = fresh();
+        st.event(up("172.18.0.1/16"), t);
+        assert_eq!(next(&mut st, &mut tor).1, TorStep::Nothing);
     }
 
     /// Lab: a point-to-point network (a VPN's /32 or /31, an IPv6 /127 or
