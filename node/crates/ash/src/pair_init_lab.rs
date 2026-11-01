@@ -6074,6 +6074,8 @@ mod send_path_tests {
     /// without that mark still never left; a queued one did, unless unsent.
     #[test]
     fn a_message_read_and_refused_is_not_never_sent_once_it_expires() {
+        // The envelope's deadline, not the long horizon's (as below).
+        raven_core::horizon::set_lab_horizon_for_this_thread(Some(false));
         let rig = Rig::new(0x99);
         rig.send("hello").unwrap();
         rig.faults.refuse_messages.store(1, Ordering::SeqCst);
@@ -6098,6 +6100,17 @@ mod send_path_tests {
         assert!(!never_left_computer(false, record));
         assert!(never_left_computer(false, None));
         assert!(!never_left_computer(true, None));
+        // With raven-node down `raven status` reads the store: read and
+        // refused, it may have arrived (review FU-4), never "will not be
+        // sent".
+        assert_eq!(
+            super::super::ext::waiting_messages_line(rig.a.path(), expired).as_deref(),
+            Some(
+                "Waiting messages: none (1 was sent but not confirmed in time and may have \
+                 arrived)."
+            )
+        );
+        raven_core::horizon::set_lab_horizon_for_this_thread(None);
     }
 
     /// A row sealed under a session the reachable peer refuses, while a newer

@@ -5548,10 +5548,12 @@ fn outbox_items(
                     raven_core::EndpointOutboundKind::Message => "message".into(),
                     raven_core::EndpointOutboundKind::Ack => "ack".into(),
                 },
-                state: if records.get(&row.message_id).is_some_and(|r| r.unsent) {
-                    "queued".into()
-                } else {
-                    state.into()
+                state: match records.get(&row.message_id) {
+                    Some(r) if r.unsent => "queued".into(),
+                    // Prepared, but a carrier wrote it and the contact read
+                    // and refused it: it may have arrived (review FU-4).
+                    Some(r) if r.written => "sent".into(),
+                    _ => state.into(),
                 },
                 expires_at_ms: Envelope::unpack(&row.immutable_envelope_bytes)
                     .map(|e| e.expires_at)
