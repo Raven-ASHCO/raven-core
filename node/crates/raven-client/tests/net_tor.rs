@@ -574,3 +574,110 @@ fn tor_several_friends_both_ways_at_once_no_send_waits_for_another() {
         );
     }
 }
+
+/// T1 (c) of the Tor messaging audit (2026-11): the Tor stream of A's
+/// message drops right after A wrote it (B took the message; its ACK never
+/// came back on that link). That read as B refusing it: no second try, and
+/// the message showed Waiting although B had just answered the check. It is
+/// a lost link: the message dial is tried once more at once, B answers the
+/// copy as a duplicate, and the message is delivered.
+#[test]
+fn tor_a_message_whose_stream_drops_after_the_write_is_delivered_on_the_second_try() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    // B again, its raven-node now dropping the link of the next message it
+    // takes before the ACK goes back (debug builds only).
+    b.stop();
+    std::env::set_var("RAVEN_LAB_CLOSE_BEFORE_ACK", "1");
+    b.start();
+    std::env::remove_var("RAVEN_LAB_CLOSE_BEFORE_ACK");
+    wait_tor_ready(b);
+
+    let began = Instant::now();
+    let m = a.send_until(
+        b,
+        "its stream drops",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(150),
+    );
+    let took = began.elapsed();
+    eprintln!(
+        "a dropped stream after the write: {} in {took:?}",
+        m["state"]
+    );
+    assert_eq!(
+        m["state"],
+        "delivered",
+        "{m}\n--- A ---\n{}\n--- B ---\n{}",
+        a.service_log(),
+        b.service_log()
+    );
+    assert!(b.wait_incoming(a, "its stream drops", Duration::from_secs(30)));
+    // A's raven-node wrote a line for each send dial (D1): the one that
+    // dropped is there.
+    let log = a.service_log();
+    assert!(
+        log.lines()
+            .any(|l| l.contains("raven-node send: ") && l.contains("message (1 frame), failed")),
+        "{log}"
+    );
+}
+
+/// T1 (b, c) of the Tor messaging audit (2026-11): B's raven-node drops
+/// the stream of each of the next three messages it takes, after the write.
+/// A's first message waits (both its tries dropped), and A writes again
+/// while it waits. The next one went out after the earlier one's re-dial,
+/// and either dropped stream held it back: Waiting (its own drop read as B
+/// refusing it) or Failed ("NOT SENT: an earlier message ...", the re-dial
+/// dropped first). It is delivered, and both arrive.
+#[test]
+fn tor_the_message_after_one_whose_streams_dropped_is_delivered() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    b.stop();
+    std::env::set_var("RAVEN_LAB_CLOSE_BEFORE_ACK", "3");
+    b.start();
+    std::env::remove_var("RAVEN_LAB_CLOSE_BEFORE_ACK");
+    wait_tor_ready(b);
+
+    let first = a.send_until(
+        b,
+        "its streams drop",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(150),
+    );
+    assert_ne!(first["state"], "failed", "{first}\n{}", a.service_log());
+    let next = a.send_until(
+        b,
+        "the next one",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(150),
+    );
+    eprintln!(
+        "after a message whose streams dropped: {} then {}",
+        first["state"], next["state"]
+    );
+    assert_eq!(
+        next["state"],
+        "delivered",
+        "{next}\n--- A ---\n{}\n--- B ---\n{}",
+        a.service_log(),
+        b.service_log()
+    );
+    assert!(b.wait_incoming(a, "its streams drop", Duration::from_secs(60)));
+    assert!(b.wait_incoming(a, "the next one", Duration::from_secs(30)));
+}

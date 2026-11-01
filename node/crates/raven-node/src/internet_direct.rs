@@ -845,6 +845,7 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         }
         // A custody handoff FORWARD left here is handed on at once (P5.21).
         let handoff = raven_core::friend_custody::is_handoff_request(&frame);
+        let close_before_ack = lab_close_before_ack(&frame);
         let dd = data_dir.clone();
         let id = identity.clone();
         let peer_c = peer.clone();
@@ -878,6 +879,12 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         if handoff {
             crate::custody::kick_forward();
         }
+        if close_before_ack {
+            // A dropped stream right after the dialer's write: the message
+            // is taken, its replies never leave on this link.
+            crate::outbox::note_unsent_replies(&remote_ed, &replies);
+            return Ok(());
+        }
         for (i, reply) in replies.iter().enumerate() {
             if let Err(e) = write_inet_frame(&mut stream, &mut transport, reply).await {
                 // See `lan_direct::handle_inbound`: the outbox pushes the ACK
@@ -888,6 +895,39 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
     Ok(())
+}
+
+/// Debug builds only, for the engine's Tor tests (Tor messaging audit
+/// 2026-11, T1): `RAVEN_LAB_CLOSE_BEFORE_ACK=<n>`, read at the first chat
+/// message this raven-node takes over a link. The next `n` such messages are
+/// taken, then their link closes before their replies (the ACK) go back, as
+/// a Tor stream that dropped after the dialer's write; the ACK is owed as
+/// for any reply that could not be written. A release build never reads it.
+fn lab_close_before_ack(frame: &[u8]) -> bool {
+    use std::sync::atomic::AtomicUsize;
+    static LEFT: std::sync::OnceLock<AtomicUsize> = std::sync::OnceLock::new();
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+    let chat = raven_core::envelope::Envelope::unpack(frame)
+        .is_some_and(|e| e.env_type == raven_core::envelope::EnvType::Message as u8)
+        && matches!(
+            raven_core::classify_packed_envelope(frame),
+            raven_core::PairInitOobClassify::NotPairInitOob
+        );
+    if !chat {
+        return false;
+    }
+    let left = LEFT.get_or_init(|| {
+        AtomicUsize::new(
+            std::env::var("RAVEN_LAB_CLOSE_BEFORE_ACK")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0),
+        )
+    });
+    left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
 }
 
 /// Blocking: loads the identity (the listener keeps it for its lifetime) and
