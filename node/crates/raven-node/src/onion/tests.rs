@@ -632,6 +632,111 @@ async fn one_circuit_cannot_take_every_onion_slot() {
     assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
 }
 
+/// Tor as a helper that is still starting says it ([`Phase::Starting`],
+/// no connect port yet) until the guard goes; then as it was.
+struct TorStarting;
+
+impl TorStarting {
+    fn now(f: &Friends) -> Self {
+        *live_lock() = Some(Live {
+            token: f.side_a.token,
+            connect: None,
+            binding: None,
+        });
+        update_status(|s| s.phase = Phase::Starting);
+        TorStarting
+    }
+}
+
+impl Drop for TorStarting {
+    fn drop(&mut self) {
+        update_status(|s| *s = Status::default());
+    }
+}
+
+/// The helper becomes ready after `after`, as the supervisor marks it
+/// (its connect port, then the phase).
+fn ready_after(after: Duration, connect: SocketAddr) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        if let Some(live) = live_lock().as_mut() {
+            live.connect = Some(connect);
+        }
+        update_status(|s| s.phase = Phase::Ready);
+    })
+}
+
+/// A send while Tor is still starting (the iPhone app back from the
+/// background, audit T7): the onion dial waits for Tor to be ready, a
+/// moment later, instead of failing at once with ONION_NOT_READY (the
+/// message then waited for the outbox's next try).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dial_while_tor_starts_waits_until_it_is_ready() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::new().await else {
+        return;
+    };
+    let _starting = TorStarting::now(&f);
+    let ready = ready_after(Duration::from_millis(1500), f.side_a.connect);
+    let began = Instant::now();
+    let replies = f
+        .alice_dials_bob("written while Tor starts")
+        .await
+        .expect("the dial waits for Tor");
+    assert!(
+        began.elapsed() >= Duration::from_millis(1400),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+    ready.await.unwrap();
+}
+
+/// The wait has its bounds: a Tor still not ready when the dial's own
+/// deadline comes is ONION_NOT_READY then, and a Tor that is not starting
+/// (blocked on this network) is ONION_NOT_READY at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dial_waits_for_a_starting_tor_only_within_its_deadline() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::new().await else {
+        return;
+    };
+    let _starting = TorStarting::now(&f);
+    let sealed = seal(f.a.path(), &f.alice, &f.key_ab, "never sent");
+    let (route, bob) = (
+        raven_core::onion::dial_for(&f.side_b.hs_id),
+        hex::encode(f.bob_pub),
+    );
+    let dial = |within: Duration| {
+        dial_with_meta(
+            f.a.path(),
+            &route,
+            &bob,
+            std::slice::from_ref(&sealed),
+            DialMeta {
+                within: Some(within),
+                ..DialMeta::default()
+            },
+        )
+    };
+    let began = Instant::now();
+    let err = dial(Duration::from_millis(800)).await.unwrap_err();
+    assert!(err.starts_with("ONION_NOT_READY"), "{err}");
+    let took = began.elapsed();
+    assert!(took >= Duration::from_millis(700), "{took:?}");
+    assert!(took < Duration::from_secs(3), "{took:?}");
+
+    update_status(|s| s.phase = Phase::Blocked);
+    let began = Instant::now();
+    let err = dial(Duration::from_secs(20)).await.unwrap_err();
+    assert!(err.starts_with("ONION_NOT_READY"), "{err}");
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        began.elapsed()
+    );
+}
+
 /// The helper's token comes before any admission slot: 40 bare local
 /// connections without it (more than the pre-token cap) do not keep a
 /// friend out.

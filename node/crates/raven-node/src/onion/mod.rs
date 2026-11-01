@@ -325,6 +325,41 @@ fn ready_connect() -> Option<(SocketAddr, [u8; proto::TOKEN_LEN])> {
     Some((live.connect?, live.token))
 }
 
+/// How long an onion dial waits for a Tor that is still starting, inside
+/// the dial's own deadline: the iPhone app's node starts again when the app
+/// comes back, and its Tor is ready about a second later (audit T7); a send
+/// meanwhile failed at once and its message waited for the outbox.
+const READY_WAIT: Duration = Duration::from_secs(8);
+const READY_LOOK: Duration = Duration::from_millis(100);
+
+/// [`ready_connect`], waiting at most `within` while the helper is starting
+/// (or about to start again); at once when Tor is ready, off, blocked or
+/// cannot start here.
+async fn ready_connect_within(within: Duration) -> Option<(SocketAddr, [u8; proto::TOKEN_LEN])> {
+    // Tokio's clock for the wait (a test may pause it), the std one for
+    // the helper's restart time.
+    let until = tokio::time::Instant::now() + within;
+    loop {
+        if let Some(ready) = ready_connect() {
+            return Some(ready);
+        }
+        let left = until.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() || !starting(&status(), Instant::now() + left) {
+            return None;
+        }
+        tokio::time::sleep(READY_LOOK.min(left)).await;
+    }
+}
+
+/// The helper is starting, or starting again before `until`.
+fn starting(s: &Status, until: Instant) -> bool {
+    match s.phase {
+        Phase::Starting => true,
+        Phase::Restarting => s.retry_at.is_none_or(|at| at <= until),
+        _ => false,
+    }
+}
+
 /// This node's own onion binding while the onion service task runs and the
 /// helper reported its key (route hints and the status read it; a card
 /// reads `onion_self.json`).
@@ -1593,7 +1628,12 @@ pub(crate) async fn dial_with_meta(
         }
     }
     let hs_id = raven_core::onion::dial_hs_id(dial).ok_or(ONION_BAD_ROUTE)?;
-    let (helper, token) = ready_connect().ok_or(ONION_NOT_READY)?;
+    let deadline = meta.deadline(ONION_DIAL_DEADLINE);
+    let began = Instant::now();
+    let (helper, token) = ready_connect_within(READY_WAIT.min(deadline))
+        .await
+        .ok_or(ONION_NOT_READY)?;
+    let deadline = deadline.saturating_sub(began.elapsed());
     // Counted as running until it ends, however it ends (E2 r40: a send
     // whose friend Tor is still dialling need not wait for Tor again).
     let _running = crate::delivery_paths::onion_dial_started(&expected);
@@ -1606,7 +1646,6 @@ pub(crate) async fn dial_with_meta(
         ONION_CONNECT_BUDGET,
     );
     progress.collector.set_race(meta.race);
-    let deadline = meta.deadline(ONION_DIAL_DEADLINE);
     let outcome = tokio::time::timeout(
         deadline,
         internet_direct::dial_session_on(
