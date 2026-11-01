@@ -561,6 +561,8 @@ pub(crate) struct SelfChecks {
     next: Option<Instant>,
     asked: Option<(u64, Instant)>,
     last: Option<Instant>,
+    /// The last one did not reach the service, or was never answered.
+    failing: bool,
 }
 
 impl SelfChecks {
@@ -602,6 +604,7 @@ impl SelfChecks {
             // Not answered: given up, tried again later.
             self.asked = None;
             self.last = Some(now);
+            self.failing = true;
             self.next = Some(now + SELF_CHECK_AGAIN);
         }
         if self.next.is_none_or(|next| now < next) {
@@ -613,6 +616,13 @@ impl SelfChecks {
         Some(self.n)
     }
 
+    /// The last self-check of this helper life did not reach the service,
+    /// or the helper never answered it: one that reaches it next says our
+    /// own Tor works again (T11, Tor messaging audit 2026-11).
+    pub(crate) fn failing(&self) -> bool {
+        self.failing
+    }
+
     /// The helper answered self-check `n` at `now`; `false` for an answer
     /// to none asked (late or unknown: ignored).
     pub(crate) fn answered(&mut self, n: u64, reached: bool, now: Instant) -> bool {
@@ -621,6 +631,7 @@ impl SelfChecks {
         }
         self.asked = None;
         self.last = Some(now);
+        self.failing = !reached;
         self.next = Some(
             now + if reached {
                 SELF_CHECK_EVERY
@@ -1117,6 +1128,32 @@ mod tests {
         c.trouble(later);
         assert_eq!(c.due(later + SELF_CHECK_ON_TROUBLE - secs(1)), None);
         assert_eq!(c.due(later + SELF_CHECK_ON_TROUBLE), Some(2));
+    }
+
+    /// T11 (Tor messaging audit 2026-11): whether the run's last self-check
+    /// failed (one the helper never answered counts), so that a check that
+    /// reaches the service after it says our own Tor works again.
+    #[test]
+    fn self_checks_know_whether_the_last_one_failed() {
+        let t = Instant::now();
+        let mut c = SelfChecks::default();
+        assert!(!c.failing(), "none yet");
+        c.published(t);
+        let first = t + SELF_CHECK_FIRST;
+        assert_eq!(c.due(first), Some(1));
+        assert!(c.answered(1, false, first + secs(30)));
+        assert!(c.failing());
+        let again = first + secs(30) + SELF_CHECK_AGAIN;
+        assert_eq!(c.due(again), Some(2));
+        assert!(c.failing(), "asked, not answered yet");
+        assert!(c.answered(2, true, again + secs(5)));
+        assert!(!c.failing());
+        // Never answered: given up, and counted as failed.
+        let next = again + secs(5) + SELF_CHECK_EVERY;
+        assert_eq!(c.due(next), Some(3));
+        assert!(!c.failing());
+        assert_eq!(c.due(next + SELF_CHECK_WAIT), None);
+        assert!(c.failing());
     }
 
     /// E2 r40 #F: the first upload round HSDirs took brings the run's

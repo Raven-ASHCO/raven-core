@@ -1268,6 +1268,7 @@ async fn handle_event(
             }
         }
         Event::SelfCheck { n, reached, reason } => {
+            let was_failing = checks.failing();
             if !checks.answered(n, reached, now) {
                 return;
             }
@@ -1287,6 +1288,11 @@ async fn handle_event(
                 // Tor works here: no friend's Tor route stays marked failed
                 // for the next send (E2 r40).
                 crate::delivery_paths::tor_works_here();
+                // Again, after a check that failed: what waits for Tor goes
+                // now (T11; only the first "ready" of a helper life did).
+                if was_failing {
+                    tor_works_again();
+                }
             }
             if let Some(news) = service.self_checked(reached, reason, now) {
                 say_service(news, service, life, now);
@@ -1306,6 +1312,36 @@ async fn handle_event(
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`tor_works_again`] calls on this thread (a `#[tokio::test]` runs
+    /// its tasks on it).
+    static TOR_BACK_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Our own Tor works again inside this helper life: a self-check reached
+/// our onion service after one that failed (T11, Tor messaging audit
+/// 2026-11: the Mac's Tor client failed for 10 min, and what waited went
+/// out only at its backoff, minutes after). What last tried Tor goes now
+/// ([`crate::outbox::tor_back`], at most once a minute).
+fn tor_works_again() {
+    #[cfg(test)]
+    TOR_BACK_CALLS.with(|n| n.set(n.get() + 1));
+    if let Some(woke) = crate::outbox::tor_back().filter(|n| *n > 0) {
+        eprintln!(
+            "raven-node onion: Tor: works again here; retrying what waits for {woke} \
+             contact{} over Tor now",
+            if woke == 1 { "" } else { "s" }
+        );
+    }
+}
+
+/// How often [`tor_works_again`] ran on this thread.
+#[cfg(test)]
+fn tor_back_calls() -> u32 {
+    TOR_BACK_CALLS.with(std::cell::Cell::get)
 }
 
 /// Friends' authenticated incoming Tor links so far ([`friend_reached_us`]).
@@ -1721,3 +1757,51 @@ async fn connect_via_helper(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tor_back_tests {
+    use super::*;
+
+    /// T11 (Tor messaging audit 2026-11): inside one helper life only its
+    /// first "ready" woke what waits. A self-check that reached our onion
+    /// service again after one that failed (our own Tor client working
+    /// again, nothing restarted) woke nothing, and messages waited out
+    /// their backoff (the Mac, 12:30-12:40Z). Now that check wakes what
+    /// waits for Tor, once; a check that reaches after one that reached
+    /// wakes nothing.
+    #[tokio::test]
+    async fn a_self_check_that_reaches_after_a_failed_one_wakes_what_waits_for_tor() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = Arc::new(Identity::from_seed(&[0x5C; 32]));
+        let t = Instant::now();
+        let mut life = Life::new(t);
+        let mut restarts = Restarts::default();
+        let mut service = ServiceWatch::default();
+        let mut checks = SelfChecks::default();
+        let mut logged = 0u8;
+        // Settled reachable already: the checks below make no status news.
+        let _ = service.observe(ServiceState::Running, None, t);
+        checks.published(t);
+        let mut at = t + watch::SELF_CHECK_FIRST;
+        let before = tor_back_calls();
+        let mut woke = Vec::new();
+        for reached in [true, false, true, true] {
+            let n = checks.due(at).expect("a self-check is due");
+            let line = format!(r#"{{"ev":"self_check","n":{n},"reached":{reached}}}"#);
+            handle_event(
+                &line,
+                &mut life,
+                &mut restarts,
+                (&mut service, &mut checks),
+                dir.path(),
+                &identity,
+                &mut logged,
+                at,
+            )
+            .await;
+            woke.push(tor_back_calls() - before);
+            at += watch::SELF_CHECK_EVERY;
+        }
+        assert_eq!(woke, [0, 0, 1, 1]);
+    }
+}

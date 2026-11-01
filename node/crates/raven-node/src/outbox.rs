@@ -175,6 +175,9 @@ const LAN_SEEN_RETRY: Duration = Duration::from_secs(15);
 /// min after it was back). Such an attempt carries a message or an owed
 /// ACK (RAVEN_ONION_CARRIER_V1 §10).
 const TOR_SEEN_RETRY: Duration = Duration::from_secs(30);
+/// Our own Tor working again ([`tor_back`], T11) wakes what waits for Tor
+/// at most this often.
+const TOR_BACK_MIN: Duration = Duration::from_secs(60);
 /// A contact's inbound link starts its backoff over at most this often: one
 /// that keeps dialling in while our dial-backs fail (NAT, a port we do not
 /// know) keeps the normal backoff in between (G5).
@@ -623,6 +626,9 @@ struct Inner {
     /// that attempt ends, if it reached nobody ([`Inner::apply`]). Only ever
     /// peers in flight.
     back_after: HashSet<[u8; 32]>,
+    /// When our own Tor working again last woke what waits for Tor
+    /// ([`tor_back`]).
+    last_tor_back: Option<Instant>,
     /// When a contact's custody offer or announced custodians last made
     /// everything due ([`custodians_changed`]).
     last_custody_kick: Option<Instant>,
@@ -796,6 +802,27 @@ pub(crate) fn network_changed() -> Option<usize> {
     drop(inner);
     ob.wake.notify_one();
     Some(waiting)
+}
+
+/// Our own Tor works again inside one helper life: a self-check reached our
+/// onion service after one that failed (T11, Tor messaging audit 2026-11).
+/// No network changed and Tor did not restart, so nothing else wakes the
+/// outbox: what last tried Tor starts its backoff over and is due within
+/// [`NETWORK_SPREAD`] ([`Inner::tor_back_now`]), at most once per
+/// [`TOR_BACK_MIN`]. How many contacts; `None` when no worker runs in this
+/// process.
+pub(crate) fn tor_back() -> Option<usize> {
+    let ob = outbox();
+    let mut inner = lock(&ob.inner);
+    if !inner.running {
+        return None;
+    }
+    let woke = inner.tor_back_now(Instant::now());
+    drop(inner);
+    if woke > 0 {
+        ob.wake.notify_one();
+    }
+    Some(woke)
 }
 
 /// Sibling wakes (cutoff pack F5) are live: the offline-LAN gate, and M0
@@ -1454,6 +1481,38 @@ impl Inner {
                 .or_insert_with(|| NETWORK_SPREAD.mul_f64(jitter()))
         });
         self.entries.len() + self.unsent_acks.len()
+    }
+
+    /// [`tor_back`]: each contact with a live object whose last attempt
+    /// dialled Tor has its backoff started over (its owed ACKs too) and is
+    /// due within [`NETWORK_SPREAD`], at one offset per contact, as after a
+    /// network change; an attempt in flight is due again when it ends.
+    /// Other contacts keep their backoff. At most once per
+    /// [`TOR_BACK_MIN`]; a call that found nobody uses nothing up. How
+    /// many contacts.
+    fn tor_back_now(&mut self, now: Instant) -> usize {
+        if self
+            .last_tor_back
+            .is_some_and(|t| now.saturating_duration_since(t) < TOR_BACK_MIN)
+        {
+            return 0;
+        }
+        let peers: BTreeSet<[u8; 32]> = self
+            .entries
+            .values()
+            .filter(|e| !e.state.is_final() && e.tried.contains(&OutboxCarrier::Onion))
+            .map(|e| e.recipient)
+            .collect();
+        if peers.is_empty() {
+            return 0;
+        }
+        self.last_tor_back = Some(now);
+        for peer in &peers {
+            self.restart_backoff(Some(peer));
+            let at = now + NETWORK_SPREAD.mul_f64(jitter());
+            self.kick_at(Some(peer), false, |_| at);
+        }
+        peers.len()
     }
 
     /// [`waiting_peers`]: each contact with a live object or an owed ACK
@@ -9936,6 +9995,67 @@ mod tests {
                 assert!(last > Duration::from_secs(45), "{seen} {tor}: {waits:?}");
             }
         }
+    }
+
+    /// T11 (Tor messaging audit 2026-11): our own Tor works again (a
+    /// self-check reached our onion service after one that failed, inside
+    /// one helper life: nothing restarted Tor, so nothing woke the outbox).
+    /// What last tried Tor, and the ACKs owed to its contact, start their
+    /// backoff over and are due within NETWORK_SPREAD; what did not try Tor
+    /// keeps its backoff; at most once per TOR_BACK_MIN.
+    #[test]
+    fn our_own_tor_working_again_sends_what_waits_for_tor() {
+        let t0 = Instant::now();
+        let wall = 1_000_000_000u64;
+        let (bob, carol) = ([0xB0; 32], [0xC0; 32]);
+        let parked = t0 + RETRY_MAX;
+        let mut inner = Inner::default();
+        inner.merge(
+            vec![
+                sched_row(1, 0xB0, wall + DAY),
+                sched_row(2, 0xC0, wall + DAY),
+            ],
+            0,
+            t0,
+            wall,
+        );
+        let park = |inner: &mut Inner| {
+            for (d, carrier) in [(1u8, OutboxCarrier::Onion), (2, OutboxCarrier::Lan)] {
+                let e = inner.entries.get_mut(&[d; 32]).unwrap();
+                e.failures = 8;
+                e.next_due = parked;
+                e.tried = vec![carrier];
+            }
+        };
+        park(&mut inner);
+        inner
+            .unsent_acks
+            .insert([7; 32], owed(bob, 6, parked, wall + DAY));
+        inner
+            .unsent_acks
+            .insert([8; 32], owed(carol, 6, parked, wall + DAY));
+        let t = t0 + Duration::from_secs(30);
+        assert_eq!(inner.tor_back_now(t), 1, "Bob only");
+        let spread = t..=t + NETWORK_SPREAD;
+        let e = &inner.entries[&[1; 32]];
+        assert_eq!(e.failures, 0);
+        assert!(spread.contains(&e.next_due), "{:?}", e.next_due - t);
+        assert!(spread.contains(&inner.unsent_acks[&[7; 32]].next_due));
+        assert_eq!(sched_of(&inner, 2), (8, parked), "Carol's tried the LAN");
+        assert_eq!(inner.unsent_acks[&[8; 32]].next_due, parked);
+        // Within TOR_BACK_MIN: nothing again.
+        park(&mut inner);
+        assert_eq!(
+            inner.tor_back_now(t + TOR_BACK_MIN - Duration::from_secs(1)),
+            0
+        );
+        assert_eq!(sched_of(&inner, 1), (8, parked));
+        assert_eq!(inner.tor_back_now(t + TOR_BACK_MIN), 1);
+        // An attempt for Bob in flight is due again when it ends.
+        park(&mut inner);
+        inner.in_flight.insert(bob);
+        assert_eq!(inner.tor_back_now(t + 2 * TOR_BACK_MIN), 1);
+        assert!(inner.kicked.contains(&bob));
     }
 
     /// S7 (Tor messaging audit 2026-11): a sign that a contact is back
