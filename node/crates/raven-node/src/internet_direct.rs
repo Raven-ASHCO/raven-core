@@ -1064,6 +1064,20 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     }
     progress.frames_sent = true;
     progress.collector.mark_frames_sent();
+    if progress.collector.answers_nothing() {
+        // Owed ACKs (or a PairResponse) only: nothing answers them, and the
+        // dial sat out its whole reply wait for nothing, 5 s on Tor, with
+        // the friend "in flight" for the outbox (Tor messaging audit
+        // 2026-11, T18). Read what the listener's hello said it sends, then
+        // end; an RRH1 it may still send unasked is read to the end of its
+        // side, as unread data at close would reset the link.
+        progress.stage = "reading the listener's route hints";
+        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        if hints.may_tell_unasked() {
+            read_to_the_end(stream, transport, hints, progress).await?;
+        }
+        return Ok(());
+    }
     progress.stage = "waiting for a reply";
     let wait = progress.collector.first_wait();
     let mut more = progress
@@ -1139,6 +1153,38 @@ async fn read_peer_frames<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
     Ok(())
+}
+
+/// A dial whose frames nothing answers, to a listener that may still send
+/// an RRH1 we did not ask for ([`crate::hints::LinkCtl::may_tell_unasked`]):
+/// end our side of the link, so the listener ends its own, and read it to
+/// its end within the idle wait, taking that RRH1 if it comes. At most one
+/// round trip instead of the idle wait; on Tor our end is the stream's END
+/// (Tor streams have no half close), and the helper then closes ours. A
+/// frame that is not a route hint is kept as a reply.
+async fn read_to_the_end<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    transport: &mut LinkCipher,
+    hints: &mut crate::hints::LinkCtl,
+    progress: &mut DialProgress,
+) -> Result<(), String> {
+    let _ = stream.shutdown().await;
+    let deadline = tokio::time::Instant::now() + progress.collector.idle_wait();
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let got = read_reply(stream, transport, left).await;
+        crate::security::dial_reply(&got, hints);
+        let ReplyWait::Frame(frame) = got else {
+            return Ok(());
+        };
+        if hints.take(&frame).await {
+            if hints.flooded() {
+                return Ok(());
+            }
+            continue;
+        }
+        progress.collector.next(ReplyWait::Frame(frame))?;
+    }
 }
 
 async fn dial_session(
@@ -3707,14 +3753,16 @@ mod tests {
         (dialer, listener)
     }
 
-    /// Two verified friends with a confirmed session: Alice (`a`) dials,
-    /// Bob (`b`) listens. `None` (skipped) without the lab backends.
+    /// Two verified friends with a confirmed session each way: Alice (`a`)
+    /// dials, Bob (`b`) listens. `None` (skipped) without the lab backends.
     struct Friends {
         a: tempfile::TempDir,
         b: tempfile::TempDir,
         alice: Identity,
         bob: Arc<Identity>,
+        b_bundle: raven_core::LanBundle,
         key_ab: raven_core::indexed_session_store::IndexedSessionRecordKey,
+        key_ba: raven_core::indexed_session_store::IndexedSessionRecordKey,
     }
 
     impl Friends {
@@ -3742,18 +3790,43 @@ mod tests {
             cache_peer_bundle(a.path(), &b_bundle).unwrap();
             cache_peer_bundle(b.path(), &a_bundle).unwrap();
             let key_ab = pair(a.path(), &alice, b.path(), &bob, &a_bundle, &b_bundle);
+            let key_ba = pair(b.path(), &bob, a.path(), &alice, &b_bundle, &a_bundle);
             Some(Self {
                 a,
                 b,
                 alice,
                 bob: Arc::new(bob),
+                b_bundle,
                 key_ab,
+                key_ba,
             })
         }
 
         /// Alice's sealed message `text` to Bob, as `raven send` stages it.
         fn alice_seals(&self, text: &str) -> Vec<u8> {
             seal(self.a.path(), &self.alice, &self.key_ab, text)
+        }
+
+        /// Alice's sealed ACK of a message Bob sealed to her (Bob's session
+        /// takes it, and answers nothing).
+        fn alice_acks_one_of_bobs(&self) -> Vec<u8> {
+            let to_alice = seal(self.b.path(), &self.bob, &self.key_ba, "for Alice");
+            let replies = raven_core::lan_dispatch::dispatch_frame(
+                self.a.path(),
+                &self.alice,
+                &self.b_bundle,
+                &self.bob.public_key_bytes(),
+                &to_alice,
+            )
+            .unwrap();
+            let acks = raven_core::outbox::ack_frames(&replies);
+            assert_eq!(acks.len(), 1, "Alice's sealed ACK");
+            replies
+                .into_iter()
+                .find(|f| {
+                    Envelope::unpack(f).is_some_and(|e| e.env_type == EnvType::Ack as u8)
+                })
+                .unwrap()
         }
 
         /// Alice dials Bob's real onion listener on a link of `one_way`
@@ -3888,4 +3961,42 @@ mod tests {
         );
     }
 
+    /// T18: a dial whose frames get no reply (the outbox pushing owed ACKs)
+    /// sat out Tor's whole reply wait, 5 s, for an answer that never comes,
+    /// while the friend stayed "in flight" for the outbox. It now ends once
+    /// its frames are written and the listener's route hints are read: at
+    /// once when its hello asked for them (it holds none of the friend's),
+    /// and one round trip later when it did not (the friend may still tell
+    /// them unasked, so our side ends and the friend's is read to its end).
+    /// Bob's session takes each ACK: his listener ends cleanly, which an
+    /// ACK it refused would not.
+    #[tokio::test(start_paused = true)]
+    async fn a_dial_of_acks_only_ends_without_sitting_out_tors_reply_wait() {
+        let _live = crate::hints::LiveForTest::set(true);
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        let one_way = Duration::from_millis(300);
+        let bob = f.bob.public_key_bytes();
+        assert!(crate::hints::holds_no_hints(f.a.path(), &bob));
+        let (asked, replies) = f
+            .alice_dials(one_way, &[f.alice_acks_one_of_bobs()])
+            .await;
+        assert_eq!(replies.len(), 1, "Bob's RLB1 offer only: nothing answers an ACK");
+        assert!(!crate::hints::holds_no_hints(f.a.path(), &bob), "Bob's RRH1 read");
+        assert_eq!(
+            round_trips(asked, one_way),
+            2,
+            "an ACK-only dial that asked for Bob's route hints took {asked:?}"
+        );
+        let (unasked, replies) = f
+            .alice_dials(one_way, &[f.alice_acks_one_of_bobs()])
+            .await;
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            round_trips(unasked, one_way),
+            3,
+            "an ACK-only dial holding Bob's route hints took {unasked:?}"
+        );
+    }
 }

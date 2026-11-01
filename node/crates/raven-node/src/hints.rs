@@ -623,6 +623,20 @@ impl LinkCtl {
             }
     }
 
+    /// Might an Internet, p2p, nearby or onion listener still send an RRH1
+    /// on this dial that our hello did not ask for? It does right after its
+    /// RLB1 offer when we are due one (§3.3, §6.1), which a dialer cannot
+    /// know; one we asked for is [`Self::expects_peer_frame`]'s. A dialer
+    /// that closes with it unread resets the link.
+    pub(crate) fn may_tell_unasked(&self) -> bool {
+        self.live
+            && self.received == 0
+            && self.role == Role::Dialer
+            && self.carrier != OutboxCarrier::Lan
+            && !self.ask_sent
+            && self.peer_accepts == Some(true)
+    }
+
     /// A p2p link: its libp2p PeerId carried the peer's Raven identity, so
     /// the PeerId the peer named over another link is proven
     /// ([`learned_routes::note_p2p_link`]).

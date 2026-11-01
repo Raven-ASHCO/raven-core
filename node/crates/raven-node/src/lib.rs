@@ -818,6 +818,23 @@ pub(crate) mod netutil {
         }
     }
 
+    /// Is this a frame the responder never answers, whatever its build: a
+    /// sealed ACK or a PairResponse? Unlike `!expects_reply`, which is also
+    /// true for a frame whose answer it cannot tell (such a dial keeps the
+    /// idle wait for it).
+    fn never_answered(frame: &[u8]) -> bool {
+        if expects_reply(frame) {
+            return false;
+        }
+        match classify_packed_envelope(frame) {
+            PairInitOobClassify::PairResponse(_) => true,
+            PairInitOobClassify::PairInit(_) => false,
+            PairInitOobClassify::NotPairInitOob => {
+                Envelope::unpack(frame).is_some_and(|e| e.env_type == EnvType::Ack as u8)
+            }
+        }
+    }
+
     /// Is this the reply a dial was waiting for (PairResponse or sealed ACK)?
     fn is_terminal_reply(frame: &[u8]) -> bool {
         // Session reset replies (RSR1 SESSION_STATUS / PREKEY_STATUS).
@@ -871,6 +888,9 @@ pub(crate) mod netutil {
         replies: Vec<Vec<u8>>,
         expected: usize,
         seen: usize,
+        /// Every frame is one nothing answers ([`never_answered`]): owed
+        /// ACKs the outbox pushes, say.
+        unanswered: bool,
         /// When the peer's offer had been read (the link authenticated),
         /// the frames were written and the first terminal reply came: the
         /// dial's times for learning connectivity ([`DialProgress::timing`]).
@@ -894,6 +914,7 @@ pub(crate) mod netutil {
                 replies: Vec::new(),
                 expected: 0,
                 seen: 0,
+                unanswered: false,
                 linked_at: None,
                 sent_at: None,
                 first_reply_at: None,
@@ -927,7 +948,15 @@ pub(crate) mod netutil {
             self.budget.admit(&peer_offer)?;
             self.replies.push(peer_offer);
             self.expected = frames.iter().filter(|f| expects_reply(f)).count();
+            self.unanswered = !frames.is_empty() && frames.iter().all(|f| never_answered(f));
             Ok(())
+        }
+
+        /// Nothing answers any of the frames ([`never_answered`]): the dial
+        /// waits for no reply once they are written (Tor messaging audit
+        /// 2026-11, T18: owed ACKs sat out the whole idle wait, 5 s on Tor).
+        pub(crate) fn answers_nothing(&self) -> bool {
+            self.unanswered
         }
 
         pub(crate) fn mark_frames_sent(&mut self) {
@@ -2335,6 +2364,29 @@ pub(crate) mod netutil {
             frame.extend_from_slice(&[1, kind]);
             frame.resize(192, 0);
             frame
+        }
+
+        /// T18 (Tor messaging audit 2026-11): a dial of sealed ACKs only
+        /// waits for no reply once they are written. One frame that gets a
+        /// reply, or whose answer this build cannot tell (an envelope of
+        /// another kind, an RSR1 status), keeps the wait; so does a dial
+        /// without frames, which reads only the route hints.
+        #[test]
+        fn only_a_dial_of_frames_nothing_answers_waits_for_no_reply() {
+            let ack = envelope(EnvType::Ack);
+            let message = envelope(EnvType::Message);
+            let gossip = envelope(EnvType::AliasGossip);
+            let answers_nothing = |frames: &[Vec<u8>]| {
+                let mut c = ReplyCollector::new("ONION", WAITS);
+                c.begin(b"offer".to_vec(), frames).unwrap();
+                c.answers_nothing()
+            };
+            assert!(answers_nothing(std::slice::from_ref(&ack)));
+            assert!(answers_nothing(&[ack.clone(), ack.clone()]));
+            assert!(!answers_nothing(&[ack.clone(), message]));
+            assert!(!answers_nothing(&[ack.clone(), gossip]));
+            assert!(!answers_nothing(&[ack, rsr1(2)]));
+            assert!(!answers_nothing(&[]));
         }
 
         #[test]
