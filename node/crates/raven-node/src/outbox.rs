@@ -3028,8 +3028,12 @@ pub(crate) struct AttemptCtx {
     /// held the contact's lock past the record phase's wait), per contact,
     /// with the carrier each came on: checked at the contact's next attempt,
     /// before it dials (T13 c). In memory, bounded.
-    pub(crate) kept_receipts: Mutex<HashMap<[u8; 32], Vec<(Vec<u8>, OutboxCarrier)>>>,
+    pub(crate) kept_receipts: Mutex<KeptReceipts>,
 }
+
+/// ACK frames kept per contact, each with the carrier it came back on
+/// ([`AttemptCtx::kept_receipts`]).
+type KeptReceipts = HashMap<[u8; 32], Vec<(Vec<u8>, OutboxCarrier)>>;
 
 /// ACKs kept per contact at most ([`AttemptCtx::kept_receipts`]).
 const KEPT_RECEIPTS_MAX: usize = 2 * MAX_FRAMES_PER_DIAL;
