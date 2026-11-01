@@ -1934,6 +1934,17 @@ impl Inner {
             .map(|t| t.saturating_duration_since(now))
     }
 
+    /// When `peer`'s next object is due, from `now` (gap2-1: the line of an
+    /// attempt that reached nobody says it). `None`: nothing waits for it.
+    fn next_try_in(&self, peer: &[u8; 32], now: Instant) -> Option<Duration> {
+        self.entries
+            .values()
+            .filter(|e| e.recipient == *peer && !e.state.is_final())
+            .map(|e| e.next_due)
+            .min()
+            .map(|t| t.saturating_duration_since(now))
+    }
+
     fn idle_refresh(&self) -> Duration {
         if self.entries.is_empty() && self.unsent_acks.is_empty() {
             IDLE_REFRESH_EMPTY
@@ -2429,6 +2440,35 @@ impl PeerReport {
         self
     }
 
+    /// gap2-1 (Tor messaging audit, 2026-11): the way and code of an attempt
+    /// that reached nobody: no object was delivered, written or left with a
+    /// friend, and one failed or was held (`("held", code)` for a hold).
+    /// `None` when it made progress or tried nothing.
+    pub(crate) fn not_reached(&self) -> Option<(&'static str, &'static str)> {
+        let progress = self.outcomes.values().any(|o| {
+            matches!(
+                o,
+                Outcome::Delivered { .. }
+                    | Outcome::Sent { .. }
+                    | Outcome::AckSent { .. }
+                    | Outcome::Deposited { .. }
+            )
+        });
+        if progress || self.attempted.is_empty() {
+            return None;
+        }
+        self.attempted
+            .iter()
+            .find_map(|d| match self.outcomes.get(d) {
+                Some(Outcome::Unreachable { carrier, code }) => {
+                    Some((carrier.map_or("unreachable", |c| c.label()), *code))
+                }
+                Some(Outcome::Held(code)) => Some(("held", *code)),
+                Some(_) => None,
+                None => self.held.map(|code| ("held", code)),
+            })
+    }
+
     /// `raven-node outbox: delivered N (<carrier>[, <path>]); contact #ab12`,
     /// one per carrier and path, for the objects this attempt delivered to
     /// `peer`: counts, the carrier and a p2p link's path only, and the
@@ -2461,6 +2501,38 @@ impl PeerReport {
             .collect()
     }
 }
+
+/// The line of an attempt that reached nobody ([`PeerReport::not_reached`]):
+/// counts and codes only, the contact's tag of this run, and when its next
+/// try is due (`next`; `None`: nothing else waits for it). `events`: the
+/// attempts like it since the contact's last such line, this one included.
+fn not_reached_line(
+    peer: &[u8; 32],
+    (way, code): (&'static str, &'static str),
+    next: Option<Duration>,
+    events: u64,
+) -> String {
+    let next = next.map_or_else(
+        || "nothing else waits".to_string(),
+        |d| format!("next try in {} s", d.as_secs()),
+    );
+    let more = if events > 1 {
+        format!(
+            " (and {} more like it in the last {}s)",
+            events - 1,
+            crate::hints::KEYED_LOG_WINDOW.as_secs()
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "raven-node outbox: contact {} not reached ({way}, {code}); {next}{more}",
+        netutil::link_tag(peer)
+    )
+}
+
+/// [`not_reached_line`]s: one per contact per 30 s.
+static NOT_REACHED_LOG: crate::hints::KeyedLog = crate::hints::KeyedLog::new();
 
 /// How one carrier attempt is made. Production dials over the network
 /// (`lan_direct::dial` / `internet_direct::dial`); tests hand the frames to a
@@ -6621,10 +6693,21 @@ async fn run_loop(ctx: Arc<AttemptCtx>) -> Result<(), String> {
                     }
                 });
                 let delivered = report.delivered_lines(&peer);
+                let missed = report.not_reached();
                 let ob = outbox();
-                let woke = lock(&ob.inner).apply(&peer, report, Instant::now(), now_ms());
+                let (woke, next) = {
+                    let mut inner = lock(&ob.inner);
+                    let woke = inner.apply(&peer, report, Instant::now(), now_ms());
+                    (woke, inner.next_try_in(&peer, Instant::now()))
+                };
                 for line in delivered {
                     eprintln!("{line}");
+                }
+                if let Some(missed) = missed {
+                    let tag = netutil::link_tag(&peer);
+                    if let Some(n) = NOT_REACHED_LOG.hit(&tag, Instant::now()) {
+                        eprintln!("{}", not_reached_line(&peer, missed, next, n));
+                    }
                 }
                 log_sibling_wake(woke);
                 ob.wake.notify_one();
@@ -8108,6 +8191,70 @@ mod tests {
         assert!(due.iter().any(|w| w.peer == *peer), "due at {at:?}");
         inner.apply(peer, report_for(digest, unreachable()), at, wall);
         inner.entries[&digest].next_due - at
+    }
+
+    /// gap2-1 (Tor messaging audit, 2026-11): failed attempts logged
+    /// nothing, so the backoff could not be measured. An attempt that
+    /// reached nobody says so: the contact's tag, the way and the code, and
+    /// when its next try is due. One that wrote or delivered says nothing
+    /// here (its delivered line says it).
+    #[test]
+    fn an_attempt_that_reached_nobody_says_when_it_tries_again() {
+        let (t0, wall) = (Instant::now(), 1_000_000);
+        let peer = [7u8; 32];
+        let mut inner = Inner::default();
+        inner.merge(vec![sched_row(1, 7, wall + DAY)], 0, t0, wall);
+        assert_eq!(inner.take_due(t0).len(), 1);
+        let report = report_for(
+            [1; 32],
+            Outcome::Unreachable {
+                carrier: Some(OutboxCarrier::Onion),
+                code: code::ONION_UNREACHABLE,
+            },
+        );
+        let missed = report.not_reached().expect("reached nobody");
+        assert_eq!(missed, ("onion_dial", code::ONION_UNREACHABLE));
+        inner.apply(&peer, report, t0, wall);
+        let next = inner.next_try_in(&peer, t0).expect("it waits");
+        assert_eq!(next, inner.entries[&[1; 32]].next_due - t0);
+        let line = not_reached_line(&peer, missed, Some(next), 1);
+        let tag = netutil::link_tag(&peer);
+        assert_eq!(
+            line,
+            format!(
+                "raven-node outbox: contact {tag} not reached (onion_dial, ONION_UNREACHABLE); \
+                 next try in {} s",
+                next.as_secs()
+            )
+        );
+        assert!(!line.contains(&hex::encode(peer)), "{line}");
+        assert!(not_reached_line(&peer, missed, None, 3).ends_with(
+            "not reached (onion_dial, ONION_UNREACHABLE); nothing else waits (and 2 more like \
+             it in the last 30s)"
+        ));
+        // Held as a whole (the send lock was busy): its code.
+        let held = PeerReport {
+            attempted: vec![[1; 32]],
+            ..PeerReport::default()
+        }
+        .hold_all(code::SEND_IN_PROGRESS);
+        assert_eq!(held.not_reached(), Some(("held", code::SEND_IN_PROGRESS)));
+        // Written or delivered: no line.
+        for outcome in [
+            Outcome::Delivered {
+                carrier: Some(OutboxCarrier::Onion),
+            },
+            Outcome::Sent {
+                carrier: Some(OutboxCarrier::Onion),
+                code: code::NO_ACK_YET,
+            },
+        ] {
+            let mut report = report_for([1; 32], unreachable());
+            report.attempted.push([2; 32]);
+            report.outcomes.insert([2; 32], outcome);
+            assert_eq!(report.not_reached(), None);
+        }
+        assert_eq!(PeerReport::default().not_reached(), None, "nothing tried");
     }
 
     #[test]
