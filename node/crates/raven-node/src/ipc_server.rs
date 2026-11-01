@@ -4187,7 +4187,11 @@ mod tests {
             matches!(answer, IpcResponse::InternetDialResult { .. }),
             "the check reached Bob: {answer:?}"
         );
-        assert_eq!(wakes() - before, 0, "a send's check wakes no outbox attempt");
+        assert_eq!(
+            wakes() - before,
+            0,
+            "a send's check wakes no outbox attempt"
+        );
         // A send's dial with a frame (one Bob refuses, after the link).
         let junk = b64_encode(b"not an envelope");
         let _ = handle_internet_dial(a.path(), dial(vec![junk])).await;

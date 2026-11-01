@@ -3986,9 +3986,7 @@ mod tests {
             assert_eq!(acks.len(), 1, "Alice's sealed ACK");
             replies
                 .into_iter()
-                .find(|f| {
-                    Envelope::unpack(f).is_some_and(|e| e.env_type == EnvType::Ack as u8)
-                })
+                .find(|f| Envelope::unpack(f).is_some_and(|e| e.env_type == EnvType::Ack as u8))
                 .unwrap()
         }
 
@@ -4035,7 +4033,9 @@ mod tests {
             .await
             .expect("the dial reaches Bob");
             let took = began.elapsed();
-            listener_result(server).await.expect("Bob's listener ends cleanly");
+            listener_result(server)
+                .await
+                .expect("Bob's listener ends cleanly");
             (took, progress.collector.into_replies())
         }
     }
@@ -4116,7 +4116,11 @@ mod tests {
             "a Tor check took {check:?} on a link of {one_way:?} each way"
         );
         let (send, replies) = f.alice_dials(one_way, &[f.alice_seals("over Tor")]).await;
-        assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1, "a sealed ACK");
+        assert_eq!(
+            raven_core::outbox::ack_frames(&replies).len(),
+            1,
+            "a sealed ACK"
+        );
         assert_eq!(
             round_trips(send, one_way),
             3,
@@ -4142,19 +4146,22 @@ mod tests {
         let one_way = Duration::from_millis(300);
         let bob = f.bob.public_key_bytes();
         assert!(crate::hints::holds_no_hints(f.a.path(), &bob));
-        let (asked, replies) = f
-            .alice_dials(one_way, &[f.alice_acks_one_of_bobs()])
-            .await;
-        assert_eq!(replies.len(), 1, "Bob's RLB1 offer only: nothing answers an ACK");
-        assert!(!crate::hints::holds_no_hints(f.a.path(), &bob), "Bob's RRH1 read");
+        let (asked, replies) = f.alice_dials(one_way, &[f.alice_acks_one_of_bobs()]).await;
+        assert_eq!(
+            replies.len(),
+            1,
+            "Bob's RLB1 offer only: nothing answers an ACK"
+        );
+        assert!(
+            !crate::hints::holds_no_hints(f.a.path(), &bob),
+            "Bob's RRH1 read"
+        );
         assert_eq!(
             round_trips(asked, one_way),
             2,
             "an ACK-only dial that asked for Bob's route hints took {asked:?}"
         );
-        let (unasked, replies) = f
-            .alice_dials(one_way, &[f.alice_acks_one_of_bobs()])
-            .await;
+        let (unasked, replies) = f.alice_dials(one_way, &[f.alice_acks_one_of_bobs()]).await;
         assert_eq!(replies.len(), 1);
         assert_eq!(
             round_trips(unasked, one_way),
