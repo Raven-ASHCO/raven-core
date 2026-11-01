@@ -2423,7 +2423,14 @@ fn apply_outcome(entry: &mut Entry, outcome: Outcome, now: Instant, wall: u64) {
                 entry.last_carrier = carrier;
             }
             entry.last_error = code;
-            backoff(entry);
+            if code == code::SEND_IN_PROGRESS {
+                // Written, but `raven send` held the lock when it came to
+                // recording it (T13 c): its ACK, if any, waits for the next
+                // attempt, soon, and nothing failed.
+                entry.next_due = now + LOCK_BUSY_RETRY.max(MIN_RETRY);
+            } else {
+                backoff(entry);
+            }
         }
         Outcome::AckSent { carrier } => {
             entry.attempts = entry.attempts.saturating_add(1);
@@ -3017,6 +3024,38 @@ pub(crate) struct AttemptCtx {
     /// Session-reset query backoff per (peer, session): when the next query
     /// may go, and how many went without an answer.
     pub(crate) reset_backoff: Mutex<QueryBackoffs>,
+    /// ACKs an attempt brought back but could not record (`raven send`
+    /// held the contact's lock past the record phase's wait), per contact,
+    /// with the carrier each came on: checked at the contact's next attempt,
+    /// before it dials (T13 c). In memory, bounded.
+    pub(crate) kept_receipts: Mutex<HashMap<[u8; 32], Vec<(Vec<u8>, OutboxCarrier)>>>,
+}
+
+/// ACKs kept per contact at most ([`AttemptCtx::kept_receipts`]).
+const KEPT_RECEIPTS_MAX: usize = 2 * MAX_FRAMES_PER_DIAL;
+
+impl AttemptCtx {
+    /// Keep `acks` for `peer`'s next attempt (the newest, at most
+    /// [`KEPT_RECEIPTS_MAX`]).
+    fn keep_receipts(&self, peer: &[u8; 32], acks: Vec<(Vec<u8>, OutboxCarrier)>) {
+        if acks.is_empty() {
+            return;
+        }
+        let mut kept = self.kept_receipts.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = kept.entry(*peer).or_default();
+        mine.extend(acks);
+        let over = mine.len().saturating_sub(KEPT_RECEIPTS_MAX);
+        mine.drain(..over);
+    }
+
+    /// What was kept for `peer`, taken.
+    fn take_receipts(&self, peer: &[u8; 32]) -> Vec<(Vec<u8>, OutboxCarrier)> {
+        self.kept_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(peer)
+            .unwrap_or_default()
+    }
 }
 
 /// Per (peer, session): when the next session-reset query may go, and how
@@ -4284,6 +4323,24 @@ fn attempt_peer_inner(
             });
         }
     };
+    // ACKs an earlier attempt brought back but could not record (T13 c):
+    // checked before anything is dialled again, so a message they confirm
+    // is delivered and not sent once more.
+    for (ack, carrier) in ctx.take_receipts(peer) {
+        for (sid, key) in &keys {
+            let (Some(key), Some(Some(cert))) = (key, certs.get(sid)) else {
+                continue;
+            };
+            match accept_sealed_ack(data_dir, &mut store, key, cert, &ack, carrier) {
+                Ok(mid) => {
+                    let _ = record_outbound_delivered(data_dir, &mut store, peer, sid, &mid);
+                    break;
+                }
+                Err(AckRejected::OtherSession) => continue,
+                Err(AckRejected::Refused(_)) => break,
+            }
+        }
+    }
     if reset_live || horizon_live {
         let _ = raven_core::session_reset::reconcile_resealed_outbound(
             data_dir,
@@ -5088,10 +5145,20 @@ fn attempt_peer_inner(
 
     // ── Under the lock again: record handoffs, verify the ACKs ──
     let Ok(_lock) = PeerSendLock::acquire_within(data_dir, peer, LOCK_WAIT * 5) else {
-        // `raven send` holds the peer: record nothing now. The next attempt
-        // re-sends the same bytes and gets the same ACK back (a duplicate).
-        // ACKs not checked: whether this route stayed silent is unknown, so
-        // no `unacked` (G3).
+        // `raven send` holds the peer: record nothing now. The ACKs that
+        // came back are kept for the next attempt, which checks them before
+        // it dials (T13 c); what they do not confirm it sends again (the
+        // same bytes: a duplicate gets the same ACK). ACKs not checked:
+        // whether this route stayed silent is unknown, so no `unacked` (G3).
+        ctx.keep_receipts(
+            peer,
+            replies
+                .iter()
+                .zip(&reply_carriers)
+                .filter(|(frame, _)| is_ack_frame(frame))
+                .map(|(frame, carrier)| (frame.clone(), *carrier))
+                .collect(),
+        );
         for c in &candidates {
             let outcome = match c.sent {
                 Some(carrier) => Outcome::Sent {
@@ -6700,6 +6767,7 @@ pub async fn run_worker(data_dir: PathBuf) -> Result<(), String> {
         lan_want: beacon_want,
         lan_beacon_failed: beacon_find_failed,
         reset_backoff: Mutex::default(),
+        kept_receipts: Mutex::default(),
     });
     // The app channel's AppSubmit reuses the worker's identity, dialer and
     // gates (design §8.6): this worker's, until it ends (a lock, Lock v2).
@@ -6957,6 +7025,11 @@ pub(crate) mod test_rig {
         /// Set by a test: the A data dir whose send lock a dial checks.
         pub(crate) lock_probe: Mutex<Option<(PathBuf, [u8; 32])>>,
         pub(crate) lock_free_during_dial: AtomicBool,
+        /// Set by a test: at its next dial, `raven send` takes this A data
+        /// dir's send lock for that peer and keeps it this long (in a thread
+        /// of its own, [`Self::lock_holder`]).
+        pub(crate) hold_lock: Mutex<Option<(PathBuf, [u8; 32], Duration)>>,
+        pub(crate) lock_holder: Mutex<Option<std::thread::JoinHandle<()>>>,
         /// RSR1 frames dialled (session reset queries).
         pub(crate) rsr1_frames: AtomicUsize,
         /// With `lock_probe` set: dials made, and dials made while the send
@@ -7035,6 +7108,18 @@ pub(crate) mod test_rig {
                 .filter(|f| raven_core::session_reset::is_rsr1(f))
                 .count();
             self.rsr1_frames.fetch_add(rsr1, Ordering::SeqCst);
+            if let Some((dir, peer, hold)) = self.hold_lock.lock().unwrap().take() {
+                let (taken, held) = std::sync::mpsc::channel();
+                let holder = std::thread::spawn(move || {
+                    let lock = PeerSendLock::acquire_within(&dir, &peer, Duration::ZERO)
+                        .expect("`raven send` takes the lock");
+                    let _ = taken.send(());
+                    std::thread::sleep(hold);
+                    drop(lock);
+                });
+                held.recv().expect("the lock is held");
+                *self.lock_holder.lock().unwrap() = Some(holder);
+            }
             if let Some((dir, peer)) = self.lock_probe.lock().unwrap().clone() {
                 let free = PeerSendLock::acquire_within(&dir, &peer, Duration::ZERO).is_ok();
                 self.lock_free_during_dial.store(free, Ordering::SeqCst);
@@ -7278,6 +7363,8 @@ pub(crate) mod test_rig {
                 log: Mutex::new(Vec::new()),
                 lock_probe: Mutex::new(None),
                 lock_free_during_dial: AtomicBool::new(false),
+                hold_lock: Mutex::new(None),
+                lock_holder: Mutex::new(None),
                 rsr1_frames: AtomicUsize::new(0),
                 probed_dials: AtomicUsize::new(0),
                 dials_with_lock_held: AtomicUsize::new(0),
@@ -7340,6 +7427,7 @@ pub(crate) mod test_rig {
             lan_want: no_want,
             lan_beacon_failed: no_find_failed,
             reset_backoff: Mutex::default(),
+            kept_receipts: Mutex::default(),
         }
     }
 
@@ -7536,6 +7624,7 @@ mod tests {
                 lan_want: no_want,
                 lan_beacon_failed: no_find_failed,
                 reset_backoff: Mutex::default(),
+                kept_receipts: Mutex::default(),
             }
         }
 
@@ -9100,6 +9189,56 @@ mod tests {
             rig.net.lock_free_during_dial.load(Ordering::SeqCst),
             "`raven send` could take the lock while the worker dialled"
         );
+    }
+
+    /// T13 (c) (Tor messaging audit 2026-11): `raven send` took the
+    /// contact's lock while the worker's dial ran and kept it past the
+    /// record phase's 10 s wait. The worker recorded nothing: the ACK that
+    /// came back was dropped, the object read Sent (SEND_IN_PROGRESS) and
+    /// counted a failure, and only another dial could deliver it. Now the
+    /// ACK is kept and checked at the next attempt, before it dials
+    /// anything, and the busy lock counts no failure.
+    #[test]
+    fn receipts_the_record_phase_could_not_take_are_kept_for_the_next_attempt() {
+        if !lab_backends() {
+            return;
+        }
+        let rig = Rig::new(0xe7);
+        rig.set(UP);
+        rig.stage("recorded later", DAY);
+        let ctx = rig.ctx();
+        *rig.net.hold_lock.lock().unwrap() = Some((
+            rig.a.path().to_path_buf(),
+            rig.bob_pub,
+            LOCK_WAIT * 5 + Duration::from_secs(2),
+        ));
+        let due = rig.due();
+        let outcome = only(&attempt_peer(&ctx, &rig.bob_pub, &due, &[]));
+        assert_eq!(
+            outcome,
+            Outcome::Sent {
+                carrier: Some(OutboxCarrier::Lan),
+                code: code::SEND_IN_PROGRESS,
+            }
+        );
+        let t = Instant::now();
+        let mut entry = due[0].clone();
+        apply_outcome(&mut entry, outcome, t, now_ms());
+        assert_eq!(entry.failures, 0, "a busy lock is no failure");
+        assert_eq!(entry.next_due, t + LOCK_BUSY_RETRY.max(MIN_RETRY));
+        let holder = rig.net.lock_holder.lock().unwrap().take();
+        holder.expect("the lock was held").join().unwrap();
+        // Bob is gone now: only the kept ACK can deliver it, and nothing
+        // is dialled for it.
+        rig.set(DOWN);
+        let dials = rig.dials();
+        let next = attempt_peer(&ctx, &rig.bob_pub, &rig.due(), &[]);
+        assert!(
+            matches!(only(&next), Outcome::Delivered { .. }),
+            "{:?}",
+            next.outcomes
+        );
+        assert_eq!(rig.dials(), dials, "nothing dialled again");
     }
 
     /// The schedule lives in memory only: a new process rebuilds it from the
@@ -13058,6 +13197,7 @@ mod tests {
             lan_want: no_want,
             lan_beacon_failed: no_find_failed,
             reset_backoff: Mutex::default(),
+            kept_receipts: Mutex::default(),
         };
         let report = rig.attempt_with(&ctx);
         assert_eq!(only(&report), Outcome::Deposited { held: 1 });
@@ -13204,6 +13344,7 @@ mod tests {
             lan_want: no_want,
             lan_beacon_failed: no_find_failed,
             reset_backoff: Mutex::default(),
+            kept_receipts: Mutex::default(),
         };
         // Review A-5: the LAN beacon found Carol where she no longer is. The
         // deposit dials that find first (no learned route then), and the
@@ -13330,6 +13471,7 @@ mod tests {
             lan_want: no_want,
             lan_beacon_failed: no_find_failed,
             reset_backoff: Mutex::default(),
+            kept_receipts: Mutex::default(),
         };
         let report = rig.attempt_with(&ctx);
         assert_eq!(only(&report), Outcome::Deposited { held: 1 });
@@ -14097,6 +14239,7 @@ mod tests {
             lan_want: no_want,
             lan_beacon_failed: no_find_failed,
             reset_backoff: Mutex::default(),
+            kept_receipts: Mutex::default(),
         };
         let report = rig.attempt_with(&ctx);
         raven_core::custody_gate::set_custody_gates_for_this_thread(None);
@@ -15543,6 +15686,7 @@ mod tests {
                 lan_want: no_want,
                 lan_beacon_failed: no_find_failed,
                 reset_backoff: Mutex::default(),
+                kept_receipts: Mutex::default(),
             }
         }
 
