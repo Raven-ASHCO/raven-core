@@ -15,7 +15,14 @@
 //! - `RAVEN_LAB_TOR_LOOPBACK_OBSOLETE=1`: once ready, say Arti's obsolete
 //!   version words on stderr and exit with 1 (Arti #1932);
 //! - `RAVEN_LAB_TOR_LOOPBACK_DELAY_MS=<ms>`: every connect takes this long
-//!   (a Tor rendezvous).
+//!   (a Tor rendezvous);
+//! - `RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS=<ms>`: on every stream this helper
+//!   connects, each byte arrives this long after it was sent, both ways (a
+//!   Tor circuit's one-way delay);
+//! - `RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT=1` (on every helper of a test):
+//!   every stream one helper connects to one "onion service" rides one
+//!   circuit, as Arti keeps a rendezvous circuit for the streams that follow
+//!   (the service side counts them under one circuit number).
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -31,6 +38,8 @@ use super::LineReader;
 const STALL_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_STALL";
 const OBSOLETE_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_OBSOLETE";
 const DELAY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS";
+const LATENCY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS";
+const ONE_CIRCUIT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT";
 /// How long one connect may take, as the Arti helper's.
 const CONNECT_WAIT: Duration = Duration::from_secs(44);
 /// The loopback helper's onion key seed, under the state directory.
@@ -42,18 +51,27 @@ pub(crate) struct Knobs {
     pub(crate) stall: bool,
     pub(crate) obsolete: bool,
     pub(crate) delay: Duration,
+    pub(crate) latency: Duration,
+    /// [`ONE_CIRCUIT_ENV`]: this helper's client number, sent first on
+    /// every stream it connects; the service side reads it.
+    pub(crate) one_circuit: Option<u64>,
 }
 
 impl Knobs {
     fn from_env() -> Self {
         let on = |name| std::env::var(name).is_ok_and(|v| v == "1");
+        let ms = |name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(60_000)))
+        };
         Self {
             stall: on(STALL_ENV),
             obsolete: on(OBSOLETE_ENV),
-            delay: std::env::var(DELAY_ENV)
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(60_000))),
+            delay: ms(DELAY_ENV),
+            latency: ms(LATENCY_ENV),
+            one_circuit: on(ONE_CIRCUIT_ENV).then(rand::random::<u64>),
         }
     }
 }
@@ -172,7 +190,12 @@ pub(crate) async fn serve(
     let entry = registry.join(hex::encode(hs_id));
     std::fs::write(&entry, service_addr.to_string()).map_err(|e| e.to_string())?;
     let _registered = Unregister(entry);
-    let accepting = tokio::spawn(accept_service(service, forward, token));
+    let accepting = tokio::spawn(accept_service(
+        service,
+        forward,
+        token,
+        knobs.one_circuit.is_some(),
+    ));
     let _accepting = AbortOnDrop(accepting);
 
     // The connect port.
@@ -185,7 +208,7 @@ pub(crate) async fn serve(
         token,
         config.port,
         Arc::new(registry.clone()),
-        knobs.delay,
+        knobs,
     ));
     let _connecting = AbortOnDrop(connecting);
     send(
@@ -270,16 +293,51 @@ impl Drop for AbortOnDrop {
 
 /// Every stream into the "onion service" goes to raven-node's forward
 /// listener, the token and a circuit number first (each stream here is its
-/// own "circuit").
-async fn accept_service(listener: TcpListener, forward: std::net::SocketAddr, token: [u8; 32]) {
-    let mut circuits: u64 = 0;
+/// own "circuit"; with `one_circuit`, each connecting helper's streams
+/// share one, [`ONE_CIRCUIT_ENV`]).
+async fn accept_service(
+    listener: TcpListener,
+    forward: std::net::SocketAddr,
+    token: [u8; 32],
+    one_circuit: bool,
+) {
+    let circuits = Arc::new(std::sync::Mutex::new((
+        0u64,
+        std::collections::HashMap::new(),
+    )));
     loop {
         let Ok((mut inbound, _)) = listener.accept().await else {
             continue;
         };
-        circuits += 1;
-        let circuit = circuits;
+        let circuits = Arc::clone(&circuits);
         tokio::spawn(async move {
+            let client = if one_circuit {
+                let mut id = [0u8; 8];
+                let read =
+                    tokio::time::timeout(Duration::from_secs(10), inbound.read_exact(&mut id));
+                if !matches!(read.await, Ok(Ok(_))) {
+                    return;
+                }
+                Some(u64::from_be_bytes(id))
+            } else {
+                None
+            };
+            let circuit = {
+                let mut c = circuits
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (next, by_client) = &mut *c;
+                match client {
+                    Some(client) => *by_client.entry(client).or_insert_with(|| {
+                        *next += 1;
+                        *next
+                    }),
+                    None => {
+                        *next += 1;
+                        *next
+                    }
+                }
+            };
             let Ok(mut out) = TcpStream::connect(forward).await else {
                 return;
             };
@@ -303,8 +361,9 @@ async fn accept_connects(
     token: [u8; 32],
     port: u16,
     registry: Arc<PathBuf>,
-    delay: Duration,
+    knobs: Knobs,
 ) {
+    let (delay, latency, one_circuit) = (knobs.delay, knobs.latency, knobs.one_circuit);
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
             continue;
@@ -336,13 +395,19 @@ async fn accept_connects(
                         .ok()
                         .and_then(|t| t.trim().parse::<std::net::SocketAddr>().ok())
                         .ok_or_else(|| ConnectReply::Unreachable("no descriptor".into()))?;
-                    TcpStream::connect(target)
+                    let mut out = TcpStream::connect(target)
                         .await
-                        .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))
+                        .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))?;
+                    if let Some(client) = one_circuit {
+                        out.write_all(&client.to_be_bytes())
+                            .await
+                            .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))?;
+                    }
+                    Ok(out)
                 }
             })
             .await;
-            let mut out = match opened {
+            let out = match opened {
                 Ok(out) => out,
                 Err(reply) => {
                     let _ = stream.write_all(&reply.encode()).await;
@@ -353,7 +418,62 @@ async fn accept_connects(
                 return;
             }
             let _ = out.set_nodelay(true);
-            let _ = tokio::io::copy_bidirectional(&mut stream, &mut out).await;
+            relay(stream, out, latency).await;
         });
     }
+}
+
+/// Both ways between `a` and `b`, each chunk arriving `latency` after it
+/// was read (a Tor circuit's one-way delay; [`LATENCY_ENV`]), an end of
+/// stream too; a plain copy without one.
+async fn relay(mut a: TcpStream, mut b: TcpStream, latency: Duration) {
+    if latency.is_zero() {
+        let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+        return;
+    }
+    let (a_read, a_write) = a.into_split();
+    let (b_read, b_write) = b.into_split();
+    tokio::join!(
+        delayed_copy(a_read, b_write, latency),
+        delayed_copy(b_read, a_write, latency),
+    );
+}
+
+/// One way of [`relay`].
+async fn delayed_copy(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    latency: Duration,
+) {
+    // `None`: the end of stream, which travels as long as the bytes do.
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(tokio::time::Instant, Option<Vec<u8>>)>();
+    let read = async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let got = match from.read(&mut buf).await {
+                Ok(n) if n > 0 => Some(buf[..n].to_vec()),
+                _ => None,
+            };
+            let end = got.is_none();
+            if tx
+                .send((tokio::time::Instant::now() + latency, got))
+                .is_err()
+                || end
+            {
+                return;
+            }
+        }
+    };
+    let write = async move {
+        while let Some((at, bytes)) = rx.recv().await {
+            tokio::time::sleep_until(at).await;
+            match bytes {
+                Some(bytes) if to.write_all(&bytes).await.is_ok() => {}
+                _ => break,
+            }
+        }
+        let _ = to.shutdown().await;
+    };
+    tokio::join!(read, write);
 }
