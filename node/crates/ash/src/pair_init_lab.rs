@@ -2133,9 +2133,12 @@ pub fn run_pair_init_and_send_routes(
                 carrier,
             )
         };
+        // A replay that fails as well changes nothing: the first failure is
+        // what the message waits on (a friend that refuses only the replay
+        // never turns a message that can wait into NOT SENT).
         let response = match dial_init() {
             Err(e) if !is_peer_refusal(&e) && started.elapsed() < PAIR_INIT_AGAIN_WITHIN => {
-                dial_init()
+                dial_init().map_err(|_| e)
             }
             other => other,
         };
@@ -3625,8 +3628,7 @@ fn send_indexed_text(
             .into_iter()
             .chain(std::iter::once(bytes.to_vec()))
             .collect();
-        let dial_once =
-            || ipc_carrier_dial_reply_patient(data_dir, carrier, lan_dial, peer_pub_hex, &frames);
+        let dial_once = || dial_on_links(data_dir, carrier, lan_dial, peer_pub_hex, &frames);
         let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
         if !carry_batch.get() {
             row_dials.set(row_dials.get() + 1);
@@ -3861,26 +3863,12 @@ fn send_indexed_text(
         *dial_expected_digest.borrow_mut() = Some(earlier_row.object_digest);
         replies.borrow_mut().clear();
         // T1 (a): a row of this send's session goes out with the new
-        // message, on its dial, while the dial has room for it: a queued one
-        // as it is, a prepared one handed to the queue first (another send's
-        // whose own dial runs, or one the friend refused before), so no row
-        // takes a link of its own under the send lock (T13 b). Past the room
-        // a queued one waits for raven-node's outbox (kicked by this send),
-        // as one more link each would cost a Tor link each again; a prepared
-        // one goes on its own link, since it would hold the lane.
-        let batched_bytes: usize = batch.borrow().iter().map(Vec::len).sum();
-        let ridable = !own && !excluded && row_key == *record_key && link_down.borrow().is_none();
-        let batchable = ridable
-            && batch.borrow().len() < SEND_DIAL_EARLIER_MAX
-            && batched_bytes + earlier_row.immutable_envelope_bytes.len()
-                <= SEND_DIAL_EARLIER_BYTES;
-        if ridable && !batchable && resend {
-            left_to_outbox += 1;
-            if record.is_none() {
-                handoff.record(&earlier_row.message_id, expiry);
-            }
-            continue;
-        }
+        // message, on its dial (16 frames a link, the links one after the
+        // other: [`dial_on_links`]): a queued one as it is, a prepared one
+        // handed to the queue first (another send's whose own dial runs, or
+        // one the friend refused before), so no row takes a link of its own
+        // under the send lock (T13 b).
+        let batchable = !own && !excluded && row_key == *record_key && link_down.borrow().is_none();
         collect_only.set(batchable);
         let collected = batch.borrow().len();
         let result = if resend {
@@ -4101,7 +4089,7 @@ fn send_indexed_text(
     // D1 (b): what this send did with the earlier messages, in counts.
     let mut said = Vec::new();
     if !batched.is_empty() {
-        said.push(format!("{} on this message's link", batched.len()));
+        said.push(format!("{} with this message", batched.len()));
     }
     if row_dials.get() > 0 {
         said.push(format!("{} on links of their own", row_dials.get()));
@@ -4150,7 +4138,9 @@ fn send_indexed_text(
         }
         // Whatever the loop above could not deliver still waits, ahead of this
         // message (parked ones too): bound how many may wait for one peer.
-        let waiting = waiting_for_peer(data_dir, &store, recipient)?;
+        // Those that go out on this message's dial, ahead of it, are not
+        // counted (T1 a: the loop delivered them before it, one link each).
+        let waiting = waiting_for_peer(data_dir, &store, recipient)?.saturating_sub(batched.len());
         if waiting >= MAX_QUEUED_PER_PEER {
             return Err(queue_full_text(ctx, waiting));
         }
@@ -4358,15 +4348,8 @@ fn send_indexed_text(
         dial: (!batched.is_empty() && !batch_dialled.get() && link_down.borrow().is_none()).then(
             || {
                 let frames = batch.borrow().clone();
-                let dial_once = || {
-                    ipc_carrier_dial_reply_patient(
-                        data_dir,
-                        carrier,
-                        lan_dial,
-                        peer_pub_hex,
-                        &frames,
-                    )
-                };
+                let dial_once =
+                    || dial_on_links(data_dir, carrier, lan_dial, peer_pub_hex, &frames);
                 let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
                 lock.around(|| {
                     if tor_checked {
@@ -4388,15 +4371,74 @@ fn send_indexed_text(
     outcome
 }
 
-/// At most this many earlier queued messages ride the new message's dial
-/// (T1 a): with it, raven-node's outbox cap on one link (16 frames). The
-/// rest wait for the outbox.
-const SEND_DIAL_EARLIER_MAX: usize = 15;
-const _: () = assert!(SEND_DIAL_EARLIER_MAX < 16);
-/// And at most this many bytes of them: the dial's IPC request (base64,
-/// with the new message at its largest) stays inside
-/// [`raven_core::ipc::MAX_IPC_FRAME`].
-const SEND_DIAL_EARLIER_BYTES: usize = 96 * 1024;
+/// Frames on one link of a send's dial (T1 a): raven-node's outbox cap on
+/// one link.
+const SEND_DIAL_FRAMES: usize = 16;
+/// And at most this many bytes of them: the link's IPC request (base64)
+/// stays inside [`raven_core::ipc::MAX_IPC_FRAME`], and one frame at its
+/// largest ([`raven_core::lan_noise::MAX_TRANSPORT_PLAINTEXT`]) fits alone.
+const SEND_DIAL_BYTES: usize = 160 * 1024;
+const _: () = assert!(SEND_DIAL_BYTES >= raven_core::lan_noise::MAX_TRANSPORT_PLAINTEXT);
+
+/// The links a send's `frames` go on (T1 a): consecutive ranges, in order,
+/// each with at most [`SEND_DIAL_FRAMES`] frames and [`SEND_DIAL_BYTES`]
+/// bytes (one frame alone always fits).
+fn dial_chunks(frames: &[Vec<u8>]) -> Vec<std::ops::Range<usize>> {
+    let mut chunks = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, frame) in frames.iter().enumerate() {
+        if i > start && (i - start == SEND_DIAL_FRAMES || bytes + frame.len() > SEND_DIAL_BYTES) {
+            chunks.push(start..i);
+            (start, bytes) = (i, 0);
+        }
+        bytes += frame.len();
+    }
+    if start < frames.len() {
+        chunks.push(start..frames.len());
+    }
+    chunks
+}
+
+/// [`ipc_carrier_dial_reply_patient`] of `frames` over [`dial_chunks`]'
+/// links, one after the other: their replies together, and the last link's
+/// path. A link before the last that fails ends it: the frames after it did
+/// not go out, so its error is told as a lost link, never as a refusal of
+/// them (`_DIAL_PEER_CLOSED` would mark the last ones written).
+fn dial_on_links(
+    data_dir: &Path,
+    carrier: DialCarrier,
+    dial: &str,
+    peer_pub_hex: &str,
+    frames: &[Vec<u8>],
+) -> Result<DialReply, String> {
+    let chunks = dial_chunks(frames);
+    let mut all = DialReply {
+        frames: Vec::new(),
+        path: None,
+    };
+    for (k, range) in chunks.iter().enumerate() {
+        match ipc_carrier_dial_reply_patient(
+            data_dir,
+            carrier,
+            dial,
+            peer_pub_hex,
+            &frames[range.clone()],
+        ) {
+            Ok(reply) => {
+                all.frames.extend(reply.frames);
+                all.path = reply.path;
+            }
+            Err(e) if k + 1 == chunks.len() => return Err(e),
+            Err(e) => {
+                return Err(format!(
+                    "{} (an earlier link of this send; the frames after it did not go out)",
+                    e.replace(PEER_REFUSED_CODE, "_DIAL_LINK_LOST")
+                ))
+            }
+        }
+    }
+    Ok(all)
+}
 
 /// An earlier queued message collected for the new message's dial (T1 a).
 struct Batched {
@@ -6876,22 +6918,43 @@ mod send_path_tests {
     }
 
     /// T1 (a): one link carries at most 16 frames, as raven-node's outbox
-    /// puts on one: the earlier messages past them wait for the outbox
-    /// (kicked by the send), never a link each again.
+    /// puts on one: the earlier messages past them go on the link before,
+    /// in order, never a link each again; and with every one of the 32 that
+    /// may wait going out with it, the new one is not refused as one too
+    /// many.
     #[test]
-    fn at_most_sixteen_frames_ride_one_link_the_rest_wait_for_the_outbox() {
+    fn at_most_sixteen_frames_ride_one_link_the_rest_go_on_the_link_before() {
         let rig = Rig::new(0xAC);
         rig.send("hello").unwrap();
         rig.set_mode(DOWN);
-        for i in 0..16 {
+        for i in 0..MAX_QUEUED_PER_PEER {
             assert!(rig.send(&format!("queued {i:02}")).is_err());
         }
         rig.set_mode(UP);
         let before = rig.faults.message_dials().len();
         rig.send("the new one").unwrap();
-        assert_eq!(rig.faults.message_dials()[before..], [16]);
-        assert_eq!(rig.alice_pending(), 1, "the last one waits for the outbox");
-        assert_eq!(rig.bob_inbox().len(), 17);
+        assert_eq!(rig.faults.message_dials()[before..], [16, 16, 1]);
+        assert_eq!(rig.alice_pending(), 0);
+        assert_eq!(rig.bob_inbox().len(), MAX_QUEUED_PER_PEER + 2);
+    }
+
+    /// The links of a send's dial: at most 16 frames and
+    /// [`SEND_DIAL_BYTES`] each, in order, the new message on the last.
+    #[test]
+    fn a_dials_frames_split_into_links_in_order() {
+        let small = vec![vec![0u8; 100]; 33];
+        assert_eq!(dial_chunks(&small), [0..16, 16..32, 32..33]);
+        let big = raven_core::lan_noise::MAX_TRANSPORT_PLAINTEXT;
+        let large = vec![vec![0u8; big]; 5];
+        let chunks = dial_chunks(&large);
+        assert!(
+            chunks.iter().all(|r| r.len() * big <= SEND_DIAL_BYTES),
+            "{chunks:?}"
+        );
+        assert_eq!(chunks.first().map(|r| r.start), Some(0));
+        assert_eq!(chunks.last().map(|r| r.end), Some(5));
+        assert!(chunks.windows(2).all(|w| w[0].end == w[1].start));
+        assert!(dial_chunks(&[]).is_empty());
     }
 
     /// T10 (Tor messaging audit, 2026-11): once the 24 h session ended,
@@ -6998,7 +7061,7 @@ mod send_path_tests {
         assert!(
             notes
                 .iter()
-                .any(|n| n == "earlier messages: 1 on this message's link"),
+                .any(|n| n == "earlier messages: 1 with this message"),
             "{notes:#?}"
         );
         assert!(notes.iter().all(|n| !n.contains("private")), "{notes:#?}");
@@ -7032,13 +7095,11 @@ mod send_path_tests {
         );
     }
 
-    /// The new message's dial with its earlier messages fits one IPC
-    /// request (base64, the new message at its largest).
+    /// One link's frames fit one IPC request (base64 and its framing).
     #[test]
-    fn the_earlier_messages_and_the_largest_new_one_fit_one_ipc_request() {
-        let raw = SEND_DIAL_EARLIER_BYTES + raven_core::lan_noise::MAX_TRANSPORT_PLAINTEXT;
-        let b64 = raw.div_ceil(3) * 4;
-        let framing = 64 * (SEND_DIAL_EARLIER_MAX + 1) + 1024;
+    fn one_links_frames_fit_one_ipc_request() {
+        let b64 = SEND_DIAL_BYTES.div_ceil(3) * 4;
+        let framing = 64 * SEND_DIAL_FRAMES + 1024;
         assert!(b64 + framing < raven_core::ipc::MAX_IPC_FRAME, "{b64}");
     }
 
