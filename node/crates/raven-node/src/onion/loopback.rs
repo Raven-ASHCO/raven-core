@@ -23,6 +23,8 @@
 //!   every stream one helper connects to one "onion service" rides one
 //!   circuit, as Arti keeps a rendezvous circuit for the streams that follow
 //!   (the service side counts them under one circuit number);
+//! - `RAVEN_LAB_TOR_LOOPBACK_READY_MS=<ms>`: the bootstrap takes this long
+//!   before the helper is ready (a Tor start);
 //! - `RAVEN_LAB_TOR_LOOPBACK_STALE_MS=<ms>`: the circuit the default
 //!   isolation group shares is dead (the friend's network path vanished
 //!   with no DESTROY back, audit T6): a connect try in that group waits this
@@ -47,6 +49,7 @@ const OBSOLETE_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_OBSOLETE";
 const DELAY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS";
 const LATENCY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS";
 const ONE_CIRCUIT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT";
+const READY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_READY_MS";
 const STALE_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_STALE_MS";
 const COUNT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_COUNT";
 /// How long one connect may take, as the Arti helper's.
@@ -66,6 +69,8 @@ pub(crate) struct Knobs {
     /// [`ONE_CIRCUIT_ENV`]: this helper's client number, sent first on
     /// every stream it connects; the service side reads it.
     pub(crate) one_circuit: Option<u64>,
+    /// [`READY_ENV`]: how long the bootstrap takes.
+    pub(crate) ready: Duration,
     /// [`STALE_ENV`]: how long a try in the default isolation group waits
     /// before it ends "tor timeout" (zero: that group works).
     pub(crate) stale: Duration,
@@ -157,6 +162,7 @@ impl Knobs {
             delay: ms(DELAY_ENV),
             latency: ms(LATENCY_ENV),
             one_circuit: on(ONE_CIRCUIT_ENV).then(rand::random::<u64>),
+            ready: ms(READY_ENV),
             stale: ms(STALE_ENV),
             count: on(COUNT_ENV),
         }
@@ -250,6 +256,8 @@ pub(crate) async fn serve(
         };
         send(&mut output, &ev).await?;
     }
+    // A Tor start that takes a while.
+    tokio::time::sleep(knobs.ready).await;
     if knobs.stall {
         // Never ready; answers nothing; waits to be killed.
         loop {

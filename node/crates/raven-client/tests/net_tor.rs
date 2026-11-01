@@ -650,6 +650,46 @@ fn tor_after_a_dead_shared_circuit_later_sends_reuse_the_fresh_one() {
     }
 }
 
+/// The iPhone app's node starts again when the app comes back, and its Tor
+/// is ready a moment later (audit T7; the loopback helper's bootstrap takes
+/// 3 s here). A message written at once is delivered: its Tor dials wait
+/// for Tor to be ready, instead of failing with ONION_NOT_READY at once and
+/// leaving the message to the outbox (Waiting).
+#[test]
+fn tor_a_send_while_its_tor_still_starts_waits_for_it() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    a.stop();
+    std::env::set_var("RAVEN_LAB_TOR_LOOPBACK_READY_MS", "3000");
+    a.start();
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK_READY_MS");
+    assert_ne!(a.carrier("tor")["running"], true, "Tor was ready at once");
+
+    let began = Instant::now();
+    let m = a.send_until(
+        b,
+        "written while Tor starts",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(120),
+    );
+    let took = began.elapsed();
+    eprintln!("a send while Tor starts: {} in {took:?}", m["state"]);
+    assert_eq!(
+        m["state"],
+        "delivered",
+        "{m}\n--- A ---\n{}",
+        a.service_log()
+    );
+    assert!(b.wait_incoming(a, "written while Tor starts", Duration::from_secs(30)));
+}
+
 /// T1 (c) of the Tor messaging audit (2026-11): the Tor stream of A's
 /// message drops right after A wrote it (B took the message; its ACK never
 /// came back on that link). That read as B refusing it: no second try, and
