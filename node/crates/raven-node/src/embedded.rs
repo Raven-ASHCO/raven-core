@@ -521,21 +521,48 @@ pub fn end_pause() {
 /// outbox worker (owed receipts, waiting messages) and the custody fetcher,
 /// no listener, no Tor, no radio; it is stopped again before the budget
 /// ends. Every custody dial is cut at the budget. Mail that arrives this way
-/// is in the profile when it returns (`messages` counts it).
+/// is in the profile when it returns (`messages` counts it). While a
+/// running node's pass is waited for, nothing else waits for the check: a
+/// start, a stop, a pause or a resume goes at once (audit T9).
 pub fn check_mail(config: &NodeConfig, budget: Duration) -> Result<MailCheck, String> {
+    check(config, budget, true).map(|done| done.unwrap_or_default())
+}
+
+/// [`check_mail`] only when a node already runs for the profile: `None`,
+/// with nothing done, when none runs (the caller starts nothing then, and
+/// may call [`check_mail`] its own way).
+pub fn check_mail_if_running(
+    config: &NodeConfig,
+    budget: Duration,
+) -> Result<Option<MailCheck>, String> {
+    check(config, budget, false)
+}
+
+/// Mail checks, one at a time (each sets the custody passes' deadline).
+static CHECKS: Mutex<()> = Mutex::new(());
+
+fn check(
+    config: &NodeConfig,
+    budget: Duration,
+    may_start: bool,
+) -> Result<Option<MailCheck>, String> {
     let began = Instant::now();
     let budget = budget.min(MAIL_CHECK_MAX_BUDGET);
-    let _turn = turn();
+    let _one_check = CHECKS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut held_turn = Some(turn());
     let mut out = MailCheck {
         custody_live: crate::custody::fetcher_live(),
         ..MailCheck::default()
     };
     if !out.custody_live {
         out.elapsed = began.elapsed();
-        return Ok(out);
+        return Ok(Some(out));
     }
     let dir = config.data_dir().to_path_buf();
     let already = running_for(&dir);
+    if !already && !may_start {
+        return Ok(None);
+    }
     let fetch_budget = if already {
         budget
     } else {
@@ -550,6 +577,10 @@ pub fn check_mail(config: &NodeConfig, budget: Duration) -> Result<MailCheck, St
             out.started_node = true;
         } else {
             crate::custody::kick();
+            // The running node fetches by itself: its turn is free while
+            // the pass is waited for. A node this check started keeps it,
+            // so that nothing else starts or stops a node meanwhile.
+            held_turn = None;
         }
         // A pass that begins after now: a running node's next one (after
         // the kick), a new node's first.
@@ -563,10 +594,11 @@ pub fn check_mail(config: &NodeConfig, budget: Duration) -> Result<MailCheck, St
         let left = (began + budget).saturating_duration_since(Instant::now());
         stop_locked(left.max(Duration::from_millis(500)));
     }
+    drop(held_turn);
     result?;
     out.messages = crate::custody::pass_counts().2 - fetched_before;
     out.elapsed = began.elapsed();
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Runs a small future (a wait on the node's state) on a throwaway

@@ -130,6 +130,12 @@ pub(crate) fn state_word() -> &'static str {
     node::status().state.word()
 }
 
+/// The whole node (not a mail check's small one, not the background one)
+/// runs for `data_dir` in this process.
+pub(crate) fn full_node_runs_for(data_dir: &Path) -> bool {
+    node::status().state == node::State::Running && node::running_for(data_dir)
+}
+
 /// `node.pause` holds `data_dir` and no node runs for it (the background
 /// node that keeps Bluetooth nearby takes sends: not paused for them).
 pub(crate) fn paused_for(data_dir: &Path) -> bool {
@@ -142,6 +148,16 @@ pub(crate) fn check_mail(
     budget: Duration,
 ) -> Result<node::MailCheck, String> {
     node::check_mail(&config(data_dir, listen), budget)
+}
+
+/// [`check_mail`] on a node that already runs; `None` (nothing done) when
+/// none runs.
+pub(crate) fn check_mail_if_running(
+    data_dir: &Path,
+    listen: &str,
+    budget: Duration,
+) -> Result<Option<node::MailCheck>, String> {
+    node::check_mail_if_running(&config(data_dir, listen), budget)
 }
 
 pub(crate) use node::MAIL_CHECK_MAX_BUDGET;

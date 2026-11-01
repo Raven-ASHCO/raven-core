@@ -49,6 +49,13 @@ impl Engine for Client {
     }
 }
 
+/// This process's engine, shared with another thread of the test.
+impl Engine for std::sync::Arc<Client> {
+    fn call(&self, request: &str) -> String {
+        Client::call(self, request)
+    }
+}
+
 /// A peer process: [`embedded_peer_process`] on a profile of its own.
 struct Remote {
     child: Child,
@@ -288,6 +295,40 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 fn one_at_a_time() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Names the scenario a process of its own runs ([`in_own_process`]).
+const OWN_PROCESS_ENV: &str = "RAVEN_TEST_EMBEDDED_OWN_PROCESS";
+
+/// Runs the scenario `name` (an ignored test of this binary) in a process
+/// of its own, one at a time: the node, its custody fetcher's and Tor's
+/// state are the process's (one node per process), so no scenario leaves
+/// them to the next.
+fn in_own_process(name: &str) {
+    let _one = one_at_a_time();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(OWN_PROCESS_ENV, name)
+        .status()
+        .expect("start the scenario's process");
+    assert!(status.success(), "{name} failed: its output is above");
+}
+
+/// This process runs the scenario `name` ([`in_own_process`]); nothing
+/// else runs one (`--ignored` alone does not).
+fn own_process(name: &str) -> bool {
+    let mine = std::env::var(OWN_PROCESS_ENV).is_ok_and(|v| v == name);
+    if mine && !cfg!(debug_assertions) {
+        eprintln!("skipped: a release engine reads no lab switch");
+        return false;
+    }
+    mine
 }
 
 /// This process as an embedded engine with no raven-node program to find.
@@ -597,9 +638,13 @@ fn message(a: &Peer, friend: &Peer, id: &str) -> Value {
 /// `node.resume` starts the node again.
 #[test]
 fn a_send_whose_turn_comes_while_paused_goes_out_after_the_resume() {
-    let _one = one_at_a_time();
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: a release engine reads no lab switch");
+    in_own_process("send_while_paused");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_send_whose_turn_comes_while_paused_goes_out_after_the_resume"]
+fn send_while_paused() {
+    if !own_process("send_while_paused") {
         return;
     }
     let root = common::short_dir();
@@ -629,9 +674,13 @@ fn a_send_whose_turn_comes_while_paused_goes_out_after_the_resume() {
 /// the unlock.
 #[test]
 fn a_send_held_by_the_pause_and_the_lock_goes_out_after_the_unlock() {
-    let _one = one_at_a_time();
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: a release engine reads no lab switch");
+    in_own_process("send_held_by_pause_and_lock");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_send_held_by_the_pause_and_the_lock_goes_out_after_the_unlock"]
+fn send_held_by_pause_and_lock() {
+    if !own_process("send_held_by_pause_and_lock") {
         return;
     }
     let root = common::short_dir();
@@ -662,6 +711,84 @@ fn a_send_held_by_the_pause_and_the_lock_goes_out_after_the_unlock() {
     let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
     assert_eq!(m["state"], "delivered", "{m}\n{}", a.log());
     b.wait_incoming(&a, "written as the lock came down", Duration::from_secs(30));
+}
+
+/// A mail check on opening while a mail friend does not answer (audit T9:
+/// the iPhone app checks when it opens): it waits out its budget, and
+/// meanwhile a send goes at once and the node can pause at once. Neither
+/// waits for the check (it held the engine's node gate and the node's
+/// turn for all of its 20 s).
+#[test]
+fn a_mail_check_holds_up_no_send_and_no_pause() {
+    in_own_process("mail_check_beside_a_send_and_a_pause");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_mail_check_holds_up_no_send_and_no_pause"]
+fn mail_check_beside_a_send_and_a_pause() {
+    if !own_process("mail_check_beside_a_send_and_a_pause") {
+        return;
+    }
+    embedded_env();
+    std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    std::env::set_var("RAVEN_LAB_TOR", "0");
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK");
+    let root = common::short_dir();
+    let dir = |n: &str| root.path().join(n);
+    let b = Peer::new("B", dir("b"), Box::new(Remote::spawn(&dir("b"), &[])));
+    // C holds A's mail; its node never runs, and A's saved address for it
+    // takes connections but never answers.
+    let c = Peer::new("C", dir("c"), Box::new(Client::with_data_dir(dir("c"))));
+    let shared = std::sync::Arc::new(Client::with_data_dir(dir("a")));
+    let a = Peer::new("A", dir("a"), Box::new(std::sync::Arc::clone(&shared)));
+    let _stops = StopsNode(&a);
+    a.befriend(&b);
+    b.befriend(&a);
+    a.befriend(&c);
+    let (la, lb) = (a.start(), b.start());
+    a.set_lan(&b, &lb);
+    b.set_lan(&a, &la);
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    a.set_lan(&c, &silent.local_addr().unwrap().to_string());
+    a.ok(
+        "contacts.set_routes",
+        json!({"address": b.address(), "custodians": [c.address()]}),
+    );
+    let id = a.send(&b, "hello before the check");
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}");
+
+    let began = Instant::now();
+    let checking = std::thread::spawn(move || {
+        let r = shared.call(r#"{"v":1,"op":"mail.check","args":{"budget_ms":20000}}"#);
+        (began.elapsed(), r)
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let sent_at = Instant::now();
+    let id = a.send(&b, "written while mail is checked");
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    let send_took = sent_at.elapsed();
+    assert_eq!(m["state"], "delivered", "{m}");
+    let paused_at = Instant::now();
+    a.ok("node.pause", json!({}));
+    let pause_took = paused_at.elapsed();
+    let still_checking = !checking.is_finished();
+    let (check_took, check) = checking.join().unwrap();
+    eprintln!("send {send_took:?}, pause {pause_took:?}, check {check_took:?}: {check}");
+    assert!(
+        check_took >= Duration::from_secs(15),
+        "the check did not wait for its mail friend: {check_took:?} {check}"
+    );
+    assert!(
+        send_took < Duration::from_secs(8),
+        "the send waited for the mail check: {send_took:?} (check {check_took:?})"
+    );
+    assert!(
+        still_checking && pause_took < Duration::from_secs(9),
+        "the pause waited for the mail check: {pause_took:?} (check {check_took:?})"
+    );
+    drop(silent);
+    a.ok("node.resume", json!({}));
 }
 
 /// Real Arti inside an engine's process (feature `tor-embedded`) until Tor

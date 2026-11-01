@@ -156,7 +156,8 @@ signal: its pid is the app's own).
 for the check (IPC, the outbox worker and the custody fetcher; no listener,
 no Tor, no p2p host, no radio), waits for one full fetch pass over the
 friends who hold mail, and stops it. On a running node it asks for a fetch
-pass now and waits for it. It is refused while the profile is locked or
+pass now and waits for it; a send, a start, a pause or a resume meanwhile
+waits for nothing. It is refused while the profile is locked or
 being erased.
 
 ## 4. Where the profile lives
