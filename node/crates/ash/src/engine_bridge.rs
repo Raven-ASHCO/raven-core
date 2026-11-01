@@ -29,6 +29,14 @@ pub fn set_quiet() {
     super::STDOUT_QUIET.store(true, Ordering::Relaxed);
 }
 
+/// Where a send's path notes go besides stderr (D1 b, Tor messaging audit
+/// 2026-11: an iPhone keeps no stdout or stderr): `sink` gets each one with
+/// the friend's key; counts, times and codes only, never a message's text
+/// or an address. The engine points it at its raven-node's log.
+pub fn set_send_note_sink(sink: fn(&[u8; 32], &str)) {
+    super::pair_init_lab::set_send_note_sink(sink);
+}
+
 // ── Profile and identity ────────────────────────────────────────────────────
 
 /// The profile folder the CLI uses without `--data-dir`: `RAVEN_DATA_DIR`,

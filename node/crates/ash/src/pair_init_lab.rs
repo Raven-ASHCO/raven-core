@@ -101,9 +101,31 @@ fn acquire_send_lock_noting(
     peer_device: &[u8; 32],
     who: &str,
 ) -> Result<PeerSendLock, String> {
-    acquire_send_lock_noting_within(data_dir, peer_device, who, PEER_SEND_LOCK_WAIT, &mut |l| {
-        eprintln!("{C_DIM}{l}{C_RESET}")
-    })
+    let started = Instant::now();
+    let mut waited = false;
+    let got = acquire_send_lock_noting_within(
+        data_dir,
+        peer_device,
+        who,
+        PEER_SEND_LOCK_WAIT,
+        &mut |l| {
+            waited = true;
+            eprintln!("{C_DIM}{l}{C_RESET}")
+        },
+    );
+    if waited {
+        send_note(
+            peer_device,
+            &match &got {
+                Ok(_) => format!("send lock: waited {:.1} s", started.elapsed().as_secs_f64()),
+                Err(_) => format!(
+                    "send lock: still taken after {} s; not sent",
+                    PEER_SEND_LOCK_WAIT.as_secs()
+                ),
+            },
+        );
+    }
+    got
 }
 
 fn acquire_send_lock_noting_within(
@@ -184,6 +206,30 @@ impl<'a> SendLockHold<'a> {
         let again = PeerSendLock::acquire_within(self.data_dir, &self.peer, SEND_LOCK_RETAKE_WAIT);
         *self.held.borrow_mut() = again.ok();
         out
+    }
+}
+
+/// Where the send path's notes go besides the terminal (D1 b, Tor
+/// messaging audit 2026-11): the engine points it at raven-node's log, as
+/// an iPhone keeps no stdout or stderr. Each note names the friend by key
+/// (the log shows its short tag only) and holds counts, times and codes,
+/// never a message's text or an address.
+pub type SendNoteSink = fn(&[u8; 32], &str);
+
+static SEND_NOTE_SINK: std::sync::RwLock<Option<SendNoteSink>> = std::sync::RwLock::new(None);
+
+/// Send the send path's notes to `sink` from now on, in this process (the
+/// engine, `engine_bridge::set_send_note_sink`).
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+pub fn set_send_note_sink(sink: SendNoteSink) {
+    *SEND_NOTE_SINK.write().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+}
+
+/// One note about a send to `peer` for the sink, when one is set.
+fn send_note(peer: &[u8; 32], line: &str) {
+    let sink = *SEND_NOTE_SINK.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(sink) = sink {
+        sink(peer, line);
     }
 }
 
@@ -1210,7 +1256,10 @@ fn route_prober(
         };
         let wait = ipc_dial_wait(route.carrier, probe_timeout, true);
         let checked = if route.carrier == DialCarrier::Onion {
-            onion_check_again(wait, ONION_CHECK_AGAIN_WITHIN, check)
+            let peer = parse_pub_hex(&peer_pub_hex).unwrap_or_default();
+            onion_check_again(wait, ONION_CHECK_AGAIN_WITHIN, check, &mut |l| {
+                send_note(&peer, &l)
+            })
         } else {
             check(wait)
         };
@@ -1242,6 +1291,7 @@ fn onion_check_again<T>(
     wait: Duration,
     again_within: Duration,
     mut check: impl FnMut(Duration) -> Result<T, String>,
+    note: &mut dyn FnMut(String),
 ) -> Result<T, String> {
     let started = Instant::now();
     match check(wait) {
@@ -1257,6 +1307,10 @@ fn onion_check_again<T>(
                     started.elapsed().as_secs_f64()
                 );
             }
+            note(format!(
+                "Tor check: second try after {:.1} s",
+                started.elapsed().as_secs_f64()
+            ));
             check(left)
         }
         other => other,
@@ -1659,6 +1713,7 @@ const ONION_SECOND_TRY_WITHIN: Duration = Duration::from_secs(30);
 fn dial_after_tor_check<T>(
     second_within: Duration,
     mut dial: impl FnMut() -> Result<T, String>,
+    note: &mut dyn FnMut(String),
 ) -> Result<T, String> {
     let started = Instant::now();
     match dial() {
@@ -1674,8 +1729,18 @@ fn dial_after_tor_check<T>(
                          failed; trying it once more{C_RESET}"
                     );
                 }
+                note(format!(
+                    "Tor message dial: second try after {:.1} s ({:?})",
+                    started.elapsed().as_secs_f64(),
+                    super::ext::classify_cause(&e)
+                ));
                 dial()
             } else {
+                note(format!(
+                    "Tor message dial: no second try, it failed after {:.1} s ({:?})",
+                    started.elapsed().as_secs_f64(),
+                    super::ext::classify_cause(&e)
+                ));
                 Err(e)
             };
             again.map_err(|e| format!("{ONION_CHECKED_THEN_LOST}: {e}"))
@@ -1835,6 +1900,17 @@ pub fn run_pair_init_and_send_routes(
                 not_dialled_line(&ctx.display_name(), &recent, age_s)
             );
         }
+        // D1 (b): the same, in counts.
+        let busy = recent.iter().flatten().any(|(e, _)| e == TOR_BUSY);
+        send_note(
+            &peer_pub,
+            &if busy {
+                "not dialled: Tor is busy with an earlier message (the outbox carries it)"
+                    .to_string()
+            } else {
+                format!("not dialled: every way failed {age_s} s ago")
+            },
+        );
         probe_errors = errors;
     }
     let head_start = tor_head_start(
@@ -3399,6 +3475,10 @@ fn send_indexed_text(
     let dial_path = std::cell::Cell::new(None::<DeliveryPath>);
     let dial_err = std::cell::RefCell::new(None::<String>);
     let recipient = &peer_cert.device_ed_pub;
+    // The friend's key as raven-node's log lines name it (D1 b).
+    let note_peer = parse_pub_hex(peer_pub_hex).unwrap_or(*recipient);
+    // The earlier rows this send dialled on links of their own (D1 b).
+    let row_dials = std::cell::Cell::new(0usize);
     raven_core::reconcile_outbound_stage_history(data_dir)?;
     // Crash leftovers of a re-seal are repaired before any row is retried
     // (on every path, the unreachable one included).
@@ -3548,9 +3628,14 @@ fn send_indexed_text(
         let dial_once =
             || ipc_carrier_dial_reply_patient(data_dir, carrier, lan_dial, peer_pub_hex, &frames);
         let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
+        if !carry_batch.get() {
+            row_dials.set(row_dials.get() + 1);
+        }
         let run = || {
             if tor_checked {
-                dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once)
+                dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once, &mut |l| {
+                    send_note(&note_peer, &l)
+                })
             } else {
                 dial_once()
             }
@@ -3668,8 +3753,10 @@ fn send_indexed_text(
     // Agent payloads (app channel) belong to raven-node's worker: never
     // dialled, abandoned or counted here (design §8.7).
     let app_rows = app_message_ids(data_dir, recipient);
-    // The earlier rows collected for the new message's dial (T1 a).
+    // The earlier rows collected for the new message's dial (T1 a), and
+    // those left to raven-node's outbox without a dial.
     let mut batched: Vec<Batched> = Vec::new();
+    let mut left_to_outbox = 0usize;
     for (earlier_row, resend) in earlier {
         if earlier_row.kind != EndpointOutboundKind::Message {
             continue;
@@ -3749,6 +3836,7 @@ fn send_indexed_text(
             continue;
         }
         if link_down.borrow().is_some() && resend {
+            left_to_outbox += 1;
             // Queued, ahead of this message: raven-node's outbox retries it.
             // Do not `note()` it: the handoff kicks the worker once per send,
             // and that kick must come after this send's own message is in the
@@ -3764,6 +3852,7 @@ fn send_indexed_text(
         // block this lane.
         let excluded = record.is_some_and(|r| !r.choice.allows(carrier.outbox()));
         if excluded && resend {
+            left_to_outbox += 1;
             continue;
         }
         handoff_only.set(excluded);
@@ -3782,6 +3871,7 @@ fn send_indexed_text(
             && batched_bytes + earlier_row.immutable_envelope_bytes.len()
                 <= SEND_DIAL_EARLIER_BYTES;
         if ridable && !batchable {
+            left_to_outbox += 1;
             if record.is_none() {
                 handoff.record(&earlier_row.message_id, expiry);
             }
@@ -4002,6 +4092,23 @@ fn send_indexed_text(
                 return Err(earlier_undelivered_text(ctx, &detail, &preview, &note()));
             }
         }
+    }
+    // D1 (b): what this send did with the earlier messages, in counts.
+    let mut said = Vec::new();
+    if !batched.is_empty() {
+        said.push(format!("{} on this message's link", batched.len()));
+    }
+    if row_dials.get() > 0 {
+        said.push(format!("{} on links of their own", row_dials.get()));
+    }
+    if left_to_outbox > 0 {
+        said.push(format!("{left_to_outbox} left to the outbox"));
+    }
+    if !said.is_empty() {
+        send_note(
+            &note_peer,
+            &format!("earlier messages: {}", said.join(", ")),
+        );
     }
     // The loops above ran the shared `dial` for *earlier* messages and left their
     // binding and staged flag behind. They describe someone else's message: reset
@@ -4258,7 +4365,9 @@ fn send_indexed_text(
                 let tor_checked = carrier == DialCarrier::Onion && peer_unreachable.is_none();
                 lock.around(|| {
                     if tor_checked {
-                        dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once)
+                        dial_after_tor_check(ONION_SECOND_TRY_WITHIN, dial_once, &mut |l| {
+                            send_note(&note_peer, &l)
+                        })
                     } else {
                         dial_once()
                     }
@@ -4960,10 +5069,18 @@ mod tests {
         let run = |plan: Vec<Result<u8, &str>>, within: Duration| {
             let mut plan = plan.into_iter();
             let mut tries = 0;
-            let got = dial_after_tor_check(within, || {
-                tries += 1;
-                plan.next().expect("a planned try").map_err(str::to_string)
-            });
+            let mut notes = Vec::new();
+            let got = dial_after_tor_check(
+                within,
+                || {
+                    tries += 1;
+                    plan.next().expect("a planned try").map_err(str::to_string)
+                },
+                &mut |l| notes.push(l),
+            );
+            // D1 (b): a note for the second try or why there is none,
+            // never the error's text.
+            assert!(notes.len() <= 1 && notes.iter().all(|n| !n.contains("rendezvous")));
             (got, tries)
         };
         let lost = "ONION_UNREACHABLE (rendezvous failed)";
@@ -5003,12 +5120,17 @@ mod tests {
         let run = |plan: Vec<Result<u8, &str>>, wait: Duration, within: Duration| {
             let mut plan = plan.into_iter();
             let mut waits = Vec::new();
-            let got = onion_check_again(wait, within, |w| {
-                waits.push(w);
-                plan.next()
-                    .expect("a planned check")
-                    .map_err(str::to_string)
-            });
+            let got = onion_check_again(
+                wait,
+                within,
+                |w| {
+                    waits.push(w);
+                    plan.next()
+                        .expect("a planned check")
+                        .map_err(str::to_string)
+                },
+                &mut |_| {},
+            );
             (got, waits)
         };
         let miss = "ONION_UNREACHABLE: the contact's onion service did not answer over Tor \
@@ -6810,6 +6932,76 @@ mod send_path_tests {
         rig.send("in its last minutes").unwrap();
         assert_eq!(rig.alice_sessions(), 2, "a new session");
         assert_eq!(rig.bob_inbox(), vec!["hello", "in its last minutes"]);
+    }
+
+    /// What the send path told its note sink (D1 b), per friend key.
+    static NOTES: std::sync::Mutex<Vec<([u8; 32], String)>> = std::sync::Mutex::new(Vec::new());
+
+    fn note_sink(peer: &[u8; 32], line: &str) {
+        NOTES.lock().unwrap().push((*peer, line.to_string()));
+    }
+
+    fn notes_for(peer: &[u8; 32]) -> Vec<String> {
+        NOTES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p == peer)
+            .map(|(_, l)| l.clone())
+            .collect()
+    }
+
+    /// D1 (b), Tor messaging audit 2026-11: an iPhone send left no trace of
+    /// its path (the engine's notes went to the app's stdout, which nothing
+    /// keeps). They also reach a note sink, which the engine points at
+    /// raven-node's log: counts, times and codes only, never the text.
+    #[test]
+    fn the_send_paths_notes_reach_its_sink_with_counts_and_codes_only() {
+        set_send_note_sink(note_sink);
+        let rig = Rig::onion(0xC4);
+        let bob = rig.bob.public_key_bytes();
+        rig.send("hello over tor").unwrap();
+        rig.faults.close_after_write.store(1, Ordering::SeqCst);
+        rig.send("a private text").unwrap();
+        rig.set_mode(DOWN);
+        assert!(rig.send("a private one waits").is_err());
+        rig.set_mode(UP);
+        rig.send("a private one after").unwrap();
+        let notes = notes_for(&bob);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("Tor message dial: second try after ")),
+            "{notes:#?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == "earlier messages: 1 on this message's link"),
+            "{notes:#?}"
+        );
+        assert!(notes.iter().all(|n| !n.contains("private")), "{notes:#?}");
+    }
+
+    /// D1 (b): a send that waited for the friend's send lock says how long.
+    #[test]
+    fn a_send_that_waited_for_the_lock_notes_how_long() {
+        set_send_note_sink(note_sink);
+        let rig = Rig::new(0xC6);
+        let bob = rig.bob.public_key_bytes();
+        rig.send("hello").unwrap();
+        let held = PeerSendLock::acquire_within(rig.a.path(), &bob, Duration::ZERO).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            drop(held);
+        });
+        rig.send("behind the lock").unwrap();
+        releaser.join().unwrap();
+        let notes = notes_for(&bob);
+        assert!(
+            notes.iter().any(|n| n.starts_with("send lock: waited ")),
+            "{notes:#?}"
+        );
     }
 
     /// The new message's dial with its earlier messages fits one IPC
