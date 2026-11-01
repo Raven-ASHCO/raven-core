@@ -563,6 +563,9 @@ impl Inner {
                     (crate::embedded::pause(&dir), Ok(()))
                 }
             };
+            // iOS may suspend the app now and end it later: no send that
+            // has not gone lives only in this engine's memory.
+            self.keep_unfinished_sends();
             let after = probe(&dir);
             let mut status = self.note_probe(&after, false);
             status["was_running"] = was.into();

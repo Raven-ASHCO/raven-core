@@ -148,6 +148,12 @@ pub(crate) struct Pending {
     /// with `path` for this run: the receipt that follows says "via" them.
     pub via_name: Option<String>,
     pub finished: Option<Instant>,
+    /// The history row that keeps it as not sent while it waits unsent
+    /// (held by a pause or Lock v2, or unfinished when the node paused):
+    /// written so that it is not lost when the app ends meanwhile (iOS ends
+    /// a suspended app at will), and left out of the chats while this send
+    /// runs ([`Inner::keep_until_sent`]).
+    pub kept: Option<String>,
 }
 
 /// What the last observation saw, to tell what changed.
@@ -532,6 +538,8 @@ fn state_of(
 /// `bind`).
 fn bind(book: &mut MessageBook, history: &[ChatHistoryEntry]) {
     let mut taken: HashSet<String> = book.alias.keys().cloned().collect();
+    // A row that keeps a waiting send is no send's own row.
+    taken.extend(kept_rows(book));
     let mut new_alias = Vec::new();
     for send in book.pendings.iter_mut().filter(|p| {
         p.bound_mid.is_none() && !p.outcome.as_ref().is_some_and(Outcome::wrote_nothing)
@@ -560,6 +568,16 @@ fn bind(book: &mut MessageBook, history: &[ChatHistoryEntry]) {
     book.alias.extend(new_alias);
 }
 
+/// The history rows that keep this run's waiting sends as not sent
+/// ([`Pending::kept`]), lower case.
+fn kept_rows(book: &MessageBook) -> HashSet<String> {
+    book.pendings
+        .iter()
+        .filter_map(|p| p.kept.as_deref())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 /// Every message: the history's rows in written order, then this session's
 /// sends that have no row.
 fn views(
@@ -570,9 +588,14 @@ fn views(
     now_ms: u64,
 ) -> Vec<View> {
     bind(book, history);
+    let kept = kept_rows(book);
     let mut out = Vec::with_capacity(history.len() + book.pendings.len());
     for e in history {
         let mid = e.message_id_hex.to_ascii_lowercase();
+        // The send it keeps shows instead (one bubble for the text).
+        if kept.contains(&mid) {
+            continue;
+        }
         let peer = e.peer_pub_hex.to_ascii_lowercase();
         let incoming = e.direction != "out";
         let text = if e.body.is_empty() {
@@ -1288,6 +1311,7 @@ impl Inner {
                 path: None,
                 via_name: None,
                 finished: None,
+                kept: None,
             };
             if let Some(observed) = book.observed.as_mut() {
                 observed
@@ -1382,6 +1406,10 @@ impl Inner {
     /// that ended meanwhile (its resume let the others go before this one
     /// came back) lets it go again at once; a lock refusal always waits for
     /// the unlock (or the watcher's next look).
+    ///
+    /// A held send may wait while the app is ended (iOS ends a suspended
+    /// app at will): it is kept as not sent until it goes
+    /// ([`Self::keep_until_sent`]).
     fn hold_send(&self, id: &str, peer: &str, raw: &str) {
         let by_lock = raw.contains(raven_core::privacy::LOCKED_V2_TEXT) || self.locked();
         let held = {
@@ -1402,6 +1430,7 @@ impl Inner {
         };
         let why = if by_lock { "locked" } else { "paused" };
         send_note(peer, &format!("{id} held back ({why}), {waiting} held"));
+        self.keep_until_sent(id);
     }
 
     /// The node runs and the profile is open again (`node.resume`,
@@ -1458,7 +1487,7 @@ impl Inner {
         );
         if outcome == Outcome::HeldBack {
             // Nothing was tried: it reads Sending again and waits for the
-            // resume or the unlock, with no row written for it.
+            // resume or the unlock, kept as not sent meanwhile (hold_send).
             {
                 let mut book = lock(&self.book);
                 if let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) {
@@ -1479,10 +1508,102 @@ impl Inner {
             }
         }
         self.keep_unsent(id);
+        self.drop_kept(id);
         self.invalidate_history();
         self.invalidate_contacts();
         self.invalidate_outbox();
         let _ = self.refresh(Duration::ZERO);
+    }
+
+    /// Keeps the send `id`, while it waits unsent, as a not-sent row of the
+    /// history (`record_not_sent`, as a message nothing was written for):
+    /// the app's next launch shows it with its text and Send again when the
+    /// app is ended before it goes (iOS ends a suspended app at will, and a
+    /// send that lives only in this engine's memory goes with it: no row,
+    /// no outbox, nothing on the next launch). This run leaves the row out
+    /// of the chats while the send
+    /// runs: the send ends on it when it writes nothing
+    /// ([`Self::keep_unsent`]), and it goes once another row is the send's
+    /// ([`Self::drop_kept`]). Nothing for a send that ended, has its row or
+    /// is kept already, and nothing while the profile can't be opened.
+    pub(crate) fn keep_until_sent(&self, id: &str) {
+        let (peer, body, written) = {
+            let book = lock(&self.book);
+            let Some(p) = book.pendings.iter().find(|p| p.id == id) else {
+                return;
+            };
+            if p.kept.is_some() || p.bound_mid.is_some() || p.job == Job::Done {
+                return;
+            }
+            (p.peer.clone(), p.body.clone(), p.created_ms)
+        };
+        let dir = match (self.open(), self.data_dir()) {
+            (Ok(()), Ok(dir)) => dir.to_path_buf(),
+            _ => {
+                send_note(&peer, &format!("{id} could not be kept as not sent"));
+                return;
+            }
+        };
+        let Ok(mid) = bridge::record_not_sent(&dir, &peer, &body, written) else {
+            send_note(&peer, &format!("{id} could not be kept as not sent"));
+            return;
+        };
+        let kept = {
+            let mut book = lock(&self.book);
+            match book.pendings.iter_mut().find(|p| p.id == id) {
+                Some(p) if p.kept.is_none() && p.bound_mid.is_none() && p.job != Job::Done => {
+                    p.kept = Some(mid.clone());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if kept {
+            send_note(&peer, &format!("{id} kept as not sent until it goes"));
+        } else {
+            // It ended (or was kept) meanwhile: its own row stands.
+            delete_row(&dir, &peer, &mid);
+        }
+        self.invalidate_history();
+    }
+
+    /// Every send of this run that has not ended and has no row of its own
+    /// is kept until it goes ([`Self::keep_until_sent`]): `node.pause`, after
+    /// which iOS may suspend the app at once and end it later (a send whose
+    /// turn comes during the pause is kept when it is held back).
+    #[cfg_attr(not(feature = "embedded-node"), allow(dead_code))]
+    pub(crate) fn keep_unfinished_sends(&self) {
+        let ids: Vec<String> = lock(&self.book)
+            .pendings
+            .iter()
+            .filter(|p| p.job != Job::Done && p.kept.is_none() && p.bound_mid.is_none())
+            .map(|p| p.id.clone())
+            .collect();
+        for id in ids {
+            self.keep_until_sent(&id);
+        }
+    }
+
+    /// The send `id` ended on a row of its own: the row that kept it while
+    /// it waited goes (one bubble for the text, in this run and the next).
+    fn drop_kept(&self, id: &str) {
+        let (peer, mid) = {
+            let mut book = lock(&self.book);
+            let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) else {
+                return;
+            };
+            if p.job != Job::Done {
+                return;
+            }
+            let Some(mid) = p.kept.take() else {
+                return;
+            };
+            (p.peer.clone(), mid)
+        };
+        if let Ok(dir) = self.data_dir() {
+            delete_row(dir, &peer, &mid);
+        }
+        self.invalidate_history();
     }
 
     /// A send of this run that queued and wrote nothing (not sent, the
@@ -1504,6 +1625,21 @@ impl Inner {
             }
             (p.peer.clone(), p.body.clone(), p.created_ms)
         };
+        // Kept while it waited: that row is its own now.
+        {
+            let mut book = lock(&self.book);
+            let kept = book.pendings.iter_mut().find(|p| p.id == id).and_then(|p| {
+                let mid = p.kept.take()?;
+                p.bound_mid = Some(mid.clone());
+                Some(mid)
+            });
+            if let Some(mid) = kept {
+                book.alias.insert(mid, id.to_owned());
+                drop(book);
+                self.invalidate_history();
+                return;
+            }
+        }
         if self.open().is_err() {
             return;
         }
@@ -2081,6 +2217,13 @@ fn outcome_word(outcome: &Outcome) -> &'static str {
     }
 }
 
+/// Takes the row `mid` of yours to `peer` out of the history (best effort:
+/// a row that stays shows as not sent).
+fn delete_row(dir: &std::path::Path, peer: &str, mid: &str) {
+    let key = (peer.to_ascii_lowercase(), mid.to_ascii_lowercase());
+    let _ = raven_core::chat_history::ChatHistory::delete_outbound_rows(dir, &HashSet::from([key]));
+}
+
 /// The sends waiting for each friend (its key, lowercase), in the order
 /// they were asked for. A friend is here while its worker runs: the one
 /// that takes the last of them away ends that worker.
@@ -2156,6 +2299,7 @@ mod tests {
             path: None,
             via_name: None,
             finished: None,
+            kept: None,
         }
     }
 
@@ -2269,6 +2413,47 @@ mod tests {
         assert_eq!(held, [("pending-1".to_owned(), "aa".to_owned())]);
         assert!(!inner.release_held_sends(), "still locked");
         assert_eq!(lock(&inner.send_queues).held.len(), 1);
+    }
+
+    /// `node.pause`, after which iOS may suspend the app at once and end it
+    /// later: a send that has not gone yet is kept as a
+    /// not-sent row, so the next launch shows it with its text; in this run
+    /// the send itself shows, once.
+    #[test]
+    fn a_send_unfinished_at_the_pause_is_kept_as_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Inner::new(Ok(dir.path().to_path_buf()));
+        let peer = "ab".repeat(32);
+        lock(&inner.book).pendings.push(Pending {
+            peer: peer.clone(),
+            ..pending(Job::Queued, None)
+        });
+        inner.keep_unfinished_sends();
+        let kept = lock(&inner.book).pendings[0].kept.clone();
+        let rows = raven_core::chat_history::ChatHistory::load(dir.path())
+            .unwrap()
+            .entries;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(
+            (
+                row.direction.as_str(),
+                row.delivery.as_str(),
+                row.body.as_str()
+            ),
+            ("out", "failed", "hi")
+        );
+        assert_eq!(kept.as_deref(), Some(row.message_id_hex.as_str()));
+        // Kept once: a second pause writes nothing more.
+        inner.keep_unfinished_sends();
+        let again = raven_core::chat_history::ChatHistory::load(dir.path()).unwrap();
+        assert_eq!(again.entries.len(), 1);
+
+        let mut book = std::mem::take(&mut *lock(&inner.book));
+        let shown = views(&mut book, &rows, &OutboxSnap::default(), &[], 2);
+        let ids: Vec<&str> = shown.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["pending-1"], "one bubble for the text");
+        assert_eq!(shown[0].state, State::Sending);
     }
 
     /// E1: "Waiting for win-c · until –". A message that starts waiting

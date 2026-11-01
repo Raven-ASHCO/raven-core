@@ -685,6 +685,119 @@ fn send_while_paused() {
     assert!(!log.contains(&b.address()), "{log}");
 }
 
+/// Messages of yours to `friend` with `text`, as `messages.history` shows
+/// them now.
+fn mine_with(a: &Peer, friend: &Peer, text: &str) -> Vec<Value> {
+    let history = a.ok(
+        "messages.history",
+        json!({"address": friend.address(), "limit": 50}),
+    );
+    history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["direction"] == "out" && m["text"] == text)
+        .cloned()
+        .collect()
+}
+
+/// The engine of the app's next launch on `old`'s profile: iOS ended the
+/// app (it may end one that is suspended at any time), and with it every
+/// send that lived only in the engine's memory.
+fn relaunched(old: Peer) -> Peer {
+    let (name, path) = (old.name.clone(), old.path.clone());
+    drop(old);
+    // The old engine's watcher lets go of it at its next beat.
+    std::thread::sleep(Duration::from_millis(1500));
+    let mut p = Peer {
+        name,
+        engine: Box::new(Client::with_data_dir(&path)),
+        path,
+        me: Value::Null,
+    };
+    p.me = p.ok("identity.me", json!({}));
+    p
+}
+
+/// A send written just before the iPhone was locked (the steps of the
+/// W4v-f-1 live test), held by the pause, and the app then ended in the
+/// background (iOS ends a suspended app at will). The message is not lost:
+/// the next launch shows it as not sent, with its text, and nothing reached
+/// the friend. The node's log says it was kept, by the friend's tag and
+/// without the text.
+#[test]
+fn a_send_the_pause_held_stays_not_sent_after_the_app_ends() {
+    in_own_process("held_send_survives_the_app");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_send_the_pause_held_stays_not_sent_after_the_app_ends"]
+fn held_send_survives_the_app() {
+    if !own_process("held_send_survives_the_app") {
+        return;
+    }
+    const TEXT: &str = "written as the phone was locked";
+    let root = common::short_dir();
+    let (a, b) = two_on_lan(root.path(), &[]);
+    a.ok("node.pause", json!({}));
+    let id = a.send(&b, TEXT);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(message(&a, &b, &id)["state"], "sending");
+
+    let a = relaunched(a);
+    let _stops = StopsNode(&a);
+    a.ok("node.resume", json!({}));
+    let kept = mine_with(&a, &b, TEXT);
+    assert_eq!(kept.len(), 1, "{kept:?}\n{}", a.log());
+    assert_eq!(kept[0]["state"], "failed", "{kept:?}");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(!b.has_incoming(&a, TEXT), "it went out after all");
+
+    let log = a.log();
+    for said in [
+        &format!("engine: {id} accepted"),
+        &format!("engine: {id} held back"),
+        &format!("engine: {id} kept as not sent"),
+    ] {
+        assert!(log.contains(said.as_str()), "no {said:?} in\n{log}");
+    }
+    assert!(!log.contains(TEXT), "{log}");
+    assert!(!log.contains(&b.address()), "{log}");
+}
+
+/// The same send when the app is not ended: it goes out after the resume,
+/// and the record kept for it while it waited leaves no second bubble, in
+/// this run or the next.
+#[test]
+fn a_send_the_pause_held_shows_once_after_it_went() {
+    in_own_process("held_send_shows_once");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_send_the_pause_held_shows_once_after_it_went"]
+fn held_send_shows_once() {
+    if !own_process("held_send_shows_once") {
+        return;
+    }
+    const TEXT: &str = "held, then sent";
+    let root = common::short_dir();
+    let (a, b) = two_on_lan(root.path(), &[]);
+    a.ok("node.pause", json!({}));
+    let id = a.send(&b, TEXT);
+    std::thread::sleep(Duration::from_millis(800));
+    a.ok("node.resume", json!({}));
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}\n{}", a.log());
+    let once = mine_with(&a, &b, TEXT);
+    assert_eq!(once.len(), 1, "{once:?}");
+
+    let a = relaunched(a);
+    let _stops = StopsNode(&a);
+    let once = mine_with(&a, &b, TEXT);
+    assert_eq!(once.len(), 1, "{once:?}");
+    assert_eq!(once[0]["state"], "delivered", "{once:?}");
+}
+
 /// The same with Lock v2 (the iPhone app's lock set to "now", audit T4):
 /// a send held back by the pause is still held when the node starts again
 /// locked (it is not refused as locked: "Not sent"), and it goes out after

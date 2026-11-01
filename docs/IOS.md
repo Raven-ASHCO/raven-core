@@ -110,9 +110,14 @@ and Neighbour"); and `NetworkStatus.tor.percent` is Tor's start percentage
 `NodeStatus` gains `embedded: true`, `paused`, and `state` `paused` or
 `mail_check`. While paused, `node.start` is refused (the detail starts
 with `PAUSED`). A send whose turn comes while paused, or while Lock v2
-holds the profile, is held back: it stays `sending` with nothing dialled
-or written, and goes when `node.resume` starts the node again (or at the
-unlock). `node.stop` stops the node in process (never a
+holds the profile, is held back: it stays `sending` with nothing dialled,
+and goes when `node.resume` starts the node again (or at the unlock).
+Meanwhile it is kept as a not-sent row of the history, as is every send
+that has not gone when `node.pause` returns: iOS may end the suspended app
+at any time, and the next launch then shows the message as not sent, with
+its text and Send again, instead of losing it. The send itself shows
+meanwhile (one bubble); once it goes, the row goes.
+`node.stop` stops the node in process (never a
 signal: its pid is the app's own).
 
 ## 3. The app's lifecycle
