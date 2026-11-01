@@ -949,14 +949,34 @@ impl PerContactLog {
 /// [`SendDialNote`]'s lines in this raven-node.
 static SEND_DIAL_LOG: std::sync::OnceLock<PerContactLog> = std::sync::OnceLock::new();
 
-/// Serve the send dial `req` with `serve`, then write its line (D1).
-async fn logged_send_dial<F>(req: IpcRequest, serve: impl FnOnce(IpcRequest) -> F) -> IpcResponse
+/// The code of a send dial that ended because the program that asked for
+/// it hung up first (nobody reads the answer).
+pub(crate) const CLIENT_GONE: &str = "IPC_CLIENT_GONE";
+
+/// Serve the send dial `req` with `serve`, then write its line (D1). The
+/// dial ends when `hangup` does: the program that asked for it closed its
+/// connection (T3 a, Tor messaging audit 2026-11: a send gives its Tor
+/// check 25 s, then queues the message and hangs up, while the dial ran on
+/// for up to 80 s beside the outbox's own and counted as Tor tried without
+/// an answer for the sends after it).
+async fn logged_send_dial<F>(
+    req: IpcRequest,
+    hangup: impl std::future::Future<Output = ()>,
+    serve: impl FnOnce(IpcRequest) -> F,
+) -> IpcResponse
 where
     F: std::future::Future<Output = IpcResponse>,
 {
     let note = SendDialNote::of(&req);
     let started = std::time::Instant::now();
-    let response = serve(req).await;
+    let response = tokio::select! {
+        response = serve(req) => response,
+        () = hangup => IpcResponse::Error {
+            v: IPC_VERSION,
+            code: CLIENT_GONE.into(),
+            message: "the program that asked for this dial hung up; the dial ended with it".into(),
+        },
+    };
     if let Some(note) = note {
         let log = SEND_DIAL_LOG.get_or_init(PerContactLog::new);
         let tag = crate::netutil::link_tag(&note.peer);
@@ -1618,10 +1638,24 @@ async fn handle_unlock(
     }
 }
 
+/// [`dispatch_watched`] for a program that never hangs up (tests).
+#[cfg(test)]
 async fn dispatch(
     frame: &[u8],
     data_dir: &Arc<PathBuf>,
     forward: &Arc<Mutex<Option<ForwardQueue>>>,
+) -> IpcResponse {
+    dispatch_watched(frame, data_dir, forward, std::future::pending()).await
+}
+
+/// Answer one request. `hangup` ends when the program that sent it closed
+/// its connection: a send dial ends then ([`logged_send_dial`]); every
+/// other request runs to its end.
+async fn dispatch_watched(
+    frame: &[u8],
+    data_dir: &Arc<PathBuf>,
+    forward: &Arc<Mutex<Option<ForwardQueue>>>,
+    hangup: impl std::future::Future<Output = ()>,
 ) -> IpcResponse {
     match decode_request_checked(frame) {
         // Liveness: no lock, no I/O — a busy daemon must still answer Ping.
@@ -1642,20 +1676,20 @@ async fn dispatch(
             message: LOCKED_MESSAGE.into(),
         },
         Ok(req @ IpcRequest::LanDial { .. }) => {
-            logged_send_dial(req, |req| handle_lan_dial(data_dir, req)).await
+            logged_send_dial(req, hangup, |req| handle_lan_dial(data_dir, req)).await
         }
         Ok(req @ IpcRequest::LanLocate { .. }) => handle_lan_locate(data_dir, req).await,
         Ok(req @ IpcRequest::InternetDial { .. }) => {
-            logged_send_dial(req, |req| handle_internet_dial(data_dir, req)).await
+            logged_send_dial(req, hangup, |req| handle_internet_dial(data_dir, req)).await
         }
         Ok(req @ IpcRequest::P2pDial { .. }) => {
-            logged_send_dial(req, |req| handle_p2p_dial(data_dir, req)).await
+            logged_send_dial(req, hangup, |req| handle_p2p_dial(data_dir, req)).await
         }
         Ok(req @ IpcRequest::NearbyDial { .. }) => {
-            logged_send_dial(req, |req| handle_nearby_dial(data_dir, req)).await
+            logged_send_dial(req, hangup, |req| handle_nearby_dial(data_dir, req)).await
         }
         Ok(req @ IpcRequest::OnionDial { .. }) => {
-            logged_send_dial(req, |req| handle_onion_dial(data_dir, req)).await
+            logged_send_dial(req, hangup, |req| handle_onion_dial(data_dir, req)).await
         }
         // Long-poll: waits on the inbox generation, not on a pool thread.
         Ok(IpcRequest::AppInboxPage {
@@ -1724,7 +1758,13 @@ async fn serve_one<S>(
         Ok(f) => f,
         Err(_) => return,
     };
-    let resp = dispatch(&frame, &data_dir, &forward).await;
+    // One request per connection: the program sends nothing more, and its
+    // connection ends only when it hangs up (T3 a).
+    let hangup = async {
+        let mut spare = [0u8; 64];
+        while stream.read(&mut spare).await.is_ok_and(|n| n > 0) {}
+    };
+    let resp = dispatch_watched(&frame, &data_dir, &forward, hangup).await;
     // It may have carried Lock v2's passphrase.
     raven_core::ipc::wipe_frame(&mut frame);
     let out = encode_response_or_error(&resp);
@@ -4157,5 +4197,59 @@ mod tests {
             .expect("raven-node's own dial without frames reached Bob");
         assert_eq!(wakes() - before, 2, "and so does raven-node's own");
         serving.abort();
+    }
+
+    /// T3 (a) (Tor messaging audit 2026-11): a send waits at most 25 s for
+    /// its Tor check, then queues its message and hangs up. raven-node went
+    /// on with the dial (up to 80 s on Tor): the outbox's own dial ran
+    /// beside it, and as a Tor dial without an answer it made later sends
+    /// count Tor as busy. A send dial whose program hung up now ends with
+    /// it: its connection closes at once, and so does the IPC connection.
+    #[tokio::test]
+    async fn a_send_dial_ends_when_its_program_hangs_up() {
+        use crate::outbox::test_rig::{contacts, lab_backends};
+        if !lab_backends() || !raven_core::internet_direct_live_enabled() {
+            eprintln!("skipped: needs the lab backends and Internet direct");
+            return;
+        }
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let _alice = raven_core::load_or_create_identity(a.path()).unwrap().0;
+        let bob = raven_core::load_or_create_identity(b.path()).unwrap().0;
+        contacts(a.path(), &bob.public_key_bytes(), "", "", true);
+        // Bob's address takes the connection and never answers: the dial
+        // waits for his handshake (up to its own deadline, 45 s).
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = silent.local_addr().unwrap().to_string();
+        let (mut program, node_end) = tokio::io::duplex(1 << 16);
+        let serving = tokio::spawn(serve_one(
+            node_end,
+            Arc::new(a.path().to_path_buf()),
+            Arc::new(Mutex::new(None)),
+        ));
+        let req = raven_core::encode_request(&IpcRequest::InternetDial {
+            v: IPC_VERSION,
+            internet_dial: at,
+            expected_pub_hex: hex::encode(bob.public_key_bytes()),
+            frames_b64: Vec::new(),
+        })
+        .unwrap();
+        program.write_all(&req).await.unwrap();
+        let (mut dialled, _) = tokio::time::timeout(Duration::from_secs(10), silent.accept())
+            .await
+            .expect("the dial reached Bob's address")
+            .unwrap();
+        // The program gives up (its 25 s are over) and hangs up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(program);
+        tokio::time::timeout(Duration::from_secs(3), serving)
+            .await
+            .expect("the IPC connection ends with the program")
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut buf = [0u8; 512];
+            while dialled.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+        })
+        .await;
+        assert!(closed.is_ok(), "the dial to Bob's address ended too");
     }
 }
