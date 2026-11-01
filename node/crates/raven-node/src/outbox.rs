@@ -167,6 +167,14 @@ const DIALBACK_INTERVAL: Duration = Duration::from_secs(60);
 /// minutes waited for a backoff of minutes after it came back; a LAN dial
 /// costs little).
 const LAN_SEEN_RETRY: Duration = Duration::from_secs(15);
+/// A contact a Tor link worked with within
+/// [`crate::delivery_paths::TOR_SEEN_SPAN`] whose attempt dialled Tor and
+/// reached nobody is tried again within this, and up to half as long again
+/// (jittered): 30-45 s (T8, Tor messaging audit 2026-11: a friend only Tor
+/// reaches, its phone locked for a few minutes, waited a backoff of 5-10
+/// min after it was back). Such an attempt carries a message or an owed
+/// ACK (RAVEN_ONION_CARRIER_V1 §10).
+const TOR_SEEN_RETRY: Duration = Duration::from_secs(30);
 /// A contact's inbound link starts its backoff over at most this often: one
 /// that keeps dialling in while our dial-backs fail (NAT, a port we do not
 /// know) keeps the normal backoff in between (G5).
@@ -2113,6 +2121,15 @@ impl Inner {
             if unreached && report.lan_seen_lately {
                 entry.next_due = entry.next_due.min(now + LAN_SEEN_RETRY);
             }
+            // Over Tor likewise (T8): nothing tells us when it is back.
+            if unreached
+                && report.tor_seen_lately
+                && !probe
+                && entry.tried.contains(&OutboxCarrier::Onion)
+            {
+                let wait = TOR_SEEN_RETRY.mul_f64(1.0 + 0.5 * jitter());
+                entry.next_due = entry.next_due.min(now + wait);
+            }
             if probe {
                 // A probe only ever waits (a hold keeps its code).
                 entry.state = EntryState::Waiting;
@@ -2432,6 +2449,11 @@ pub(crate) struct PeerReport {
     /// [`crate::delivery_paths::HERE_SPAN`] when the attempt ended: an
     /// object it could not reach waits at most [`LAN_SEEN_RETRY`].
     pub(crate) lan_seen_lately: bool,
+    /// A Tor link with the contact worked within
+    /// [`crate::delivery_paths::TOR_SEEN_SPAN`] when the attempt ended: an
+    /// object whose attempt dialled Tor and reached nobody waits at most
+    /// [`TOR_SEEN_RETRY`] and half as long again (T8).
+    pub(crate) tor_seen_lately: bool,
 }
 
 impl PeerReport {
@@ -3738,6 +3760,7 @@ pub(crate) fn attempt_peer(
 ) -> PeerReport {
     let mut report = attempt_peer_inner(ctx, peer, due, owed_acks);
     report.lan_seen_lately = crate::delivery_paths::lan_linked_within_span(peer);
+    report.tor_seen_lately = crate::delivery_paths::tor_seen_lately(peer);
     // Carry choice (P6.16): who held what this attempt finished.
     carry_outcomes(peer, due, &report);
     // Why LAN could not carry it (Phase 3 diagnosis), before the custody
@@ -9809,6 +9832,65 @@ mod tests {
                 assert!(wait <= LAN_SEEN_RETRY, "{failures}: {wait:?}");
             } else {
                 assert!(wait > LAN_SEEN_RETRY, "{wait:?}");
+            }
+        }
+    }
+
+    /// T8 (Tor messaging audit 2026-11): nothing tells us that a friend
+    /// only Tor reaches is back (its phone unlocked, its Raven opened), so
+    /// what waited for it sat out a backoff of 5-10 min. A contact a Tor
+    /// link worked with in the last 30 min ([`PeerReport::tor_seen_lately`])
+    /// whose attempt dialled Tor and reached nobody is tried again within
+    /// 30-45 s, whatever its backoff; without such a link, or when the
+    /// attempt did not dial Tor, its backoff.
+    #[test]
+    fn a_contact_tor_reached_lately_is_tried_again_within_45_s() {
+        let t0 = Instant::now();
+        let wall = 1_000_000_000u64;
+        let bob = [0xB0; 32];
+        let missed = |tor: bool| {
+            let carrier = if tor {
+                OutboxCarrier::Onion
+            } else {
+                OutboxCarrier::Lan
+            };
+            let mut report = report_for(
+                [1; 32],
+                Outcome::Unreachable {
+                    carrier: Some(carrier),
+                    code: if tor {
+                        code::ONION_UNREACHABLE
+                    } else {
+                        code::NOT_REACHABLE
+                    },
+                },
+            );
+            report.tried.insert([1; 32], vec![carrier]);
+            report
+        };
+        for (seen, tor) in [(true, true), (false, true), (true, false)] {
+            let mut inner = Inner::default();
+            inner.merge(vec![sched_row(1, 0xB0, wall + DAY)], 0, t0, wall);
+            let mut at = t0;
+            let mut waits = Vec::new();
+            for _ in 0..9 {
+                assert!(inner.take_due(at).iter().any(|w| w.peer == bob));
+                let mut report = missed(tor);
+                report.tor_seen_lately = seen;
+                inner.apply(&bob, report, at, wall);
+                let next = inner.entries[&[1; 32]].next_due;
+                waits.push(next - at);
+                at = next;
+            }
+            let last = *waits.last().unwrap();
+            if seen && tor {
+                assert!(
+                    waits.iter().all(|w| *w <= Duration::from_secs(45)),
+                    "{waits:?}"
+                );
+                assert!(last >= Duration::from_secs(30), "{last:?}");
+            } else {
+                assert!(last > Duration::from_secs(45), "{seen} {tor}: {waits:?}");
             }
         }
     }

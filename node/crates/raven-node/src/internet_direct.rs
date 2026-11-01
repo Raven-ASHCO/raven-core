@@ -786,9 +786,12 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         // A contact that reaches us is online now: retry what we owe it.
         crate::outbox::peer_seen(&remote_ed);
         crate::custody::peer_seen(&remote_ed);
-        // Over Tor: our onion service is reachable (`raven status`).
+        // Over Tor: our onion service is reachable (`raven status`), and
+        // Tor links with this friend work (T8: the outbox tries it again
+        // soon when it goes away for a moment).
         if link.carrier == OutboxCarrier::Onion {
             crate::onion::friend_reached_us();
+            crate::delivery_paths::tor_linked(&remote_ed);
         }
         // Auto-reach (gated): a contact came in over Internet direct from
         // outside, so its listener's public address is confirmed.

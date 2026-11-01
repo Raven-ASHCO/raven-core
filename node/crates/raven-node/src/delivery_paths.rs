@@ -1081,15 +1081,25 @@ pub(crate) fn tor_tried_lately(contact: &[u8; 32]) -> bool {
 
 /// When a Tor link with each contact last worked (a delivery over Tor, a
 /// message that came over Tor): in memory, bounded like the failed routes,
-/// cleared when the network changes.
+/// cleared when the network changes. Apart from that, when any Tor link
+/// with it last worked, its authenticated links to us included, kept
+/// whatever our network does ([`tor_seen_lately`]).
 #[derive(Default)]
 struct TorReached {
     by: HashMap<[u8; 32], Instant>,
+    seen: HashMap<[u8; 32], Instant>,
 }
 
 impl TorReached {
     fn reached(&mut self, contact: [u8; 32], at: Instant) {
         insert_bounded(&mut self.by, contact, at, |at| *at);
+        self.linked(contact, at);
+    }
+
+    /// A Tor link with `contact` worked at `at` (no answer to a dial of
+    /// ours: [`Self::within`] does not count it).
+    fn linked(&mut self, contact: [u8; 32], at: Instant) {
+        insert_bounded(&mut self.seen, contact, at, |at| *at);
     }
 
     /// A Tor link with `contact` worked within `span` of `now`.
@@ -1099,9 +1109,39 @@ impl TorReached {
             .is_some_and(|at| now.saturating_duration_since(*at) <= span)
     }
 
+    /// Any Tor link with `contact` worked within `span` of `now`, before
+    /// or after a network change.
+    fn seen_within(&self, contact: &[u8; 32], now: Instant, span: Duration) -> bool {
+        self.seen
+            .get(contact)
+            .is_some_and(|at| now.saturating_duration_since(*at) <= span)
+    }
+
+    /// The network changed: Tor's answers to our dials are old news. Which
+    /// friends Tor linked with is not: their onion services did not move.
     fn clear(&mut self) {
         self.by.clear();
     }
+}
+
+/// How long a Tor link that worked with a contact makes it "seen over Tor
+/// lately" ([`tor_seen_lately`]).
+pub(crate) const TOR_SEEN_SPAN: Duration = Duration::from_secs(30 * 60);
+
+/// A contact's authenticated Tor link to this node: Tor links with it work
+/// ([`tor_seen_lately`]). Not an answer to a dial of ours
+/// ([`tor_tried_lately`] does not count it).
+pub(crate) fn tor_linked(contact: &[u8; 32]) {
+    with_tor_reached(|r| r.linked(*contact, Instant::now()));
+}
+
+/// A Tor link with `contact` worked within [`TOR_SEEN_SPAN`] (our delivery
+/// or dial over Tor, its message over Tor, its authenticated Tor link to
+/// us), whatever our network did since: a friend only Tor reaches that
+/// was online then is most likely away for a moment (a locked phone), and
+/// the outbox tries it again soon (T8, Tor messaging audit 2026-11).
+pub(crate) fn tor_seen_lately(contact: &[u8; 32]) -> bool {
+    with_tor_reached(|r| r.seen_within(contact, Instant::now(), TOR_SEEN_SPAN))
 }
 
 static TOR_REACHED: Mutex<Option<TorReached>> = Mutex::new(None);
@@ -2134,6 +2174,39 @@ mod failed_route_tests {
         assert!(reached.within(&friend, now, ROUTE_FAIL_FRESH));
         reached.clear();
         assert!(!reached.within(&friend, now, ROUTE_FAIL_FRESH));
+    }
+
+    /// T8 (Tor messaging audit 2026-11): whether a Tor link with a contact
+    /// worked within [`TOR_SEEN_SPAN`] (the outbox then tries a Tor-only
+    /// friend that went away again within 45 s). Any Tor link that worked
+    /// counts: our delivery, its message, its authenticated link to us. Our
+    /// network changing does not forget it: the friend's onion service did
+    /// not move.
+    #[test]
+    fn a_tor_link_that_worked_is_remembered_for_30_min() {
+        let mut tor = TorReached::default();
+        let (bob, carol) = ([0x81; 32], [0x82; 32]);
+        let now = Instant::now();
+        let ago = |s: u64| now - Duration::from_secs(s);
+        tor.reached(bob, ago(29 * 60));
+        tor.linked(carol, ago(60));
+        assert!(tor.seen_within(&bob, now, TOR_SEEN_SPAN));
+        assert!(tor.seen_within(&carol, now, TOR_SEEN_SPAN));
+        // A link to us is no answer to our dials (tor_tried_lately).
+        assert!(!tor.within(&carol, now, ROUTE_FAIL_FRESH));
+        tor.clear();
+        assert!(tor.seen_within(&bob, now, TOR_SEEN_SPAN), "network changed");
+        assert!(!tor.seen_within(&bob, now + Duration::from_secs(61), TOR_SEEN_SPAN));
+        // The global hooks.
+        let dave = [0xD3; 32];
+        assert!(!tor_seen_lately(&dave));
+        carrier_worked(&dave, OutboxCarrier::Lan);
+        assert!(!tor_seen_lately(&dave), "not over Tor");
+        tor_linked(&dave);
+        assert!(tor_seen_lately(&dave));
+        let erin = [0xD4; 32];
+        carrier_worked(&erin, OutboxCarrier::Onion);
+        assert!(tor_seen_lately(&erin));
     }
 
     /// Field test E3 round 2: a send's Tor check failed after 5.2 s (Tor
