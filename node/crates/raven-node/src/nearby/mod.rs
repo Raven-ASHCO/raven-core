@@ -502,10 +502,10 @@ impl Host for NodeHost {
         )
     }
 
-    /// Task 2 Q5: the work (outbox, held, mail friends), then the contacts
-    /// with a recent pipe and those `raven nearby on` named, as this process
-    /// remembers them across engines ([`Remembered`]: the full node's engine
-    /// is gone when the background node starts).
+    /// Task 2 Q5: the work (outbox, held, mail friends, keepers), then the
+    /// contacts with a recent pipe and those `raven nearby on` named, as this
+    /// process remembers them across engines ([`Remembered`]: the full node's
+    /// engine is gone when the background node starts).
     fn filter_contacts(&self) -> BoxFuture<'static, Vec<[u8; 32]>> {
         let work = self.has_work();
         Box::pin(async move {
@@ -640,9 +640,10 @@ fn held_work(dd: &Path, letters: bool, hops: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
 
 /// [`NodeHost::has_work`] once the outbox named `waiting` (cutoff addendum
 /// F11d, field finding S17): `waiting`, then while the custody gates are
-/// live the recipients this node holds mail for ([`held_work`]) and the
-/// mail friends of `waiting` ([`mail_friends`]), read with one book on the
-/// blocking pool ([`work_set`]).
+/// live the recipients this node holds mail for ([`held_work`]), the mail
+/// friends of `waiting` ([`mail_friends`]) and the friends this node
+/// collects its own mail from ([`keepers_for_me`]), read with one book on
+/// the blocking pool ([`work_set`]).
 fn work_for(
     dd: PathBuf,
     local: [u8; 32],
@@ -659,15 +660,27 @@ fn work_for(
         let asked = waiting.clone();
         let (held, friends) = internet_direct::blocking(move || {
             let now = raven_core::clock::now_ms();
-            Ok((
-                held_work(&dd, letters, hops),
-                mail_friends(&dd, &local, &asked, carry, now),
-            ))
+            let mut friends = mail_friends(&dd, &local, &asked, carry, now);
+            friends.extend(keepers_for_me(&dd, &local, now));
+            Ok((held_work(&dd, letters, hops), friends))
         })
         .await
         .unwrap_or_default();
         work_set(waiting, held, friends)
     })
+}
+
+/// Blocking: the friends this node collects its own mail from, the custody
+/// fetcher's targets ([`raven_core::custody_client::fetch_targets`]). The
+/// fetcher's failed nearby dial only `want`s a keeper, which no user work
+/// puts on air, so without this a recipient never advertised for the friend
+/// holding mail for it (field test 2026-11-02, R7b: two open iPhones met only
+/// once an unrelated send brought a link up). An unreadable book is nobody.
+/// The caller checks the custody gates.
+fn keepers_for_me(dd: &Path, local: &[u8; 32], now: u64) -> Vec<[u8; 32]> {
+    raven_core::custody_client::fetch_targets(dd, local, now)
+        .map(|targets| targets.into_iter().map(|(keeper, _)| keeper).collect())
+        .unwrap_or_default()
 }
 
 /// Blocking: the mail friends of `waiting` (field finding S17): the deposit
@@ -1344,6 +1357,47 @@ mod tests {
         assert_eq!(live, [alice, bob]);
         assert_eq!(both, [dave, alice, bob]);
         assert_eq!(closed, [alice], "custody closed: no mail friend");
+    }
+
+    /// Field test 2026-11-02 (R7b): with nothing waiting and nothing held,
+    /// the friend this node collects its own mail from is work too, so a
+    /// recipient with background mail on advertises for its keeper and the
+    /// keeper's scan finds it. Before, two open iPhones with mail held for
+    /// one of them met only when an unrelated send brought a link up. With
+    /// the custody gates closed nobody is.
+    #[tokio::test]
+    async fn a_friend_holding_mail_for_this_node_is_work() {
+        use raven_core::custody_gate::{set_custody_gates_for_this_thread, CustodyGates};
+        let dir = tempfile::tempdir().unwrap();
+        let (local, alice, bob) = ([0xEE; 32], [0xA1; 32], [0xB1; 32]);
+        let row = |key: &[u8; 32], custodians: &[[u8; 32]]| {
+            serde_json::json!({
+                "pub_hex": hex::encode(key),
+                "pinned": true,
+                "custodians": custodians.iter().map(hex::encode).collect::<Vec<_>>(),
+            })
+        };
+        // Alice's mail for this node may wait with Bob.
+        let rows = vec![row(&alice, &[bob]), row(&bob, &[])];
+        std::fs::write(
+            dir.path().join("contacts.json"),
+            serde_json::Value::Array(rows).to_string(),
+        )
+        .unwrap();
+        let work = || work_for(dir.path().to_path_buf(), local, Vec::new());
+        set_custody_gates_for_this_thread(Some(CustodyGates {
+            live: true,
+            wan: false,
+        }));
+        let live = work().await;
+        set_custody_gates_for_this_thread(Some(CustodyGates {
+            live: false,
+            wan: false,
+        }));
+        let closed = work().await;
+        set_custody_gates_for_this_thread(None);
+        assert_eq!(live, [bob]);
+        assert!(closed.is_empty(), "custody closed: no keeper");
     }
 
     /// Task 2 Q5: the contacts a background scan filter remembers across
