@@ -1,11 +1,36 @@
 # Outside review scope: Bluetooth nearby on iPhones (gate 27 for phones)
 
-For the reviewer the draft amendment
-[`WAIVER_NEARBY_PHONES_AMENDMENT_DRAFT.md`](WAIVER_NEARBY_PHONES_AMENDMENT_DRAFT.md)
-asks for. The general review package is
-[`SECURITY_REVIEW_SCOPE.md`](SECURITY_REVIEW_SCOPE.md); this covers what a phone
-adds to Bluetooth nearby. Branch `release/raven-core-0.1.2` of raven-core, and `release/ios-0.1.2`
-of the iPhone app.
+A standalone brief for an outside reviewer. The owner sends it with read
+access to the code; nothing else is needed to start.
+
+## What this is
+
+Raven is a serverless messenger: friends who verified each other talk
+directly over the local network, Tor or Bluetooth, with no Raven server.
+"Bluetooth nearby" is one of those carriers (spec RNL1,
+`protocol/RAVEN_NEARBY_LINK_V1.md`): pairwise rotating beacon tokens, a knock
+before any Noise byte, then the same Noise-based Raven link as the other
+carriers. It ships on macOS today. Gate 27 would turn it on for iPhones too,
+where the radio runs inside the app and iOS decides when the app runs. A
+friend may also keep sealed mail for another and hand it over when they meet
+over Bluetooth ("friend custody", one hop).
+
+The owner has given the per-gate OK, and decided (2026-11-02) that the gate
+flips only after the owner signs the waiver amendment
+([`WAIVER_NEARBY_PHONES_AMENDMENT_DRAFT.md`](WAIVER_NEARBY_PHONES_AMENDMENT_DRAFT.md))
+and this review is in. The general review package for the rest of Raven is
+[`SECURITY_REVIEW_SCOPE.md`](SECURITY_REVIEW_SCOPE.md); this brief covers only
+what a phone adds to Bluetooth nearby.
+
+**Code:** the private repository Raven-ASHCO/RAVEN-v2, branches
+`release/raven-core-0.1.2` (the engine, Rust) and `release/ios-0.1.2` (the
+iPhone app, Swift). The flip itself is written down in the amendment's §8 and
+is not applied on either branch.
+
+**What to send back:** each finding with the file and line, what can go
+wrong and for whom, and how severe; and a short statement of what was
+checked and found sound. The owner records the review and its settled
+findings in the amendment's §9.
 
 ## Read
 

@@ -7,13 +7,20 @@
 > `docs/WAIVER_NEARBY_PHONES_<date>.md`), an outside review of the scope in
 > [`REVIEW_SCOPE_NEARBY_PHONES.md`](REVIEW_SCOPE_NEARBY_PHONES.md) is recorded,
 > and the flip in §8 lands in its own reviewed commit.
+>
+> **Owner decisions recorded (2026-11-02):**
+> - **Per-gate OK for gate 27 on iPhone: given.** The owner said to open gate 27, in the
+>   coordinating session's chat (mac-b).
+> - **Order: the outside review comes before the flip.** Asked whether to flip right after
+>   signing, the owner chose to keep the rule: gate 27 flips only after the owner signs this
+>   waiver and an outside review is in. Everything else is made ready meanwhile.
 
 | | |
 |---|---|
 | **Amends** | [`WAIVER_NEARBY_DRAFT.md`](WAIVER_NEARBY_DRAFT.md), which excludes phones (its §2, "Not covered") |
 | **Waiver ID** | `WAIVER-NEARBY-PHONES-<date>` (to be assigned on signature) |
 | **Scope** | Bluetooth LE nearby inside the iPhone app's own process, its background modes, and the custody pickup advert (§2) |
-| **Approver** | Protocol owner (signature pending) |
+| **Approver** | Protocol owner (per-gate OK given 2026-11-02; signature pending) |
 | **Date drafted** | 2026-11-02 |
 | **Review by** | 3 months after signature |
 | **Withdrawal** | Set `NEARBY_PRODUCTION_ENABLED` back to `cfg!(target_os = "macos")` in `node/crates/raven-core/src/nearby_gate.rs` and remove the two background modes from the app's release Info.plist. A phone then creates no radio object, never advertises, scans, knocks or dials over Bluetooth, and its pause is the plain pause of 0.1.1 |
@@ -68,8 +75,9 @@ allows, which waits for session renewal or letters.
 
 | Hold | Status at signature (to fill) | Waived? |
 |---|---|---|
+| The owner's per-gate OK for gate 27 on iPhone | Given 2026-11-02 | Recorded |
 | The nearby waiver itself (laptops) signed | Draft | **Not waived**: this amendment cannot stand alone |
-| Outside review of [`REVIEW_SCOPE_NEARBY_PHONES.md`](REVIEW_SCOPE_NEARBY_PHONES.md) | Not started | **Not waived** |
+| Outside review of [`REVIEW_SCOPE_NEARBY_PHONES.md`](REVIEW_SCOPE_NEARBY_PHONES.md) | Not started; before the flip (owner, 2026-11-02) | **Not waived** |
 | Privacy capture on iPhone (row P7): what an iPhone adverts in front and in the background, its address type, and the GAP name a connecting device reads | Not run | **Not waived** |
 | App Review accepts the two background modes for this use | Not asked | Not waived: a rejection means the modes and the keep pause wait |
 | Rows R0 to R8 (lab builds, 2026-11-02) | R0, R1, R2, R3, R5, R7a, R8 passed; R4 as expected; R6 and R7b show the background limits of §4 | Recorded, not waived |
@@ -161,4 +169,17 @@ happens before it is renewed:
 
 ## 9. Signature
 
-Not signed.
+Not signed. To sign, the owner fills this in, renames the file to
+`docs/WAIVER_NEARBY_PHONES_<date>.md`, and commits it alone. Signing does not
+flip the gate: the flip in §8 follows the outside review (owner decision of
+2026-11-02).
+
+| | |
+|---|---|
+| **Signed by** | |
+| **Date** | |
+| **Waiver ID** | `WAIVER-NEARBY-PHONES-<date>` |
+| **Nearby waiver (laptops) it amends** | `WAIVER_NEARBY_<date>.md`, signed on: |
+| **OD-C8 (background mail, its pickup advert included)** | recorded: yes / no |
+| **Holds of §3 at signature** | (fill each row's status) |
+| **Outside review** | reviewer, date, findings and how each was settled: |
