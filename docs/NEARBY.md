@@ -94,9 +94,10 @@ over Bluetooth, and `raven status` says the last delivery went over
 Bluetooth nearby.
 
 **Background mail** (advertising for every contact you have mail waiting
-for, or keep mail for as their mail friend, not only for the ones you just
-wrote to; cutoff addendum F11d) is off until you turn it on with its own
-consent (owner decision OD-C8, 2026-10-28):
+for, or keep mail for as their mail friend, and for the friends that keep
+mail for you, not only for the ones you just wrote to; cutoff addendum F11d,
+RNL1 §3 (c)) is off until you turn it on with its own consent (owner
+decision OD-C8, 2026-10-28):
 
 ```bash
 raven nearby background-mail on      # says what nearby devices can then see; asks first
@@ -108,7 +109,7 @@ While it is on and such mail waits, nearby devices can see a random
 Bluetooth ID (changing every 15 minutes, at most two contacts at a time)
 without any send of yours: they cannot tell whom it is for, but they can see
 that this computer advertises, and so that it keeps or waits with mail for
-someone, and for how long. Bluetooth also keeps scanning (more battery on a
+someone, or a friend keeps mail for it, and for how long. Bluetooth also keeps scanning (more battery on a
 laptop). It needs nearby itself on and never turns it on. Off a terminal,
 `on` needs `--yes` (exit 2 without it), as `raven node custody on` does.
 `raven nearby status` shows a `background` row while it is on, and `raven
@@ -158,7 +159,7 @@ it.
 
 | Who | What they can learn |
 |---|---|
-| Anyone in radio range with a Bluetooth scanner | That a computer advertises one random-looking ID, which changes every 15 minutes, only while its user is sending to a nearby contact (with background mail on, also while mail waits for a contact or is kept for one, section 2); its random Bluetooth address, how often it advertises, the signal strength, and the sizes and timing of the encrypted exchange. When this computer connects to a contact that advertises for it (also with nothing to send), a radio sniffer sees the connection come from this computer's random address. Sightings within one 15-minute period can be linked, and so can sightings across an address change that does not fall at the same moment as an ID change. |
+| Anyone in radio range with a Bluetooth scanner | That a computer advertises one random-looking ID, which changes every 15 minutes, only while its user is sending to a nearby contact (with background mail on, also while mail waits for a contact, is kept for one, or a friend keeps mail for this computer, section 2); its random Bluetooth address, how often it advertises, the signal strength, and the sizes and timing of the encrypted exchange. When this computer connects to a contact that advertises for it (also with nothing to send), a radio sniffer sees the connection come from this computer's random address. Sightings within one 15-minute period can be linked, and so can sightings across an address change that does not fall at the same moment as an ID change. |
 | Someone who recorded a contact's Bluetooth ID | The ID is a random-looking UUID anyone in range can copy. Played back near this computer within about 30 minutes of when the contact advertised it, it makes this computer connect (from its random address) as if the contact were there, at most twice per recorded ID: so the person who played it back learns that the computer the contact had something for is in range. Nothing else: no name, key, address book entry or message, and after two tries this computer ignores that ID. |
 | A device that connects to this computer | What the operating system itself shows to any connecting device: this computer's **Bluetooth name** (usually the computer's name) and, on macOS, its **model**. It also sees that there is one service with one characteristic. It gets no answer from Raven unless it is the contact the service is for. On Linux it can subscribe and see the encrypted traffic of that one contact's link while it is up (its sizes and timing, never its content). |
 | Your contact | That you are in range, and when. |

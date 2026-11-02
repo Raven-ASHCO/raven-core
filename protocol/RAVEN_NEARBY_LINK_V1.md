@@ -120,7 +120,17 @@ the cached certificate and revocation before any key is derived.
 - **Who advertises:** a node advertises `T(epoch, self)` for contact `P` only when:
   - (a) user-initiated work for `P` exists within `FOREGROUND_TTL` = 15 min (a send, an open chat,
     or `nearby on P --for`), and there is still queued work for `P`; or
-  - (b) `nearby on P` was set explicitly.
+  - (b) `nearby on P` was set explicitly; or
+  - (c) the user turned on background mail (its own consent, default off; owner decision OD-C8,
+    cutoff addendum F11d), and `P` is one of:
+    - a contact with queued work;
+    - while friend custody is live:
+      - a recipient this node holds sealed mail for;
+      - a friend this node may leave a waiting contact's mail with;
+      - a friend that holds mail for this node (this node's custody fetch targets; owner decision
+        of 2026-11-02 after the field test's row R8: without it a recipient never advertised for
+        its keeper, and a pickup waited for an unrelated send).
+    - Such contacts use only the rotation slots that (a) and (b) leave free, in turn by epoch.
 - **Air limits:** at most 1 token on air; at most 2 contacts in rotation, with 5 s slots.
 - **Address:** advertising MUST use a random (private) device address. A node whose controller would
   advertise from a public address does not advertise.
