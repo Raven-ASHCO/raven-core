@@ -346,6 +346,10 @@ pub(crate) struct Entry {
     /// Monotonic: when the next attempt is due.
     pub(crate) next_due: Instant,
     pub(crate) last_carrier: Option<OutboxCarrier>,
+    /// The carrier of its last write (written, delivered, or our ACK sent):
+    /// the way it went when its receipt came another way, where
+    /// `last_carrier` may be a later try that reached nobody.
+    pub(crate) wrote_carrier: Option<OutboxCarrier>,
     /// How the last p2p write travelled ([`DeliveryPath`]); `None` for a LAN
     /// or Internet direct write, so their views stay as they were.
     pub(crate) last_path: Option<DeliveryPath>,
@@ -469,6 +473,7 @@ impl Entry {
             failures: 0,
             next_due: now,
             last_carrier: None,
+            wrote_carrier: None,
             last_path: None,
             last_error: "",
             delivered_at_ms: 0,
@@ -2413,7 +2418,11 @@ fn apply_outcome(entry: &mut Entry, outcome: Outcome, now: Instant, wall: u64) {
                 // The attempt that got the ACK counts too.
                 entry.attempts = entry.attempts.saturating_add(1);
             }
-            entry.last_carrier = carrier.or(entry.last_carrier);
+            // The dial that brought its receipt, else its last write: never
+            // a try that reached nobody (field test 2026-11-02: Tor could
+            // not reach the friend, Bluetooth delivered it, and it read Tor).
+            entry.last_carrier = carrier.or(entry.wrote_carrier);
+            entry.wrote_carrier = entry.last_carrier;
             entry.last_error = "";
         }
         Outcome::Sent { carrier, code } => {
@@ -2421,6 +2430,7 @@ fn apply_outcome(entry: &mut Entry, outcome: Outcome, now: Instant, wall: u64) {
             if carrier.is_some() {
                 entry.attempts = entry.attempts.saturating_add(1);
                 entry.last_carrier = carrier;
+                entry.wrote_carrier = carrier;
             }
             entry.last_error = code;
             if code == code::SEND_IN_PROGRESS {
@@ -2435,6 +2445,7 @@ fn apply_outcome(entry: &mut Entry, outcome: Outcome, now: Instant, wall: u64) {
         Outcome::AckSent { carrier } => {
             entry.attempts = entry.attempts.saturating_add(1);
             entry.last_carrier = Some(carrier);
+            entry.wrote_carrier = Some(carrier);
             entry.last_error = "";
             entry.state = EntryState::Delivered;
         }
@@ -8444,6 +8455,55 @@ mod tests {
         merge_untracked(&mut items, &rows, &tracked, None, 2, now, wall);
         assert_eq!(items.len(), 2);
         assert_eq!(items[1].message_id_hex, hex::encode([3u8; 16]));
+    }
+
+    /// Field test 2026-11-02 (an iPhone in Airplane Mode with Bluetooth on):
+    /// Tor could not reach the friend, Bluetooth delivered the message later,
+    /// and the chat said "Delivered · Tor". A delivered object names the
+    /// carrier that delivered it, else the one that last wrote it (its
+    /// receipt came another way: the friend's own link, or a dial this
+    /// worker did not make), never a try that reached nobody. While it
+    /// waits, the carrier stays the last try's (its waiting reason).
+    #[test]
+    fn a_delivered_object_never_names_a_carrier_that_reached_nobody() {
+        let (now, wall) = (Instant::now(), 1_000_000);
+        let tor_lost = Outcome::Unreachable {
+            carrier: Some(OutboxCarrier::Onion),
+            code: code::NOT_REACHABLE,
+        };
+        let p2p_written = Outcome::Sent {
+            carrier: Some(OutboxCarrier::P2p),
+            code: code::NO_ACK_YET,
+        };
+        let receipt_elsewhere = Outcome::Delivered { carrier: None };
+        let seen = |outcomes: &[&Outcome]| {
+            let mut e = Entry::from_row(&sched_row(1, 7, wall + 3_600_000), now);
+            for o in outcomes {
+                apply_outcome(&mut e, (*o).clone(), now, wall);
+            }
+            let item = e.item(now, wall);
+            (item.state, item.carrier)
+        };
+        let nearby = Outcome::Delivered {
+            carrier: Some(OutboxCarrier::Nearby),
+        };
+        assert_eq!(
+            seen(&[&tor_lost, &nearby]),
+            ("delivered".into(), "nearby_dial".into())
+        );
+        assert_eq!(
+            seen(&[&tor_lost, &receipt_elsewhere]),
+            ("delivered".into(), String::new()),
+            "Tor carried nothing"
+        );
+        assert_eq!(
+            seen(&[&p2p_written, &tor_lost, &receipt_elsewhere]),
+            ("delivered".into(), "p2p_dial".into())
+        );
+        assert_eq!(
+            seen(&[&p2p_written, &tor_lost]),
+            ("sent".into(), "onion_dial".into())
+        );
     }
 
     /// E2 r40 #D, #E: each attempt that dialled counts by how it ended, and
