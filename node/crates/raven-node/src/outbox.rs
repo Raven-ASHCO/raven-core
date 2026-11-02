@@ -2828,11 +2828,15 @@ impl NetDialer {
                         )
                         .await
                     }
-                    OutboxCarrier::Nearby => {
-                        crate::nearby::dial(data_dir, &route.dial, expected_pub_hex, frames)
-                            .await
-                            .map(direct)
-                    }
+                    OutboxCarrier::Nearby => crate::nearby::dial_raced(
+                        data_dir,
+                        &route.dial,
+                        expected_pub_hex,
+                        frames,
+                        meta.race,
+                    )
+                    .await
+                    .map(direct),
                     // Its path is Tor (the carrier says it): no DeliveryPath.
                     OutboxCarrier::Onion => crate::onion::dial_with_meta(
                         data_dir,
@@ -4064,6 +4068,30 @@ struct OnionBranch {
     handle: std::thread::JoinHandle<DialResult>,
 }
 
+/// How often an attempt waiting for its onion dial looks for a nearby pipe
+/// that came up meanwhile ([`late_pipe`]).
+const LATE_PIPE_POLL: Duration = Duration::from_millis(200);
+
+/// Wait for the onion dial on `onion` to end, or for the pipe of one of
+/// `routes` (nearby routes out of range earlier in the attempt) to come up
+/// (`connected`): that route, to dial now. `None` once the onion dial ended
+/// or won the race (nothing else may write then), and at once without such
+/// a route.
+fn late_pipe(
+    onion: &std::thread::JoinHandle<DialResult>,
+    race: &RaceGuard,
+    routes: &[(OutboxRoute, OutboxRoute)],
+    connected: fn(&OutboxRoute) -> bool,
+) -> Option<(OutboxRoute, OutboxRoute)> {
+    while !routes.is_empty() && !onion.is_finished() && race.winner() != Some(RaceSide::Onion) {
+        if let Some(route) = routes.iter().find(|(p, _)| connected(p)) {
+            return Some(route.clone());
+        }
+        std::thread::sleep(LATE_PIPE_POLL);
+    }
+    None
+}
+
 fn attempt_peer_inner(
     ctx: &AttemptCtx,
     peer: &[u8; 32],
@@ -4833,7 +4861,14 @@ fn attempt_peer_inner(
             onion_branch = Some(OnionBranch { batch, handle });
             Some(race)
         });
-    for (planned, dial) in &order {
+    // Nearby routes that were out of range at their dial in this attempt,
+    // and those dialled once more since: a pipe came up while Tor tried
+    // (below, at the onion route).
+    let mut out_of_range: Vec<OutboxRoute> = Vec::new();
+    let mut redialled: Vec<OutboxRoute> = Vec::new();
+    let mut queue: VecDeque<(OutboxRoute, OutboxRoute)> = order.iter().cloned().collect();
+    while let Some((planned, dial)) = queue.pop_front() {
+        let (planned, dial) = (&planned, &dial);
         // `raven lan off` (or the end of a meeting) while this attempt runs:
         // its LAN routes left are not dialled (B-3); the next attempt plans
         // without them.
@@ -4857,6 +4892,32 @@ fn attempt_peer_inner(
             Some(branch) if is_onion => {
                 if let Some(r) = race.as_ref() {
                     r.direct_exhausted();
+                }
+                // While Tor still tries, the pipe of a nearby route that was
+                // out of range above may come up (that dial put the contact
+                // on the air, and it connected in): it is dialled now, in the
+                // race, and then Tor is waited for again. Waiting for Tor
+                // first let the pipe idle out unused (RNL1 §6: 30 s; field
+                // test R1, 2026-11-02).
+                let late: Vec<(OutboxRoute, OutboxRoute)> = order
+                    .iter()
+                    .filter(|(p, _)| out_of_range.contains(p) && !redialled.contains(p))
+                    .filter(|(p, _)| {
+                        !batch_for(p, &candidates, &owed, &acks_sent, &ack_routes, wall)
+                            .frames
+                            .is_empty()
+                    })
+                    .cloned()
+                    .collect();
+                if let Some(pipe) = race
+                    .as_deref()
+                    .and_then(|r| late_pipe(&branch.handle, r, &late, ctx.connected))
+                {
+                    redialled.push(pipe.0.clone());
+                    onion_branch = Some(branch);
+                    queue.push_front((planned.clone(), dial.clone()));
+                    queue.push_front(pipe);
+                    continue;
                 }
                 let got = branch
                     .handle
@@ -4886,7 +4947,8 @@ fn attempt_peer_inner(
                         )
                     }
                     // Its own batch, minus what another path carried
-                    // meanwhile (an unraced nearby dial).
+                    // meanwhile (a direct path that won while this dial
+                    // failed before its handshake).
                     got => {
                         let in_batch: Vec<usize> = branch
                             .batch
@@ -4914,7 +4976,10 @@ fn attempt_peer_inner(
                 // no sample.
                 let raced = matches!(
                     planned.carrier,
-                    OutboxCarrier::Lan | OutboxCarrier::Internet | OutboxCarrier::P2p
+                    OutboxCarrier::Lan
+                        | OutboxCarrier::Internet
+                        | OutboxCarrier::P2p
+                        | OutboxCarrier::Nearby
                 );
                 let meta = DialMeta {
                     karn_exclude: batch.in_batch.iter().any(|&i| candidates[i].unacked),
@@ -4981,6 +5046,12 @@ fn attempt_peer_inner(
             }
             Err(e) => {
                 let why = dial_error_code(&e);
+                if planned.carrier == OutboxCarrier::Nearby
+                    && why == code::NEARBY_NOT_IN_RANGE
+                    && !out_of_range.contains(planned)
+                {
+                    out_of_range.push(planned.clone());
+                }
                 // A find that does not lead to the contact is one no longer
                 // (§7): the beacon forgets it.
                 if is_find(planned) && find_failed(why) {
@@ -8140,6 +8211,154 @@ mod tests {
         );
         assert_eq!(net.started(), [OutboxCarrier::Onion]);
         assert_eq!(rig.bob_inbox(), ["tor only"]);
+    }
+
+    /// Bob's nearby pipe for [`LatePipeNet`]: up for a while, a moment after
+    /// the attempt's nearby dial found him out of range.
+    static LATE_PIPE_UP: AtomicBool = AtomicBool::new(false);
+
+    fn late_pipe_connected(route: &OutboxRoute) -> bool {
+        route.carrier == OutboxCarrier::Nearby && LATE_PIPE_UP.load(Ordering::SeqCst)
+    }
+
+    /// Field test R1 (2026-11-02, the Mac to an iPhone) in small: nearby is
+    /// out of range at first; that failed dial puts Bob on the air, and his
+    /// phone connects in `up_after` later; the pipe idles out after `up_for`
+    /// (RNL1 §6: 30 s). Tor keeps trying for `onion_for` and then fails,
+    /// unless the direct side wins first: it is cut then, as the real onion
+    /// dial is (`NetDialer`, `race::lost`). What gets through goes to Bob's
+    /// real dispatcher ([`FakeNet`], the nearby route's mode).
+    struct LatePipeNet {
+        inner: Arc<FakeNet>,
+        nearby: OutboxRoute,
+        up_after: Duration,
+        up_for: Duration,
+        onion_for: Duration,
+        pipe_started: AtomicBool,
+        /// The carriers that wrote frames, in order.
+        wrote: Mutex<Vec<OutboxCarrier>>,
+    }
+
+    impl Dialer for LatePipeNet {
+        fn dial(
+            &self,
+            data_dir: &Path,
+            route: &OutboxRoute,
+            expected: &str,
+            frames: &[Vec<u8>],
+        ) -> Result<Vec<Vec<u8>>, String> {
+            self.dial_path_meta(data_dir, route, expected, frames, DialMeta::default())
+                .map(|(r, _)| r)
+        }
+
+        fn dial_path_meta(
+            &self,
+            data_dir: &Path,
+            route: &OutboxRoute,
+            expected: &str,
+            frames: &[Vec<u8>],
+            meta: DialMeta,
+        ) -> Result<(Vec<Vec<u8>>, Option<DeliveryPath>), String> {
+            if route.carrier == OutboxCarrier::Onion {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .unwrap();
+                let cut = async {
+                    match meta.race {
+                        Some(ticket) => crate::onion::race::lost(ticket).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                return rt.block_on(async {
+                    tokio::select! {
+                        () = tokio::time::sleep(self.onion_for) => {
+                            Err("ONION_UNREACHABLE: the onion service did not answer".into())
+                        }
+                        () = cut => Err(crate::onion::race::RACE_LOST.into()),
+                    }
+                });
+            }
+            if route == &self.nearby
+                && !LATE_PIPE_UP.load(Ordering::SeqCst)
+                && !self.pipe_started.swap(true, Ordering::SeqCst)
+            {
+                let (net, nearby) = (self.inner.clone(), self.nearby.clone());
+                let (after, up_for) = (self.up_after, self.up_for);
+                std::thread::spawn(move || {
+                    std::thread::sleep(after);
+                    net.route_modes.lock().unwrap().insert(nearby.clone(), UP);
+                    LATE_PIPE_UP.store(true, Ordering::SeqCst);
+                    std::thread::sleep(up_for);
+                    LATE_PIPE_UP.store(false, Ordering::SeqCst);
+                    net.route_modes.lock().unwrap().insert(nearby, NOT_IN_RANGE);
+                });
+            }
+            let mode = self.inner.route_modes.lock().unwrap().get(route).copied();
+            if mode == Some(UP) {
+                if let Some(ticket) = meta.race.filter(|_| !frames.is_empty()) {
+                    if !crate::onion::race::claim(ticket) {
+                        return Err(crate::onion::race::RACE_LOST.into());
+                    }
+                }
+                self.wrote.lock().unwrap().push(route.carrier);
+            }
+            self.inner
+                .dial_path_meta(data_dir, route, expected, frames, meta)
+        }
+    }
+
+    /// R1: Bob's nearby pipe comes up while Tor is still trying (his phone
+    /// connected in after this attempt's nearby dial put him on the air).
+    /// The attempt dials the pipe at once, in the race: it delivers, and Tor
+    /// is cut. Before, the attempt waited for Tor (field test: 15 to 40 s)
+    /// and the pipe idled out unused.
+    #[test]
+    fn tor_race_a_nearby_pipe_that_comes_up_while_tor_tries_delivers() {
+        if !lab_backends() {
+            return;
+        }
+        let rig = Rig::new(0xa5);
+        bob_with_onion(&rig, "");
+        let n = nearby_route(&rig.bob_pub);
+        rig.set_route(n.clone(), NOT_IN_RANGE);
+        let mid = rig.stage_queued("while tor tries", DAY);
+        rig.record(&mid, CarrierChoice::Auto, &[]);
+        let net = Arc::new(LatePipeNet {
+            inner: rig.net.clone(),
+            nearby: n.clone(),
+            up_after: Duration::from_millis(300),
+            up_for: Duration::from_millis(1_500),
+            onion_for: Duration::from_secs(4),
+            pipe_started: AtomicBool::new(false),
+            wrote: Mutex::new(Vec::new()),
+        });
+        let ctx = AttemptCtx {
+            dialer: net.clone(),
+            nearby_live: on,
+            nearby_available: nearby_everyone,
+            onion_live: on,
+            onion_available: on,
+            onion_head_start: || Duration::from_millis(100),
+            connected: late_pipe_connected,
+            ..rig.ctx()
+        };
+        let t = std::time::Instant::now();
+        let report = rig.attempt_with(&ctx);
+        assert_eq!(
+            only(&report),
+            Outcome::Delivered {
+                carrier: Some(OutboxCarrier::Nearby)
+            }
+        );
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "Tor was cut: {:?}",
+            t.elapsed()
+        );
+        assert_eq!(*net.wrote.lock().unwrap(), [OutboxCarrier::Nearby]);
+        assert_eq!(rig.dialled(), [n.clone(), n]);
+        assert_eq!(rig.bob_inbox(), ["while tor tries"]);
     }
 
     /// The worker's onion dials get Tor's deadline, not the 45 s of a direct

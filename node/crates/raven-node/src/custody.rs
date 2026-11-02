@@ -45,6 +45,8 @@ use raven_core::friend_custody::CustodyCode;
 use raven_core::identity::Identity;
 use raven_core::outbox::{retry_delay, DeliveryPath, OutboxCarrier, OutboxRoute};
 use tokio::sync::Notify;
+
+use crate::onion::race::{RaceGuard, Side as RaceSide};
 use tokio::time::Instant;
 
 /// Base fetch interval per custodian.
@@ -1111,16 +1113,36 @@ pub(crate) fn dial_route_path(
                 }
                 // A custodian's Tor route (lab, `custodian_routes`): a
                 // deposit, the forwarder, a fetch within ONION_FETCH_EVERY;
-                // its path is Tor.
-                OutboxCarrier::Onion => crate::onion::dial_with_meta(
-                    data_dir,
-                    &route.dial,
-                    expected_pub_hex,
-                    frames,
-                    crate::learning::DialMeta::default(),
-                )
-                .await
-                .map(|replies| (replies, None)),
+                // its path is Tor. Every pass plans the friend's nearby
+                // route after it (`nearby::custodian_route`): a pipe to the
+                // friend that is up meanwhile cuts it ([`onion_unless_pipe`]).
+                OutboxCarrier::Onion => {
+                    let pipe = crate::internet_direct::parse_pub_hex(expected_pub_hex)
+                        .ok()
+                        .and_then(|peer| crate::nearby::custodian_route(&peer))
+                        .map(|(planned, _)| (planned, RaceGuard::new()));
+                    let meta = crate::learning::DialMeta {
+                        race: pipe.as_ref().map(|(_, race)| race.ticket(RaceSide::Onion)),
+                        ..crate::learning::DialMeta::default()
+                    };
+                    let dial = crate::onion::dial_with_meta(
+                        data_dir,
+                        &route.dial,
+                        expected_pub_hex,
+                        frames,
+                        meta,
+                    );
+                    match &pipe {
+                        Some((planned, race)) => {
+                            onion_unless_pipe(dial, race, || {
+                                crate::nearby::route_connected(planned)
+                            })
+                            .await
+                        }
+                        None => dial.await,
+                    }
+                    .map(|replies| (replies, None))
+                }
             }
         };
         let deadline = if route.carrier == OutboxCarrier::Onion {
@@ -1139,6 +1161,39 @@ pub(crate) fn dial_route_path(
             .await
             .unwrap_or_else(|_| Err("custody dial deadline".into()))
     })
+}
+
+/// How often a custodian's Tor dial looks for a nearby pipe to the same
+/// friend ([`onion_unless_pipe`]).
+const PIPE_POLL: Duration = Duration::from_millis(200);
+
+/// A custodian's Tor dial (`dial`, holding `race`'s onion ticket) while a
+/// nearby pipe to the same friend may be up (`pipe_up`): once it is, the
+/// pipe's side takes the race and Tor writes nothing
+/// ([`crate::onion::race::RACE_LOST`]), so the nearby route, next in turn,
+/// is dialled while the pipe is there. Waiting for Tor (up to 75 s) let the
+/// pipe idle out unused (RNL1 §6: 30 s), as in the outbox (field test R1,
+/// 2026-11-02). A Tor link that authenticated first goes on.
+async fn onion_unless_pipe<T>(
+    dial: impl std::future::Future<Output = Result<T, String>>,
+    race: &RaceGuard,
+    pipe_up: impl Fn() -> bool,
+) -> Result<T, String> {
+    let piped = async {
+        loop {
+            if pipe_up() {
+                if crate::onion::race::claim(race.ticket(RaceSide::Direct)) {
+                    return;
+                }
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(PIPE_POLL).await;
+        }
+    };
+    tokio::select! {
+        done = dial => done,
+        () = piped => Err(crate::onion::race::RACE_LOST.into()),
+    }
 }
 
 /// One custody dial as a fetch pass makes it: a route, the custodian's key
@@ -2630,6 +2685,93 @@ mod tests {
             dial_in_turn(&none, &mut first, |_| Ok(())),
             Err("no custodian route".into())
         );
+    }
+
+    /// A custodian's Tor dial as [`dial_route_path`] makes it while a nearby
+    /// pipe to the friend may come up: Tor takes `tor_for`, claiming the
+    /// race right before it writes (`netutil::ReplyCollector::begin`), and
+    /// says whether it wrote.
+    fn custody_tor_dial(
+        rt: &tokio::runtime::Runtime,
+        tor_claims_after: Duration,
+        tor_for: Duration,
+        pipe_up: impl Fn() -> bool,
+        wrote: &std::sync::atomic::AtomicBool,
+    ) -> Result<&'static str, String> {
+        let race = RaceGuard::new();
+        let ticket = race.ticket(RaceSide::Onion);
+        let tor = async move {
+            tokio::time::sleep(tor_claims_after).await;
+            if !crate::onion::race::claim(ticket) {
+                return Err(crate::onion::race::RACE_LOST.to_string());
+            }
+            wrote.store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(tor_for.saturating_sub(tor_claims_after)).await;
+            Ok("tor")
+        };
+        rt.block_on(onion_unless_pipe(tor, &race, pipe_up))
+    }
+
+    /// Row R3 (a custodian hands held mail to a friend over Bluetooth) in
+    /// small: the friend's nearby pipe comes up while the custodian's Tor
+    /// dial still tries (up to 75 s; here 4 s). Tor yields and writes
+    /// nothing, and the nearby route, planned after it, carries the frames
+    /// while the pipe is up. Before, the pass waited for Tor and the pipe
+    /// idled out unused (RNL1 §6: 30 s).
+    #[test]
+    fn a_custody_tor_dial_yields_to_a_nearby_pipe_that_comes_up() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let t = std::time::Instant::now();
+        let pipe_up = || t.elapsed() >= Duration::from_millis(300);
+        let wrote = std::sync::atomic::AtomicBool::new(false);
+        let routes = [OutboxCarrier::Onion, OutboxCarrier::Nearby];
+        let mut first = 0;
+        let mut calls = Vec::new();
+        let got = dial_in_turn(&routes, &mut first, |carrier| {
+            calls.push(*carrier);
+            match carrier {
+                OutboxCarrier::Onion => custody_tor_dial(
+                    &rt,
+                    Duration::from_secs(4),
+                    Duration::from_secs(4),
+                    pipe_up,
+                    &wrote,
+                ),
+                _ if pipe_up() => Ok("nearby"),
+                _ => Err(crate::nearby::NEARBY_NOT_IN_RANGE.into()),
+            }
+        });
+        assert_eq!(got, Ok("nearby"));
+        assert_eq!(calls, routes);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(
+            !wrote.load(std::sync::atomic::Ordering::SeqCst),
+            "Tor wrote nothing"
+        );
+    }
+
+    /// A Tor link that authenticated before the pipe came up goes on: the
+    /// pipe takes nothing from it, and nothing else is dialled.
+    #[test]
+    fn a_custody_tor_dial_that_got_through_first_is_not_cut() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let t = std::time::Instant::now();
+        let wrote = std::sync::atomic::AtomicBool::new(false);
+        let got = custody_tor_dial(
+            &rt,
+            Duration::from_millis(100),
+            Duration::from_millis(800),
+            || t.elapsed() >= Duration::from_millis(300),
+            &wrote,
+        );
+        assert_eq!(got, Ok("tor"));
+        assert!(wrote.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ── Phase 3 P3.20: learned custody in the fetcher ──────────────────────

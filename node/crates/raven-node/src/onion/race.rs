@@ -4,11 +4,11 @@
 //! One outbox attempt with an onion route and any other route holds a
 //! [`RaceGuard`]. Its dials carry a [`RaceTicket`] (in
 //! [`crate::learning::DialMeta::race`]): the onion dial the onion side's,
-//! every LAN, Internet direct and p2p dial the direct side's. The first dial
-//! that completes the Raven handshake (the contact's RLB1 offer read and
-//! verified: `netutil::ReplyCollector::begin`, right before the first frame)
-//! [`claim`]s the attempt for its side and writes its frames; a dial of the
-//! other side that gets there later writes nothing and ends with
+//! every LAN, Internet direct, p2p and nearby dial the direct side's. The
+//! first dial that completes the Raven handshake (the contact's RLB1 offer
+//! read and verified: `netutil::ReplyCollector::begin`, right before the
+//! first frame) [`claim`]s the attempt for its side and writes its frames; a
+//! dial of the other side that gets there later writes nothing and ends with
 //! [`RACE_LOST`], which is no route failure. A dial of the losing side still
 //! in flight is cut at once ([`lost`]).
 //!

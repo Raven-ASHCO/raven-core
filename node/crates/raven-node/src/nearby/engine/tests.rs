@@ -410,7 +410,7 @@ async fn discovery_knock_pipe_then_a_message_and_its_sealed_ack_both_ways() {
     .await;
 
     let to_bob = seal(a.path(), &alice, &key_ab, "over the air");
-    let replies = crate::nearby::dial_on(&alice_engine, a.path(), &bob_pub, &[to_bob])
+    let replies = crate::nearby::dial_on(&alice_engine, a.path(), &bob_pub, &[to_bob], None)
         .await
         .expect("delivered over nearby");
     assert_eq!(
@@ -421,7 +421,7 @@ async fn discovery_knock_pipe_then_a_message_and_its_sealed_ack_both_ways() {
     assert_eq!(inbox(b.path()), ["over the air"]);
 
     let to_alice = seal(b.path(), &bob, &key_ba, "and back");
-    let replies = crate::nearby::dial_on(&bob_engine, b.path(), &alice_pub, &[to_alice])
+    let replies = crate::nearby::dial_on(&bob_engine, b.path(), &alice_pub, &[to_alice], None)
         .await
         .expect("delivered over nearby");
     assert_eq!(

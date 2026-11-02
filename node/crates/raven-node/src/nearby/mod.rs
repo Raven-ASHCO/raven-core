@@ -811,6 +811,19 @@ pub(crate) async fn dial(
     expected_pub_hex: &str,
     frames: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, String> {
+    dial_raced(data_dir, nearby_dial, expected_pub_hex, frames, None).await
+}
+
+/// [`dial`] as one of the outbox's direct paths in its Tor race
+/// ([`crate::onion::race`]): with `race`, the link claims it before its
+/// first frame, and one whose other side already won writes nothing.
+pub(crate) async fn dial_raced(
+    data_dir: &Path,
+    nearby_dial: &str,
+    expected_pub_hex: &str,
+    frames: &[Vec<u8>],
+    race: Option<crate::onion::race::RaceTicket>,
+) -> Result<Vec<Vec<u8>>, String> {
     NEARBY_LINK.require_live()?;
     let expected = internet_direct::parse_pub_hex(expected_pub_hex)?;
     if nearby_dial_peer(nearby_dial) != Some(expected) {
@@ -826,15 +839,16 @@ pub(crate) async fn dial(
         ));
     }
     let engine = current().ok_or_else(|| NEARBY_NOT_RUNNING.to_string())?;
-    dial_on(&engine, data_dir, &expected, frames).await
+    dial_on(&engine, data_dir, &expected, frames, race).await
 }
 
-/// [`dial`] on `engine`, past the checks.
+/// [`dial_raced`] on `engine`, past the checks.
 pub(crate) async fn dial_on(
     engine: &EngineHandle,
     data_dir: &Path,
     expected: &[u8; 32],
     frames: &[Vec<u8>],
+    race: Option<crate::onion::race::RaceTicket>,
 ) -> Result<Vec<Vec<u8>>, String> {
     let pipe = match engine.pipe_for(*expected, CONNECT_BUDGET).await {
         Ok(pipe) => pipe,
@@ -854,6 +868,7 @@ pub(crate) async fn dial_on(
         }
     };
     let mut progress = DialProgress::new(NEARBY_LINK.wire, PRODUCTION_REPLY_WAITS);
+    progress.collector.set_race(race);
     let outcome = tokio::time::timeout(
         DIAL_DEADLINE,
         internet_direct::dial_session_on(
