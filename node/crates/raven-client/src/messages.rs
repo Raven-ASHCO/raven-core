@@ -429,6 +429,24 @@ pub(crate) fn carried_label(item: &OutboxItem, letter: bool) -> Option<PathLabel
     }
 }
 
+/// Did the carrier raven-node's outbox lists for `item` carry the message?
+/// It did once the outbox saw it delivered, and when its last attempt wrote
+/// it (no receipt yet). Otherwise it is a try that reached nobody: the
+/// history turns delivered before the outbox's list does (the list is read
+/// up to 1.5 s old, and the worker applies an attempt's outcome when the
+/// attempt ends), and field test 2026-11-02 read "Delivered · Tor" for a
+/// message Tor could not reach and Bluetooth delivered.
+fn listed_carrier_wrote_it(item: &OutboxItem) -> bool {
+    match item.state.as_str() {
+        "delivered" => true,
+        "sent" => matches!(
+            item.last_error_code.as_str(),
+            "NO_ACK_YET" | "SEND_IN_PROGRESS"
+        ),
+        _ => false,
+    }
+}
+
 /// A `state` event's fields (API.md): the state, its deadline while it
 /// waits, and how it travels once known (`path`, `path_kind`, and the
 /// friend that holds a copy, `via_name`).
@@ -644,7 +662,7 @@ fn views(
                 // Friends carry it (held, passed on, or a letter): said
                 // while it waits too; else how the last write travelled.
                 carried_label(i, letter).or_else(|| {
-                    matches!(state, State::Sent | State::Delivered)
+                    (matches!(state, State::Sent | State::Delivered) && listed_carrier_wrote_it(i))
                         .then(|| path_label(&i.carrier, &i.path, &[]))
                         .flatten()
                 })
@@ -2652,6 +2670,66 @@ mod tests {
             .push(pending(Job::Done, Some(Outcome::NodeUnavailable)));
         bind(&mut book, &history);
         assert_eq!(book.pendings[0].bound_mid, None);
+    }
+
+    /// Field test 2026-11-02 (an iPhone in Airplane Mode with Bluetooth on):
+    /// a message nearby could not reach at first waited in raven-node's
+    /// outbox, which tried Tor (not reachable) and then delivered it over
+    /// Bluetooth; the chat said "Delivered · Tor" for good. The history
+    /// turns delivered before the outbox's list does (the list is read up to
+    /// 1.5 s old, and the worker applies an attempt's outcome when the
+    /// attempt ends), and the list still named the failed Tor try. The
+    /// outbox's carrier says the way once the outbox saw it delivered, or
+    /// when its last attempt wrote it; until then nothing is kept, and
+    /// raven-node's last delivery to the friend says the way.
+    #[test]
+    fn a_delivery_never_takes_the_carrier_of_a_try_that_reached_nobody() {
+        let mut book = MessageBook::default();
+        book.pendings.push(pending(
+            Job::Done,
+            Some(Outcome::Waiting {
+                background: true,
+                connect: true,
+            }),
+        ));
+        let history = vec![entry("ab", "out", "hi", "delivered")];
+        let listed = |state: &str, carrier: &str, code: &str| OutboxSnap {
+            answered: true,
+            worker_running: true,
+            items: HashMap::from([(
+                "ab".to_owned(),
+                OutboxItem {
+                    carrier: carrier.into(),
+                    last_error_code: code.into(),
+                    ..item(state, 0)
+                },
+            )]),
+            ..Default::default()
+        };
+        let tor_lost = listed("queued", "onion_dial", "NOT_REACHABLE");
+        let v = views(&mut book, &history, &tor_lost, &[], 10);
+        assert_eq!(
+            (v[0].id.as_str(), v[0].state),
+            ("pending-1", State::Delivered)
+        );
+        assert_eq!(v[0].path, None, "Tor reached nobody");
+        assert_eq!(book.pendings[0].path, None, "nothing kept");
+        // Written over p2p, no receipt yet, then a Tor try failed: the same.
+        let written_then_lost = listed("sent", "onion_dial", "NOT_REACHABLE");
+        let v = views(&mut book, &history, &written_then_lost, &[], 10);
+        assert_eq!(v[0].path, None);
+        // The outbox saw it delivered over Bluetooth: that way, kept.
+        let nearby = listed("delivered", "nearby_dial", "");
+        let v = views(&mut book, &history, &nearby, &[], 10);
+        assert_eq!(v[0].path.as_ref().map(|p| p.kind), Some("nearby"));
+        let v = views(&mut book, &history, &tor_lost, &[], 10);
+        assert_eq!(v[0].path.as_ref().map(|p| p.kind), Some("nearby"));
+        // Its last attempt wrote it (the receipt came on another link).
+        let mut book = MessageBook::default();
+        book.pendings.push(pending(Job::Done, Some(Outcome::Sent)));
+        let written = listed("sent", "p2p_dial", "NO_ACK_YET");
+        let v = views(&mut book, &history, &written, &[], 10);
+        assert_eq!(v[0].path.as_ref().map(|p| p.kind), Some("p2p"));
     }
 
     #[test]
