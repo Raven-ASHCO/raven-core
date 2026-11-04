@@ -27,7 +27,7 @@ authors = ["RAVEN contributors"]
 raven-core = { path = "crates/raven-core" }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
