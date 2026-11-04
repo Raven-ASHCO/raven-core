@@ -199,7 +199,7 @@ objc2-core-bluetooth = { version = "=0.3.2", optional = true, default-features =
 # (src/proxy.rs, WinHttpGetIEProxyConfigForCurrentUser), a feature of the same
 # windows-sys; its strings are freed with GlobalFree (Win32_Foundation).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
