@@ -188,6 +188,17 @@ fn max_interval(base: Duration) -> Duration {
     base.saturating_mul(10).min(MAX_INTERVAL)
 }
 
+/// The fetch interval at a custodian after `empty` empty rounds in a row,
+/// for the base interval `base`: `base` up to [`EMPTY_BEFORE_BACKOFF`] of
+/// them, then doubling up to [`max_interval`].
+fn idle_interval(empty: u32, base: Duration) -> Duration {
+    if empty > EMPTY_BEFORE_BACKOFF {
+        (base * 2u32.saturating_pow(empty - EMPTY_BEFORE_BACKOFF)).min(max_interval(base))
+    } else {
+        base
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     /// custodian -> parked until (with why).
@@ -206,7 +217,8 @@ struct Shared {
     /// Phase 6b R6: misbehaviour strikes per custodian (within a day).
     misbehaved: HashMap<[u8; 32], Vec<Instant>>,
     /// The custodian a fetch pass works on now (its entry is out of
-    /// `states` meanwhile), and whether [`peer_seen`] named it since.
+    /// `states` meanwhile), and whether [`peer_seen`] named it since, or a
+    /// kick, a network change or Tor coming up came ([`Shared::all_due`]).
     in_pass: Option<([u8; 32], bool)>,
     /// Inbound store tags derived so far (§8.1), in memory only. A pass
     /// takes it out while it runs.
@@ -297,16 +309,29 @@ impl Shared {
             || !within(self.onion_fetch_at.get(custodian), ONION_FETCH_EVERY)
     }
 
-    /// [`kick`]: every custodian due at `now`, parks cleared (save a
-    /// misbehaving custodian's, which only [`Self::retry`] lifts).
+    /// [`kick`]: every custodian due at `now` ([`Self::all_due`]), parks
+    /// cleared (save a misbehaving custodian's, which only [`Self::retry`]
+    /// lifts).
     fn kick(&mut self, now: Instant) {
+        self.all_due(now);
+        // An explicit kick (OutboxKick) also clears parks.
+        self.parked.retain(|_, (_, why)| *why == CUSTODY_MISBEHAVED);
+        self.parked_pair.clear();
+    }
+
+    /// Every custodian due at `now` with its empty rounds forgotten, and
+    /// every forward row. The one a pass is dialling (out of `states`
+    /// meanwhile) is due again when that pass ends, if the pass reached
+    /// nothing ([`Self::end_fetch`]): a kick, a network change or Tor
+    /// coming up during its dial was lost for it before.
+    fn all_due(&mut self, now: Instant) {
         for (_, due, empty) in self.states.values_mut() {
             *due = now;
             *empty = 0;
         }
-        // An explicit kick (OutboxKick) also clears parks.
-        self.parked.retain(|_, (_, why)| *why == CUSTODY_MISBEHAVED);
-        self.parked_pair.clear();
+        if let Some((_, again)) = self.in_pass.as_mut() {
+            *again = true;
+        }
         self.forward_everything(now);
     }
 
@@ -517,7 +542,8 @@ impl Shared {
     /// empty rounds, or at `now` when the pass reached nothing (`missed`: no
     /// route, or every dial failed) and a link from it or its new routes
     /// came meanwhile (perhaps it moved while the pass dialled where it
-    /// was, cutoff F8). A pass that reached it keeps its own next time.
+    /// was, cutoff F8), or a kick, a network change or Tor coming up. A
+    /// pass that reached it keeps its own next time.
     fn end_fetch(
         &mut self,
         custodian: [u8; 32],
@@ -532,13 +558,17 @@ impl Shared {
     }
 
     /// [`network_changed`]: every custodian due at `now`, and every forward
-    /// row; parks and strikes stay.
+    /// row ([`Self::all_due`]); parks and strikes stay.
     fn network_changed(&mut self, now: Instant) {
-        for (_, due, empty) in self.states.values_mut() {
-            *due = now;
-            *empty = 0;
-        }
-        self.forward_everything(now);
+        self.all_due(now);
+    }
+
+    /// [`tor_ready`]: as after a network change, every custodian due at
+    /// `now` with its empty rounds forgotten (so the idle-Tor rule,
+    /// [`Self::onion_fetch_ok`], lets its onion route through), and every
+    /// forward row ([`Self::all_due`]); parks and strikes stay.
+    fn tor_ready(&mut self, now: Instant) {
+        self.all_due(now);
     }
 
     /// [`note_deposit`]: `custodian` due by `due` at the latest.
@@ -890,6 +920,36 @@ pub(crate) fn note_forward_hop_for_tests(hop: &[u8; 32], on: bool) {
 pub(crate) fn network_changed() {
     lock().network_changed(Instant::now());
     notify().notify_one();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`tor_ready`] calls on this thread (a `#[tokio::test]` runs its
+    /// tasks on it).
+    static TOR_READY_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// This node's Tor became usable (`crate::onion`): a helper life's first
+/// ready (a start, a network change, a wake, a restart), Tor relays reached
+/// after a ready from Tor's cache, or our own Tor working again (T11). Every
+/// custodian is due now with its empty rounds forgotten, so the idle-Tor
+/// rule ([`ONION_FETCH_EVERY`]) lets its onion route through: a mail friend
+/// only Tor reaches is asked for what it holds as soon as Tor is ready, not
+/// at the next poll (up to a minute later) or 30 minutes after the last Tor
+/// fetch there. The custodian a pass is dialling is due again when that
+/// pass ends, if the pass reached nothing. Parks and strikes stay; with the
+/// custody gate closed nothing is tracked, so this does nothing.
+pub(crate) fn tor_ready() {
+    #[cfg(test)]
+    TOR_READY_CALLS.with(|n| n.set(n.get() + 1));
+    lock().tor_ready(Instant::now());
+    notify().notify_one();
+}
+
+/// How often [`tor_ready`] ran on this thread.
+#[cfg(test)]
+pub(crate) fn tor_ready_calls() -> u32 {
+    TOR_READY_CALLS.with(std::cell::Cell::get)
 }
 
 /// A contact's custody offer (or the custodians it announced) changed
@@ -1521,7 +1581,18 @@ fn fetch_pass_with(
             if let Some(p) = path {
                 s.last_path.insert(custodian, p);
             }
-            if all_failed {
+            if routes.is_empty() {
+                // No route at all (no address known, Tor not usable yet, or
+                // the idle-Tor rule took its route): nothing was asked
+                // there, so this was no round. Its failures and empty
+                // rounds stay as they were, and it is looked at again on
+                // its current interval; Tor coming up makes it due at once
+                // ([`tor_ready`]). It used to count as an empty round,
+                // which after an iPhone open or a network change kept the
+                // onion route off until 30 minutes after the last Tor fetch
+                // there (ONION_FETCH_EVERY).
+                idle_interval(empty, base)
+            } else if all_failed {
                 // Not reached at all. With releases owed there it is retried
                 // like a delivery (5 s doubling to 10 min); an idle poll,
                 // with nothing known to wait there, backs off from the base
@@ -1549,12 +1620,7 @@ fn fetch_pass_with(
                     }
                     _ => {
                         empty = empty.saturating_add(1);
-                        if empty > EMPTY_BEFORE_BACKOFF {
-                            (base * 2u32.saturating_pow(empty - EMPTY_BEFORE_BACKOFF))
-                                .min(max_interval(base))
-                        } else {
-                            base
-                        }
+                        idle_interval(empty, base)
                     }
                 }
             }
@@ -2247,6 +2313,158 @@ mod tests {
             Some("CUSTODY_HOLD"),
             "the park stays"
         );
+    }
+
+    /// This node's Tor became usable (a helper life's first ready, relays
+    /// after a ready from cache, our Tor working again): every custodian is
+    /// due now with its empty rounds forgotten, so the idle-Tor rule lets
+    /// the onion route through at once; every forward row is due; parks
+    /// stay.
+    #[test]
+    fn tor_coming_up_makes_every_custodian_due_with_tor_allowed() {
+        let _g = Gates::on(true, false);
+        raven_core::custody_gate::set_handoff_gate_for_this_thread(Some(true));
+        let mut s = Shared::default();
+        let t0 = Instant::now();
+        let (c, d) = ([0xCA; 32], [0xCB; 32]);
+        // The last Tor fetch at `c`, 5 minutes ago, found nothing.
+        s.onion_fetch_at.insert(c, t0);
+        let now = t0 + Duration::from_secs(300);
+        let later = now + Duration::from_secs(480);
+        s.states.insert(c, (FetchState::default(), later, 5));
+        s.states.insert(d, (FetchState::default(), later, 0));
+        s.park_for_code(&d, &[0xBB; 32], CustodyCode::Hold, now);
+        s.forward_next = Some(later);
+        assert!(!s.onion_fetch_ok(&c, 4, now), "an idle poll: no Tor yet");
+        s.tor_ready(now);
+        raven_core::custody_gate::set_handoff_gate_for_this_thread(None);
+        for x in [c, d] {
+            assert_eq!((s.states[&x].1, s.states[&x].2), (now, 0), "due now");
+        }
+        assert!(s.onion_fetch_ok(&c, s.states[&c].2, now), "over Tor now");
+        assert_eq!(s.parked(&d, None, now), Some("CUSTODY_HOLD"), "parks stay");
+        assert!(s.forward_all);
+        assert_eq!(s.forward_next, Some(now), "forward rows due");
+    }
+
+    /// A kick, a network change or Tor coming up while a pass dials a
+    /// custodian (its entry is out of `states` then) was lost for it: the
+    /// pass put back its own next time. Now that custodian is due again as
+    /// soon as the pass ends if it reached nothing there; a pass that
+    /// reached it keeps its own next time and empty rounds.
+    #[test]
+    fn a_wake_during_a_custodians_fetch_is_not_lost() {
+        let mut s = Shared::default();
+        let now = Instant::now();
+        let c = [0xCC; 32];
+        let later = now + BASE_INTERVAL;
+        type Wake = fn(&mut Shared, Instant);
+        let wakes: [(&str, Wake); 3] = [
+            ("a kick", Shared::kick),
+            ("a network change", Shared::network_changed),
+            ("Tor ready", Shared::tor_ready),
+        ];
+        for (what, wake) in wakes {
+            for (missed, due) in [(true, now), (false, later)] {
+                s.states.remove(&c);
+                s.begin_fetch(&c);
+                wake(&mut s, now);
+                s.end_fetch(c, FetchState::default(), (later, 2), missed, now);
+                assert_eq!(
+                    (s.states[&c].1, s.states[&c].2),
+                    (due, 2),
+                    "{what}, missed {missed}"
+                );
+                assert!(s.in_pass.is_none());
+            }
+        }
+    }
+
+    /// The idle interval is the empty-round rule as it was: the base
+    /// interval for the first three empty rounds, then doubling up to ten
+    /// base intervals.
+    #[test]
+    fn the_idle_interval_is_the_empty_round_rule() {
+        let old = |empty: u32, base: Duration| {
+            if empty > EMPTY_BEFORE_BACKOFF {
+                (base * 2u32.saturating_pow(empty - EMPTY_BEFORE_BACKOFF)).min(max_interval(base))
+            } else {
+                base
+            }
+        };
+        for base in [BASE_INTERVAL, Duration::from_secs(1)] {
+            for empty in 0..=12 {
+                assert_eq!(
+                    idle_interval(empty, base),
+                    old(empty, base),
+                    "{empty} {base:?}"
+                );
+            }
+        }
+        let minutes = |m: u64| Duration::from_secs(60 * m);
+        let idle: Vec<Duration> = (0..8).map(|n| idle_interval(n, BASE_INTERVAL)).collect();
+        assert_eq!(idle, [1, 1, 1, 1, 2, 4, 8, 10].map(minutes));
+    }
+
+    /// The iPhone app back in front, or a desktop's Tor restarted after a
+    /// network change, with a mail friend only Tor reaches: custody is
+    /// kicked at once (the listeners came up, the network changed) and
+    /// Tor is ready from its cache 2 s later. Before, the pass at the kick
+    /// found no route (Tor not ready yet) and counted an empty round, and
+    /// nothing told custody when Tor was ready: the friend was asked at
+    /// the next poll a minute later, or, when the last Tor fetch there
+    /// (which found nothing) was 5 minutes before, once the idle-Tor rule
+    /// let Tor through again, 27 minutes later. Now it is asked as soon as
+    /// Tor is ready.
+    #[test]
+    fn a_mail_friend_only_tor_reaches_is_asked_as_soon_as_tor_is_ready() {
+        let c = [0xCE; 32];
+        let ready_after = Duration::from_secs(2);
+        // After the kick, when the first Tor fetch at `c` goes (`None`: not
+        // within an hour). The last Tor fetch there was `tor_fetch_before`
+        // before the kick, if any; it had brought nothing, as the rounds
+        // since (`c` was last due 4 minutes on, after 6 empty rounds).
+        let first_tor_fetch = |tor_fetch_before: Option<Duration>, old_rule: bool| {
+            let t = Instant::now();
+            let t0 = t + Duration::from_secs(3_600);
+            let mut s = Shared::default();
+            s.states
+                .insert(c, (FetchState::default(), t0 + 4 * BASE_INTERVAL, 6));
+            if let Some(before) = tor_fetch_before {
+                s.onion_fetch_at.insert(c, t0 - before);
+            }
+            s.kick(t0);
+            let mut now = t0;
+            while now < t0 + Duration::from_secs(3_600) {
+                let tor = now >= t0 + ready_after;
+                if now == t0 + ready_after && !old_rule {
+                    s.tor_ready(now);
+                }
+                let (due, empty) = (s.states[&c].1, s.states[&c].2);
+                if due <= now {
+                    if tor && s.onion_fetch_ok(&c, empty, now) {
+                        return Some(now - t0);
+                    }
+                    // A pass with no route to `c` (Tor not ready yet, or
+                    // the idle-Tor rule): before, an empty round.
+                    let empty = if old_rule { empty + 1 } else { empty };
+                    let next = now + idle_interval(empty, BASE_INTERVAL);
+                    s.states.insert(c, (FetchState::default(), next, empty));
+                }
+                now += Duration::from_secs(1);
+            }
+            None
+        };
+        let recent = Some(Duration::from_secs(300));
+        let before = [first_tor_fetch(None, true), first_tor_fetch(recent, true)];
+        let after = [first_tor_fetch(None, false), first_tor_fetch(recent, false)];
+        eprintln!(
+            "a mail friend only Tor reaches is asked over Tor {before:?} after the kick before \
+             (no Tor fetch there lately; one 5 min before), {after:?} now"
+        );
+        let secs = |s: u64| Some(Duration::from_secs(s));
+        assert_eq!(before, [secs(60), secs(27 * 60)]);
+        assert_eq!(after, [secs(2), secs(2)]);
     }
 
     /// Phase 5 nearby (design step 5.12, cutoff addendum F11d): a pipe to a
@@ -3449,6 +3667,59 @@ mod tests {
         pass(&fix, &shared, &carol, &seen, true, t2, wall);
         assert_eq!(wait_after(t2), BASE_INTERVAL);
         assert!(!lock_of(&shared).failures.contains_key(&fix.carol));
+    }
+
+    /// A pass that finds no route to a custodian at all (here no saved
+    /// address; Tor not usable yet, or the idle-Tor rule taking its onion
+    /// route, leaves none the same way) asks nothing there: nothing is
+    /// dialled, and it is no round. Before, it counted an empty round and
+    /// cleared the custodian's failures: after an iPhone open or a network
+    /// change the idle-Tor rule then kept Tor off there until 30 minutes
+    /// after the last Tor fetch, and a link from a friend that had been
+    /// unreachable no longer pulled its fetch forward. Now its empty rounds
+    /// and failures stay, and it is looked at again on its current
+    /// interval (Tor coming up makes it due at once).
+    #[test]
+    fn a_pass_with_no_route_to_a_custodian_is_no_round() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, false);
+        let fix = Fix::new(0xB9);
+        // Bob lists Carol as his mail friend (a fetch target with or
+        // without hints); Carol has no saved address.
+        fix.book(&[fix.carol]);
+        let book = fix.dir().join("contacts.json");
+        let mut rows: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&book).unwrap()).unwrap();
+        for row in rows.as_array_mut().unwrap() {
+            if row["pub_hex"] == hex::encode(fix.carol) {
+                row.as_object_mut().unwrap().remove("lan_dial");
+            }
+        }
+        std::fs::write(&book, rows.to_string()).unwrap();
+        let wall = raven_core::clock::now_ms();
+        let base = lab_fetch_interval().unwrap_or(BASE_INTERVAL);
+        for empty in [0, 5] {
+            let (shared, carol, seen) = (Mutex::default(), Carol::default(), Seen::default());
+            let t0 = Instant::now();
+            {
+                let mut s = lock_of(&shared);
+                s.states
+                    .insert(fix.carol, (FetchState::default(), t0, empty));
+                s.failures.insert(fix.carol, 2);
+            }
+            pass(&fix, &shared, &carol, &seen, true, t0, wall);
+            assert_eq!(*seen.wants.borrow(), [fix.carol], "the pass took her");
+            assert_eq!(carol.count(), 0, "nothing dialled");
+            let s = lock_of(&shared);
+            assert_eq!(
+                (s.states[&fix.carol].1, s.states[&fix.carol].2),
+                (t0 + idle_interval(empty, base), empty),
+                "no round: her interval, her empty rounds"
+            );
+            assert_eq!(s.failures.get(&fix.carol), Some(&2), "her failures stay");
+        }
     }
 
     #[test]

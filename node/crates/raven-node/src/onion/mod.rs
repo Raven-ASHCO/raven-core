@@ -1157,6 +1157,10 @@ async fn handle_event(
             let tor_says = blocked.as_deref().map(proto::blockage_word);
             let stage = stage.as_deref().map(proto::known_stage);
             let new_stage = life.progress(pct, stage, tor_says, now);
+            // Ready from Tor's cache, and only now Tor relays answered.
+            if life.relays_came_after_ready() {
+                tor_relays_after_ready();
+            }
             if new_stage && !life.is_ready() {
                 // A few lines per start: where a slow or stuck start is.
                 eprintln!(
@@ -1210,8 +1214,11 @@ async fn handle_event(
                     "raven-node onion: Tor: ready (bootstrap {})",
                     bootstrap.map_or_else(|| "?".into(), wait_words)
                 );
-                // A path just opened: what waits goes now.
+                // A path just opened: what waits goes now, and mail friends
+                // are asked for what they hold (one only Tor reaches was
+                // asked at its next poll, up to 30 min later).
                 let _ = crate::outbox::network_changed();
+                crate::custody::tor_ready();
             }
         }
         Event::Onion { hs_id } => {
@@ -1325,7 +1332,8 @@ thread_local! {
 /// our onion service after one that failed (T11, Tor messaging audit
 /// 2026-11: the Mac's Tor client failed for 10 min, and what waited went
 /// out only at its backoff, minutes after). What last tried Tor goes now
-/// ([`crate::outbox::tor_back`], at most once a minute).
+/// ([`crate::outbox::tor_back`], at most once a minute), and mail friends
+/// are asked for what they hold ([`crate::custody::tor_ready`]).
 fn tor_works_again() {
     #[cfg(test)]
     TOR_BACK_CALLS.with(|n| n.set(n.get() + 1));
@@ -1336,12 +1344,44 @@ fn tor_works_again() {
             if woke == 1 { "" } else { "s" }
         );
     }
+    crate::custody::tor_ready();
 }
 
 /// How often [`tor_works_again`] ran on this thread.
 #[cfg(test)]
 fn tor_back_calls() -> u32 {
     TOR_BACK_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`tor_relays_after_ready`] calls on this thread.
+    static TOR_RELAYS_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Tor relays answered after this helper life said ready without them:
+/// Arti says ready from its cached directory (85 %, stage "connecting")
+/// before any relay handshake, so what that ready woke may have tried Tor
+/// before it worked. What last tried Tor goes again now
+/// ([`crate::outbox::tor_back`], at most once a minute), and mail friends
+/// are asked for what they hold ([`crate::custody::tor_ready`]). Once per
+/// helper life ([`Life::relays_came_after_ready`]); counts only in the log.
+fn tor_relays_after_ready() {
+    #[cfg(test)]
+    TOR_RELAYS_CALLS.with(|n| n.set(n.get() + 1));
+    let woke = crate::outbox::tor_back().unwrap_or(0);
+    crate::custody::tor_ready();
+    eprintln!(
+        "raven-node onion: Tor: relays reached after a ready from cache; retrying what waits \
+         for {woke} contact{} over Tor and asking mail friends now",
+        if woke == 1 { "" } else { "s" }
+    );
+}
+
+/// How often [`tor_relays_after_ready`] ran on this thread.
+#[cfg(test)]
+fn tor_relays_calls() -> u32 {
+    TOR_RELAYS_CALLS.with(std::cell::Cell::get)
 }
 
 /// Friends' authenticated incoming Tor links so far ([`friend_reached_us`]).
@@ -1803,5 +1843,166 @@ mod tor_back_tests {
             at += watch::SELF_CHECK_EVERY;
         }
         assert_eq!(woke, [0, 0, 1, 1]);
+    }
+}
+
+#[cfg(test)]
+mod tor_usable_tests {
+    use super::*;
+
+    /// One helper life's events, as [`run_once`] hands them to
+    /// [`handle_event`], one second apart.
+    struct Feed {
+        dir: tempfile::TempDir,
+        identity: Arc<Identity>,
+        life: Life,
+        restarts: Restarts,
+        service: ServiceWatch,
+        checks: SelfChecks,
+        logged: u8,
+        at: Instant,
+        /// [`crate::custody::tor_ready_calls`] and [`tor_relays_calls`]
+        /// when [`Self::woke`] last looked.
+        seen: (u32, u32),
+    }
+
+    impl Feed {
+        fn new() -> Self {
+            let at = Instant::now();
+            Self {
+                dir: tempfile::tempdir().unwrap(),
+                identity: Arc::new(Identity::from_seed(&[0x5D; 32])),
+                life: Life::new(at),
+                restarts: Restarts::default(),
+                service: ServiceWatch::default(),
+                checks: SelfChecks::default(),
+                logged: 0,
+                at,
+                seen: (crate::custody::tor_ready_calls(), tor_relays_calls()),
+            }
+        }
+
+        async fn say(&mut self, line: &str) {
+            handle_event(
+                line,
+                &mut self.life,
+                &mut self.restarts,
+                (&mut self.service, &mut self.checks),
+                self.dir.path(),
+                &self.identity,
+                &mut self.logged,
+                self.at,
+            )
+            .await;
+            self.at += Duration::from_secs(1);
+        }
+
+        async fn progress(&mut self, pct: u8, stage: &str) {
+            self.say(&format!(
+                r#"{{"ev":"progress","pct":{pct},"stage":"{stage}"}}"#
+            ))
+            .await;
+        }
+
+        /// The helper's Ready. It also sets what this process shares of the
+        /// onion carrier (the helper's connect port, the status, the "Tor
+        /// is ready" flag), which the lab onion tests (`tests.rs`) use one
+        /// at a time under a lock of their own: it names the connect port a
+        /// lab helper has, if any, so a dial there meanwhile goes where it
+        /// went, and the rest is put back as it was at once.
+        async fn ready(&mut self) {
+            let connect = live_lock().as_ref().map(|live| live.connect);
+            let before = status_lock().clone().unwrap_or_default();
+            let was_ready = raven_core::onion_gate::onion_ready();
+            let port = connect
+                .flatten()
+                .filter(|a| a.ip().is_loopback())
+                .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 9)));
+            self.say(&format!(r#"{{"ev":"ready","connect":"{port}"}}"#))
+                .await;
+            raven_core::onion_gate::set_onion_ready(was_ready);
+            if let (Some(live), Some(connect)) = (live_lock().as_mut(), connect) {
+                live.connect = connect;
+            }
+            update_status(move |s| {
+                (s.phase, s.pct, s.tor_says) = (before.phase, before.pct, before.tor_says);
+                (s.why, s.retry_at, s.bootstrap) = (before.why, before.retry_at, before.bootstrap);
+            });
+        }
+
+        /// Mail friends asked ([`crate::custody::tor_ready`]) and relays
+        /// wakes ([`tor_relays_after_ready`]) since the last look.
+        fn woke(&mut self) -> (u32, u32) {
+            let now = (crate::custody::tor_ready_calls(), tor_relays_calls());
+            let woke = (now.0 - self.seen.0, now.1 - self.seen.1);
+            self.seen = now;
+            woke
+        }
+    }
+
+    /// A Tor start from Arti's cached directory (the iPhone app back in
+    /// front, a helper restarted after a network change): Arti says ready
+    /// at 85 %, before any Tor relay answered (stage "connecting"). That
+    /// ready asks mail friends for held mail at once (before, they were
+    /// asked at their next poll, up to 30 min later). Tor relays answering
+    /// afterwards, the first time in that life, retries what waits for Tor
+    /// and asks them again (before, nothing heard of it); any later
+    /// progress wakes nothing.
+    #[tokio::test]
+    async fn a_ready_from_cache_asks_mail_friends_and_again_once_relays_answer() {
+        let mut feed = Feed::new();
+        feed.progress(85, "connecting").await;
+        assert_eq!(feed.woke(), (0, 0), "not ready yet");
+        feed.ready().await;
+        assert_eq!(feed.woke(), (1, 0), "ready: mail friends asked now");
+        feed.progress(92, "handshaking").await;
+        assert_eq!(feed.woke(), (0, 0), "no relay answered yet");
+        feed.progress(100, "usable").await;
+        assert_eq!(feed.woke(), (1, 1), "relays answered: asked again, once");
+        feed.progress(100, "usable").await;
+        assert_eq!(feed.woke(), (0, 0), "the same again");
+        // Tor lost its relays and found them again: once per life.
+        feed.progress(85, "connecting").await;
+        feed.progress(100, "usable").await;
+        assert_eq!(feed.woke(), (0, 0), "once per life");
+    }
+
+    /// A start that reached Tor relays before Arti said ready (a cold
+    /// start, which downloads the directory from them): its ready asks mail
+    /// friends once, and no relays wake follows.
+    #[tokio::test]
+    async fn a_ready_after_relays_answered_asks_mail_friends_once() {
+        let mut feed = Feed::new();
+        feed.progress(15, "consensus").await;
+        feed.progress(60, "microdescriptors").await;
+        assert_eq!(feed.woke(), (0, 0), "not ready yet");
+        feed.ready().await;
+        assert_eq!(feed.woke(), (1, 0), "ready: mail friends asked now");
+        feed.progress(100, "usable").await;
+        assert_eq!(feed.woke(), (0, 0), "relays had answered before");
+    }
+
+    /// T11: our own Tor working again (a self-check reached our onion
+    /// service after one that failed) asks mail friends for held mail too,
+    /// as it retries what waits for Tor.
+    #[tokio::test]
+    async fn our_tor_working_again_asks_mail_friends() {
+        let mut feed = Feed::new();
+        // Settled reachable already: the checks below make no status news.
+        let t = feed.at;
+        let _ = feed.service.observe(ServiceState::Running, None, t);
+        feed.checks.published(t);
+        feed.at = t + watch::SELF_CHECK_FIRST;
+        let mut woke = Vec::new();
+        for reached in [true, false, true] {
+            let n = feed.checks.due(feed.at).expect("a self-check is due");
+            feed.say(&format!(
+                r#"{{"ev":"self_check","n":{n},"reached":{reached}}}"#
+            ))
+            .await;
+            woke.push(feed.woke());
+            feed.at += watch::SELF_CHECK_EVERY;
+        }
+        assert_eq!(woke, [(0, 0), (0, 0), (1, 0)]);
     }
 }
