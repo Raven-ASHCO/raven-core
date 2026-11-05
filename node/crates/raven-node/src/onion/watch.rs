@@ -125,6 +125,10 @@ pub(crate) struct Life {
     last_progress: Instant,
     pct: u8,
     ready_at: Option<Instant>,
+    /// Whether Tor relays had answered when it said ready
+    /// ([`Self::relays_reached`]; `None` before then). Arti says ready from
+    /// its cached directory (85 %) before any relay handshake.
+    relays_at_ready: Option<bool>,
     last_pong: Instant,
     pongs: u32,
     /// The last bootstrap stage ([`proto::STAGES`]).
@@ -144,6 +148,7 @@ impl Life {
             last_progress: now,
             pct: 0,
             ready_at: None,
+            relays_at_ready: None,
             last_pong: now,
             pongs: 0,
             stage: None,
@@ -183,8 +188,20 @@ impl Life {
     pub(crate) fn ready(&mut self, now: Instant) {
         if self.ready_at.is_none() {
             self.ready_at = Some(now);
+            self.relays_at_ready = Some(self.relays_reached());
             self.last_pong = now;
         }
+    }
+
+    /// Tor relays answered after it said ready without them (a ready from
+    /// Arti's cache): `true` once per life, at the first progress that says
+    /// so.
+    pub(crate) fn relays_came_after_ready(&mut self) -> bool {
+        if self.relays_at_ready != Some(false) || !self.relays_reached() {
+            return false;
+        }
+        self.relays_at_ready = Some(true);
+        true
     }
 
     pub(crate) fn pong(&mut self, now: Instant) {

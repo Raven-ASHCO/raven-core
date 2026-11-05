@@ -222,10 +222,15 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
   send`), and from friend custody: a deposit or a hand-on carries mail, so
   it may always go over Tor; a fetch poll at a mail friend goes over Tor
   only when the last round there brought mail, the friend just linked to
-  this node, or no fetch there went over Tor for 30 minutes
-  (`ONION_FETCH_EVERY`). The route-hints announcer, session renewal, the
-  learning prober and the update exchange never plan the onion route, so
-  they cannot keep circuits busy.
+  this node, this node's Tor has just become usable (a new helper life's
+  first ready, Tor relays answering after a ready from Tor's cache, or our
+  own Tor working again after a failed self-check: every mail friend is
+  asked then, once), or no fetch there went over Tor for 30 minutes
+  (`ONION_FETCH_EVERY`). A pass that finds no route to a mail friend at
+  all (Tor not ready yet, or this rule) counts as no round there, so it
+  does not stretch the friend's poll interval. The route-hints announcer,
+  session renewal, the learning prober and the update exchange never plan
+  the onion route, so they cannot keep circuits busy.
 - After a delivery Arti keeps the rendezvous circuit for 10 minutes after
   its last use (`tor-hsclient`, `RETAIN_CIRCUIT_AFTER_LAST_USE`): a chat
   burst reuses one warm circuit (one Tor round trip per dial instead of a
