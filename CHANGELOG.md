@@ -4,6 +4,27 @@ What changed in each version of Raven core, for the people who use it. Raven is 
 nothing here has had an independent security review, and there are no downloads yet. The
 [README](README.md) says what release builds have and what stays in the lab.
 
+## Next version (not released yet)
+
+### Tor and mail friends
+
+- When Tor becomes usable (Raven started, the network changed, the computer woke, the iPhone app
+  opened), Raven asks your mail friends for held mail at once. Before, mail held by a friend that
+  only Tor reaches could wait a minute, or up to 30 minutes after the last check there.
+- On the iPhone, the short mail check when the app opens no longer cuts the node's own fetch: mail
+  that needs a new Tor connection arrives when that fetch ends, not a minute or more later.
+- The iPhone's background refresh asks every mail friend, also one that had nothing just before the
+  app went to the background.
+- A message to a friend whose Tor connection died without notice gets a new connection after 6
+  seconds instead of 12.
+- When Raven's own onion service stays unreachable while Tor still answers (two failed self-checks
+  in a row, at least 12 minutes after Tor was ready, and no friend linked in for 10 minutes), Raven
+  starts Tor again: at most once in 30 minutes and four times in 6 hours. Before, it stayed
+  unreachable until the network changed.
+- On the iPhone, a local network connection the system refuses right after the app starts no longer
+  holds a send or a mail check for up to 30 seconds. The wait stays on macOS, where a new program is
+  let onto the local network only after a few seconds.
+
 ## 0.1.1 (October 2026)
 
 Fixes from our own testing after 0.1.0, the engine for the iPhone app, and a Linux package.
