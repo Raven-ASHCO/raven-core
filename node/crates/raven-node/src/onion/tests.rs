@@ -1446,3 +1446,139 @@ fn the_status_line_needs_no_lab_switch() {
     };
     assert_eq!(status_line(&s, Instant::now()), "Tor: starting (37 %)");
 }
+
+// ── A ready helper whose onion service stays unreachable (paused clock) ─────
+
+/// The fake helper `ReadyUnreachable` (its own here, beside [`Fake`]): Ready,
+/// its onion service launched while Arti says "degraded_unreachable"; it
+/// answers every ping and fails every self-check ("rendezvous failed"). Tor
+/// itself works here; our onion service does not (stale introduction
+/// points, uploads that keep failing).
+fn ready_unreachable_proc() -> Proc {
+    let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
+    let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
+    let helper = tokio::spawn(async move {
+        let mut lines = LineReader::new(Box::pin(helper_in));
+        let mut out: Pin<Box<dyn AsyncWrite + Send>> = Box::pin(helper_out);
+        let say = |ev: Event| proto::line(&ev);
+        if lines.next_line().await.is_none() {
+            return;
+        }
+        let hs_id = Identity::from_seed(&[0x3e; 32]).public_key_bytes();
+        let first = [
+            say(Event::Ready {
+                connect: "127.0.0.1:9".into(),
+            }),
+            say(Event::Onion {
+                hs_id: hex::encode(hs_id),
+            }),
+            say(Event::Service {
+                state: "degraded_unreachable".into(),
+                reason: Some("descriptor upload timed out".into()),
+            }),
+        ]
+        .concat();
+        if out.write_all(first.as_bytes()).await.is_err() {
+            return;
+        }
+        while let Some(line) = lines.next_line().await {
+            let answer = match serde_json::from_str::<proto::Command>(&line) {
+                Ok(proto::Command::Ping { n }) => say(Event::Pong { n }),
+                Ok(proto::Command::SelfCheck { n }) => say(Event::SelfCheck {
+                    n,
+                    reached: false,
+                    reason: Some("rendezvous failed".into()),
+                }),
+                _ => continue,
+            };
+            if out.write_all(answer.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    });
+    let (kill, killed) = tokio::sync::oneshot::channel::<()>();
+    let abort = helper.abort_handle();
+    let done = async move {
+        tokio::select! {
+            _ = helper => {}
+            _ = killed => abort.abort(),
+        }
+    };
+    Proc {
+        stdin: Box::pin(to_helper),
+        stdout: Box::pin(from_helper),
+        stderr: None,
+        done: Box::pin(done),
+        kill: Some(kill),
+    }
+}
+
+/// One helper life of `proc` under the paused clock, given up after an
+/// hour: how it ended (`None`: it did not), how long it ran, and the
+/// restart policy it left.
+async fn one_hour_of(proc: Proc, seed: u8) -> (Option<(End, Life)>, Duration, Restarts) {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = Arc::new(Identity::from_seed(&[seed; 32]));
+    let mut restarts = Restarts::default();
+    let started = tokio::time::Instant::now();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(3600),
+        run_once(
+            proc,
+            &test_config(dir.path()),
+            &mut restarts,
+            dir.path(),
+            &identity,
+        ),
+    )
+    .await
+    .ok();
+    let ran = started.elapsed();
+    // Its Ready set this process's "Tor is ready" flag: no later test sees it.
+    raven_core::onion_gate::set_onion_ready(false);
+    (ended, ran, restarts)
+}
+
+/// A ready helper whose onion service stays unreachable while Tor answers
+/// every ping: before, nothing ended its life until the next network change
+/// (friends fell back to custody or waited). Now it is started again once it
+/// was ready 12 min with two self-checks failed in a row, within 15 min of
+/// ready, at once and blaming nobody; not again within the repair gap.
+#[tokio::test(start_paused = true)]
+async fn a_ready_helper_whose_onion_service_stays_unreachable_is_started_again() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let links = FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed);
+    let (ended, ran, mut restarts) = one_hour_of(ready_unreachable_proc(), 0x3c).await;
+    let (end, life) = ended.expect("the stuck service ended the helper's life within an hour");
+    eprintln!("a stuck onion service: its helper life ended after {ran:?}");
+    assert_eq!(end, End::Unreachable);
+    let blame = life.blame(end);
+    assert_eq!(blame, Blame::Restart);
+    // (Another test's friend link proves the service reachable and holds
+    // the repair back for a while: only time it when none came meanwhile.)
+    if FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed) == links {
+        assert!(
+            ran >= watch::REPAIR_MIN_READY && ran < Duration::from_secs(15 * 60),
+            "{ran:?}"
+        );
+    }
+    assert!(!restarts.may_repair(now_for_watchdogs()), "the gap holds");
+    let next = restarts.ended(end, ran, &blame);
+    assert_eq!((next.wait, next.fresh_state), (Duration::ZERO, false));
+    assert!(life
+        .summary(end, now_for_watchdogs())
+        .contains("(our onion service stayed unreachable)"));
+}
+
+/// The repair never ends a ready helper whose self-checks reach its onion
+/// service, however long Arti says "bootstrapping" (round 9: Arti's word
+/// alone is no outage).
+#[tokio::test(start_paused = true)]
+async fn a_ready_helper_whose_self_checks_reach_the_service_is_kept() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let (ended, ran, restarts) = one_hour_of(fake_proc(Fake::ReadyPublishing), 0x3d).await;
+    if let Some((end, _)) = ended {
+        panic!("ended after {ran:?}: {end:?}");
+    }
+    assert!(restarts.may_repair(now_for_watchdogs()), "no repair");
+}

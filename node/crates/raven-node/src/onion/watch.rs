@@ -25,6 +25,11 @@
 //! - **Fresh guard state:** after [`FRESH_STATE_AFTER`] stuck bootstraps
 //!   in a row the next start sets the old guard state aside (Arti issue
 //!   #2534).
+//! - **Repair:** a ready helper whose onion service stayed unreachable
+//!   ([`REPAIR_FAILED_CHECKS`] self-checks in a row failed, ready for
+//!   [`REPAIR_MIN_READY`], no friend reached it, a network up) is started
+//!   again at once ([`repair_due`]), at most once per [`REPAIR_GAP`] and
+//!   [`REPAIR_MAX`] times per [`REPAIR_WINDOW`].
 
 use std::time::{Duration, Instant};
 
@@ -77,12 +82,18 @@ pub(crate) enum End {
     Woke,
     /// Tor on Wi-Fi only, and the device went to mobile data.
     MobileData,
+    /// Ready, but our onion service stayed unreachable while the helper
+    /// answered its pings ([`repair_due`]).
+    Unreachable,
 }
 
 impl End {
     /// A restart for this end waits no backoff and is no failure.
     pub(crate) fn immediate(self) -> bool {
-        matches!(self, Self::NetworkChanged | Self::Woke | Self::MobileData)
+        matches!(
+            self,
+            Self::NetworkChanged | Self::Woke | Self::MobileData | Self::Unreachable
+        )
     }
 
     /// The bootstrap got stuck (counts toward a fresh guard state).
@@ -101,6 +112,7 @@ impl End {
             Self::NetworkChanged => "network changed",
             Self::Woke => "woke from sleep",
             Self::MobileData => "on mobile data (Tor on Wi-Fi only)",
+            Self::Unreachable => "our onion service stayed unreachable",
         }
     }
 }
@@ -108,8 +120,8 @@ impl End {
 /// Where the trouble is when a helper ended ([`Life::blame`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Blame {
-    /// Nobody's: a restart (network change, wake, a ready helper that
-    /// stopped, an old Tor).
+    /// Nobody's: a restart (network change, wake, a repair, a ready helper
+    /// that stopped, an old Tor).
     Restart,
     /// The network kept Tor out; the short reason.
     Network(String),
@@ -429,6 +441,9 @@ pub(crate) struct ServiceWatch {
     /// Since when the reading differs from `settled`.
     differs_since: Option<Instant>,
     evidence: Option<Evidence>,
+    /// The last friend's authenticated incoming Tor link (kept when Arti's
+    /// word ends the evidence: [`Self::friend_within`]).
+    friend_at: Option<Instant>,
 }
 
 impl ServiceWatch {
@@ -464,6 +479,7 @@ impl ServiceWatch {
 
     /// A friend's authenticated incoming Tor link at `now`.
     pub(crate) fn reached_by_friend(&mut self, now: Instant) -> Option<ServiceNews> {
+        self.friend_at = Some(now);
         self.evidence = Some(Evidence {
             at: now,
             reached: true,
@@ -471,6 +487,14 @@ impl ServiceWatch {
             reason: None,
         });
         self.settle(now)
+    }
+
+    /// A friend reached the service over Tor (an authenticated incoming
+    /// link) less than `within` before `now`: friends can reach it,
+    /// whatever our own self-checks say ([`repair_due`]).
+    pub(crate) fn friend_within(&self, now: Instant, within: Duration) -> bool {
+        self.friend_at
+            .is_some_and(|at| now.saturating_duration_since(at) < within)
     }
 
     /// A self-check at `now`: `reached`, or not for `reason`.
@@ -580,6 +604,9 @@ pub(crate) struct SelfChecks {
     last: Option<Instant>,
     /// The last one did not reach the service, or was never answered.
     failing: bool,
+    /// Self-checks in a row that did not reach the service or were never
+    /// answered ([`repair_due`]).
+    failed_in_row: u32,
 }
 
 impl SelfChecks {
@@ -622,6 +649,7 @@ impl SelfChecks {
             self.asked = None;
             self.last = Some(now);
             self.failing = true;
+            self.failed_in_row = self.failed_in_row.saturating_add(1);
             self.next = Some(now + SELF_CHECK_AGAIN);
         }
         if self.next.is_none_or(|next| now < next) {
@@ -640,6 +668,13 @@ impl SelfChecks {
         self.failing
     }
 
+    /// Self-checks of this helper life in a row that did not reach the
+    /// service or that the helper never answered; 0 after one that reached
+    /// it.
+    pub(crate) fn failed_in_row(&self) -> u32 {
+        self.failed_in_row
+    }
+
     /// The helper answered self-check `n` at `now`; `false` for an answer
     /// to none asked (late or unknown: ignored).
     pub(crate) fn answered(&mut self, n: u64, reached: bool, now: Instant) -> bool {
@@ -649,6 +684,11 @@ impl SelfChecks {
         self.asked = None;
         self.last = Some(now);
         self.failing = !reached;
+        self.failed_in_row = if reached {
+            0
+        } else {
+            self.failed_in_row.saturating_add(1)
+        };
         self.next = Some(
             now + if reached {
                 SELF_CHECK_EVERY
@@ -697,6 +737,10 @@ pub(crate) struct Restarts {
     blocked: u32,
     /// Helpers started.
     pub(crate) started: u32,
+    /// When a ready helper was started again because its onion service
+    /// stayed unreachable, within the last [`REPAIR_WINDOW`]
+    /// ([`Self::may_repair`]).
+    repairs: Vec<Instant>,
 }
 
 /// What to do after a helper ended.
@@ -758,6 +802,79 @@ impl Restarts {
     pub(crate) fn ready(&mut self) {
         self.blocked = 0;
     }
+
+    /// Whether a repair ([`End::Unreachable`]) may start the helper again
+    /// at `now`: none within [`REPAIR_GAP`], and fewer than [`REPAIR_MAX`]
+    /// within [`REPAIR_WINDOW`]. A service that no restart cures costs a
+    /// warm bootstrap and a republish now and then, never a loop.
+    pub(crate) fn may_repair(&self, now: Instant) -> bool {
+        let ago = |at: &Instant| now.saturating_duration_since(*at);
+        let recent = self
+            .repairs
+            .iter()
+            .filter(|at| ago(at) < REPAIR_WINDOW)
+            .count();
+        self.repairs.iter().all(|at| ago(at) >= REPAIR_GAP) && recent < REPAIR_MAX
+    }
+
+    /// A repair at `now` ([`Self::may_repair`]); older ones than
+    /// [`REPAIR_WINDOW`] are forgotten.
+    pub(crate) fn repaired(&mut self, now: Instant) {
+        self.repairs
+            .retain(|at| now.saturating_duration_since(*at) < REPAIR_WINDOW);
+        self.repairs.push(now);
+    }
+}
+
+/// A ready helper is started again for its onion service only once it was
+/// ready this long: a new service's first publish took up to 9 min on a
+/// slow link (field test round 8), and two self-checks ten minutes apart
+/// must fail first anyway.
+pub(crate) const REPAIR_MIN_READY: Duration = Duration::from_secs(12 * 60);
+/// Self-checks in a row that did not reach our onion service (or went
+/// unanswered) before a repair: one alone may be a bad circuit.
+pub(crate) const REPAIR_FAILED_CHECKS: u32 = 2;
+/// The least time between two repairs.
+pub(crate) const REPAIR_GAP: Duration = Duration::from_secs(30 * 60);
+/// Repairs within [`REPAIR_WINDOW`], at most.
+pub(crate) const REPAIR_MAX: usize = 4;
+/// The window [`REPAIR_MAX`] counts in.
+pub(crate) const REPAIR_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Whether a ready helper is started again now because our onion service
+/// stayed unreachable ([`End::Unreachable`]; pure: the supervisor passes
+/// what it knows at every tick). Nothing else ends a ready life while the
+/// helper answers its pings, so a service whose introduction points went
+/// stale or whose uploads kept failing stayed unreachable until the next
+/// network change, and friends fell back to custody meanwhile. A fresh
+/// life publishes again on fresh circuits. All of these hold:
+///
+/// - the helper was ready for [`REPAIR_MIN_READY`] or more (`ready_for`;
+///   `None`: not ready);
+/// - [`REPAIR_FAILED_CHECKS`] or more self-checks in a row failed or went
+///   unanswered (`failed_in_row`, [`SelfChecks::failed_in_row`]);
+/// - the service does not read reachable (`settled`,
+///   [`ServiceWatch::settled`]: before it first was, or since a loss);
+/// - no friend reached it over Tor within [`EVIDENCE_HOLD`]
+///   (`friend_recent`, [`ServiceWatch::friend_within`]): friends get in,
+///   so the self-checks fail for our own Tor client's reasons;
+/// - this device has a network (`network`: `Some(false)` none, when every
+///   self-check fails anyway; `None` unknown, which holds nothing back);
+/// - [`Restarts::may_repair`] (`allowed`).
+pub(crate) fn repair_due(
+    ready_for: Option<Duration>,
+    failed_in_row: u32,
+    settled: Option<bool>,
+    friend_recent: bool,
+    network: Option<bool>,
+    allowed: bool,
+) -> bool {
+    ready_for.is_some_and(|ready| ready >= REPAIR_MIN_READY)
+        && failed_in_row >= REPAIR_FAILED_CHECKS
+        && settled != Some(true)
+        && !friend_recent
+        && network != Some(false)
+        && allowed
 }
 
 #[cfg(test)]
@@ -1285,5 +1402,162 @@ mod tests {
             assert!(!end.words().contains(".onion"));
             assert!(!end.words().chars().any(|c| c.is_ascii_digit() && c != '5'));
         }
+    }
+
+    /// A repair needs every condition, and each veto holds it back.
+    #[test]
+    fn a_repair_needs_a_long_ready_helper_failed_checks_and_no_veto() {
+        /// [`repair_due`]'s inputs.
+        #[derive(Clone, Copy)]
+        struct In {
+            ready_for: Option<Duration>,
+            failed: u32,
+            settled: Option<bool>,
+            friend: bool,
+            network: Option<bool>,
+            allowed: bool,
+        }
+        let due = |i: In| {
+            repair_due(
+                i.ready_for,
+                i.failed,
+                i.settled,
+                i.friend,
+                i.network,
+                i.allowed,
+            )
+        };
+        // Ready 12 min, two checks failed in a row, never reachable yet, no
+        // friend, the network not known, no repair lately.
+        let base = In {
+            ready_for: Some(REPAIR_MIN_READY),
+            failed: 2,
+            settled: None,
+            friend: false,
+            network: None,
+            allowed: true,
+        };
+        assert!(due(base));
+        assert!(due(In {
+            ready_for: Some(secs(5 * 3600)),
+            failed: 3,
+            settled: Some(false),
+            network: Some(true),
+            ..base
+        }));
+        // Each condition and each veto flips it.
+        let flips = |why: &str, change: fn(&mut In)| {
+            let mut inputs = base;
+            change(&mut inputs);
+            assert!(!due(inputs), "{why}");
+        };
+        flips("not ready", |i| i.ready_for = None);
+        flips("ready too short", |i| {
+            i.ready_for = Some(REPAIR_MIN_READY - secs(1));
+        });
+        flips("one check failed", |i| i.failed = 1);
+        flips("reads reachable", |i| i.settled = Some(true));
+        flips("a friend reached it", |i| i.friend = true);
+        flips("no network", |i| i.network = Some(false));
+        flips("repaired lately", |i| i.allowed = false);
+    }
+
+    #[test]
+    fn repairs_keep_their_gap() {
+        let t = Instant::now();
+        let mut r = Restarts::default();
+        assert!(r.may_repair(t), "none yet");
+        r.repaired(t);
+        assert!(!r.may_repair(t + secs(29 * 60)));
+        assert!(r.may_repair(t + secs(30 * 60)));
+    }
+
+    #[test]
+    fn a_fifth_repair_within_six_hours_is_refused() {
+        let t = Instant::now();
+        let mut r = Restarts::default();
+        for i in 0..4u32 {
+            assert!(r.may_repair(t + REPAIR_GAP * i), "repair {i}");
+            r.repaired(t + REPAIR_GAP * i);
+        }
+        assert!(!r.may_repair(t + REPAIR_GAP * 4), "a fifth within 6 h");
+        assert!(!r.may_repair(t + REPAIR_WINDOW - secs(1)));
+        // The first one is six hours old: room for one more.
+        assert!(r.may_repair(t + REPAIR_WINDOW));
+    }
+
+    /// A repair restarts at once (no backoff), is no failure and keeps the
+    /// guard state; nobody is blamed.
+    #[test]
+    fn a_repair_restarts_at_once_and_is_no_failure() {
+        let mut r = Restarts::default();
+        let local = Blame::ThisComputer("x".into());
+        r.ended(End::Exited, secs(1), &local);
+        let next = r.ended(End::Unreachable, secs(1), &Blame::Restart);
+        assert_eq!(
+            next,
+            Next {
+                wait: Duration::ZERO,
+                fresh_state: false,
+                blocked: false
+            }
+        );
+        // The failure count was not moved by it.
+        assert_eq!(r.ended(End::Exited, secs(1), &local).wait, secs(10));
+        assert!(End::Unreachable.immediate() && !End::Unreachable.stuck());
+        let t = Instant::now();
+        let mut life = Life::new(t);
+        life.ready(t);
+        assert_eq!(life.blame(End::Unreachable), Blame::Restart);
+        let words = End::Unreachable.words();
+        assert_eq!(words, "our onion service stayed unreachable");
+        assert!(!words.contains(".onion") && !words.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    /// The self-checks that failed in a row: one more for each that did not
+    /// reach the service and each the helper never answered; none after one
+    /// that reached it.
+    #[test]
+    fn self_checks_count_their_failures_in_a_row() {
+        let t = Instant::now();
+        let mut c = SelfChecks::default();
+        assert_eq!(c.failed_in_row(), 0);
+        c.published(t);
+        let first = t + SELF_CHECK_FIRST;
+        assert_eq!(c.due(first), Some(1));
+        assert!(c.answered(1, false, first + secs(30)));
+        assert_eq!(c.failed_in_row(), 1);
+        let second = first + secs(30) + SELF_CHECK_AGAIN;
+        assert_eq!(c.due(second), Some(2));
+        assert_eq!(c.due(second + SELF_CHECK_WAIT - secs(1)), None);
+        assert_eq!(c.failed_in_row(), 1, "asked, not given up yet");
+        assert_eq!(c.due(second + SELF_CHECK_WAIT), None);
+        assert_eq!(c.failed_in_row(), 2, "given up");
+        // A late answer to the one given up changes nothing.
+        assert!(!c.answered(2, true, second + SELF_CHECK_WAIT + secs(1)));
+        assert_eq!(c.failed_in_row(), 2);
+        let third = second + SELF_CHECK_WAIT + SELF_CHECK_AGAIN;
+        assert_eq!(c.due(third), Some(3));
+        assert!(c.answered(3, true, third + secs(5)));
+        assert_eq!(c.failed_in_row(), 0);
+    }
+
+    /// A friend's link counts for the hold given, also after Arti's word
+    /// ended it as evidence; a self-check is no friend.
+    #[test]
+    fn a_friends_link_counts_within_the_hold() {
+        use proto::ServiceState as S;
+        let t = Instant::now();
+        let mut w = ServiceWatch::default();
+        assert!(!w.friend_within(t, EVIDENCE_HOLD), "none yet");
+        let _ = w.reached_by_friend(t);
+        assert!(w.friend_within(t, EVIDENCE_HOLD));
+        assert!(w.friend_within(t + EVIDENCE_HOLD - secs(1), EVIDENCE_HOLD));
+        assert!(!w.friend_within(t + EVIDENCE_HOLD, EVIDENCE_HOLD));
+        let _ = w.observe(S::Running, None, t + secs(5));
+        assert!(w.friend_within(t + secs(10), EVIDENCE_HOLD));
+        let mut w = ServiceWatch::default();
+        let _ = w.self_checked(true, None, t);
+        assert!(!w.friend_within(t, EVIDENCE_HOLD));
     }
 }

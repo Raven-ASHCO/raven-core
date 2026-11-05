@@ -1046,6 +1046,46 @@ async fn run_once(
                         // Its stdin closed: it is ending; `done` says when.
                     }
                 }
+                // Our onion service stayed unreachable while Tor answers
+                // (stale introduction points, uploads that keep failing):
+                // no watchdog ends a ready life for that, and a fresh life
+                // publishes again on fresh circuits ([`watch::repair_due`]).
+                let now = now_for_watchdogs();
+                let ready_for = life
+                    .bootstrap_time()
+                    .map(|bootstrap| life.age(now).saturating_sub(bootstrap));
+                let network = if raven_core::net_path::current()
+                    == raven_core::net_path::PathKind::Offline
+                {
+                    Some(false)
+                } else {
+                    crate::netwatch::has_network()
+                };
+                if watch::repair_due(
+                    ready_for,
+                    checks.failed_in_row(),
+                    service.settled(),
+                    service.friend_within(now, watch::EVIDENCE_HOLD),
+                    network,
+                    restarts.may_repair(now),
+                ) {
+                    restarts.repaired(now);
+                    eprintln!(
+                        "raven-node onion: Tor: our onion service stayed unreachable ({} \
+                         self-checks failed in a row, ready {} min); starting Tor again",
+                        checks.failed_in_row(),
+                        ready_for.unwrap_or_default().as_secs() / 60
+                    );
+                    let _ = proc
+                        .stdin
+                        .write_all(proto::line(&proto::Command::Stop).as_bytes())
+                        .await;
+                    if let Some(k) = proc.kill.take() {
+                        let _ = k.send(());
+                    }
+                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut done).await;
+                    return (End::Unreachable, life);
+                }
                 if let Some(end) = life.check(now_for_watchdogs()) {
                     if let Some(k) = proc.kill.take() {
                         let _ = k.send(());
