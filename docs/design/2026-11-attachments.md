@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Architecture for the owner's review, third draft. Nothing is built. Not normative: the wire spec and the custody amendment it calls for (§22) do not exist yet. It changes no frozen byte. |
+| **Status** | Architecture, third draft. The owner confirmed all ten decisions of §23 on 2026-11-05. Nothing is built yet. Not normative: the wire spec and the custody amendment it calls for (§22) do not exist yet. It changes no frozen byte. |
 | **Review** | Two independent reads of the code on 2026-11-05. The first found 17 problems in the first draft (chunks sent as messages, mail friends, groups, link limits, storage, several numbers); the second found 13 in the second draft. This draft fixes all 30; §25 lists each one. |
 | **Requested** | By the owner, 2026-11-05: photos, voice notes and files, over Tor, and fast. "Only the architecture." |
 | **Gates (new)** | `ATTACHMENTS_PRODUCTION_ENABLED = false` (offers and live chunks up to 1 MiB, §9); `ATTACHMENT_CUSTODY_PRODUCTION_ENABLED = false` (mail friends hold chunks, §12; asserts the first and `FRIEND_CUSTODY_PRODUCTION_ENABLED` at compile time); `ATTACHMENT_EXCHANGE_PRODUCTION_ENABLED = false` (transfer links up to 64 MB, §10; asserts the first). Lab switches `RAVEN_LAB_ATTACHMENTS=1`, `RAVEN_LAB_ATTACHMENT_CUSTODY=1` and `RAVEN_LAB_ATTACHMENT_EXCHANGE=1` with `RAVEN_LAB_TEST_A=1`, debug builds only. |
@@ -58,7 +58,7 @@ Sizes: 1 MiB is 1,048,576 bytes; 64 MB is 64,000,000 bytes.
 6. **Fast on Tor** (§11). Small items follow their offer on the link that is
    already open; the preview shows first; the window matches Tor's flow
    control; LAN and direct paths win when they exist; a cut costs nothing
-   already checked. Arti's congestion control is a separate owner decision
+   already checked. Arti's congestion control was a separate owner decision
    (§11.4).
 7. **No friend gets what it cannot read.** First, every build learns to show
    an offer as "{name} sent a photo. Update Raven to see it." instead of text
@@ -76,7 +76,7 @@ Sizes: 1 MiB is 1,048,576 bytes; 64 MB is 64,000,000 bytes.
 10. **iPhone** (§17). Transfers run while Raven is open, finish in the
     existing 15 s of grace when it leaves the screen, and resume on the next
     open. No background Tor.
-11. **Limits to confirm** (§23): 64 MB per attachment, 16 MB in groups,
+11. **Limits** (§23, confirmed 2026-11-05): 64 MB per attachment, 16 MB in groups,
     1 MiB through mail friends, captions up to 2,000 bytes; photos and voice
     notes download by themselves, files on a tap.
 
@@ -538,7 +538,7 @@ The limits that replace them, for a transfer link only:
 9. Chat never waits behind a file: chunks are not messages, and chat frames
    go first on any link.
 
-### 11.4 Owner decision: Arti's congestion control
+### 11.4 Arti's congestion control (owner decision 2026-11-05: measure first)
 Arti 0.47 can negotiate Tor's congestion control (proposal 324) on onion
 circuits, but only with its experimental features `hsc-negotiate-extensions`
 and `hss-negotiate-extensions`, which Raven does not turn on. With it a
@@ -889,7 +889,12 @@ gate.
 | 2 | Transfer links: the link changes of §10.5; files and big photos up to 64 MB (16 MB in groups); two links; moving to LAN mid transfer; bit 13. | `ATTACHMENT_EXCHANGE_PRODUCTION_ENABLED` |
 | 3 | Only if the numbers say so: Arti's congestion control, several circuits, `BGProcessingTask` on iPhone. | separate decisions |
 
-## 23. Decisions for the owner
+## 23. Decisions
+
+The owner confirmed all ten on 2026-11-05, each as recommended: Opus in Ogg
+for voice notes (with its two new packages, one small library on Windows
+and GStreamer on Linux, approved with it), Arti's congestion control
+measured in the lab first, and phase 1a first and alone.
 
 1. **Limits.** 64 MB per attachment, 16 MB in groups, 1 MiB through mail
    friends (chats only), and captions up to 2,000 bytes so that every offer
