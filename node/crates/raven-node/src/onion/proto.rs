@@ -182,7 +182,11 @@ pub fn upload_round(message: &str) -> Option<(u32, u32)> {
     (ok <= of).then_some((ok, of))
 }
 
-/// The pause before a second Tor connect ([`connect_with_retry`]).
+/// The pause before a second Tor connect after a first try that failed
+/// without timing out: no descriptor, an introduction or a rendezvous that
+/// failed ([`connect_with_retry`]). After a timeout there is none: that try
+/// has waited already (audit T6: a BEGIN on a dead shared circuit), and a
+/// pause would only add to it.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub const CONNECT_RETRY_PAUSE: Duration = Duration::from_secs(2);
 /// A second Tor connect is made only with at least this much of the
@@ -209,9 +213,10 @@ pub fn worth_another_connect(reply: &ConnectReply) -> bool {
 /// ([`worth_another_connect`]) one more with fresh ones (`connect(true,
 /// within)`: the helper uses a new isolation group, so Arti fetches the
 /// descriptor again and builds new circuits) when [`CONNECT_RETRY_MIN_LEFT`]
-/// is left after [`CONNECT_RETRY_PAUSE`]. Each try is bounded by what is
-/// left of `budget`; the error is the last try's. (The Arti helper's
-/// self-check; a friend's connect is [`connect_in_groups`].)
+/// is left for it: at once after a timeout, [`CONNECT_RETRY_PAUSE`] after
+/// any other failure. Each try is bounded by what is left of `budget`; the
+/// error is the last try's. (The Arti helper's self-check; a friend's
+/// connect is [`connect_in_groups`].)
 #[cfg_attr(not(feature = "tor-embedded"), allow(dead_code))]
 pub async fn connect_with_retry<T, F, Fut>(budget: Duration, connect: F) -> Result<T, ConnectReply>
 where
@@ -231,7 +236,11 @@ struct Tries<T> {
     fresh: bool,
 }
 
-/// [`connect_with_retry`], and how its tries went.
+/// [`connect_with_retry`], and how its tries went. A first try that timed
+/// out is followed by the fresh one at once: on a dead shared circuit
+/// (audit T6) the first message to a friend already paid Arti's BEGIN
+/// timeout. One that failed otherwise is followed after
+/// [`CONNECT_RETRY_PAUSE`]: a quick failure is not tried again at once.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 async fn tries<T, F, Fut>(budget: Duration, mut connect: F) -> Tries<T>
 where
@@ -254,15 +263,22 @@ where
         }
         Err(e) => e,
     };
+    let pause = if matches!(err, ConnectReply::Timeout(_)) {
+        Duration::ZERO
+    } else {
+        CONNECT_RETRY_PAUSE
+    };
     let left = budget.saturating_sub(start.elapsed());
-    if !worth_another_connect(&err) || left < CONNECT_RETRY_PAUSE + CONNECT_RETRY_MIN_LEFT {
+    if !worth_another_connect(&err) || left < pause + CONNECT_RETRY_MIN_LEFT {
         return Tries {
             got: Err(err.clone()),
             first: Some(err),
             fresh: false,
         };
     }
-    tokio::time::sleep(CONNECT_RETRY_PAUSE).await;
+    if !pause.is_zero() {
+        tokio::time::sleep(pause).await;
+    }
     let left = budget.saturating_sub(start.elapsed());
     Tries {
         got: bounded(left, connect(true, left)).await,
@@ -932,6 +948,56 @@ mod tests {
         assert_eq!((tries.len(), took), (1, 44));
     }
 
+    /// Audit T6: a first try that timed out (the Arti helper gives up a
+    /// BEGIN on a dead shared circuit after 6 s) is followed by the fresh
+    /// one at once, with [`CONNECT_RETRY_MIN_LEFT`] left; the pause comes
+    /// only after any other failure.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_first_try_is_followed_at_once() {
+        use std::sync::{Arc, Mutex};
+        let budget = Duration::from_secs(44);
+        let run = |plan: Vec<(u64, Result<u8, ConnectReply>)>| {
+            let tries: Arc<Mutex<Vec<(bool, u64)>>> = Arc::default();
+            let log = tries.clone();
+            let plan = Arc::new(Mutex::new(plan.into_iter()));
+            let fut = connect_with_retry(budget, move |fresh, within| {
+                log.lock().unwrap().push((fresh, within.as_secs()));
+                let (secs, got) = plan.lock().unwrap().next().expect("a planned try");
+                async move {
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    got
+                }
+            });
+            async move {
+                let t = tokio::time::Instant::now();
+                let got = fut.await;
+                let tries = tries.lock().unwrap().clone();
+                (got, tries, t.elapsed().as_secs())
+            }
+        };
+        let timeout = || Err(ConnectReply::Timeout("tor timeout".into()));
+        let gone = || Err(ConnectReply::Unreachable("rendezvous failed".into()));
+        // The BEGIN times out after 6 s; the fresh try starts at once and
+        // works in 3 s.
+        let (got, tries, took) = run(vec![(6, timeout()), (3, Ok(1))]).await;
+        assert_eq!(got, Ok(1));
+        assert_eq!(tries, [(false, 44), (true, 38)]);
+        assert_eq!(took, 9);
+        // A rendezvous that failed after 6 s: the fresh try 2 s later.
+        let (got, tries, took) = run(vec![(6, gone()), (3, Ok(2))]).await;
+        assert_eq!(got, Ok(2));
+        assert_eq!(tries, [(false, 44), (true, 36)]);
+        assert_eq!(took, 11);
+        // Timed out after 31 s: the 13 s left are enough for a fresh try.
+        let (got, tries, took) = run(vec![(31, timeout()), (3, Ok(3))]).await;
+        assert_eq!(got, Ok(3));
+        assert_eq!(tries, [(false, 44), (true, 13)]);
+        assert_eq!(took, 34);
+        // Timed out after 33 s: 11 s left, no fresh try; the first's error.
+        let (got, tries, took) = run(vec![(33, timeout())]).await;
+        assert_eq!((got, tries.len(), took), (timeout(), 1, 33));
+    }
+
     /// A new group number for the tests' isolation books.
     fn next_group() -> u32 {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -976,10 +1042,11 @@ mod tests {
     }
 
     /// Audit T6 as the helpers connect: the circuit the default group
-    /// shares is dead (each try in it times out after 10 s, as Arti's BEGIN
-    /// that gets no CONNECTED). The first connect pays for it once: 10 s,
-    /// the pause, then the fresh try. The next ones go in that fresh group
-    /// at once. Before, each one met the dead circuit again (15 s each).
+    /// shares is dead (each try in it times out after 10 s, as a BEGIN that
+    /// gets no CONNECTED with Arti's default timeout). The first connect
+    /// pays for it once: 10 s, then the fresh try at once (no pause after a
+    /// timeout). The next ones go in that fresh group at once. Without the
+    /// book, each one would meet the dead circuit again (13 s each).
     #[tokio::test(start_paused = true)]
     async fn connects_after_a_dead_shared_circuit_reuse_the_fresh_group() {
         use std::sync::{Arc, Mutex};
@@ -1012,7 +1079,7 @@ mod tests {
             used.push(connect().await.expect("connected"));
             took.push(t.elapsed().as_secs());
         }
-        assert_eq!(took, [15, 3, 3]);
+        assert_eq!(took, [13, 3, 3]);
         let fresh = used[0];
         assert!(fresh.is_some());
         assert_eq!(used, [fresh, fresh, fresh]);

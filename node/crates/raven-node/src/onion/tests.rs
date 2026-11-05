@@ -646,10 +646,10 @@ async fn one_circuit_cannot_take_every_onion_slot() {
 /// Audit T6: the rendezvous circuit Alice's helper shares by default to
 /// Bob is dead (Bob's network path vanished and no DESTROY came back). The
 /// first dial pays for it once: its first try times out and the helper's
-/// fresh try (a new isolation group) delivers. The dials after it reuse
-/// that fresh group at once. Before, each of them met the dead circuit again
-/// (in the field: a 10 s timeout, a 2 s pause and a whole new rendezvous per
-/// dial).
+/// fresh try (a new isolation group) starts at once, with no pause, and
+/// delivers. The dials after it reuse that fresh group at once. Before,
+/// each of them met the dead circuit again (in the field: a 10 s timeout,
+/// a 2 s pause and a whole new rendezvous per dial).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     let _one_at_a_time = LAB_ONION.lock().await;
@@ -674,9 +674,10 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     }
     let counts = loopback::Counts::read(&f.a.path().join(TOR_DIR));
     eprintln!("three dials past a dead shared circuit: {took:?}, {counts:?}");
+    assert!(took[0] >= stale, "{took:?} {counts:?}");
     assert!(
-        took[0] >= stale + proto::CONNECT_RETRY_PAUSE,
-        "{took:?} {counts:?}"
+        took[0] < stale + proto::CONNECT_RETRY_PAUSE,
+        "the fresh try waited after the timeout: {took:?} {counts:?}"
     );
     for t in &took[1..] {
         assert!(

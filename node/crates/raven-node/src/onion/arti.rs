@@ -22,9 +22,10 @@
 //! nowhere, and none of its events names an onion address of a friend.
 //!
 //! Arti's defaults, except: channel padding `reduced` (laptops and
-//! phones), no exit circuits built ahead of need, at most
-//! [`MAX_STREAMS_PER_CIRCUIT`] streams per rendezvous circuit and an
-//! introduction rate limit sent to the introduction points.
+//! phones), no exit circuits built ahead of need, a stream's BEGIN given
+//! up after [`STREAM_CONNECT_TIMEOUT`], at most [`MAX_STREAMS_PER_CIRCUIT`]
+//! streams per rendezvous circuit and an introduction rate limit sent to
+//! the introduction points.
 //! No bridges, no pluggable transports, no proof-of-work, no experimental
 //! APIs.
 
@@ -46,6 +47,15 @@ use super::proto::{self, Command, Config, ConnectReply, Event, ServiceState};
 
 /// How long one Tor connect may take (raven-node waits 45 s in all).
 const CONNECT_WAIT: Duration = Duration::from_secs(44);
+
+/// How long Arti waits for CONNECTED after a stream's BEGIN, once it has
+/// the rendezvous circuit (its `connect_timeout`, 10 s by default). The
+/// descriptor fetch, the introduction and the rendezvous keep their own
+/// timeouts. A healthy BEGIN is one onion round trip (typically under a
+/// second); one on a shared circuit whose far end vanished with no DESTROY
+/// gets no answer at all (audit T6), and the fresh try in a new group
+/// starts only after it.
+const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Streams one rendezvous circuit may hold open at once; one more tears the
 /// circuit down (RAVEN_ONION_CARRIER_V1 §5).
@@ -428,6 +438,11 @@ fn client_config(state_dir: &Path) -> Result<arti_client::TorClientConfig, Strin
         .preemptive_circuits()
         .disable_at_threshold(0)
         .set_initial_predicted_ports(vec![]);
+    // A BEGIN on a dead shared rendezvous circuit is given up after 6 s,
+    // not 10 (audit T6).
+    builder
+        .stream_timeouts()
+        .connect_timeout(STREAM_CONNECT_TIMEOUT);
     builder.build().map_err(|e| e.to_string())
 }
 
@@ -773,5 +788,20 @@ mod tests {
         let text = format!("{preemptive:?}");
         assert!(text.contains("disable_at_threshold: 0"), "{text}");
         assert!(text.contains("initial_predicted_ports: []"), "{text}");
+    }
+
+    /// Audit T6: a BEGIN on a dead shared rendezvous circuit is given up
+    /// after 6 s (Arti's default is 10 s); then the fresh try starts.
+    #[test]
+    fn the_client_gives_up_a_begin_after_six_seconds() {
+        let text = format!(
+            "{:?}",
+            client_config(Path::new("/nonexistent/raven-tor")).unwrap()
+        );
+        let timeouts = text
+            .split_once("stream_timeouts: ")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map_or("", |(timeouts, _)| timeouts);
+        assert!(timeouts.contains("connect_timeout: 6s"), "{text}");
     }
 }
