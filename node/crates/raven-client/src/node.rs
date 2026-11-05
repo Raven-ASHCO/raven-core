@@ -599,11 +599,15 @@ impl Inner {
         Err(embedded_only_op("node.resume"))
     }
 
-    /// `mail.check {budget_ms?}` (iOS background refresh; embedded node
-    /// only): one custody fetch from the friends who hold this profile's
-    /// mail, finished within `budget_ms` (default 25 s, at most 28 s). A
-    /// paused or stopped node is not resumed: a small node (no listener, no
-    /// Tor) runs for the check and is stopped again.
+    /// `mail.check {budget_ms?}` (iOS background refresh, and the app in
+    /// the front; embedded node only): one custody fetch from the friends
+    /// who hold this profile's mail, waited for at most `budget_ms`
+    /// (default 25 s, at most 28 s). A paused or stopped node is not
+    /// resumed: a small node (no listener, no Tor) runs for the check and
+    /// is stopped again. A small node's dials are cut at the budget; a
+    /// running full node's keep their own deadlines, and what its fetch
+    /// brings after the answer shows through `events.poll` (raven-node
+    /// `embedded::check_mail`).
     pub(crate) fn mail_check(&self, args: &Args) -> OpResult {
         let budget_ms = args.opt_u64("budget_ms")?.unwrap_or(25_000);
         #[cfg(feature = "embedded-node")]

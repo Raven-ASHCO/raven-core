@@ -143,9 +143,11 @@ pub struct MailCheck {
     pub custody_live: bool,
     /// A small node was started for the check (none ran).
     pub started_node: bool,
-    /// A whole fetch pass over the friends who hold mail finished in time.
+    /// A whole fetch pass over the friends who hold mail finished within the
+    /// budget.
     pub completed: bool,
-    /// Messages taken in from friends during the check.
+    /// Messages taken in from friends within the budget (a running full
+    /// node's pass may bring more after the check returned).
     pub messages: u64,
     pub elapsed: Duration,
 }
@@ -214,11 +216,17 @@ pub fn status() -> Status {
 /// Whether a node (a full one, a mail check's or the background one) runs
 /// for `data_dir` in this process.
 pub fn running_for(data_dir: &Path) -> bool {
+    running_kind(data_dir).is_some()
+}
+
+/// The kind of node that runs for `data_dir` in this process, if one does.
+fn running_kind(data_dir: &Path) -> Option<Kind> {
     let mut c = controller();
     reap(&mut c);
     c.running
         .as_ref()
-        .is_some_and(|r| same_profile(&r.data_dir, data_dir))
+        .filter(|r| same_profile(&r.data_dir, data_dir))
+        .map(|r| r.kind)
 }
 
 /// Whether [`pause`] holds `data_dir`.
@@ -530,16 +538,28 @@ pub fn end_pause() {
     controller().paused = None;
 }
 
-/// One bounded custody fetch from the friends who hold this profile's mail
-/// (iOS background refresh: everything within `budget`, at most
-/// [`MAIL_CHECK_MAX_BUDGET`]). A running node is asked for a fetch pass now;
-/// otherwise (paused, stopped) a small node runs for the check: IPC, the
-/// outbox worker (owed receipts, waiting messages) and the custody fetcher,
-/// no listener, no Tor, no radio; it is stopped again before the budget
-/// ends. Every custody dial is cut at the budget. Mail that arrives this way
-/// is in the profile when it returns (`messages` counts it). While a
-/// running node's pass is waited for, nothing else waits for the check: a
-/// start, a stop, a pause or a resume goes at once (audit T9).
+/// One bounded custody fetch from the friends who hold this profile's mail:
+/// the check returns within `budget` (at most [`MAIL_CHECK_MAX_BUDGET`]). A
+/// running node is asked for a fetch pass now, and the pass is waited for
+/// until the budget ends; otherwise (paused, stopped) a small node runs for
+/// the check: IPC, the outbox worker (owed receipts, waiting messages) and
+/// the custody fetcher, no listener, no Tor, no radio; it is stopped again
+/// before the budget ends.
+///
+/// - **A running full node** (the app in the front: on opening, on a pull)
+///   keeps its dials' own deadlines (a custody dial over Tor 80 s, any
+///   other 45 s): only the wait is bounded. A fetch that takes longer than
+///   the check (a fresh Tor rendezvous) goes on and brings the mail after
+///   the check returned, as any fetch does, instead of being cut, counted
+///   as a friend not reached and tried again a minute later.
+/// - **A small node** (iOS background refresh: the background node, or one
+///   the check started) has every custody dial cut at the budget; one the
+///   check started leaves [`MAIL_CHECK_STOP_RESERVE`] of it for its stop.
+///
+/// Mail taken in within the budget is in the profile when the check returns
+/// (`messages` counts it). While a running node's pass is waited for,
+/// nothing else waits for the check: a start, a stop, a pause or a resume
+/// goes at once (audit T9).
 pub fn check_mail(config: &NodeConfig, budget: Duration) -> Result<MailCheck, String> {
     check(config, budget, true).map(|done| done.unwrap_or_default())
 }
@@ -556,6 +576,20 @@ pub fn check_mail_if_running(
 
 /// Mail checks, one at a time (each sets the custody passes' deadline).
 static CHECKS: Mutex<()> = Mutex::new(());
+
+/// When the custody dials of a mail check that began at `began` with
+/// `budget` are cut ([`crate::custody::set_pass_deadline`]), by the kind of
+/// node that runs for the profile (`None`: none runs, the check starts a
+/// small one). A full node's keep their own deadlines (`None`): the check
+/// bounds only its wait. A small node's are cut at the budget; one the
+/// check starts leaves [`MAIL_CHECK_STOP_RESERVE`] of it for its stop.
+fn pass_deadline_for(kind: Option<Kind>, began: Instant, budget: Duration) -> Option<Instant> {
+    match kind {
+        Some(Kind::Full) => None,
+        Some(Kind::MailCheck | Kind::Background) => Some(began + budget),
+        None => Some(began + budget.saturating_sub(MAIL_CHECK_STOP_RESERVE)),
+    }
+}
 
 fn check(
     config: &NodeConfig,
@@ -575,17 +609,16 @@ fn check(
         return Ok(Some(out));
     }
     let dir = config.data_dir().to_path_buf();
-    let already = running_for(&dir);
+    let kind = running_kind(&dir);
+    let already = kind.is_some();
     if !already && !may_start {
         return Ok(None);
     }
-    let fetch_budget = if already {
-        budget
-    } else {
-        budget.saturating_sub(MAIL_CHECK_STOP_RESERVE)
-    };
-    let deadline = began + fetch_budget;
-    crate::custody::set_pass_deadline(Some(deadline));
+    // A running full node's dials keep their own deadlines; the wait for
+    // its pass still ends with the budget.
+    let cut = pass_deadline_for(kind, began, budget);
+    crate::custody::set_pass_deadline(cut);
+    let deadline = cut.unwrap_or(began + budget);
     let (begun, _, fetched_before) = crate::custody::pass_counts();
     let result = (|| {
         if !already {
@@ -645,6 +678,34 @@ mod tests {
             )
         );
         assert!(!line.contains(&hex::encode(peer)), "{line}");
+    }
+
+    /// A mail check cuts no dial of a running full node (the app in the
+    /// front checks with a few seconds: a Tor fetch that needs more goes
+    /// on); a small node's are cut at the budget, and one the check starts
+    /// leaves the stop its reserve.
+    #[test]
+    fn a_mail_check_cuts_only_a_small_nodes_dials() {
+        let began = Instant::now();
+        let budget = Duration::from_secs(5);
+        assert_eq!(pass_deadline_for(Some(Kind::Full), began, budget), None);
+        for small in [Kind::MailCheck, Kind::Background] {
+            assert_eq!(
+                pass_deadline_for(Some(small), began, budget),
+                Some(began + budget),
+                "{small:?}"
+            );
+        }
+        assert_eq!(
+            pass_deadline_for(None, began, budget),
+            Some(began + Duration::from_secs(2))
+        );
+        // A budget shorter than the reserve leaves the started node's
+        // dials none.
+        assert_eq!(
+            pass_deadline_for(None, began, Duration::from_secs(1)),
+            Some(began)
+        );
     }
 
     /// The node inside an app binds no port Raven reserves (7420-7427): its
