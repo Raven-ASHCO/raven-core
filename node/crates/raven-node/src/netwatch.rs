@@ -1141,6 +1141,23 @@ fn on_link_in(view: &[IpNet], ip: IpAddr) -> Option<bool> {
     (!point_to_point).then_some(false)
 }
 
+/// Whether this computer has a network Tor could use, as the service's task
+/// last settled: `None` when that is not known (no baseline yet, or no
+/// task: not `raven-node service`), `Some(false)` when none of its networks
+/// counts ([`key`]: loopback and link-local never do, so a cable alone with
+/// no DHCP server is none either). The Tor helper's repair reads it
+/// ([`crate::onion`]): a self-check that fails with no network says nothing
+/// about our onion service.
+pub(crate) fn has_network() -> Option<bool> {
+    let view = VIEW.lock().unwrap_or_else(PoisonError::into_inner);
+    has_network_in(view.as_deref())
+}
+
+/// [`has_network`] of `view` (pure).
+fn has_network_in(view: Option<&[IpNet]>) -> Option<bool> {
+    Some(view?.iter().any(|net| key(net).is_some()))
+}
+
 /// The supervised task (`raven-node service`); it runs for the life of the
 /// process.
 pub(crate) async fn run() -> Result<(), String> {
@@ -3004,5 +3021,24 @@ mod tests {
         task.abort();
         let _ = task.await;
         set_last_egress(None);
+    }
+
+    /// The Tor helper's repair asks whether there is a network at all: not
+    /// known before the first baseline; none while only loopback or
+    /// link-local addresses are there (a cable alone included).
+    #[test]
+    fn has_network_needs_one_that_counts() {
+        assert_eq!(has_network_in(None), None);
+        assert_eq!(has_network_in(Some(&[])), Some(false));
+        let local = [
+            net("127.0.0.1/8"),
+            net("::1/128"),
+            net("169.254.7.7/16"),
+            net("fe80::1/64"),
+        ];
+        assert_eq!(has_network_in(Some(&local)), Some(false));
+        assert_eq!(has_network_in(Some(&[net("10.0.0.0/24")])), Some(true));
+        let v6 = [net("169.254.7.7/16"), net("2001:db8:1::/64")];
+        assert_eq!(has_network_in(Some(&v6)), Some(true));
     }
 }

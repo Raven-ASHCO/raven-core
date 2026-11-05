@@ -292,6 +292,23 @@ vanguards, lite, see the table above).
 never our own (the card carries ours). The helper does not forward Arti's
 own log lines.
 
+- **A ready helper whose onion service stays unreachable is started again.**
+  None of the watchdogs above ends a ready helper that answers its pings, so
+  a service whose introduction points went stale or whose uploads kept
+  failing stayed unreachable until the next network change, and friends fell
+  back to custody or waited. raven-node now starts Tor again ("Tor: restarting
+  (our onion service stayed unreachable)": no backoff, no failure, guard
+  state kept) when the helper has been ready 12 min or more, its last 2
+  self-checks in a row failed or went unanswered, the service does not read
+  reachable, no friend reached it over Tor within 10 min, and this device has
+  a network (the app's report or netwatch); at most once per 30 min and 4
+  times per 6 hours. A service stuck from the start is restarted about 12-14
+  min after ready; a later loss about 10 min after the first failed
+  self-check.
+  The new life publishes again on fresh circuits, from Arti's cache (seconds
+  to a minute); Tor streams in flight are dropped. The same rules hold in the
+  iPhone app while it is in front; a paused node runs no helper.
+
 ### 3.8 What the user is told (privacy wording)
 
 Shown by `raven status --explain tor` and in the docs:
