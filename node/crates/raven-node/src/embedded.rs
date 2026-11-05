@@ -621,11 +621,17 @@ fn check(
     let deadline = cut.unwrap_or(began + budget);
     let (begun, _, fetched_before) = crate::custody::pass_counts();
     let result = (|| {
+        // Every mail friend is due for the pass this check waits for. A
+        // node this check starts would otherwise follow the schedule this
+        // process's last full node left: a friend that had nothing a moment
+        // before, or did not answer, would not be asked again for minutes,
+        // whatever it holds now, and on Apple platforms that clock
+        // (`Instant`) stands still while the device sleeps.
+        crate::custody::kick();
         if !already {
             start_locked(config, Kind::MailCheck)?;
             out.started_node = true;
         } else {
-            crate::custody::kick();
             // The running node fetches by itself: its turn is free while
             // the pass is waited for. A node this check started keeps it,
             // so that nothing else starts or stops a node meanwhile.
