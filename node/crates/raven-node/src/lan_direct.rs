@@ -579,12 +579,16 @@ const REFUSED_RETRY_EVERY: Duration = Duration::from_secs(1);
 /// This system's start grace: [`START_GRACE`] on macOS, none elsewhere.
 /// Only macOS lets a new binary onto the local network late. On iOS the same
 /// refusal (EHOSTUNREACH is 65 there too) is the app's Local Network
-/// permission, not given yet or denied (docs/IOS.md §11): a retry would only
-/// hold the dial, and the routes after it (Internet, then Tor), for up to
+/// permission (docs/IOS.md §11): denied, or not asked yet while the app is
+/// in the background, where iOS refuses without asking. A retry then only
+/// holds the dial, and the routes after it (Internet, then Tor), for up to
 /// 29 s on a cold launch (an open from a notification, or a background
-/// refresh's mail check with 25 s in all). There the dial fails at once, and
-/// the outbox tries LAN again on its own schedule. Linux and Windows never
-/// answer os error 65.
+/// refresh's mail check with 25 s in all). Only a connect refused while iOS
+/// still asks (the app's first use of the local network in the front) may go
+/// through on a retry once the user allows it (Apple TN3179): that happens
+/// once, and Tor or the outbox's next try covers it. So there the dial fails
+/// at once, and the outbox tries LAN again on its own schedule. Linux and
+/// Windows never answer os error 65.
 fn start_grace() -> Duration {
     if cfg!(target_os = "macos") {
         START_GRACE
