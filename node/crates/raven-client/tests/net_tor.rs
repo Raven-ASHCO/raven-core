@@ -577,7 +577,7 @@ fn tor_several_friends_both_ways_at_once_no_send_waits_for_another() {
 
 /// How long a try on the dead shared circuit of
 /// [`tor_after_a_dead_shared_circuit_later_sends_reuse_the_fresh_one`]
-/// waits, in ms (Arti's stream connect timeout is 10 s).
+/// waits, in ms (the Tor helper gives up a BEGIN after 6 s).
 const STALE_MS: u64 = 4000;
 
 /// `p`'s Tor helper's connect counts (`RAVEN_LAB_TOR_LOOPBACK_COUNT=1`):
@@ -641,8 +641,8 @@ fn tor_after_a_dead_shared_circuit_later_sends_reuse_the_fresh_one() {
         "a later dial met the dead circuit again: {took:?} {counts:?}\n{}",
         a.service_log()
     );
-    // Not one later dial paid the stale wait, the pause and a new
-    // rendezvous.
+    // No later send took as long as the stale wait, a new rendezvous and
+    // 2 s more (the stale count above is the exact check).
     let one_stale_dial =
         Duration::from_millis(STALE_MS + 2000 + RENDEZVOUS_MS.parse::<u64>().unwrap());
     for t in &took {
