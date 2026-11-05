@@ -570,10 +570,28 @@ const REFUSED_FOR: Duration = Duration::from_secs(30);
 /// For this long after raven-node started, a LAN connect macOS refuses at
 /// once is tried again ([`REFUSED_RETRY_EVERY`]) instead of failing the
 /// dial: macOS lets a new binary (each rebuild is a new ad-hoc signature)
-/// onto the local network only after a few seconds.
+/// onto the local network only after a few seconds. macOS only
+/// ([`start_grace`]).
 const START_GRACE: Duration = Duration::from_secs(30);
 /// The pause between those tries.
 const REFUSED_RETRY_EVERY: Duration = Duration::from_secs(1);
+
+/// This system's start grace: [`START_GRACE`] on macOS, none elsewhere.
+/// Only macOS lets a new binary onto the local network late. On iOS the same
+/// refusal (EHOSTUNREACH is 65 there too) is the app's Local Network
+/// permission, not given yet or denied (docs/IOS.md §11): a retry would only
+/// hold the dial, and the routes after it (Internet, then Tor), for up to
+/// 29 s on a cold launch (an open from a notification, or a background
+/// refresh's mail check with 25 s in all). There the dial fails at once, and
+/// the outbox tries LAN again on its own schedule. Linux and Windows never
+/// answer os error 65.
+fn start_grace() -> Duration {
+    if cfg!(target_os = "macos") {
+        START_GRACE
+    } else {
+        Duration::ZERO
+    }
+}
 
 /// When this raven-node started ([`note_process_start`]; first use
 /// otherwise).
@@ -592,11 +610,17 @@ fn since_process_start() -> Duration {
 /// `uptime` since raven-node started, is tried again after
 /// [`REFUSED_RETRY_EVERY`] (pure): macOS refused it at once ("No route to
 /// host" for a local-network address within [`REFUSED_AT_ONCE`]) and the
-/// node is inside [`START_GRACE`] still after that pause. Past it a refusal
-/// fails the dial and counts for the warning, as before.
-fn retry_refused_at_start(connect_error: &str, took: Duration, uptime: Duration) -> bool {
+/// node is inside its start `grace` ([`start_grace`]) still after that
+/// pause. Past it, or with no grace, a refusal fails the dial and counts for
+/// the warning, as before.
+fn retry_refused_at_start(
+    connect_error: &str,
+    took: Duration,
+    uptime: Duration,
+    grace: Duration,
+) -> bool {
     took < REFUSED_AT_ONCE
-        && uptime + REFUSED_RETRY_EVERY < START_GRACE
+        && uptime + REFUSED_RETRY_EVERY < grace
         && !raven_core::outbox::local_network_refused_at(connect_error).is_empty()
 }
 
@@ -702,8 +726,8 @@ fn say_local_network_refused(connect_error: &str, took: Duration) {
 
 /// [`netutil::connect_dial_within`] for a LAN dial: a connect macOS refuses
 /// at once while raven-node is new ([`retry_refused_at_start`]) is tried
-/// again within seconds, quietly; a refusal that stands counts for the
-/// warning ([`say_local_network_refused`]).
+/// again within seconds, quietly (on macOS only, [`start_grace`]); a refusal
+/// that stands counts for the warning ([`say_local_network_refused`]).
 async fn connect_lan(
     lan_dial: &str,
     connect: &netutil::ConnectWait,
@@ -712,16 +736,18 @@ async fn connect_lan(
         || netutil::connect_dial_within(lan_dial, connect, CONNECT_BUDGET),
         since_process_start,
         REFUSED_RETRY_EVERY,
+        start_grace(),
     )
     .await
 }
 
-/// [`connect_lan`] with the connect, the time since raven-node started and
-/// the pause between tries as arguments.
+/// [`connect_lan`] with the connect, the time since raven-node started, the
+/// pause between tries and the start grace as arguments.
 async fn connect_lan_with<T, F, Fut>(
     mut dial: F,
     uptime: impl Fn() -> Duration,
     pause: Duration,
+    grace: Duration,
 ) -> Result<T, String>
 where
     F: FnMut() -> Fut,
@@ -731,7 +757,7 @@ where
         let started = std::time::Instant::now();
         match dial().await {
             Ok(done) => return Ok(done),
-            Err(e) if retry_refused_at_start(&e, started.elapsed(), uptime()) => {
+            Err(e) if retry_refused_at_start(&e, started.elapsed(), uptime(), grace) => {
                 tokio::time::sleep(pause).await;
                 lan_still_on()?;
             }
@@ -4113,21 +4139,28 @@ mod tests {
                        host (os error 65))";
         let s = Duration::from_secs;
         let quick = Duration::from_millis(20);
-        assert!(retry_refused_at_start(refused, quick, s(0)));
-        assert!(retry_refused_at_start(refused, quick, s(28)));
+        let grace = START_GRACE;
+        assert!(retry_refused_at_start(refused, quick, s(0), grace));
+        assert!(retry_refused_at_start(refused, quick, s(28), grace));
         assert!(
-            !retry_refused_at_start(refused, quick, s(29)),
+            !retry_refused_at_start(refused, quick, s(29), grace),
             "the grace ends"
         );
-        assert!(!retry_refused_at_start(refused, quick, s(300)));
-        assert!(!retry_refused_at_start(refused, s(2), s(0)), "not at once");
+        assert!(!retry_refused_at_start(refused, quick, s(300), grace));
+        assert!(
+            !retry_refused_at_start(refused, s(2), s(0), grace),
+            "not at once"
+        );
         for other in [
             "cannot connect to 192.168.0.25:17420 (192.168.0.25:17420: Connection refused (os \
              error 61))",
             "cannot connect to 203.0.113.9:17420 (203.0.113.9:17420: No route to host (os error \
              65))",
         ] {
-            assert!(!retry_refused_at_start(other, quick, s(0)), "{other}");
+            assert!(
+                !retry_refused_at_start(other, quick, s(0), grace),
+                "{other}"
+            );
         }
     }
 
@@ -4152,12 +4185,75 @@ mod tests {
             }
         };
         let pause = Duration::from_millis(5);
-        let got = connect_lan_with(dial, || Duration::from_secs(3), pause).await;
+        let got = connect_lan_with(dial, || Duration::from_secs(3), pause, START_GRACE).await;
         assert_eq!(got, Ok(4), "three refusals, then through");
         tries.set(0);
-        let got = connect_lan_with(dial, || Duration::from_secs(45), pause).await;
+        let got = connect_lan_with(dial, || Duration::from_secs(45), pause, START_GRACE).await;
         assert_eq!(got, Err(format!("lan connect: {refused}")));
         assert_eq!(tries.get(), 1, "past the grace: no second try");
+    }
+
+    /// iOS (any system but macOS, [`start_grace`]): a LAN connect refused at
+    /// once is the app's Local Network permission, not a new binary. With
+    /// no grace even a new node's refusal fails the dial after one try, in
+    /// the same words, and the next route is dialled at once.
+    #[tokio::test]
+    async fn without_the_start_grace_a_refusal_fails_at_once() {
+        let refused = "cannot connect to 192.168.0.25:17420 (192.168.0.25:17420: No route to \
+                       host (os error 65))";
+        let quick = Duration::from_millis(20);
+        assert!(!retry_refused_at_start(
+            refused,
+            quick,
+            Duration::ZERO,
+            Duration::ZERO
+        ));
+        let tries = std::cell::Cell::new(0u32);
+        let dial = || {
+            tries.set(tries.get() + 1);
+            async move { Err::<u32, _>(refused.to_string()) }
+        };
+        let pause = Duration::from_millis(5);
+        let got = connect_lan_with(dial, || Duration::ZERO, pause, Duration::ZERO).await;
+        assert_eq!(got, Err(format!("lan connect: {refused}")));
+        assert_eq!(tries.get(), 1, "no second try");
+    }
+
+    /// The cut, on tokio's paused clock: a refusal at once right after the
+    /// start holds the dial for 29 s with the grace (30 tries a second
+    /// apart), and for no time without it. Before, an iPhone's cold launch
+    /// had the grace too, and every route after the LAN one waited that
+    /// long (a mail check dials a friend's routes in turn).
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_at_start_holds_the_dial_29s_with_the_grace_and_none_without() {
+        let _lan = lan_switch_untouched();
+        let refused = "cannot connect to 192.168.0.25:17420 (192.168.0.25:17420: No route to \
+                       host (os error 65))";
+        for (grace, want) in [
+            (START_GRACE, (30, Duration::from_secs(29))),
+            (Duration::ZERO, (1, Duration::ZERO)),
+        ] {
+            let tries = std::cell::Cell::new(0u32);
+            let dial = || {
+                tries.set(tries.get() + 1);
+                async move { Err::<(), _>(refused.to_string()) }
+            };
+            let started = tokio::time::Instant::now();
+            let got =
+                connect_lan_with(dial, || started.elapsed(), REFUSED_RETRY_EVERY, grace).await;
+            assert_eq!(got, Err(format!("lan connect: {refused}")), "{grace:?}");
+            assert_eq!((tries.get(), started.elapsed()), want, "{grace:?}");
+        }
+    }
+
+    /// Only macOS lets a new binary onto the local network late, so only
+    /// macOS has the start grace.
+    #[test]
+    fn the_start_grace_is_for_macos_only() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(start_grace(), START_GRACE);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(start_grace(), Duration::ZERO);
     }
 
     /// Owner decision 2026-10-08: an unverified contact is answered on LAN
