@@ -154,8 +154,11 @@ signal: its pid is the app's own).
    are in the profile, so it is ready again in seconds, and an onion dial
    meanwhile waits for it (up to 8 s). Call `messages.retry` for what waits
    at once and again when `NetworkStatus.tor.phase` turns `ready`. A
-   `mail.check` in the front takes a short budget (the app gives 5000 ms):
-   the running node fetches by itself, and nothing waits for the check.
+   `mail.check` in the front takes a short budget (the app gives 5000 ms),
+   and nothing else waits for the check. On the running node only its wait
+   is bounded: the node's dials keep their own deadlines, so a fetch that
+   takes longer than the check (a fresh Tor rendezvous) goes on, and what
+   it brings shows through `events.poll` after the check returned.
 4. **Background refresh** (`BGAppRefreshTask`, about 30 s): call
    `mail.check {"budget_ms": 25000}` off the main thread, then
    `setTaskCompleted(success:)` and schedule the next request. It returns
@@ -172,9 +175,14 @@ signal: its pid is the app's own).
 for the check (IPC, the outbox worker and the custody fetcher; no listener,
 no Tor, no p2p host, no radio), waits for one full fetch pass over the
 friends who hold mail, and stops it. On a running node it asks for a fetch
-pass now and waits for it; a send, a start, a pause or a resume meanwhile
-waits for nothing. It is refused while the profile is locked or
-being erased.
+pass now and waits for it, within the budget; a send, a start, a pause or a
+resume meanwhile waits for nothing. On a running full node only that wait
+is bounded: its dials keep their own deadlines (80 s for a custody dial
+over Tor, 45 s for any other), `completed` and `new_messages` say what the
+pass did within the budget, and what it brings later shows through
+`events.poll`. A small node's dials (the one a check starts, or the
+background node of `node.pause {"nearby": "keep"}`) are still cut at the
+budget. It is refused while the profile is locked or being erased.
 
 ## 4. Where the profile lives
 
@@ -439,6 +447,7 @@ node stays paused, `node.resume`, and a direct delivery again.
 | | macOS | iOS Simulator (iOS 27.2) | iPhone / iPad |
 |---|---|---|---|
 | Embedded node, in-process IPC, `node.pause` / `node.resume` / `mail.check` | `embedded_engines_end_to_end` | the same test, its three engines in three simulator processes | not yet |
+| `mail.check` on a running node bounds only its wait: the node's fetch from a slow mail friend goes on | `a_mail_check_cuts_no_dial_of_the_running_node` | not yet | not yet |
 | Tor in process, loopback helper | in that test | in that test | not yet |
 | Tor in process, real Arti (bootstrap, onion service publishing) | `tor_in_process_bootstraps` | the same test | not yet |
 | Tor off when the Tor network finds it too old (patched Arti told instead of exiting), Tor on Wi-Fi only | `onion::tests`, the end-to-end test (`network.path`) | the end-to-end test, `simulator_smoke.sh` | not yet |

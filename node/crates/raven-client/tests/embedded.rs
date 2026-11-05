@@ -19,15 +19,20 @@
 //! A send whose turn comes while A is paused (and then locked by Lock v2)
 //! waits and goes after the resume (and the unlock).
 //!
+//! A short mail check while A's node runs bounds only its own wait: a fetch
+//! from a mail friend that takes longer goes on and brings the mail.
+//!
 //! `tor_in_process_bootstraps` (ignored: it needs the Tor network) runs
 //! real Arti in an engine's process until Tor is ready.
 
 mod common;
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use raven_client::Client;
@@ -919,6 +924,232 @@ fn mail_check_beside_a_send_and_a_pause() {
     );
     drop(silent);
     a.ok("node.resume", json!({}));
+}
+
+/// A TCP link to `to` that comes up `delay` after each connection (as a
+/// fresh Tor rendezvous takes its time): it accepts on 127.0.0.1, waits,
+/// then connects to `to` and copies the bytes both ways. Dropped, it stops
+/// accepting and ends every link it carries.
+struct SlowLink {
+    addr: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SlowLink {
+    fn to(to: &str, delay: Duration) -> SlowLink {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let to: SocketAddr = to.parse().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let mut links = Vec::new();
+            while !stopped.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((near, _)) => {
+                        let stopped = Arc::clone(&stopped);
+                        links.push(std::thread::spawn(move || {
+                            carry(near, to, delay, &stopped);
+                        }));
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+            for link in links {
+                let _ = link.join();
+            }
+        });
+        SlowLink {
+            addr,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for SlowLink {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// One link of a [`SlowLink`]: `delay`, then `near` joined to `to` until
+/// either side ends or the link is stopped.
+fn carry(near: TcpStream, to: SocketAddr, delay: Duration, stop: &AtomicBool) {
+    let until = Instant::now() + delay;
+    while Instant::now() < until {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = near.set_nonblocking(false);
+    let Ok(far) = TcpStream::connect_timeout(&to, Duration::from_secs(5)) else {
+        return;
+    };
+    let (Ok(near_back), Ok(far_back)) = (near.try_clone(), far.try_clone()) else {
+        return;
+    };
+    std::thread::scope(|s| {
+        s.spawn(|| pipe(near, far, stop));
+        pipe(far_back, near_back, stop);
+    });
+}
+
+/// Copies `from` to `to` until `from` ends or `stop`; then `to` gets no
+/// more.
+fn pipe(mut from: TcpStream, mut to: TcpStream, stop: &AtomicBool) {
+    let _ = from.set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = to.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut buf = [0u8; 16 * 1024];
+    while !stop.load(Ordering::SeqCst) {
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = to.shutdown(Shutdown::Write);
+}
+
+/// A 127.0.0.1 address nobody listens on (a port that was free a moment
+/// ago).
+fn closed_port() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
+}
+
+/// A short mail check while the app is open (the iPhone app gives 5 s
+/// when it opens or on a pull) bounds only its own wait: the running
+/// node's fetch from a mail friend is not cut at the budget. B's message is
+/// held by C, A's only way to it, and A's link to C takes 2 s to come up
+/// (a fresh Tor rendezvous takes longer than a foreground check): the
+/// check returns within its 1 s, and the message is in A's inbox seconds
+/// later. Cut at the budget, the fetch counted as a mail friend not
+/// reached, and the next one came a minute later.
+#[test]
+fn a_mail_check_cuts_no_dial_of_the_running_node() {
+    in_own_process("mail_check_beside_a_slow_mail_friend");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_mail_check_cuts_no_dial_of_the_running_node"]
+fn mail_check_beside_a_slow_mail_friend() {
+    if !own_process("mail_check_beside_a_slow_mail_friend") {
+        return;
+    }
+    const HELD: &str = "held by C while A runs";
+    embedded_env();
+    std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    std::env::set_var("RAVEN_LAB_TOR", "0");
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK");
+    // A copy is left with C at once. A's fetcher keeps its own interval
+    // (60 s): no RAVEN_LAB_CUSTODY_FETCH_MS.
+    std::env::set_var("RAVEN_LAB_CUSTODY_AFTER_MS", "0");
+    // Route hints (on in release builds since 2026-10) would teach B and C
+    // A's live LAN address, and A C's: closed here, so B's message reaches
+    // A only through A's fetch from C, over the slow link.
+    std::env::set_var("RAVEN_LAB_ROUTE_HINTS", "0");
+    let root = common::short_dir();
+    let dir = |n: &str| root.path().join(n);
+    let b = Peer::new("B", dir("b"), Box::new(Remote::spawn(&dir("b"), &[])));
+    let c = Peer::new("C", dir("c"), Box::new(Remote::spawn(&dir("c"), &[])));
+    let a = Peer::new("A", dir("a"), Box::new(Client::with_data_dir(dir("a"))));
+    let _stops = StopsNode(&a);
+    for (x, y) in [(&a, &b), (&a, &c), (&b, &a), (&b, &c), (&c, &a), (&c, &b)] {
+        x.befriend(y);
+    }
+    // C carries for friends.
+    c.ok(
+        "network.set",
+        json!({"carry_for_friends": true, "agreed": true}),
+    );
+    let (_, lb, lc) = (a.start(), b.start(), c.start());
+    // A reaches C only over a link that takes 2 s to come up; nobody
+    // reaches A.
+    let slow = SlowLink::to(&lc, Duration::from_secs(2));
+    let nowhere = closed_port();
+    for (x, y, l) in [
+        (&a, &b, &lb),
+        (&a, &c, &slow.addr),
+        (&b, &a, &nowhere),
+        (&b, &c, &lc),
+        (&c, &a, &nowhere),
+        (&c, &b, &lb),
+    ] {
+        x.set_lan(y, l);
+    }
+    for (x, y) in [(&a, &b), (&b, &a)] {
+        x.ok(
+            "contacts.set_routes",
+            json!({"address": y.address(), "custodians": [c.address()]}),
+        );
+    }
+    // A secure connection with B first: a first message needs both online.
+    let id = a.send(&b, "hello before the check");
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}");
+    // A's fetches from C settle: one whole pass now, the next a minute
+    // later.
+    let settled = a.ok("mail.check", json!({"budget_ms": 20000}));
+    assert_eq!(settled["completed"], true, "{settled}\n{}", a.log());
+
+    // B's message is left with C.
+    b.send(&a, HELD);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let net = c.ok("network.status", json!({}));
+        if net["carry"]["carry_for_friends"]["held_messages"]
+            .as_i64()
+            .unwrap_or(0)
+            >= 1
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "C holds nothing: {net}\n{}",
+            b.log()
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(!a.has_incoming(&b, HELD), "{}", a.log());
+
+    // The app opens: a short check. It returns within its budget, and the
+    // node's fetch goes on.
+    let began = Instant::now();
+    let check = a.ok("mail.check", json!({"budget_ms": 1000}));
+    let took = began.elapsed();
+    assert!(took < Duration::from_secs(2), "{took:?} {check}");
+    assert_eq!(check["started_node"], false, "{check}");
+    let deadline = began + Duration::from_secs(15);
+    while !a.has_incoming(&b, HELD) {
+        assert!(
+            Instant::now() < deadline,
+            "B's message is not in A's inbox {:?} after a mail check ({took:?}: {check})\n{}",
+            began.elapsed(),
+            a.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!(
+        "mail check {took:?}: {check}; B's message in A's inbox after {:?}",
+        began.elapsed()
+    );
+    // That pass goes on (it releases the message at C); the next one waits
+    // for it and ends in time, so no dial is left when the node stops.
+    let after = a.ok("mail.check", json!({"budget_ms": 20000}));
+    assert_eq!(after["completed"], true, "{after}\n{}", a.log());
 }
 
 /// Real Arti inside an engine's process (feature `tor-embedded`) until Tor
