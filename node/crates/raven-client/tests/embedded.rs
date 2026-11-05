@@ -1152,6 +1152,115 @@ fn mail_check_beside_a_slow_mail_friend() {
     assert_eq!(after["completed"], true, "{after}\n{}", a.log());
 }
 
+/// A background refresh (`mail.check` while the app is paused: the check
+/// starts a small node of its own) asks every mail friend, whatever the
+/// schedule the app's running node left. A asked C just before the pause
+/// and C had nothing, so the running node would ask C next only a fetch
+/// interval later (10 min here). The message B leaves with C meanwhile is
+/// collected by the check. Before, the small node's pass asked only the
+/// friends whose turn had come and the check came back with nothing: an
+/// iPhone app's process outlives many such refreshes, and its clock stands
+/// still while the phone sleeps.
+#[test]
+fn a_paused_mail_check_asks_a_mail_friend_the_running_node_put_off() {
+    in_own_process("paused_check_after_an_empty_fetch");
+}
+
+#[test]
+#[ignore = "run in a process of its own by a_paused_mail_check_asks_a_mail_friend_the_running_node_put_off"]
+fn paused_check_after_an_empty_fetch() {
+    if !own_process("paused_check_after_an_empty_fetch") {
+        return;
+    }
+    const HELD: &str = "left with C while A sleeps";
+    embedded_env();
+    std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    std::env::set_var("RAVEN_LAB_TOR", "0");
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK");
+    // A copy is left with C at once, and A's fetcher asks a mail friend
+    // that had nothing again only 10 min later: far beyond this test.
+    std::env::set_var("RAVEN_LAB_CUSTODY_AFTER_MS", "0");
+    std::env::set_var("RAVEN_LAB_CUSTODY_FETCH_MS", "600000");
+    // Route hints would teach B A's address: B's message reaches A only
+    // through C.
+    std::env::set_var("RAVEN_LAB_ROUTE_HINTS", "0");
+    let root = common::short_dir();
+    let dir = |n: &str| root.path().join(n);
+    let b = Peer::new("B", dir("b"), Box::new(Remote::spawn(&dir("b"), &[])));
+    let c = Peer::new("C", dir("c"), Box::new(Remote::spawn(&dir("c"), &[])));
+    let a = Peer::new("A", dir("a"), Box::new(Client::with_data_dir(dir("a"))));
+    let _stops = StopsNode(&a);
+    for (x, y) in [(&a, &b), (&a, &c), (&b, &a), (&b, &c), (&c, &a), (&c, &b)] {
+        x.befriend(y);
+    }
+    // C carries for friends.
+    c.ok(
+        "network.set",
+        json!({"carry_for_friends": true, "agreed": true}),
+    );
+    let (_, lb, lc) = (a.start(), b.start(), c.start());
+    // A reaches B and C; nobody reaches A.
+    let nowhere = closed_port();
+    for (x, y, l) in [
+        (&a, &b, &lb),
+        (&a, &c, &lc),
+        (&b, &a, &nowhere),
+        (&b, &c, &lc),
+        (&c, &a, &nowhere),
+        (&c, &b, &lb),
+    ] {
+        x.set_lan(y, l);
+    }
+    for (x, y) in [(&a, &b), (&b, &a)] {
+        x.ok(
+            "contacts.set_routes",
+            json!({"address": y.address(), "custodians": [c.address()]}),
+        );
+    }
+    // A secure connection with B first: a first message needs both online.
+    let id = a.send(&b, "hello before the pause");
+    let m = a.wait_state(&b, &id, &["delivered", "failed"], Duration::from_secs(90));
+    assert_eq!(m["state"], "delivered", "{m}");
+    // The running node asks C, which holds nothing for A: C's next turn
+    // is a fetch interval away.
+    let empty = a.ok("mail.check", json!({"budget_ms": 20000}));
+    assert_eq!(empty["completed"], true, "{empty}\n{}", a.log());
+    assert!(!a.has_incoming(&b, HELD), "{}", a.log());
+
+    // The app goes to the background, and B's message is left with C.
+    let paused = a.ok("node.pause", json!({}));
+    assert_eq!(paused["state"], "paused", "{paused}");
+    let held = |c: &Peer| {
+        c.ok("network.status", json!({}))["carry"]["carry_for_friends"]["held_messages"]
+            .as_i64()
+            .unwrap_or(0)
+    };
+    let before = held(&c);
+    b.send(&a, HELD);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while held(&c) <= before {
+        assert!(
+            Instant::now() < deadline,
+            "C holds nothing new\n{}",
+            b.log()
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    // iOS background refresh: the check's own node asks C.
+    let check = a.ok("mail.check", json!({"budget_ms": 25000}));
+    assert_eq!(check["started_node"], true, "{check}");
+    assert_eq!(check["completed"], true, "{check}\n{}", a.log());
+    assert!(
+        check["new_messages"].as_u64().unwrap_or(0) >= 1,
+        "{check}\n{}",
+        a.log()
+    );
+    assert!(a.has_incoming(&b, HELD), "{}", a.log());
+    let st = a.ok("node.status", json!({}));
+    assert_eq!(st["state"], "paused", "{st}");
+}
+
 /// Real Arti inside an engine's process (feature `tor-embedded`) until Tor
 /// is ready. Needs the Tor network: run it by name with `--ignored`.
 #[test]

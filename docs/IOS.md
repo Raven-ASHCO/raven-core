@@ -174,7 +174,10 @@ signal: its pid is the app's own).
 `mail.check` on a paused node does not resume it: it starts a small node
 for the check (IPC, the outbox worker and the custody fetcher; no listener,
 no Tor, no p2p host, no radio), waits for one full fetch pass over the
-friends who hold mail, and stops it. On a running node it asks for a fetch
+friends who hold mail, and stops it. That pass asks every one of them,
+whatever the schedule the app's running node left (the app's process
+outlives many refreshes, and its clock stands still while the phone
+sleeps). On a running node it asks for a fetch
 pass now and waits for it, within the budget; a send, a start, a pause or a
 resume meanwhile waits for nothing. On a running full node only that wait
 is bounded: its dials keep their own deadlines (80 s for a custody dial
@@ -448,6 +451,7 @@ node stays paused, `node.resume`, and a direct delivery again.
 |---|---|---|---|
 | Embedded node, in-process IPC, `node.pause` / `node.resume` / `mail.check` | `embedded_engines_end_to_end` | the same test, its three engines in three simulator processes | not yet |
 | `mail.check` on a running node bounds only its wait: the node's fetch from a slow mail friend goes on | `a_mail_check_cuts_no_dial_of_the_running_node` | not yet | not yet |
+| `mail.check` on a paused node asks every mail friend, also one the running node would ask only minutes later | `a_paused_mail_check_asks_a_mail_friend_the_running_node_put_off` | not yet | not yet |
 | Tor in process, loopback helper | in that test | in that test | not yet |
 | Tor in process, real Arti (bootstrap, onion service publishing) | `tor_in_process_bootstraps` | the same test | not yet |
 | Tor off when the Tor network finds it too old (patched Arti told instead of exiting), Tor on Wi-Fi only | `onion::tests`, the end-to-end test (`network.path`) | the end-to-end test, `simulator_smoke.sh` | not yet |
