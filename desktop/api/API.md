@@ -328,7 +328,9 @@ node (no full node starts). The answer says `nearby: "kept"`, or `"stopped"` wit
 `note` when that node did not start (the pause holds all the same). `node.resume` replaces it
 with the full node. `mail.check` collects what friends hold for
 this profile within `budget_ms` (default 25000, at most 28000), starting a
-small node for it when none runs and stopping it again; it is refused with
+small node for it when none runs and stopping it again. On a running full
+node (the app in the front) only its wait is bounded: the node's fetch goes
+on, and what it brings later shows through `events.poll`. It is refused with
 `PROFILE_LOCKED` while the profile is locked. Without the embedded node the
 three answer `NOT_AVAILABLE_YET`, as does `network.path`: the app reports the kind of network
 the device uses (`NWPathMonitor`), and with the setting `tor_wifi_only` on (`network.set`; off by
