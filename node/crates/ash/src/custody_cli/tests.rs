@@ -1376,8 +1376,11 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
     assert!(frank[0].ends_with("not verified"), "{frank:?}");
     assert_eq!(
         frank.last().unwrap(),
-        "  offline delivery: friends carry mail for verified contacts only (raven contact \
-         verify @frank)"
+        &format!(
+            "  offline delivery: friends carry mail for verified contacts only (raven contact \
+             verify --address {})",
+            contact(0x45, "Frank", false).address
+        )
     );
     // Learned custody held in this build: nothing announced is read.
     gates(Some(true), Some(false), Some(true));
@@ -1393,4 +1396,39 @@ fn contact_show_lists_announced_mail_friends_and_handoff() {
     );
     assert!(show("@nobody", &[]).is_err());
     gates(None, None, None);
+}
+
+/// ASH-1, the other hints: `raven contact show` for a contact that is not
+/// verified names it by its rvn1 address in the command to verify it, never
+/// by the name that was typed (one that holds what a shell runs once the
+/// command is pasted, quotes or option like text).
+#[test]
+fn contact_show_verify_hint_names_the_contact_by_address() {
+    let dir = tmp();
+    let names = [
+        "Ali & Sara $(touch pwned)",
+        "x;id",
+        "a`id`b",
+        "q\" ; id ; \"",
+        "\u{201c}curly\u{201d}; calc",
+        "--yes",
+    ];
+    let book: Vec<Contact> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| contact(0x60 + i as u8, name, false))
+        .collect();
+    super::super::save_contacts(dir.path(), &book).unwrap();
+    for c in &book {
+        let lines = contact_show_lines(dir.path(), &c.petname, &LOCAL, &[], now_ms()).unwrap();
+        assert_eq!(
+            lines.last().unwrap(),
+            &format!(
+                "  offline delivery: friends carry mail for verified contacts only (raven \
+                 contact verify --address {})",
+                c.address
+            ),
+            "{lines:?}"
+        );
+    }
 }

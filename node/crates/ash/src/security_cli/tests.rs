@@ -408,12 +408,57 @@ fn verify_names_the_contact_as_one_shell_word() {
         Some("--petname \"Sara K. (work)\"")
     );
     c.petname = "a\"b$c`d".into();
-    assert_eq!(verify_arg(&c).as_deref(), Some("--petname \"abcd\""));
+    assert_eq!(verify_arg(&c).as_deref(), Some("--petname 'a\"b$c`d'"));
     c.petname = String::new();
-    assert_eq!(verify_arg(&c).as_deref(), Some("@sara"));
+    assert_eq!(verify_arg(&c).as_deref(), Some("--tag sara"));
     c.public_tag = String::new();
     assert_eq!(verify_arg(&c), None);
     assert_eq!(display_name(&c), "an unnamed contact");
+}
+
+/// ASH-1, the other hints: in PowerShell (and cmd.exe for a plain name)
+/// the argument is bare when plain, else in PowerShell's verbatim single
+/// quotes, never in double quotes, which `$`, a backtick and the
+/// typographic double quotes end or expand; a tag goes after `--tag`, never
+/// as a bare `@tag` (a splat there).
+#[test]
+fn verify_hint_is_one_safe_word_in_powershell() {
+    let mut c = contact(0x5a, "Sara", true);
+    for (petname, arg) in [
+        ("Sara", "--petname Sara"),
+        (
+            "Sara \u{201c}work\u{201d}; calc",
+            "--petname 'Sara \u{201c}work\u{201d}; calc'",
+        ),
+        ("it's", "--petname 'it''s'"),
+        ("a$b`c", "--petname 'a$b`c'"),
+        ("50%off", "--petname '50%off'"),
+    ] {
+        c.petname = petname.into();
+        assert_eq!(verify_arg_for(&c, true).as_deref(), Some(arg), "{petname}");
+    }
+    c.petname = String::new();
+    assert_eq!(verify_arg_for(&c, true).as_deref(), Some("--tag sara"));
+}
+
+/// ASH-1, the other hints: the `raven contact verify` argument pastes into
+/// a POSIX shell as one word holding the whole name: in single quotes when
+/// the name has a character the shell acts on inside double quotes (`!`,
+/// the history, among them), never with characters dropped.
+#[test]
+fn verify_hint_keeps_any_name_one_safe_word() {
+    let mut c = contact(0x5a, "Sara", true);
+    for (petname, arg) in [
+        ("Bob!!", "--petname 'Bob!!'"),
+        ("x!#:s/a/b/", "--petname 'x!#:s/a/b/'"),
+        ("a\"b$c`d", "--petname 'a\"b$c`d'"),
+        ("x$(id)", "--petname 'x$(id)'"),
+        ("it's", "--petname \"it's\""),
+        ("Ali & Sara", "--petname \"Ali & Sara\""),
+    ] {
+        c.petname = petname.into();
+        assert_eq!(verify_arg(&c).as_deref(), Some(arg), "{petname}");
+    }
 }
 
 /// A temporary sealed profile (a debug build with the lab file backend),

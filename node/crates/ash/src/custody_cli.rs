@@ -1477,10 +1477,12 @@ pub(super) fn contact_show_lines(
         ));
     }
     if !target.pinned {
+        // The contact by its rvn1 address (ASH-1: never by the name typed,
+        // in a command to paste).
         lines.push(format!(
             "  offline delivery: friends carry mail for verified contacts only (raven contact \
-             verify {})",
-            sanitize_terminal_line(selector.trim())
+             verify --address {})",
+            sanitize_terminal_line(&target.address)
         ));
         return Ok(lines);
     }

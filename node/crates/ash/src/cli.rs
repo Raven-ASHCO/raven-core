@@ -4682,26 +4682,12 @@ fn cmd_outbox_cli(data_dir: &Path, cmd: Option<OutboxCommands>) -> Result<(), St
         OutboxCommands::Retry { mid } => ext::OutboxCmd::Retry { mid },
         OutboxCommands::Cancel { mid, yes } => ext::OutboxCmd::Cancel { mid, yes },
         OutboxCommands::Resend { contact } => {
+            // Also the rvn1 address, which the held lines name the contact
+            // by (ASH-1: never its name in a command to paste).
             let contacts = load_contacts(data_dir)?;
-            let hits = resolve_contact_arg(&contacts, &contact);
-            let one = match hits.as_slice() {
-                [one] => one,
-                [] => return Err(no_contact_message(&contacts, &contact)),
-                many => {
-                    return Err(format!(
-                        "contact {} is ambiguous ({} matches): use the @tag",
-                        sanitize_terminal_line(&contact),
-                        many.len()
-                    ))
-                }
-            };
+            let one = select_contact_for_edit(&contacts, Some(&contact), None, None, None)?;
             let peer = parse_pub_hex(&one.pub_hex)?;
-            let who = if one.petname.is_empty() {
-                sanitize_terminal_line(&contact)
-            } else {
-                sanitize_terminal_line(&one.petname)
-            };
-            return pair_init_lab::resend_after_reset(data_dir, &peer, &who);
+            return pair_init_lab::resend_after_reset(data_dir, &peer, &one.primary_label());
         }
     };
     ext::cmd_outbox(data_dir, cmd)
@@ -7337,15 +7323,7 @@ fn save_contact_from(
     );
     println!(
         "{C_DIM}pinned{C_RESET}      {}",
-        if verified {
-            "yes (Tag+key locked locally)".to_string()
-        } else {
-            format!(
-                "no — not verified yet (compare security words with them by phone or in \
-                 person: raven contact verify {})",
-                if named { label.as_str() } else { "NAME" }
-            )
-        }
+        pinned_text(saved, verified)
     );
     let who = if named { label.as_str() } else { "them" };
     println!("{}", add_next_line(who, prior.is_some()));
@@ -7353,6 +7331,20 @@ fn save_contact_from(
         "{C_DIM}(saved on this computer only — no server or online directory was involved){C_RESET}"
     );
     Ok(())
+}
+
+/// The `pinned` row of `contact add`'s summary for `saved`: yes when it is
+/// `verified`, else how to verify it, the contact named by its rvn1 address
+/// (ASH-1: never by its name in a command to paste).
+fn pinned_text(saved: &Contact, verified: bool) -> String {
+    if verified {
+        return "yes (Tag+key locked locally)".to_string();
+    }
+    format!(
+        "no — not verified yet (compare security words with them by phone or in \
+         person: raven contact verify --address {})",
+        sanitize_terminal_line(&saved.address)
+    )
 }
 
 /// The line after `contact add`: a new contact has to add you too; a contact
@@ -8585,8 +8577,10 @@ pub(crate) fn unverify_saved_contact(data_dir: &Path, pub_hex: &str) -> Result<b
     Ok(true)
 }
 
-/// `raven contact block NAME`.
-fn cmd_contact_block_saved(data_dir: &Path, selector: &str, yes: bool) -> Result<(), String> {
+/// `raven contact block NAME`: the line to print once it is blocked, whose
+/// undo names the contact by its rvn1 address (ASH-1: never by the name
+/// typed, in a command to paste).
+fn cmd_contact_block_saved(data_dir: &Path, selector: &str, yes: bool) -> Result<String, String> {
     let contacts = load_contacts(data_dir)?;
     let target = select_contact_for_edit(&contacts, Some(selector), None, None, None)?;
     let name = target.primary_label();
@@ -8605,11 +8599,10 @@ fn cmd_contact_block_saved(data_dir: &Path, selector: &str, yes: bool) -> Result
     for note in block_saved_contact(data_dir, &target.pub_hex)? {
         eprintln!("{}", sanitize_terminal_line(&note));
     }
-    println!(
+    Ok(format!(
         "{C_GREEN}blocked{C_RESET} {name} on this computer; undo with `raven contact unblock {}`",
-        sanitize_terminal_line(selector.trim())
-    );
-    Ok(())
+        sanitize_terminal_line(&target.address)
+    ))
 }
 
 /// `raven contact unblock NAME` or `--pub-hex <key>`.
@@ -8635,8 +8628,10 @@ fn cmd_contact_unblock_any(
     }
 }
 
-/// `raven contact unverify NAME`.
-fn cmd_contact_unverify(data_dir: &Path, selector: &str, yes: bool) -> Result<(), String> {
+/// `raven contact unverify NAME`: the line to print once it is done, whose
+/// way back names the contact by its rvn1 address (ASH-1: never by the
+/// name typed, in a command to paste).
+fn cmd_contact_unverify(data_dir: &Path, selector: &str, yes: bool) -> Result<String, String> {
     let contacts = load_contacts(data_dir)?;
     let target = select_contact_for_edit(&contacts, Some(selector), None, None, None)?;
     let name = target.primary_label();
@@ -8656,11 +8651,11 @@ fn cmd_contact_unverify(data_dir: &Path, selector: &str, yes: bool) -> Result<()
         return Err("cancelled — still verified".into());
     }
     unverify_saved_contact(data_dir, &target.pub_hex)?;
-    println!(
-        "{C_GREEN}not verified any more{C_RESET}: {name}; verify again with `raven contact verify {}`",
-        sanitize_terminal_line(selector.trim())
-    );
-    Ok(())
+    Ok(format!(
+        "{C_GREEN}not verified any more{C_RESET}: {name}; verify again with `raven contact verify \
+         --address {}`",
+        sanitize_terminal_line(&target.address)
+    ))
 }
 
 /// `ash contact set-dial`: refresh one contact's saved LAN dial in place
@@ -17375,7 +17370,10 @@ pub fn run() {
                 if is_request_id(&target) {
                     cmd_contact_block(&data_dir, &target)
                 } else {
-                    exit_on_err(cmd_contact_block_saved(&data_dir, &target, yes))
+                    exit_on_err(
+                        cmd_contact_block_saved(&data_dir, &target, yes)
+                            .map(|line| println!("{line}")),
+                    )
                 }
             }
             ContactCommands::Unblock { selector, pub_hex } => exit_on_err(cmd_contact_unblock_any(
@@ -17383,9 +17381,9 @@ pub fn run() {
                 selector.as_deref(),
                 pub_hex.as_deref(),
             )),
-            ContactCommands::Unverify { selector, yes } => {
-                exit_on_err(cmd_contact_unverify(&data_dir, &selector, yes))
-            }
+            ContactCommands::Unverify { selector, yes } => exit_on_err(
+                cmd_contact_unverify(&data_dir, &selector, yes).map(|line| println!("{line}")),
+            ),
             ContactCommands::Remove {
                 tag,
                 petname,
@@ -24399,6 +24397,96 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             .map(|c| c.petname.clone())
             .collect();
         assert_eq!(pet, ["alice"]);
+    }
+
+    /// Names the paste safe hints are checked with (ASH-1): what a shell runs
+    /// once a command is pasted, quotes that end the word, and text a
+    /// command reads as an option.
+    const HOSTILE_NAMES: [&str; 6] = [
+        "Ali & Sara $(touch pwned)",
+        "x;id",
+        "a`id`b",
+        "q\" ; id ; \"",
+        "\u{201c}curly\u{201d}; calc",
+        "--yes",
+    ];
+
+    /// ASH-1, the other hints: `contact add` says how to verify the contact
+    /// with a command that names it by its rvn1 address, never by its name
+    /// (and a contact without one gets a command it can run as well).
+    #[test]
+    fn contact_add_verify_hint_names_the_contact_by_address() {
+        for (i, name) in HOSTILE_NAMES.into_iter().chain(["Bob", ""]).enumerate() {
+            let id = ident(0x70 + i as u8);
+            let text = pinned_text(&book_row(&id, name, ""), false);
+            assert!(
+                text.ends_with(&format!("raven contact verify --address {})", id.address())),
+                "{name}: {text}"
+            );
+        }
+        assert_eq!(
+            pinned_text(&book_row(&ident(0x70), "Bob", ""), true),
+            "yes (Tag+key locked locally)"
+        );
+    }
+
+    /// ASH-1, the other hints: the undo after `contact block` and the way
+    /// back after `contact unverify` name the contact by its rvn1 address,
+    /// never by the name that was typed; the undo works as given.
+    #[test]
+    fn block_and_unverify_hints_name_the_contact_by_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let book: Vec<Contact> = HOSTILE_NAMES
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Contact {
+                pinned: true,
+                ..book_row(&ident(0x80 + i as u8), name, "")
+            })
+            .collect();
+        save_contacts(d, &book).unwrap();
+        for c in &book {
+            let blocked = cmd_contact_block_saved(d, &c.petname, true).unwrap();
+            assert!(
+                blocked.ends_with(&format!("`raven contact unblock {}`", c.address)),
+                "{blocked}"
+            );
+            cmd_contact_unblock_any(d, Some(&c.address), None).unwrap();
+            let unverified = cmd_contact_unverify(d, &c.petname, true).unwrap();
+            assert!(
+                unverified.ends_with(&format!("`raven contact verify --address {}`", c.address)),
+                "{unverified}"
+            );
+        }
+    }
+
+    /// ASH-1, the other hints: `raven outbox resend --contact` takes the rvn1
+    /// address the held lines name the contact by, as its help says it does:
+    /// the address selects the same contact as its name.
+    #[test]
+    fn outbox_resend_takes_the_contact_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let id = ident(0x90);
+        save_contacts(d, &[book_row(&id, "Ali & Sara", "")]).unwrap();
+        let resend = |contact: &str| {
+            cmd_outbox_cli(
+                d,
+                Some(OutboxCommands::Resend {
+                    contact: contact.into(),
+                }),
+            )
+        };
+        let by_name = resend("Ali & Sara");
+        assert!(
+            by_name
+                .as_ref()
+                .err()
+                .is_none_or(|e| !e.starts_with("no contact for")),
+            "{by_name:?}"
+        );
+        assert_eq!(resend(&id.address()), by_name);
     }
 
     #[test]

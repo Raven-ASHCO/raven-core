@@ -549,8 +549,9 @@ fn action_text(code: &str, about: About<'_>) -> Option<String> {
 }
 
 /// The CLI command for `act` (none for an act without one). `verify` is the
-/// `raven contact verify` argument that names the contact
-/// (`--petname Sara`, `@sara`); without one the command says `NAME`.
+/// `raven contact verify` argument that names the contact, one word safe to
+/// paste (`--petname Sara`, `--tag sara`); without one the command says
+/// `NAME`.
 pub(crate) fn cli_hint(act: Act, verify: Option<&str>) -> Option<String> {
     match act {
         Act::CompareWords => Some(format!("raven contact verify {}", verify.unwrap_or("NAME"))),

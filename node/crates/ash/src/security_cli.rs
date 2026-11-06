@@ -26,6 +26,7 @@ use raven_core::security_ledger::{
 };
 use serde_json::{json, Value};
 
+use super::ext::paste_word;
 use super::security_text::{self as text, About, NoticeText};
 use super::{load_contacts, normalize_tag, typed_confirmation, Contact, C_BOLD, C_DIM, C_RESET};
 
@@ -286,34 +287,26 @@ fn display_name(c: &Contact) -> String {
     }
 }
 
-/// What `raven contact verify` takes to name `c`: `--petname NAME` (quoted
-/// when it needs it) or `@tag`; none for a contact with neither.
+/// What `raven contact verify` takes to name `c`: `--petname NAME` or
+/// `--tag TAG`; none for a contact with neither.
 fn verify_arg(c: &Contact) -> Option<String> {
+    verify_arg_for(c, cfg!(windows))
+}
+
+/// [`verify_arg`] for a POSIX shell, or (`windows`) for PowerShell. The name
+/// is one word that pastes unchanged, whole and quoted as ash's other hints
+/// quote a name (`ext::paste_word`, ASH-1): no character a shell acts on
+/// stays bare, none is dropped. No address replaces it: no text here names
+/// one.
+fn verify_arg_for(c: &Contact, windows: bool) -> Option<String> {
     let petname = sanitize_terminal_line(c.petname.trim());
     let tag = normalize_tag(&c.public_tag);
     if !petname.is_empty() {
-        Some(format!("--petname {}", shell_word(&petname)))
+        Some(format!("--petname {}", paste_word(&petname, windows)))
     } else if !tag.is_empty() {
-        Some(format!("@{tag}"))
+        Some(format!("--tag {}", paste_word(&tag, windows)))
     } else {
         None
-    }
-}
-
-/// `word` as one shell word: as it is when it is plain, else in double
-/// quotes without the characters a shell expands inside them.
-fn shell_word(word: &str) -> String {
-    let plain = word
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'));
-    if plain {
-        word.to_owned()
-    } else {
-        let kept: String = word
-            .chars()
-            .filter(|c| !matches!(c, '"' | '\\' | '$' | '`'))
-            .collect();
-        format!("\"{kept}\"")
     }
 }
 

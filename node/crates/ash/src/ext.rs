@@ -1586,6 +1586,21 @@ fn selector_for_shell(name: &str, address: &str, windows: bool) -> String {
     }
 }
 
+/// `word` as one argument the user can paste into this platform's shell,
+/// quoted as [`selector_for_shell`] quotes a name it has no address for: for
+/// a POSIX shell [`shell_word`]; on Windows bare when plain, else in
+/// PowerShell's verbatim single quotes (never double quotes, inside which
+/// `$`, a backtick and the typographic double quotes act).
+pub(super) fn paste_word(word: &str, windows: bool) -> String {
+    if !windows {
+        shell_word(word)
+    } else if super::p2p_cli::plain_word(word, true) {
+        word.to_string()
+    } else {
+        super::p2p_cli::powershell_quote(word)
+    }
+}
+
 impl SendCtx {
     /// Only a display name is known (see [`friendly_send_error`]).
     pub(crate) fn named(who: &str) -> Self {
@@ -1638,6 +1653,17 @@ impl SendCtx {
         } else {
             self.selector.clone()
         }
+    }
+
+    /// `raven outbox resend` for this contact, as the held lines give it:
+    /// the contact named by its rvn1 address, never by its name (ASH-1: a
+    /// name can hold what a shell runs once the command is pasted); `NAME`
+    /// when its key is not known.
+    fn resend_command(&self) -> String {
+        let contact = parse_pub_hex(&self.pub_hex)
+            .map(|key| encode_address(&key))
+            .unwrap_or_else(|_| "NAME".into());
+        format!("raven outbox resend --contact {contact}")
     }
 }
 
@@ -4556,6 +4582,7 @@ impl SendCtx {
         why: ResetWhy,
     ) -> String {
         let who = self.who();
+        let resend = self.resend_command();
         match code {
             // The contact set up the newer connection itself (most often a
             // security re-key there): nothing was lost on its side, but it
@@ -4567,8 +4594,8 @@ impl SendCtx {
                  in, as it does after a security re-key or a restore. The new one was not made on \
                  your local \
                  network, so RAVEN does not send them again by itself until you are both on the \
-                 same local network. To send them now, run `raven outbox resend --contact \
-                 {who}` (after a re-key, {who}'s `raven security` says Raven set up a new secure \
+                 same local network. To send them now, run `{resend}` \
+                 (after a re-key, {who}'s `raven security` says Raven set up a new secure \
                  connection with you); `raven outbox cancel` drops one. (technical: \
                  PEER_RESET_CONFIRM)"
             ),
@@ -4576,21 +4603,21 @@ impl SendCtx {
                 "{rows} earlier message(s) to {who} are on hold: {who}'s RAVEN lost your secure \
                  connection, and the new one could not be made on your local network, so RAVEN \
                  will not send them again by itself. If {who} confirms they reinstalled or \
-                 restored RAVEN, run `raven outbox resend --contact {who}`; `raven outbox \
-                 cancel` drops one. (technical: PEER_RESET_CONFIRM)"
+                 restored RAVEN, run `{resend}`; `raven outbox cancel` drops \
+                 one. (technical: PEER_RESET_CONFIRM)"
             ),
             "PEER_RESET_LOOP" => format!(
                 "{rows} earlier message(s) to {who} are on hold: {who}'s RAVEN lost your secure \
                  connection {today} times today, so RAVEN stopped re-sending by itself. Ask {who} \
-                 to run `raven doctor`, then run `raven outbox resend --contact {who}`. \
-                 (technical: PEER_RESET_LOOP)"
+                 to run `raven doctor`, then run `{resend}`. (technical: \
+                 PEER_RESET_LOOP)"
             ),
             "PEER_IDENTITY_FORK" => format!(
                 "Warning: {who}'s Raven identity seems to be in use on two computers at once \
                  (one said it no longer has your connection while another kept using it). \
                  {rows} earlier message(s) are on hold and will not be re-sent by themselves. \
-                 Check with {who} in person or by phone; run `raven outbox resend --contact \
-                 {who}` only if they confirm. (technical: PEER_IDENTITY_FORK)"
+                 Check with {who} in person or by phone; run `{resend}` only if they \
+                 confirm. (technical: PEER_IDENTITY_FORK)"
             ),
             other => format!(
                 "{rows} earlier message(s) to {who} are waiting: {who}'s RAVEN lost your secure \
@@ -12871,7 +12898,13 @@ mod send_outcome_tests {
             ),
             "{held}"
         );
-        assert!(held.contains("raven outbox resend --contact Bob"), "{held}");
+        assert!(
+            held.contains(&format!(
+                "raven outbox resend --contact {}",
+                encode_address(&[0xab; 32])
+            )),
+            "{held}"
+        );
         assert!(held.contains("(technical: PEER_RESET_CONFIRM)"), "{held}");
         for line in [
             held.clone(),
@@ -12911,6 +12944,45 @@ mod send_outcome_tests {
                 ctx.reset_held_line(code, 2, 3, ResetWhy::Lost)
             );
         }
+    }
+
+    /// ASH-1, the other hints: every held line names the contact in `raven
+    /// outbox resend` by its rvn1 address, never by its name (one that holds
+    /// what a shell runs once the command is pasted, or only a space); with
+    /// no key known, a placeholder.
+    #[test]
+    fn the_resend_hint_names_the_contact_by_address() {
+        let id = Identity::from_seed(&[0x61; 32]);
+        let address = encode_address(&id.public_key_bytes());
+        let name = "Ali & Sara $(touch pwned)";
+        let ctx = SendCtx {
+            name: name.into(),
+            selector: selector_for(name, &address),
+            pub_hex: hex::encode(id.public_key_bytes()),
+            ..bob()
+        };
+        let resend = format!("`raven outbox resend --contact {address}`");
+        for (code, why) in [
+            ("PEER_RESET_CONFIRM", ResetWhy::Replaced),
+            ("PEER_RESET_CONFIRM", ResetWhy::Lost),
+            ("PEER_RESET_LOOP", ResetWhy::Lost),
+            ("PEER_IDENTITY_FORK", ResetWhy::Lost),
+        ] {
+            let line = ctx.reset_held_line(code, 2, 3, why);
+            assert!(line.contains(&resend), "{code}: {line}");
+            for command in line.split('`').skip(1).step_by(2) {
+                assert!(!command.contains("Ali"), "{code}: {command}");
+            }
+        }
+        let unknown = SendCtx {
+            pub_hex: String::new(),
+            ..ctx
+        };
+        let line = unknown.reset_held_line("PEER_RESET_LOOP", 2, 3, ResetWhy::Lost);
+        assert!(
+            line.contains("`raven outbox resend --contact NAME`"),
+            "{line}"
+        );
     }
 
     /// Review C-time-deadlines-7: the background re-seal note names the time
