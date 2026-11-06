@@ -57,6 +57,10 @@ mod arti;
 #[cfg(debug_assertions)]
 pub(crate) mod loopback;
 
+/// Tests: loopback streams in memory, for tests on the paused clock.
+#[cfg(test)]
+pub(crate) mod memnet;
+
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -1700,10 +1704,10 @@ impl PreToken {
 /// The helper's header within [`TOKEN_WAIT`]: the token, then the stream's
 /// circuit number. Anyone else on this computer is closed before any Raven
 /// byte.
-async fn check_token(
-    mut stream: TcpStream,
+async fn check_token<S: AsyncRead + Unpin>(
+    mut stream: S,
     token: &[u8; proto::TOKEN_LEN],
-) -> Result<(TcpStream, u64), String> {
+) -> Result<(S, u64), String> {
     let mut got = [0u8; proto::FORWARD_HEADER_LEN];
     tokio::time::timeout(TOKEN_WAIT, stream.read_exact(&mut got))
         .await
@@ -1962,6 +1966,25 @@ async fn warm_dial(
     Ok(())
 }
 
+/// A Tor stream from the helper: a TCP stream from its connect port (in
+/// tests it may be in memory, `memnet`).
+#[cfg(not(test))]
+pub(crate) type HelperStream = TcpStream;
+#[cfg(test)]
+pub(crate) type HelperStream = memnet::Stream;
+
+/// A stream to the helper's connect port at `helper`, Nagle off.
+#[cfg(not(test))]
+async fn helper_stream(helper: SocketAddr) -> std::io::Result<HelperStream> {
+    let stream = TcpStream::connect(helper).await?;
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
+}
+#[cfg(test)]
+async fn helper_stream(helper: SocketAddr) -> std::io::Result<HelperStream> {
+    memnet::connect(helper).await
+}
+
 /// A Tor stream to `hs_id`'s onion service through the helper at `helper`,
 /// with the connect `flags` ([`proto::CONNECT_FLAGS`]; 0: as before).
 async fn connect_via_helper(
@@ -1969,12 +1992,11 @@ async fn connect_via_helper(
     token: [u8; proto::TOKEN_LEN],
     hs_id: [u8; 32],
     flags: u8,
-) -> Result<TcpStream, String> {
+) -> Result<HelperStream, String> {
     let work = async {
-        let mut stream = TcpStream::connect(helper)
+        let mut stream = helper_stream(helper)
             .await
             .map_err(|_| ONION_NOT_READY.to_string())?;
-        let _ = stream.set_nodelay(true);
         stages::mark(stages::Step::Asked);
         stream
             .write_all(&proto::encode_connect(

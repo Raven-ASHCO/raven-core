@@ -37,7 +37,9 @@
 //! rendezvous, paid once per isolation group and onion key, and
 //! [`Knobs::kill`]: every circuit the helper built so far dies with no word
 //! when the test says so (`kill_circuits`), as one whose far end vanished
-//! (audit T6). With neither, a connect behaves as above.
+//! (audit T6). With neither, a connect behaves as above. And (test builds)
+//! `Knobs::memory`: its listeners and streams are in memory
+//! (`super::memnet`), for a test on tokio's paused clock.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -96,6 +98,11 @@ pub(crate) struct Knobs {
     /// and never close, and a try in its group waits [`Self::stale`] and
     /// ends "tor timeout". `None`: no circuit dies.
     pub(crate) kill: Option<&'static AtomicU64>,
+    /// Tests only: every listener and stream of this helper is in memory
+    /// ([`super::memnet`]; the forward listener it streams to must be too),
+    /// so a test can run it on tokio's paused clock.
+    #[cfg(test)]
+    pub(crate) memory: bool,
 }
 
 /// One helper life's connect counts ([`COUNT_ENV`]), kept in [`COUNT_FILE`]
@@ -187,6 +194,8 @@ impl Knobs {
             count: on(COUNT_ENV),
             rendezvous: Duration::ZERO,
             kill: None,
+            #[cfg(test)]
+            memory: false,
         }
     }
 }
@@ -339,9 +348,7 @@ pub(crate) async fn serve(
     .await?;
 
     // The "onion service": a loopback port, registered under its key.
-    let service = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .map_err(|e| e.to_string())?;
+    let service = listen(&knobs).await.map_err(|e| e.to_string())?;
     let service_addr = service.local_addr().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&registry).map_err(|e| e.to_string())?;
     let entry = registry.join(hex::encode(hs_id));
@@ -356,9 +363,7 @@ pub(crate) async fn serve(
     let _accepting = AbortOnDrop(accepting);
 
     // The connect port.
-    let connect = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .map_err(|e| e.to_string())?;
+    let connect = listen(&knobs).await.map_err(|e| e.to_string())?;
     let connect_addr = connect.local_addr().map_err(|e| e.to_string())?;
     let connecting = tokio::spawn(accept_connects(
         connect,
@@ -449,12 +454,79 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// A stream of this helper: TCP on loopback (in tests it may be in memory,
+/// `Knobs::memory`).
+#[cfg(not(test))]
+type Stream = TcpStream;
+#[cfg(test)]
+type Stream = super::memnet::Stream;
+
+/// A listener of this helper ([`Stream`]).
+enum Listener {
+    Tcp(TcpListener),
+    #[cfg(test)]
+    Memory(super::memnet::Listener),
+}
+
+impl Listener {
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        match self {
+            Self::Tcp(listener) => listener.local_addr(),
+            #[cfg(test)]
+            Self::Memory(listener) => Ok(listener.local_addr()),
+        }
+    }
+
+    async fn accept(&mut self) -> std::io::Result<Stream> {
+        match self {
+            Self::Tcp(listener) => listener.accept().await.map(|(stream, _)| tcp(stream)),
+            #[cfg(test)]
+            Self::Memory(listener) => listener.accept().await,
+        }
+    }
+}
+
+/// `stream` as a [`Stream`].
+#[cfg(not(test))]
+fn tcp(stream: TcpStream) -> Stream {
+    stream
+}
+#[cfg(test)]
+fn tcp(stream: TcpStream) -> Stream {
+    Stream::Left(stream)
+}
+
+/// A new listener on a loopback port of its own (in memory with
+/// `Knobs::memory`).
+#[cfg_attr(not(test), allow(unused_variables))]
+async fn listen(knobs: &Knobs) -> std::io::Result<Listener> {
+    #[cfg(test)]
+    if knobs.memory {
+        return Ok(Listener::Memory(super::memnet::Listener::bind()));
+    }
+    TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map(Listener::Tcp)
+}
+
+/// A stream to `addr`, Nagle off (in tests: `super::memnet::connect`).
+#[cfg(not(test))]
+async fn connect(addr: std::net::SocketAddr) -> std::io::Result<Stream> {
+    let stream = TcpStream::connect(addr).await?;
+    let _ = stream.set_nodelay(true);
+    Ok(tcp(stream))
+}
+#[cfg(test)]
+async fn connect(addr: std::net::SocketAddr) -> std::io::Result<Stream> {
+    super::memnet::connect(addr).await
+}
+
 /// Every stream into the "onion service" goes to raven-node's forward
 /// listener, the token and a circuit number first (each stream here is its
 /// own "circuit"; with `one_circuit`, each connecting helper's streams
 /// share one, [`ONE_CIRCUIT_ENV`]).
 async fn accept_service(
-    listener: TcpListener,
+    mut listener: Listener,
     forward: std::net::SocketAddr,
     token: [u8; 32],
     one_circuit: bool,
@@ -464,7 +536,7 @@ async fn accept_service(
         std::collections::HashMap::new(),
     )));
     loop {
-        let Ok((mut inbound, _)) = listener.accept().await else {
+        let Ok(mut inbound) = listener.accept().await else {
             continue;
         };
         let circuits = Arc::clone(&circuits);
@@ -496,10 +568,9 @@ async fn accept_service(
                     }
                 }
             };
-            let Ok(mut out) = TcpStream::connect(forward).await else {
+            let Ok(mut out) = connect(forward).await else {
                 return;
             };
-            let _ = out.set_nodelay(true);
             if out
                 .write_all(&proto::encode_forward(&token, circuit))
                 .await
@@ -515,7 +586,7 @@ async fn accept_service(
 /// raven-node's connect requests: the token, a registered key and the
 /// virtual port, then the bytes.
 async fn accept_connects(
-    listener: TcpListener,
+    mut listener: Listener,
     token: [u8; 32],
     port: u16,
     registry: Arc<PathBuf>,
@@ -528,7 +599,7 @@ async fn accept_connects(
     let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(new_group)));
     let circuits: Arc<std::sync::Mutex<Circuits>> = Arc::default();
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
+        let Ok(mut stream) = listener.accept().await else {
             continue;
         };
         let (registry, counter, book) = (registry.clone(), counter.clone(), book.clone());
@@ -592,7 +663,7 @@ async fn accept_connects(
                             .ok()
                             .and_then(|t| t.trim().parse::<std::net::SocketAddr>().ok())
                             .ok_or_else(|| ConnectReply::Unreachable("no descriptor".into()))?;
-                        let mut out = TcpStream::connect(target)
+                        let mut out = connect(target)
                             .await
                             .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))?;
                         if let Some(client) = one_circuit {
@@ -614,7 +685,6 @@ async fn accept_connects(
             if stream.write_all(&ConnectReply::Ok.encode()).await.is_err() {
                 return;
             }
-            let _ = out.set_nodelay(true);
             relay(stream, out, latency, built).await;
         });
     }
@@ -636,13 +706,13 @@ fn new_group() -> u64 {
 /// was read (a Tor circuit's one-way delay; [`LATENCY_ENV`]), an end of
 /// stream too; a plain copy without one, unless its circuit (`built`) may
 /// die ([`Knobs::kill`]).
-async fn relay(mut a: TcpStream, mut b: TcpStream, latency: Duration, built: Life) {
+async fn relay(mut a: Stream, mut b: Stream, latency: Duration, built: Life) {
     if latency.is_zero() && built.kill.is_none() {
         let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
         return;
     }
-    let (a_read, a_write) = a.into_split();
-    let (b_read, b_write) = b.into_split();
+    let (a_read, a_write) = tokio::io::split(a);
+    let (b_read, b_write) = tokio::io::split(b);
     tokio::join!(
         delayed_copy(a_read, b_write, latency, built),
         delayed_copy(b_read, a_write, latency, built),
@@ -652,8 +722,8 @@ async fn relay(mut a: TcpStream, mut b: TcpStream, latency: Duration, built: Lif
 /// One way of [`relay`]: once its circuit is dead ([`Life::dead`]) nothing
 /// more arrives, not even the end of the stream.
 async fn delayed_copy(
-    mut from: tokio::net::tcp::OwnedReadHalf,
-    mut to: tokio::net::tcp::OwnedWriteHalf,
+    mut from: tokio::io::ReadHalf<Stream>,
+    mut to: tokio::io::WriteHalf<Stream>,
     latency: Duration,
     built: Life,
 ) {
