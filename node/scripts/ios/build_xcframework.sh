@@ -115,7 +115,10 @@ for t in "${TARGETS[@]}"; do
   # Only the static library: the rlib and cdylib forms are for the desktop.
   # The debug profile's flag list is empty: macOS's bash 3.2 calls an empty
   # array unbound under set -u, so it expands only when it has a word.
-  cargo rustc -p raven-client --lib ${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"} \
+  # --locked: exactly the audited Cargo.lock, as every other release build
+  # (a lock that no longer fits the manifests stops the build instead of
+  # pulling crate versions nobody reviewed into the App Store library).
+  cargo rustc --locked -p raven-client --lib ${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"} \
     --features "$FEATURES" --target "$t" --crate-type staticlib
   lib="$TARGET_DIR/$t/$PROFILE_DIR/libraven_client.a"
   [[ -f "$lib" ]] || fail "no $lib after the build"

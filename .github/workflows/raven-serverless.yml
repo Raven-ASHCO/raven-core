@@ -135,6 +135,16 @@ jobs:
       # too). Stand-in rustc and cargo: nothing is built or cloned.
       - name: Reproducible build guards (cargo_config_guard_selftest.sh)
         run: bash scripts/release/cargo_config_guard_selftest.sh
+      # Security review 2026-11 (DEP-6): every cargo build in the release,
+      # package, installer and iOS scripts passes --locked, so a Cargo.lock
+      # that no longer fits the manifests fails the build instead of pulling
+      # in crate versions nobody reviewed. Static; the self-test plants lines
+      # it must catch.
+      - name: Release builds use the audited Cargo.lock (check_locked_builds.sh)
+        run: |
+          set -euo pipefail
+          bash scripts/check_locked_builds.sh --self-test
+          bash scripts/check_locked_builds.sh
       # The secret scanner must still see a real seed after many allow-listed RFC 8032
       # test seeds, and the O6 IPC-surface guard must fire on an injected forbidden op
       # (both used to be silent no-ops). Neither writes anything. The Keychain guard
