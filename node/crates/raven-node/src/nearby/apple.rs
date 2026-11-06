@@ -25,7 +25,10 @@
 //! (an absolute path to the helper or to its .app; nothing else is tried),
 //! else `RavenNearby.app` next to the raven-node executable, else
 //! `~/Library/Application Support/Raven/RavenNearby.app`, where the macOS
-//! installer puts it. Tests never look anywhere.
+//! installer puts it. Tests never look anywhere. It is started only when
+//! `codesign --verify` finds its signature intact and naming
+//! `org.raven.nearby` ([`signed_as_helper`]), with an empty environment and
+//! only its stdin, stdout and stderr open (security review 2026-11, BT-03).
 //!
 //! **Start.** The helper's first line is `hello` with [`proto::VERSION`]
 //! within [`HELLO_WAIT`], or why it cannot run (`unauthorized` without the
@@ -164,6 +167,12 @@ pub(crate) const BROKE_PROTOCOL: &str =
     "the nearby helper broke the protocol: more connections than it may hold";
 /// Why the radio stopped: [`OUT_QUEUE`] lines waited for the helper.
 pub(crate) const STOPPED_READING: &str = "the nearby helper stopped reading its commands";
+/// The code signing identifier the installers sign [`BUNDLE`] with.
+pub(crate) const IDENTIFIER: &str = "org.raven.nearby";
+/// Why the radio did not start: the helper found is not signed as
+/// [`IDENTIFIER`], or its signature does not verify.
+pub(crate) const NOT_SIGNED: &str =
+    "the nearby helper is not signed as RavenNearby (org.raven.nearby): install it again";
 
 // The helper's own cap is the one raven-node holds it to.
 #[cfg(all(
@@ -241,6 +250,32 @@ pub(crate) fn find_helper(
     .find(|exe| exists(exe))
 }
 
+/// Whether the helper at `exe` may be started: `codesign --verify --strict`
+/// finds the signature of its bundle (of `exe` itself outside one) intact
+/// and naming [`IDENTIFIER`] (security review 2026-11, BT-03). Never on a
+/// system without codesign.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn signed_as_helper(exe: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let inside = exe
+        .parent()
+        .filter(|d| d.ends_with("Contents/MacOS"))
+        .and_then(|d| d.parent()?.parent())
+        .filter(|app| app.extension().is_some_and(|e| e == "app"));
+    Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R"])
+        .arg(format!("=identifier \"{IDENTIFIER}\""))
+        .arg(inside.unwrap_or(exe))
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 // ── Back-off ────────────────────────────────────────────────────────────────
 
 /// The wait between helper starts after failures (see the module doc).
@@ -295,7 +330,13 @@ pub(crate) fn open(tx: mpsc::Sender<RadioEvent>) -> Result<HelperRadio, RadioSta
         note(&state);
         return Err(state);
     };
-    let opened = open_at(&exe, tx, Some(Arc::clone(&backoff)), HELLO_WAIT);
+    // Its signature before each start (BT-03); a refusal waits as a failed
+    // start does.
+    let opened = if signed_as_helper(&exe) {
+        open_at(&exe, tx, Some(Arc::clone(&backoff)), HELLO_WAIT)
+    } else {
+        Err(RadioState::Unsupported(NOT_SIGNED.into()))
+    };
     if let Err(state) = &opened {
         note(state);
         lock(&backoff).failed(Instant::now(), state.clone());
@@ -349,6 +390,7 @@ pub(crate) fn open_at(
     }
     let mut child = Command::new(exe)
         .current_dir("/")
+        .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -453,7 +495,9 @@ impl Proc {
 
 /// Starting the helper as its own responsible process on macOS
 /// (`responsibility_spawnattrs_setdisclaim`, in libSystem since macOS 10.14),
-/// with its stdin and stdout on pipes and stderr shared with raven-node.
+/// with its stdin and stdout on pipes and stderr shared with raven-node, an
+/// empty environment and no other descriptor (security review 2026-11,
+/// BT-03).
 #[cfg(target_os = "macos")]
 mod disclaim {
     use std::ffi::CString;
@@ -471,6 +515,11 @@ mod disclaim {
         fn posix_spawn_file_actions_addchdir_np(
             actions: *mut libc::posix_spawn_file_actions_t,
             path: *const libc::c_char,
+        ) -> libc::c_int;
+        // macOS 10.7 and later: keep `fd` open under POSIX_SPAWN_CLOEXEC_DEFAULT.
+        fn posix_spawn_file_actions_addinherit_np(
+            actions: *mut libc::posix_spawn_file_actions_t,
+            fd: libc::c_int,
         ) -> libc::c_int;
     }
 
@@ -512,6 +561,9 @@ mod disclaim {
         };
         let argv: [*mut libc::c_char; 2] =
             [path.as_ptr() as *mut libc::c_char, std::ptr::null_mut()];
+        // No variable of raven-node's (no DYLD_*): the helper reads none,
+        // and the system finds the home and temporary folders without one.
+        let envp: [*mut libc::c_char; 1] = [std::ptr::null_mut()];
         let mut pid: libc::pid_t = 0;
         // SAFETY: the file actions and attributes are initialised before use and
         // destroyed after posix_spawn; every pointer passed lives across the call.
@@ -522,16 +574,28 @@ mod disclaim {
             libc::posix_spawnattr_init(&mut attrs);
             libc::posix_spawn_file_actions_adddup2(&mut actions, input[0], 0);
             libc::posix_spawn_file_actions_adddup2(&mut actions, output[1], 1);
+            // Every other descriptor of raven-node's is closed in the
+            // helper, whatever its close-on-exec; its stderr stays
+            // raven-node's.
+            let mut rc = posix_spawn_file_actions_addinherit_np(&mut actions, 2);
+            if rc == 0 {
+                rc = libc::posix_spawnattr_setflags(
+                    &mut attrs,
+                    libc::POSIX_SPAWN_CLOEXEC_DEFAULT as libc::c_short,
+                );
+            }
             posix_spawn_file_actions_addchdir_np(&mut actions, root.as_ptr());
             responsibility_spawnattrs_setdisclaim(&mut attrs, 1);
-            let rc = libc::posix_spawn(
-                &mut pid,
-                path.as_ptr(),
-                &actions,
-                &attrs,
-                argv.as_ptr(),
-                *libc::_NSGetEnviron(),
-            );
+            if rc == 0 {
+                rc = libc::posix_spawn(
+                    &mut pid,
+                    path.as_ptr(),
+                    &actions,
+                    &attrs,
+                    argv.as_ptr(),
+                    envp.as_ptr(),
+                );
+            }
             libc::posix_spawn_file_actions_destroy(&mut actions);
             libc::posix_spawnattr_destroy(&mut attrs);
             rc

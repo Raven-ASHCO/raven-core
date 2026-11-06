@@ -56,7 +56,7 @@
 #   helper app, which holds no keys; raven-node is never re-signed for it, so
 #   its code signature and Keychain access stay as they are. The installer
 #   builds RavenNearby.app (node/scripts/build_nearby_helper_app.sh), signs it
-#   ad hoc and copies it to ~/Library/Application Support/Raven/, where
+#   ad hoc (hardened runtime) and copies it to ~/Library/Application Support/Raven/, where
 #   raven-node looks for it. RAVEN_INSTALL_NEARBY_HELPER=0 builds raven-node
 #   without the radio backend and installs no helper.
 # RAVEN_NEARBY_SIGN="Developer ID Application: ..." signs it with that
@@ -289,8 +289,12 @@ install_nearby_helper() {
       || nearby_fail "the build failed (node/scripts/build_nearby_helper_app.sh)"
   fi
   if [[ "$NEARBY_SIGN" != keep ]]; then
+    # The hardened runtime also when ad hoc (security review 2026-11,
+    # BT-03): the helper then ignores DYLD_* variables and loads no library
+    # signed otherwise.
+    sign+=(--options runtime)
     if [[ "$NEARBY_SIGN" != - ]]; then
-      sign+=(--options runtime --timestamp)
+      sign+=(--timestamp)
     fi
     "${sign[@]}" "$app" || nearby_fail "codesign --sign '$NEARBY_SIGN' failed"
   fi

@@ -197,7 +197,7 @@ RAVEN_INSTALL_NEARBY_HELPER=1 bash scripts/install/macos_launchd.sh
 ```
 
 This builds raven-node with Bluetooth support (feature `nearby-radio`),
-builds RavenNearby.app, signs it ad hoc and copies it to
+builds RavenNearby.app, signs it ad hoc with the hardened runtime and copies it to
 `~/Library/Application Support/Raven/RavenNearby.app`. It does not turn
 nearby on. Variants:
 
@@ -221,6 +221,11 @@ executable, then `~/Library/Application Support/Raven/RavenNearby.app`.
 When none is there, or the one found belongs to another release or stops,
 the `bluetooth` row says the RavenNearby helper is missing, outdated or did
 not run: install it as above, then restart raven-node.
+
+raven-node starts the helper it finds only when its code signature is intact
+and names `org.raven.nearby` (`codesign --verify`), and starts it with no
+environment variables and nothing else of its own open. A helper signed
+otherwise counts as missing: install it again as above.
 
 **Allow Bluetooth.** The first time the radio starts (after `raven nearby
 enable`), macOS asks whether RavenNearby may use Bluetooth: allow it. If

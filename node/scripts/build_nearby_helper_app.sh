@@ -7,8 +7,8 @@
 # Builds raven-nearby-helper (cargo, feature nearby-radio; release unless
 # --debug), assembles OUT_DIR/RavenNearby.app from
 # node/crates/raven-node/macos/RavenNearby.app (its Info.plist carries
-# NSBluetoothAlwaysUsageDescription), and signs the bundle: ad hoc by default
-# (IDENTITY "-"), or with a Developer ID identity (hardened runtime). Then it
+# NSBluetoothAlwaysUsageDescription), and signs the bundle with the hardened
+# runtime: ad hoc by default (IDENTITY "-"), or with a Developer ID identity. Then it
 # runs `raven-nearby-helper --check` from the bundle, which must answer hello:
 # --check reads the bundle's usage description and touches no Bluetooth.
 #
@@ -68,9 +68,10 @@ cp "$TARGET/$PROFILE/raven-nearby-helper" "$APP/Contents/MacOS/raven-nearby-help
 chmod 755 "$APP/Contents/MacOS/raven-nearby-helper"
 
 if [[ "$SIGN" == 1 ]]; then
-  sign=(codesign --force --sign "$IDENTITY" --identifier org.raven.nearby)
+  # The hardened runtime also when ad hoc (security review 2026-11, BT-03).
+  sign=(codesign --force --sign "$IDENTITY" --identifier org.raven.nearby --options runtime)
   if [[ "$IDENTITY" != - ]]; then
-    sign+=(--options runtime --timestamp)
+    sign+=(--timestamp)
   fi
   "${sign[@]}" "$APP"
   codesign --verify --strict "$APP"

@@ -885,7 +885,7 @@ fn a_helper_that_stops_reading_is_dead() {
         dir.path(),
         "deaf",
         &format!(
-            "printf '%s\\n' '{}' '{}'\nexec sleep 30",
+            "printf '%s\\n' '{}' '{}'\nexec /bin/sleep 30",
             hello().trim_end(),
             proto::line(&peripheral(2)).trim_end()
         ),
@@ -966,4 +966,100 @@ fn an_end_the_helper_does_not_confirm_expires() {
     );
     assert!(rx.try_recv().is_err(), "one Disconnected only");
     assert!(lock(&link.table).conns.is_empty());
+}
+
+// ── How the helper is started (security review 2026-11, BT-03) ──────────────
+
+/// The helper starts with an empty environment (no DYLD_* variable, nothing
+/// raven-node has) and with only its stdin, stdout and stderr open: a
+/// descriptor raven-node holds without close-on-exec stays out.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_helper_starts_with_no_inherited_variable_or_descriptor() {
+    use std::os::fd::AsRawFd as _;
+    if std::env::var_os("RAVEN_NEARBY_HELPER_INHERIT").is_some() {
+        eprintln!("RAVEN_NEARBY_HELPER_INHERIT is set (a plain child): skipped");
+        return;
+    }
+    let shells_own = |k: &str| matches!(k, "PWD" | "OLDPWD" | "SHLVL" | "_");
+    assert!(
+        std::env::vars_os().any(|(k, _)| !shells_own(&k.to_string_lossy())),
+        "this test has variables to leave out"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let held = std::fs::File::create(dir.path().join("held")).unwrap();
+    // SAFETY: fcntl on a descriptor this test owns; F_DUPFD leaves
+    // close-on-exec off on the copy.
+    let leak = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_DUPFD, 100) };
+    assert!(leak >= 100, "{leak}");
+    let seen = dir.path().join("seen");
+    let body = format!(
+        "/usr/bin/env > '{s}.env'\n\
+         for n in 0 1 2 {leak}; do if [ -e /dev/fd/$n ]; then echo $n >> '{s}.fd'; fi; done\n\
+         printf '%s\\n' '{hello}'\n\
+         read line",
+        s = seen.display(),
+        hello = hello().trim_end(),
+    );
+    let probe = script(dir.path(), "probe", &body);
+    let (tx, _rx) = mpsc::channel(EVENT_QUEUE);
+    let radio = open_at(&probe, tx, None, WAIT);
+    // SAFETY: closes the copy this test made.
+    unsafe {
+        libc::close(leak);
+    }
+    let radio = radio.unwrap();
+    let env = std::fs::read_to_string(seen.with_extension("env")).unwrap();
+    let names: Vec<&str> = env
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+        .collect();
+    assert!(names.iter().all(|k| shells_own(k)), "inherited: {names:?}");
+    let fds = std::fs::read_to_string(seen.with_extension("fd")).unwrap();
+    assert_eq!(fds.lines().collect::<Vec<_>>(), ["0", "1", "2"]);
+    drop(radio);
+}
+
+/// Before each start the helper's signature must be intact and name
+/// org.raven.nearby (`codesign --verify`): a bundle that is not signed,
+/// is signed as anything else, or changed after signing is not started.
+/// Ad hoc signatures of a scratch copy only.
+#[cfg(target_os = "macos")]
+#[test]
+fn only_a_helper_signed_as_ravennearby_may_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join(BUNDLE);
+    let exe = executable_in(&app);
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    let plist = app.join("Contents").join("Info.plist");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("macos/RavenNearby.app/Contents/Info.plist"),
+        &plist,
+    )
+    .unwrap();
+    std::fs::copy("/usr/bin/true", &exe).unwrap();
+    let sign = |id: &str| {
+        let signed = Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-", "--options", "runtime"])
+            .args(["--identifier", id])
+            .arg(&app)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(signed.success(), "ad hoc as {id}");
+    };
+    assert!(!signed_as_helper(&exe), "a bundle that is not signed");
+    sign(IDENTIFIER);
+    assert!(signed_as_helper(&exe), "signed as RavenNearby");
+    sign("org.example.other");
+    assert!(!signed_as_helper(&exe), "signed as something else");
+    sign(IDENTIFIER);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&plist)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    assert!(!signed_as_helper(&exe), "changed after signing");
 }

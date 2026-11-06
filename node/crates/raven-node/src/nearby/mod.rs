@@ -1231,6 +1231,7 @@ mod tests {
                 .into(),
             apple::BROKE_PROTOCOL.into(),
             apple::STOPPED_READING.into(),
+            apple::NOT_SIGNED.into(),
         ] {
             assert_eq!(
                 name(Unsupported(why.clone())),

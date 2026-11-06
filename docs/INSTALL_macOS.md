@@ -894,7 +894,7 @@ bash scripts/install/macos_launchd.sh
 ```
 
 It builds raven-node with Bluetooth support (feature `nearby-radio`), builds
-RavenNearby.app, signs it ad hoc (`RAVEN_NEARBY_SIGN="Developer ID
+RavenNearby.app, signs it ad hoc with the hardened runtime (`RAVEN_NEARBY_SIGN="Developer ID
 Application: …"` signs it with your Developer ID instead), copies it to
 `~/Library/Application Support/Raven/`, and checks that raven-node's code
 signature is the same before and after. `RAVEN_INSTALL_NEARBY_ONLY=1`
