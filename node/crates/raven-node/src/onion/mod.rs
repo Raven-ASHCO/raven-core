@@ -1564,8 +1564,10 @@ async fn serve_forward(
     // listener once it lost a pre-auth link in this helper life (TOR-1).
     let admission = Admission::for_circuits(limits);
     let pre_token = Arc::new(PreToken::default());
-    // The token of the helper life the admission's circuits belong to.
-    let mut life = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
+    // The helper life the admission's circuits belong to: its token and its
+    // number in the admission.
+    let mut life_token = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut life = admission.new_life();
     loop {
         let (stream, peer) = crate::accept_retrying("onion", &mut || listener.accept()).await;
         if !peer.ip().is_loopback() {
@@ -1574,10 +1576,10 @@ async fn serve_forward(
         let _ = stream.set_nodelay(true);
         let (waiting, kicked) = pre_token.enter();
         let token = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
-        if token != life {
+        if token != life_token {
             // A new helper life (§6): its circuit numbers start over.
-            admission.new_life();
-            life = token;
+            life = admission.new_life();
+            life_token = token;
         }
         let (dd, id) = (data_dir.clone(), identity.clone());
         let (admission, pre_token) = (Arc::clone(&admission), Arc::clone(&pre_token));
@@ -1596,7 +1598,10 @@ async fn serve_forward(
                     return;
                 }
             };
-            let Some(mut slot) = admission.try_admit(circuit_source(circuit)) else {
+            // In the life it was accepted in (and its token checked against):
+            // a link of the last life that this task admits after the next
+            // one began marks no circuit of the new life.
+            let Ok(mut slot) = admission.admit_in_life(circuit_source(circuit), life) else {
                 netutil::log_limited(
                     &FORWARD_LOG,
                     "onion",

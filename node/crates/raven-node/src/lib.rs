@@ -1533,19 +1533,44 @@ pub(crate) mod netutil {
         /// A new helper life (a new token, RAVEN_ONION_CARRIER_V1 §6): its
         /// circuit numbers start over, so the circuits that lost a link in
         /// the last life are forgotten, and a link of the last life that ends
-        /// from now on costs no circuit of this one anything.
-        pub(crate) fn new_life(&self) {
+        /// from now on costs no circuit of this one anything. Its number, for
+        /// [`Self::admit_in_life`].
+        pub(crate) fn new_life(&self) -> u64 {
             let mut st = lock(&self.state);
             st.life += 1;
             st.lost.clear();
+            st.life
         }
 
         pub(crate) fn try_admit(self: &Arc<Self>, ip: IpAddr) -> Option<AdmissionSlot> {
             self.admit(ip).ok()
         }
 
+        /// [`Self::admit`] of a link the onion forward listener accepted in
+        /// helper life `life` ([`Self::new_life`]): its task admits it later,
+        /// maybe after the next life began. A link of an earlier life is on
+        /// no circuit of this one: it takes no slot from a full listener, and
+        /// when it ends it marks no circuit lost (TOR-1).
+        pub(crate) fn admit_in_life(
+            self: &Arc<Self>,
+            ip: IpAddr,
+            life: u64,
+        ) -> Result<AdmissionSlot, Refused> {
+            self.admit_as(ip, Some(life))
+        }
+
         /// [`Self::try_admit`], saying why it refused.
         pub(crate) fn admit(self: &Arc<Self>, ip: IpAddr) -> Result<AdmissionSlot, Refused> {
+            self.admit_as(ip, None)
+        }
+
+        /// `life`: the helper life the link was accepted in (`None`: this
+        /// one).
+        fn admit_as(
+            self: &Arc<Self>,
+            ip: IpAddr,
+            life: Option<u64>,
+        ) -> Result<AdmissionSlot, Refused> {
             if let Some(carrier) = self.addresses {
                 if crate::security::admit_source(ip, carrier)
                     == raven_core::security_events::Admit::Deny
@@ -1560,6 +1585,7 @@ pub(crate) mod netutil {
                 None => admission_key(ip),
             };
             let mut st = lock(&self.state);
+            let life = life.unwrap_or(st.life);
             let (mut total, mut handshaking) = (0, 0);
             for c in st.conns.values().filter(|c| c.key == key) {
                 total += 1;
@@ -1572,8 +1598,8 @@ pub(crate) mod netutil {
             if st.conns.len() >= self.limits.max_conns {
                 // TOR-1: a circuit that already lost a pre-auth link in this
                 // helper life gets no slot in a full listener, and so pushes
-                // nobody out.
-                if self.circuits && st.lost.contains(&key) {
+                // nobody out; nor does a link of an earlier life.
+                if self.circuits && (life != st.life || st.lost.contains(&key)) {
                     return Err(Refused::Full);
                 }
                 let victim = st.displaceable(handshaking).ok_or(Refused::Full)?;
@@ -1587,7 +1613,6 @@ pub(crate) mod netutil {
             let id = st.next_id;
             st.next_id += 1;
             let displaced = Displaced::default();
-            let life = st.life;
             st.conns.insert(
                 id,
                 Conn {
@@ -2608,6 +2633,38 @@ pub(crate) mod netutil {
             let _three = adm
                 .admit(circuit(3))
                 .expect("a link of the last life marks no circuit of this one");
+        }
+
+        /// TOR-1 review: the forward listener takes a link's helper life when
+        /// it accepts it, and the link's task admits it later. A link of the
+        /// last life admitted after the next one began (around a helper
+        /// restart) counted as one of the new life: when it ended before it
+        /// authenticated, it marked the new life's circuit of the same number
+        /// lost, and a friend on that circuit was refused while the listener
+        /// was full. Now it marks nothing, and it takes no slot from a full
+        /// listener (its circuit number says nothing about this life's).
+        #[test]
+        fn a_link_of_the_last_helper_life_marks_no_circuit_of_this_one() {
+            let adm = Admission::for_circuits(ONION_INBOUND);
+            let last = adm.new_life();
+            let this = adm.new_life();
+            // Accepted in the last life, admitted in this one, ended before
+            // it authenticated.
+            drop(adm.admit_in_life(circuit(5), last).unwrap());
+            let held: Vec<AdmissionSlot> = (1..=4)
+                .chain(6..=17)
+                .map(|c| adm.admit_in_life(circuit(c), this).unwrap())
+                .collect();
+            let _friend = adm
+                .admit_in_life(circuit(5), this)
+                .expect("circuit 5 of this life lost no link");
+            assert!(!held[0].is_live(), "the oldest gave way");
+            assert_eq!(
+                adm.admit_in_life(circuit(18), last).err(),
+                Some(Refused::Full),
+                "a link of the last life takes no slot from a full listener"
+            );
+            assert!(held[1..].iter().all(AdmissionSlot::is_live));
         }
 
         /// TOR-2: authenticated links are never displaced, so one contact
