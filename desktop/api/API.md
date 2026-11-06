@@ -255,7 +255,8 @@ raven-node).
   through another member: its entry is `failed` from the start, and its receipts are ignored. A
   member's Raven takes at most 512 of one author's messages a group within 7 days; past that it
   does not confirm the next copy, which stays `sent` and is sent again until it is taken or its 7
-  days pass.
+  days pass. A copy another member passed on for you past that is dropped there (so it never
+  waits in that member's queue), and that entry stays `waiting`.
 - **Leaving and removal.** `status` is `left` after `groups.leave` and `removed` when the admin
   removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`.
 - **Forget** (`groups.forget`): a group you left or were removed from (or one with no other

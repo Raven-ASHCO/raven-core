@@ -4174,6 +4174,115 @@ mod tests {
         assert_eq!(lab.bob_history().len(), 1, "{:?}", lab.bob_history());
     }
 
+    /// Groups live on this thread (with the long horizon) for the guard's
+    /// life.
+    struct GroupLab;
+    impl GroupLab {
+        fn on() -> Self {
+            crate::group::set_lab_groups_for_this_thread(Some(true));
+            crate::horizon::set_lab_horizon_for_this_thread(Some(true));
+            Self
+        }
+    }
+    impl Drop for GroupLab {
+        fn drop(&mut self) {
+            crate::group::set_lab_groups_for_this_thread(None);
+            crate::horizon::set_lab_horizon_for_this_thread(None);
+        }
+    }
+
+    /// Bob's group of Alice (admin), Bob and `author`, with `author`'s
+    /// share of its room for message keys full at Bob.
+    fn bob_group_with_a_full_author(lab: &AppLab, author: &Identity) -> crate::group::GroupId {
+        use crate::group::{GroupFrame, GroupState, Member};
+        let (a, b, m) = (
+            lab.alice.public_key_bytes(),
+            lab.bob.public_key_bytes(),
+            author.public_key_bytes(),
+        );
+        let salt = [0x5a; 16];
+        let member = |key| Member {
+            key,
+            label: String::new(),
+        };
+        let mut state = GroupState {
+            group: crate::group::group_id_for(&a, &salt),
+            salt,
+            epoch: 1,
+            name: "Team".into(),
+            admin: a,
+            issued_ms: now(),
+            members: vec![member(a), member(b), member(m)],
+            sig: [0; 64],
+        };
+        state.sign(&lab.alice);
+        let invite = GroupFrame::State(state.clone());
+        assert!(crate::group::ingest(lab.b_dir.path(), &a, &invite, now()).unwrap());
+        let from = hex::encode(m);
+        crate::group::store::edit(lab.b_dir.path(), |f| {
+            let g = &mut f.groups[0];
+            for i in 0..crate::group::store::MAX_SEEN_PER_AUTHOR {
+                g.seen.push(&from, &format!("{i:032x}"), now());
+            }
+            Ok(())
+        })
+        .unwrap();
+        state.group
+    }
+
+    /// `author`'s signed group message `n` (no relay list: a forward).
+    fn group_copy(group: crate::group::GroupId, author: &Identity, n: u8) -> String {
+        let mut m = crate::group::GroupMsg {
+            group,
+            id: [n; 16],
+            epoch: 1,
+            from: author.public_key_bytes(),
+            sent_ms: now(),
+            body: format!("copy {n}"),
+            sig: [0; 64],
+            relay: Vec::new(),
+        };
+        m.sign(author);
+        crate::group::GroupFrame::Msg(m).encode()
+    }
+
+    /// G4 forwards, end to end: Alice forwards to Bob copies of a member
+    /// whose share at Bob is full. Bob answers each with its ACK (dropped
+    /// and counted), so none of them waits in Alice's queue for Bob (the 32
+    /// a friend may have waiting) and Bob keeps no row for them.
+    #[test]
+    fn forwarded_copies_of_a_full_author_are_acked_and_leave_no_queue() {
+        let _groups = GroupLab::on();
+        let lab = AppLab::new();
+        let author = Identity::from_seed(&[0x44; 32]);
+        let group = bob_group_with_a_full_author(&lab, &author);
+        let bob_device = lab.b_bundle.cert.device_ed_pub;
+        let waiting = || {
+            IndexedSessionStore::open(lab.a_dir.path())
+                .unwrap()
+                .awaiting_ack_endpoint_outbound_for_recipient(Some(&bob_device))
+                .unwrap()
+                .len()
+        };
+        for n in 1..=40u8 {
+            let replies = lab.deliver(&lab.seal(&group_copy(group, &author, n)));
+            assert_eq!(replies.len(), 1, "forwarded copy {n} is ACKed");
+            dispatch_frame(
+                lab.a_dir.path(),
+                &lab.alice,
+                &lab.b_bundle,
+                &lab.bob.public_key_bytes(),
+                &replies[0],
+            )
+            .unwrap();
+        }
+        assert_eq!(waiting(), 0, "nothing waits in the forwarder's queue");
+        assert_eq!(lab.bob_pending_intents(), 0, "no row left at Bob");
+        let file = crate::group::store::load(lab.b_dir.path()).unwrap();
+        assert_eq!(file.dropped, 40);
+        assert!(file.groups[0].messages.is_empty());
+    }
+
     #[test]
     fn a_revoked_peer_give_up_records_why_on_the_app_record() {
         use crate::app_store::{AppOutRecord, AppStore, Dedup, MetadataOnly, OutState};

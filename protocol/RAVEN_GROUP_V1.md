@@ -129,10 +129,14 @@ taken later.
 **Refused, not ACKed.** A verified frame refused only for lack of room by
 the limits below (a `state` past its admin's 8 groups or the receiver's
 64 groups; a `msg` past its author's share of the group's
-remembered ids) is not stored and **not ACKed**: the receiver does not
-count it as handled, its endpoint row stays, and the sender's copy keeps
-waiting and is sent again until its horizon, so it is taken once there is
-room. Its author sees that copy as not delivered meanwhile (§5).
+remembered ids, carried by that author itself) is not stored and **not
+ACKed**: the receiver does not count it as handled, its endpoint row stays,
+and the sender's copy keeps waiting and is sent again until its horizon,
+so it is taken once there is room. Its author sees that copy as not
+delivered meanwhile (§5). A `msg` past its author's share that another
+member carried (`P` is not `from`: a forward) is dropped and counted, and
+ACKed: the carrier cannot send it again for the author, and it must not
+wait in the carrier's queue for the receiver.
 
 **`state`**: verified under `admin`, with `group` the id of `admin` and
 `salt` (§1). For an unknown group it is accepted
@@ -159,7 +163,8 @@ every message it took until its `sent_ms` is 7 days old, so a message
 cannot be replayed as new. Each author has a share of 512 per group (its
 messages kept and its ids remembered, while their `sent_ms` is within the 7
 days): a `msg` from an author at its share is refused (not ACKed, above)
-until some of its ids expire, and every other author's messages are still
+until some of its ids expire when `P` is `from`, and dropped (ACKed) when
+another member carried it; every other author's messages are still
 taken. A group remembers at most 8,192 ids (16 authors' shares); over it,
 the ids of authors who are no member go first. When `from` is not in the roster but `epoch` is newer than the
 roster and the signature verifies under `from`, the frame is held (§4.3). A

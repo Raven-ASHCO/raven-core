@@ -1899,6 +1899,36 @@ fn an_authors_full_share_refuses_only_its_messages_until_its_keys_expire() {
     assert_eq!(group(&file).messages.len(), 2);
 }
 
+/// G4 forwards: a copy of an author at its share that another member
+/// carried (a forward) is dropped and counted, so it is ACKed: the
+/// forwarder cannot send it again on the author's behalf and must not keep
+/// it waiting in its queue for this profile. Each copy forwarded again is
+/// answered the same way, while the author's own copy is still refused
+/// (not ACKed, so the author sends it again once its keys expire).
+#[test]
+fn a_forwarded_copy_of_a_full_author_is_dropped_and_answered() {
+    let me = key(3);
+    let none = HashSet::new();
+    let mut file = joined(3, &roster(1, &[2, 3, 4], 1));
+    let author = hex::encode(key(4));
+    for i in 0..store::MAX_SEEN_PER_AUTHOR {
+        file.groups[0].seen.push(&author, &format!("{i:032x}"), NOW);
+    }
+    let before = file.dropped;
+    for n in 1..=40u8 {
+        let copy = GroupFrame::Msg(msg_with_id(4, 1, "via 2", [n; 16], &[]));
+        let done = apply(&mut file, &me, &key(2), &copy, &none, NOW);
+        assert!(!done.refused, "forwarded copy {n} is answered");
+    }
+    assert_eq!(file.dropped, before + 40, "dropped and counted");
+    assert!(group(&file).messages.is_empty());
+    assert!(group(&file).intents.is_empty(), "no receipt, no forward");
+    let own = GroupFrame::Msg(msg_with_id(4, 1, "direct", [0x41; 16], &[]));
+    let done = apply(&mut file, &me, &key(4), &own, &none, NOW);
+    assert!(done.refused, "the author's own copy is refused");
+    assert_eq!(file.dropped, before + 40);
+}
+
 /// G4 on disk: with `seen` full of one author's keys, another author's
 /// message is stored and handled (`ingest` is `Ok(true)`: ACKed), and the
 /// full author's message is refused: not stored, not counted, and not

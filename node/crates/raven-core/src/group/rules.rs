@@ -442,13 +442,17 @@ fn apply_msg(
         }
         return Applied::change(false);
     }
-    // Its author's share of the group's room for message keys is full:
-    // refused, not ACKed, so it comes again once some of the author's keys
-    // expire; every other author's messages are still taken.
-    if g.author_share(&hex::encode(msg.from), now_ms) >= store::MAX_SEEN_PER_AUTHOR {
-        return refused();
-    }
+    // Its author's share of the group's room for message keys is full; every
+    // other author's messages are still taken. The author's own copy is
+    // refused, not ACKed, so the author sends it again once some of its keys
+    // expire. A copy another member carried (a forward) is dropped and
+    // counted, so it is ACKed: its carrier cannot send it again for the
+    // author, and it must not wait in that member's queue for this profile
+    // until its horizon.
     let forwarded = *peer != msg.from;
+    if g.author_share(&hex::encode(msg.from), now_ms) >= store::MAX_SEEN_PER_AUTHOR {
+        return if forwarded { dropped(file) } else { refused() };
+    }
     g.messages.push(StoredMsg {
         id: id.clone(),
         from: hex::encode(msg.from),
