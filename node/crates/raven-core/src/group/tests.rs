@@ -3428,3 +3428,113 @@ fn a_non_member_carriers_relay_list_is_ignored() {
         group(&file).intents
     );
 }
+
+/// The leaves this profile parked, as their frames.
+fn parked_leaves(d: &Path) -> Vec<GroupLeave> {
+    crate::chat_history::list_staged_outbound_bodies(d)
+        .unwrap()
+        .into_iter()
+        .filter_map(|s| match parse_frame(s.body.as_bytes()) {
+            Some(GroupFrame::Leave(l)) => Some(l),
+            _ => None,
+        })
+        .collect()
+}
+
+/// G8: a leave that crossed a newer roster (the admin moved on first, so it
+/// drops the leave of the older epoch) is made again by its member for the
+/// roster that still names it, once per roster, and the admin takes that
+/// one. A roster without the member ends it.
+#[test]
+fn a_leave_that_crossed_a_newer_roster_is_made_again() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann")]);
+    let first = GroupFrame::State(roster(1, &[2, 3], 1));
+    assert!(ingest(d, &key(1), &first, NOW).unwrap());
+    leave(d, &id(3), &gid(), NOW + 1).unwrap();
+    let crossed = roster(1, &[2, 3, 4], 2);
+    let frame = GroupFrame::State(crossed.clone());
+    assert!(ingest(d, &key(1), &frame, NOW + 2).unwrap());
+    park::process_intents(d, &id(3), NOW + 3);
+    let sent = parked_leaves(d);
+    let mut admin = joined(1, &crossed);
+    for l in &sent {
+        let leave = GroupFrame::Leave(l.clone());
+        apply(
+            &mut admin,
+            &key(1),
+            &key(3),
+            &leave,
+            &HashSet::new(),
+            NOW + 4,
+        );
+    }
+    assert_eq!(
+        intents_of(&admin, INTENT_LEAVER).len(),
+        1,
+        "the admin takes the leave made again: {sent:?}"
+    );
+    assert_eq!(store::load(d).unwrap().groups[0].status, STATUS_LEFT);
+    assert!(ingest(d, &key(1), &frame, NOW + 5).unwrap());
+    park::process_intents(d, &id(3), NOW + 6);
+    assert_eq!(parked_leaves(d).len(), sent.len(), "once per roster");
+    let later = GroupFrame::State(roster(1, &[2, 3, 4, 5], 3));
+    assert!(ingest(d, &key(1), &later, NOW + 7).unwrap());
+    park::process_intents(d, &id(3), NOW + 8);
+    let mut epochs: Vec<u32> = parked_leaves(d).iter().map(|l| l.epoch).collect();
+    epochs.sort_unstable();
+    assert_eq!(epochs, [1, 2, 3]);
+    let without = GroupFrame::State(roster(1, &[2, 4, 5], 4));
+    assert!(ingest(d, &key(1), &without, NOW + 9).unwrap());
+    park::process_intents(d, &id(3), NOW + 10);
+    assert_eq!(parked_leaves(d).len(), 3, "none after a roster without it");
+    assert_eq!(store::load(d).unwrap().groups[0].status, STATUS_LEFT);
+}
+
+/// G8: a group forgotten after leaving makes a crossed leave again too, and
+/// a leave waiting to be made again goes only while the admin has not
+/// answered: after a roster without the member and a new invitation, it is
+/// not signed (it would take the member out again).
+#[test]
+fn a_leave_made_again_goes_only_while_it_is_unanswered() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    // Forgotten after leaving: the crossed roster still gets the leave.
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann")]);
+    let first = GroupFrame::State(roster(1, &[2, 3], 1));
+    assert!(ingest(d, &key(1), &first, NOW).unwrap());
+    leave(d, &id(3), &gid(), NOW + 1).unwrap();
+    forget(d, &gid(), NOW + 2).unwrap();
+    let crossed = GroupFrame::State(roster(1, &[2, 3, 4], 2));
+    assert!(ingest(d, &key(1), &crossed, NOW + 3).unwrap());
+    park::process_intents(d, &id(3), NOW + 4);
+    let mut epochs: Vec<u32> = parked_leaves(d).iter().map(|l| l.epoch).collect();
+    epochs.sort_unstable();
+    assert_eq!(epochs, [1, 2], "the forgotten group's leave is made again");
+    assert_eq!(store::load(d).unwrap().groups[0].status, STATUS_FORGOTTEN);
+    // Answered before the park step ran: removed, then invited again.
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann")]);
+    assert!(ingest(d, &key(1), &first, NOW).unwrap());
+    leave(d, &id(3), &gid(), NOW + 1).unwrap();
+    assert!(ingest(d, &key(1), &crossed, NOW + 2).unwrap());
+    let without = GroupFrame::State(roster(1, &[2, 4], 3));
+    assert!(ingest(d, &key(1), &without, NOW + 3).unwrap());
+    let again = GroupFrame::State(roster(1, &[2, 3, 4], 4));
+    assert!(ingest(d, &key(1), &again, NOW + 4).unwrap());
+    assert_eq!(store::load(d).unwrap().groups[0].status, STATUS_ACTIVE);
+    park::process_intents(d, &id(3), NOW + 5);
+    let epochs: Vec<u32> = parked_leaves(d).iter().map(|l| l.epoch).collect();
+    assert_eq!(epochs, [1], "no leave for the new invitation");
+    assert!(store::load(d).unwrap().groups[0].intents.is_empty());
+}

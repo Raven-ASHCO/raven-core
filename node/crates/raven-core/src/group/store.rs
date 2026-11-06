@@ -139,6 +139,13 @@ pub const VIA_RELAY: &str = "relay";
 pub const INTENT_SEND: &str = "send";
 pub const INTENT_RECEIPT: &str = "receipt";
 pub const INTENT_LEAVER: &str = "leaver";
+/// A leave of this profile to make again: it left, and a newer roster that
+/// still names it came before the admin took the leave (the admin drops a
+/// leave of an older epoch, protocol §4.2). The receive path has no
+/// identity key, so the leave is signed for the roster held when the
+/// intents are processed ([`super::process_intents`]), and only while
+/// [`GroupRecord::leave_unanswered`]. An older build drops it unread.
+pub const INTENT_LEAVE: &str = "leave";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -258,8 +265,8 @@ pub struct Held {
 pub struct Intent {
     pub id: String,
     pub kind: String,
-    /// The member the copy goes to (send), the author (receipt) or the
-    /// member who left (leaver).
+    /// The member the copy goes to (send), the author (receipt), the member
+    /// who left (leaver) or the admin (leave).
     pub to: String,
     #[serde(default)]
     pub frame: String,
@@ -1407,6 +1414,12 @@ impl GroupRecord {
 
     pub fn is_forgotten(&self) -> bool {
         self.status == STATUS_FORGOTTEN
+    }
+
+    /// This profile left the group (and may have forgotten it since), and no
+    /// roster without it came: the admin has not taken its leave yet.
+    pub fn leave_unanswered(&self) -> bool {
+        (self.status == STATUS_LEFT || self.status == STATUS_FORGOTTEN) && !self.left_seen_out
     }
 
     /// Whether message `id` by `from` (both hex) is known here: a message is

@@ -11,9 +11,12 @@ use std::time::Duration;
 
 use super::rules::{drop_blocked_work, fail_line, remove_leaver};
 use super::store::{
-    self, hex_key, line_after, Intent, INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND, LINE_WAITING,
+    self, hex_key, line_after, Intent, INTENT_LEAVE, INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND,
+    LINE_WAITING,
 };
-use super::{group_live_enabled, GroupFrame, GroupId, GroupReceipt, Key, GROUP_RESERVED_PREFIX};
+use super::{
+    group_live_enabled, GroupFrame, GroupId, GroupLeave, GroupReceipt, Key, GROUP_RESERVED_PREFIX,
+};
 use crate::identity::Identity;
 use crate::indexed_session_store::{EndpointOutboundKind, IndexedSessionStore};
 
@@ -205,12 +208,12 @@ impl Pending {
     }
 }
 
-/// Turn the store's intents into parked copies: receipts are signed and
-/// leaves applied (the admin) under the store lock, then each copy is
-/// parked outside it, then the outcomes are written. Best effort: a store
-/// that cannot be read leaves everything for the next run, and so does a
-/// block list that cannot be read (nothing goes while it is not known who
-/// is blocked; [`drop_blocked_work`]).
+/// Turn the store's intents into parked copies: receipts and leaves made
+/// again are signed and leaves applied (the admin) under the store lock,
+/// then each copy is parked outside it, then the outcomes are written. Best
+/// effort: a store that cannot be read leaves everything for the next run,
+/// and so does a block list that cannot be read (nothing goes while it is
+/// not known who is blocked; [`drop_blocked_work`]).
 ///
 /// One run at a time (E2 r40: `raven group send` and raven-node's outbox
 /// scan each read the same intent and parked a copy of it, so the sender
@@ -263,8 +266,34 @@ pub fn process_intents(data_dir: &Path, identity: &Identity, now_ms: u64) -> Pen
             };
             g.intents.retain(|i| i.kind != INTENT_LEAVER);
             drop_blocked_work(g, &blocked);
-            let epoch = g.roster().map_or(1, |r| r.epoch);
+            let roster = g.roster();
+            let epoch = roster.as_ref().map_or(1, |r| r.epoch);
+            // A leave made again (it crossed a newer roster): signed for the
+            // roster held now, to its admin, while the admin has not taken
+            // the leave (no roster without this profile came); else it goes.
+            let leave_to = roster
+                .as_ref()
+                .filter(|r| r.admin != me && g.leave_unanswered())
+                .map(|r| r.admin);
             for intent in &mut g.intents {
+                if intent.kind == INTENT_LEAVE {
+                    let Some(admin) = leave_to else {
+                        intent.kind = String::new();
+                        continue;
+                    };
+                    let mut leave = GroupLeave {
+                        group: gid,
+                        epoch,
+                        from: me,
+                        at_ms: now_ms,
+                        sig: [0u8; 64],
+                    };
+                    leave.sign(identity);
+                    intent.kind = INTENT_SEND.into();
+                    intent.frame = GroupFrame::Leave(leave).encode();
+                    intent.to = hex::encode(admin);
+                    continue;
+                }
                 if intent.kind != INTENT_RECEIPT {
                     continue;
                 }

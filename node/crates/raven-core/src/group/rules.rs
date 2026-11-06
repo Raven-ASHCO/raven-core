@@ -8,8 +8,9 @@ use std::path::Path;
 
 use super::store::{
     self, hex_key, new_intent_id, Answered, GroupRecord, GroupsFile, Held, Intent, Line, StoredMsg,
-    INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND, LINE_DELIVERED, LINE_FAILED, LINE_WAITING,
-    STATUS_ACTIVE, STATUS_FORGOTTEN, STATUS_LEFT, STATUS_REMOVED, VIA_DIRECT, VIA_RELAY,
+    INTENT_LEAVE, INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND, LINE_DELIVERED, LINE_FAILED,
+    LINE_WAITING, STATUS_ACTIVE, STATUS_FORGOTTEN, STATUS_LEFT, STATUS_REMOVED, VIA_DIRECT,
+    VIA_RELAY,
 };
 use super::{
     body_ok, group_live_enabled, name_ok, GroupError, GroupFrame, GroupId, GroupLeave, GroupMsg,
@@ -255,7 +256,8 @@ fn apply_state(
             if status == STATUS_FORGOTTEN {
                 // Still forgotten: only what tells its frames apart moves on.
                 g.keep_forgotten(state, left_seen_out);
-                return Applied::change(false);
+                let work = leave_again(g, me, state, now_ms);
+                return Applied::change(work);
             }
             if forgotten {
                 // Back from forgotten: a new invitation.
@@ -276,10 +278,41 @@ fn apply_state(
             g.status = status.into();
             g.left_seen_out = left_seen_out;
             done.changed = true;
+            done.work = leave_again(g, me, state, now_ms);
         }
     }
     done.merge(retry_held(file, me, &state.group, contacts, now_ms));
     done
+}
+
+/// A leave that crossed the newer roster `state` just stored: this profile
+/// left the group (and may have forgotten it since), no roster without it
+/// came, and `state` still names it, so the admin, holding `state`, drops
+/// the leave made for an older epoch (protocol §4.2). The leave is made
+/// again, once while one waits ([`store::INTENT_LEAVE`]: it is signed for
+/// the roster held when the intents are processed). Returns whether it was
+/// queued.
+fn leave_again(g: &mut GroupRecord, me: &Key, state: &GroupState, now_ms: u64) -> bool {
+    if !g.leave_unanswered()
+        || !state.has(me)
+        || state.admin == *me
+        || g.intents.iter().any(|i| i.kind == INTENT_LEAVE)
+    {
+        return false;
+    }
+    g.push_intent(Intent {
+        id: new_intent_id(),
+        kind: INTENT_LEAVE.into(),
+        to: hex::encode(state.admin),
+        frame: String::new(),
+        of: String::new(),
+        via: String::new(),
+        line_of: String::new(),
+        made_ms: now_ms,
+        tries: 0,
+        author: String::new(),
+    });
+    true
 }
 
 /// Try again the frames held for `group` (after a newer roster).
@@ -882,7 +915,9 @@ pub(crate) fn remove_leaver(
 }
 
 /// Leave a group: a signed `leave` to the admin, and the group turns
-/// `left` here at once (its history stays).
+/// `left` here at once (its history stays). A leave that crosses a newer
+/// roster still naming this profile is made again for that roster, once
+/// per roster, until a roster without it comes ([`store::INTENT_LEAVE`]).
 pub fn leave(
     data_dir: &Path,
     identity: &Identity,

@@ -230,6 +230,11 @@ not fit is ACKed and dropped (§4.2).
   those friends, else in every copy. A member the author blocked gets no
   copy and is in no `relay`: it is shown as not delivered (failed) at once.
 - Only the admin sends `state`; it adds only its own friends.
+- A member that leaves signs its `leave` for the roster epoch it holds.
+  When a newer roster that still names it comes before one without it (the
+  leave crossed it, and the admin ignores a leave of an older epoch, §4.2),
+  the member makes the leave again for that roster, once per roster, until
+  a roster without it comes; a group it forgot after leaving does the same.
 - Every copy is an ordinary indexed-session Message with the 7-day message
   horizon; the pairwise ACK of a copy is that member's delivery receipt. A
   receiver that refuses a copy for lack of room (§4.2) sends no ACK, so the
