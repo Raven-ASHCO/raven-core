@@ -266,7 +266,10 @@ raven-node).
   share is dropped there (so it never waits in that member's queue), and that entry stays
   `waiting`.
 - **Leaving and removal.** `status` is `left` after `groups.leave` and `removed` when the admin
-  removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`.
+  removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`. `groups.leave` on a group
+  you left whose admin has not taken your leave yet (no roster without you came; the copy may
+  have been given up after 7 days) sends the leave again, one at a time; once a roster without you
+  came, it is `GROUP_NOT_MEMBER`.
 - **Forget** (`groups.forget`): a group you left or were removed from (or one with no other
   member) goes from this computer: it leaves `groups.list`, its messages go, and its place is free
   for another group; every op on it is then `GROUP_NOT_FOUND`. A group you are still in is

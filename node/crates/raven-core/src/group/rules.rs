@@ -318,6 +318,19 @@ fn leave_again(g: &mut GroupRecord, me: &Key, state: &GroupState, now_ms: u64) -
     true
 }
 
+/// A leave of this profile waits in `g`'s intents: one to make again
+/// ([`store::INTENT_LEAVE`]), or one signed and not parked yet.
+fn leave_waits(g: &GroupRecord) -> bool {
+    g.intents.iter().any(|i| {
+        i.kind == INTENT_LEAVE
+            || (i.kind == INTENT_SEND
+                && matches!(
+                    super::parse_frame(i.frame.as_bytes()),
+                    Some(GroupFrame::Leave(_))
+                ))
+    })
+}
+
 /// Try again the frames held for `group` (after a newer roster).
 fn retry_held(
     file: &mut GroupsFile,
@@ -928,6 +941,10 @@ pub(crate) fn remove_leaver(
 /// `left` here at once (its history stays). A leave that crosses a newer
 /// roster still naming this profile is made again for that roster, once
 /// per roster, until a roster without it comes ([`store::INTENT_LEAVE`]).
+/// On a group this profile left whose leave the admin has not taken (no
+/// roster without it came: its copy expired or failed on the way, say),
+/// `leave` makes it again, once while one waits; once a roster without
+/// this profile came, it is [`GroupError::NotMember`].
 pub fn leave(
     data_dir: &Path,
     identity: &Identity,
@@ -936,6 +953,15 @@ pub fn leave(
 ) -> Result<(), GroupError> {
     gate()?;
     let me = identity.public_key_bytes();
+    // A leave of this group parked for the admin and not given up yet.
+    let parked = crate::chat_history::list_staged_outbound_bodies(data_dir).is_ok_and(|staged| {
+        staged
+            .iter()
+            .any(|s| match super::parse_frame(s.body.as_bytes()) {
+                Some(GroupFrame::Leave(l)) => l.group == *group,
+                _ => false,
+            })
+    });
     store::edit(data_dir, |file| {
         file.note_me(&me);
         let g = file.shown_mut(group).ok_or(GroupError::NotFound)?;
@@ -944,7 +970,13 @@ pub fn leave(
             return Err(GroupError::AdminCannotLeave);
         }
         if !g.is_active() {
-            return Err(GroupError::NotMember);
+            if !g.leave_unanswered() || !held.has(&me) {
+                return Err(GroupError::NotMember);
+            }
+            if !parked && !leave_waits(g) {
+                leave_again(g, &me, &held, now_ms);
+            }
+            return Ok(());
         }
         let mut leave = GroupLeave {
             group: *group,

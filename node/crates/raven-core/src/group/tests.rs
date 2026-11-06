@@ -3741,3 +3741,64 @@ fn a_leave_made_again_goes_only_while_it_is_unanswered() {
     assert_eq!(epochs, [1], "no leave for the new invitation");
     assert!(store::load(d).unwrap().groups[0].intents.is_empty());
 }
+
+/// G8 (review): a leave whose copy expired on the way never reached the
+/// admin, so no roster without the member comes and the member stays in
+/// the admin's roster. `leave` on that left group makes the leave again
+/// (instead of GROUP_NOT_MEMBER), once while one waits, and the admin takes
+/// it; after a roster without the member, `leave` says GROUP_NOT_MEMBER.
+#[test]
+fn leave_makes_a_leave_whose_copy_expired_again_once_while_one_waits() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann")]);
+    let first = roster(1, &[2, 3], 1);
+    assert!(ingest(d, &key(1), &GroupFrame::State(first.clone()), NOW).unwrap());
+    leave(d, &id(3), &gid(), NOW + 1).unwrap();
+    assert_eq!(parked_leaves(d).len(), 1);
+    // The copy is given up at its deadline, never delivered.
+    let later = NOW + crate::horizon::MESSAGE_HORIZON_MS + 2;
+    {
+        let mut sessions = crate::IndexedSessionStore::open(d).unwrap();
+        let mut report = crate::horizon::HorizonReport::default();
+        crate::horizon::settle_parked(d, &id(3), &mut sessions, &key(1), later, &mut report)
+            .unwrap();
+        assert_eq!(report.expired.len(), 1, "{report:?}");
+    }
+    assert!(parked_leaves(d).is_empty(), "the copy expired");
+    assert_eq!(store::load(d).unwrap().groups[0].status, STATUS_LEFT);
+
+    leave(d, &id(3), &gid(), later + 1).unwrap();
+    let sent = parked_leaves(d);
+    assert_eq!(sent.len(), 1, "the leave is made again: {sent:?}");
+    assert_eq!(sent[0].epoch, 1);
+    let mut admin = joined(1, &first);
+    apply(
+        &mut admin,
+        &key(1),
+        &key(3),
+        &GroupFrame::Leave(sent[0].clone()),
+        &HashSet::new(),
+        later + 2,
+    );
+    assert_eq!(
+        intents_of(&admin, INTENT_LEAVER).len(),
+        1,
+        "the admin takes it"
+    );
+    leave(d, &id(3), &gid(), later + 3).unwrap();
+    assert_eq!(parked_leaves(d).len(), 1, "once while one waits");
+    assert!(store::load(d).unwrap().groups[0].intents.is_empty());
+
+    let without = GroupFrame::State(roster(1, &[2], 2));
+    assert!(ingest(d, &key(1), &without, later + 4).unwrap());
+    assert_eq!(
+        leave(d, &id(3), &gid(), later + 5),
+        Err(GroupError::NotMember)
+    );
+    assert_eq!(parked_leaves(d).len(), 1);
+}
