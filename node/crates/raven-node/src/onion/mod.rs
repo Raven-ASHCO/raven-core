@@ -1272,6 +1272,10 @@ async fn handle_event(
                 // asked at its next poll, up to 30 min later).
                 let _ = crate::outbox::network_changed();
                 crate::custody::tor_ready();
+                // After a wake, a resume or any new Tor life: the circuits
+                // of the conversations going on are warmed again (speed
+                // design M2, M10; warm gate only).
+                warm::KEEP.tor_ready();
             }
         }
         Event::Onion { hs_id } => {
@@ -1907,6 +1911,9 @@ async fn dial_on(
     crate::clock_notes::dialled(&expected, frames, &replies);
     let replies = replies?;
     crate::delivery_paths::note(&expected, OutboxCarrier::Onion, None, frames, &replies);
+    // Keep warm (speed design M2, warm gate only): the friend's circuit was
+    // just used, and a chat message shows the conversation.
+    warm::KEEP.dialled(data_dir, &expected, hs_id, frames);
     Ok(replies)
 }
 
@@ -1963,6 +1970,128 @@ async fn warm_dial(
             .reply_ms
             .map(|ms| Duration::from_millis(u64::from(ms)));
         pool.checkin(warm::WarmLink::new(key.clone(), open, began, written, trip));
+    }
+    Ok(())
+}
+
+/// The warm gate is shut: nothing is probed or warmed (speed design M2, M3).
+pub(crate) const WARM_SHUT: &str = "the warm gate is shut";
+
+/// Speed design M2 and M3 (warm gate only, `pool`'s): a probe of the
+/// verified contact `expected`'s onion service `hs_id` through the helper
+/// ([`proto::CONNECT_PROBE`]): one try in the contact's isolation group to
+/// a port its service refuses, which proves the rendezvous circuit works
+/// and keeps it in use (or builds one first); nothing reaches the contact's
+/// raven-node. A dial's checks run first (the carrier live, the contact
+/// verified and not blocked, Tor allowed on this network), and Tor must be
+/// ready now: a probe never waits for it. A probe that failed past the
+/// helper makes the next connect to the contact fresh first, as a failed
+/// link does ([`warm::WarmPool::link_failed`], hedge gate only); the helper
+/// itself has moved the contact to a new isolation group.
+pub(crate) async fn probe_on(
+    pool: &'static warm::WarmPool,
+    data_dir: &Path,
+    expected: [u8; 32],
+    hs_id: [u8; 32],
+) -> Result<(), String> {
+    if !pool.live() {
+        return Err(WARM_SHUT.into());
+    }
+    ONION_LINK.require_live()?;
+    let dd = data_dir.to_path_buf();
+    if !internet_direct::blocking(move || Ok(warm::may_warm(&dd, &expected))).await? {
+        return Err(format!(
+            "{}: a probe needs a verified contact that is not blocked; nothing was asked",
+            raven_core::CONTACT_NOT_VERIFIED
+        ));
+    }
+    if off_on_mobile_data(data_dir) {
+        return Err(format!("{ONION_NOT_READY} ({MOBILE_DATA_WHY})"));
+    }
+    let (helper, token) = ready_connect().ok_or(ONION_NOT_READY)?;
+    let flags = proto::CONNECT_PROBE | (pool.connect_flags(&hs_id) & proto::CONNECT_FRESH_FIRST);
+    match connect_via_helper(helper, token, hs_id, flags).await {
+        // Answered: the helper closes the connection, no stream follows.
+        Ok(_closed) => Ok(()),
+        Err(e) => {
+            if !e.starts_with(ONION_NOT_READY) {
+                pool.link_failed(hs_id);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Why the app's warm-up warms nothing ([`warm_up_on`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WarmRefused {
+    /// A word of `raven_core::ipc::WARM_SKIP_WORDS`.
+    Skip(warm::Skip),
+    /// No request to warm anything: a contact key or an onion route that is
+    /// none.
+    Bad(String),
+}
+
+/// Speed design M3 (warm gate only): the app's warm-up of `level` for the
+/// verified contact `expected_pub_hex`, whose onion route is `dial`, under
+/// `keep`'s limits and with its pool. A chat open
+/// ([`raven_core::ipc::WarmLevel::Circuit`]) probes the contact's
+/// rendezvous circuit ([`probe_on`]: its node sees nothing); typing
+/// ([`raven_core::ipc::WarmLevel::Link`]) opens an onion link with no
+/// frame, a send's check as a program's send makes it, so it stays kept for
+/// the next send (W1) and no frame goes early. A dial's checks come first
+/// (the gates, the contact verified and not blocked, Tor allowed on this
+/// network and ready now: a warm-up never waits for Tor), then its rate
+/// limit ([`warm::KeepWarm::warm_up`]); the warm-up itself runs in a task
+/// of its own (`Ok`: it started).
+pub(crate) async fn warm_up_on(
+    keep: &'static warm::KeepWarm,
+    data_dir: &Path,
+    dial: &str,
+    expected_pub_hex: &str,
+    level: raven_core::ipc::WarmLevel,
+) -> Result<(), WarmRefused> {
+    use raven_core::ipc::WarmLevel;
+    let expected = internet_direct::parse_pub_hex(expected_pub_hex).map_err(WarmRefused::Bad)?;
+    let hs_id = raven_core::onion::dial_hs_id(dial)
+        .ok_or_else(|| WarmRefused::Bad(ONION_BAD_ROUTE.into()))?;
+    if !keep.live() || ONION_LINK.require_live().is_err() {
+        return Err(WarmRefused::Skip("off"));
+    }
+    let dd = data_dir.to_path_buf();
+    let refused = internet_direct::blocking(move || Ok(warm::warm_refusal(&dd, &expected)))
+        .await
+        .unwrap_or(Some("not_verified"));
+    if let Some(word) = refused {
+        return Err(WarmRefused::Skip(word));
+    }
+    if off_on_mobile_data(data_dir) {
+        return Err(WarmRefused::Skip("mobile_data"));
+    }
+    if ready_connect().is_none() {
+        return Err(WarmRefused::Skip("tor_not_ready"));
+    }
+    keep.warm_up(data_dir, &expected, hs_id, level)
+        .map_err(WarmRefused::Skip)?;
+    let pool = keep.pool();
+    let dd = data_dir.to_path_buf();
+    match level {
+        WarmLevel::Circuit => {
+            tokio::spawn(async move {
+                let _ = probe_on(pool, &dd, expected, hs_id).await;
+            });
+        }
+        WarmLevel::Link => {
+            let (dial, hex) = (dial.to_owned(), expected_pub_hex.to_owned());
+            tokio::spawn(async move {
+                let meta = DialMeta {
+                    send_check: true,
+                    warm: true,
+                    ..DialMeta::default()
+                };
+                let _ = dial_on(pool, ONION_WAITS, &dd, &dial, &hex, &[], meta).await;
+            });
+        }
     }
     Ok(())
 }

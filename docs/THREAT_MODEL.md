@@ -1083,6 +1083,20 @@ are all off.
 | A friend who keeps mail (custody, §3.7a T4) | Who left mail for whom and when, sizes, and the signed envelope until release or expiry; on a direct link the depositor's and the fetcher's IP addresses | Keeping and using custody are each person's choice, off by default; never message content |
 | Bluetooth radio range (macOS, after `raven nearby enable`) | §1.1: a random-looking per-pair UUID while there is something to send, the random Bluetooth address, timing and sizes; a connecting device sees the computer's Bluetooth name | §1.1 and its table |
 
+**Onion warm-ups (gated off: `ONION_WARM_PRODUCTION_ENABLED = false`).**
+Keep warm and the app's warm-ups (`RAVEN_ONION_CARRIER_V1.md` §10) run for
+verified contacts that are not blocked, and only while a conversation goes
+on. A chat open, keep warm and the resume warm-up only probe the contact's
+onion service: its Tor refuses the stream and its node sees nothing. A
+typing warm-up opens an authenticated link with no frame on it: the
+contact's node learns that this node is online and probably writing to it,
+even for a draft never sent. Keep warm holds one rendezvous circuit to the
+contact for up to 60 minutes (a probe every 6 to 9 minutes), which gives a
+timing adversary on the relays of that circuit longer to watch it (§3.17).
+None of it runs while the profile is locked or the app is paused, Tor on
+Wi-Fi only holds for all of it, and on the iPhone a typing warm-up stays
+off on mobile data unless the user allows it (§10 and §12 of that spec).
+
 **Phase 6b (built, all gated off; none is in this version).** Each measure
 and what it does not hide; the full inventory of identifiers is in
 [`design/2026-10-traffic-analysis.md`](design/2026-10-traffic-analysis.md)

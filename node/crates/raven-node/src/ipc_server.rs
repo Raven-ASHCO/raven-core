@@ -699,6 +699,11 @@ fn handle_req(req: IpcRequest, data_dir: &Path, forward: &Option<ForwardQueue>) 
             code: "INTERNAL".into(),
             message: "OnionDial must be handled asynchronously".into(),
         },
+        IpcRequest::OnionWarm { v, .. } => IpcResponse::Error {
+            v,
+            code: "INTERNAL".into(),
+            message: "OnionWarm must be handled asynchronously".into(),
+        },
         // `raven nearby …` (Phase 5): the hold while the nearby gate is
         // closed (nothing read or written); `enable` / `disable` write the
         // ask-once consent, and `background_on` / `background_off` the
@@ -1520,6 +1525,49 @@ async fn handle_onion_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
     }
 }
 
+/// IPC `OnionWarm` (speed design M3; the warm gate): the app warms its Tor
+/// path to a verified contact ahead of a send ([`crate::onion::warm_up_on`]
+/// with the process's keep warm and kept links). `Accepted` once the
+/// warm-up started; `ONION_WARM_SKIPPED` with one word of
+/// `raven_core::ipc::WARM_SKIP_WORDS` when nothing warms. Never logged: it
+/// carries no content, and a line would say who is being written to.
+async fn handle_onion_warm(data_dir: &Path, req: IpcRequest) -> IpcResponse {
+    let IpcRequest::OnionWarm {
+        v,
+        onion_dial,
+        expected_pub_hex,
+        level,
+    } = req
+    else {
+        return IpcResponse::Error {
+            v: IPC_VERSION,
+            code: "INTERNAL".into(),
+            message: "not OnionWarm".into(),
+        };
+    };
+    let warmed = crate::onion::warm_up_on(
+        &crate::onion::warm::KEEP,
+        data_dir,
+        &onion_dial,
+        &expected_pub_hex,
+        level,
+    )
+    .await;
+    match warmed {
+        Ok(()) => IpcResponse::Accepted { v },
+        Err(crate::onion::WarmRefused::Skip(word)) => IpcResponse::Error {
+            v,
+            code: raven_core::ipc::ONION_WARM_SKIPPED.into(),
+            message: word.into(),
+        },
+        Err(crate::onion::WarmRefused::Bad(e)) => IpcResponse::Error {
+            v,
+            code: crate::outbox::dial_error_code(&e).into(),
+            message: e,
+        },
+    }
+}
+
 /// IPC `NearbyDial` (Phase 5, `raven send --carrier nearby`): the same rules
 /// as the outbox's nearby dials ([`crate::nearby::dial`]: the gate, the
 /// route naming exactly this contact, verified contacts only, an engine).
@@ -1759,6 +1807,8 @@ async fn dispatch_watched(
         Ok(req @ IpcRequest::OnionDial { .. }) => {
             logged_send_dial(req, hangup, |req| handle_onion_dial(data_dir, req)).await
         }
+        // Not a send: it carries nothing and answers at once.
+        Ok(req @ IpcRequest::OnionWarm { .. }) => handle_onion_warm(data_dir, req).await,
         // Long-poll: waits on the inbox generation, not on a pool thread.
         Ok(IpcRequest::AppInboxPage {
             v,
@@ -2713,6 +2763,13 @@ mod tests {
                     lan_dial: "127.0.0.1:9".into(),
                     expected_pub_hex: "ab".repeat(32),
                     frames_b64: Vec::new(),
+                },
+                // Speed design M3: never a warm-up while locked.
+                IpcRequest::OnionWarm {
+                    v: IPC_VERSION,
+                    onion_dial: raven_core::onion::dial_for(&[0xab; 32]),
+                    expected_pub_hex: "ab".repeat(32),
+                    level: raven_core::ipc::WarmLevel::Link,
                 },
             ] {
                 let (code, message) = error_code(dispatch(&frame(&req), &dd, &fq).await);
@@ -4145,6 +4202,54 @@ mod tests {
         let asked = tokio::time::Instant::now();
         assert_eq!(dispatch(&frame(&req), &dd, &fq).await, located(&[]));
         assert_eq!(tokio::time::Instant::now(), asked, "at once");
+    }
+
+    /// Speed design M3: with the warm gate shut (every build but a lab run
+    /// with `RAVEN_LAB_TOR_WARM`) `OnionWarm` warms nothing and says so in
+    /// one word, before it reads any contact; a key or a route that is none
+    /// is refused as a bad dial, and the blocking handler never serves it.
+    #[tokio::test]
+    async fn onion_warm_with_the_gate_shut_warms_nothing() {
+        use raven_core::ipc::{WarmLevel, ONION_WARM_SKIPPED};
+        if raven_core::onion_gate::onion_warm_live() {
+            eprintln!("skipped: the warm gate is open in this run");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (dd, fq) = shared(dir.path());
+        // An onion route names a usable key (an ed25519 point).
+        let onion_key = raven_core::identity::Identity::from_seed(&[0x3b; 32]).public_key_bytes();
+        let route = raven_core::onion::dial_for(&onion_key);
+        let key = "cd".repeat(32);
+        let warm = |onion_dial: &str, key: &str, level| IpcRequest::OnionWarm {
+            v: IPC_VERSION,
+            onion_dial: onion_dial.into(),
+            expected_pub_hex: key.into(),
+            level,
+        };
+        for level in [WarmLevel::Circuit, WarmLevel::Link] {
+            match dispatch(&frame(&warm(&route, &key, level)), &dd, &fq).await {
+                IpcResponse::Error { code, message, .. } => {
+                    assert_eq!(
+                        (code.as_str(), message.as_str()),
+                        (ONION_WARM_SKIPPED, "off")
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+            for (bad_route, bad_key) in [("onion:zz", key.as_str()), (route.as_str(), "zz")] {
+                match dispatch(&frame(&warm(bad_route, bad_key, level)), &dd, &fq).await {
+                    IpcResponse::Error { code, .. } => assert_ne!(code, ONION_WARM_SKIPPED),
+                    other => panic!("{other:?}"),
+                }
+            }
+            assert!(matches!(
+                handle_req(warm(&route, &key, level), dir.path(), &None),
+                IpcResponse::Error { code, .. } if code == "INTERNAL"
+            ));
+        }
+        let written: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(written.is_empty(), "{written:?}");
     }
 
     /// D1 (Tor messaging audit, 2026-11): an iPhone send left no trace of

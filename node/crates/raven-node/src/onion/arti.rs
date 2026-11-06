@@ -775,7 +775,30 @@ async fn accept_connects(
                         .map_err(|e| connect_reply(e.kind()))
                 }
             };
-            if let Some(mut tor) = answer_connect(&mut stream, &token, &book, open).await {
+            // A probe (speed design M2, M3): one try with Arti to the
+            // friend's onion service on the self-check port, in `group`;
+            // the service refuses that port, and its refusal is the answer,
+            // as for our own self-check. The stream is never kept.
+            let probe = |group: Option<IsolationToken>, hs_id: [u8; 32]| {
+                let client = client.clone();
+                async move {
+                    let addr = onion_text(&tor_hscrypto::pk::HsId::from(hs_id));
+                    let mut prefs = StreamPrefs::new();
+                    prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
+                    if let Some(group) = group {
+                        prefs.set_isolation(group);
+                    }
+                    match client
+                        .connect_with_prefs((addr.as_str(), proto::SELF_CHECK_PORT), &prefs)
+                        .await
+                    {
+                        Ok(_stream) => Ok(()),
+                        Err(e) if service_answered(e.kind()) => Ok(()),
+                        Err(e) => Err(connect_reply(e.kind())),
+                    }
+                }
+            };
+            if let Some(mut tor) = answer_connect(&mut stream, &token, &book, open, probe).await {
                 let _ = tokio::io::copy_bidirectional(&mut stream, &mut tor).await;
             }
         });
@@ -787,18 +810,23 @@ async fn accept_connects(
 /// [`proto::connect_in_groups`] with `open` making each try (`open(group,
 /// hs_id, port)`), and the reply written. The Tor stream once the reply
 /// said it opened; `None` when the request was not raven-node's (closed
-/// without a word), was refused, or found no stream.
-async fn answer_connect<S, G, T, O, Fut>(
+/// without a word), was refused, or found no stream. A probe
+/// ([`proto::CONNECT_PROBE`]) is made by `probe(group, hs_id)` instead
+/// ([`proto::probe_in_groups`]): its reply, and never a stream.
+async fn answer_connect<S, G, T, O, Fut, P, PFut>(
     stream: &mut S,
     token: &[u8; proto::TOKEN_LEN],
     book: &std::sync::Mutex<proto::IsolationBook<G>>,
     open: O,
+    probe: P,
 ) -> Option<T>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     G: Clone + PartialEq,
     O: Fn(Option<G>, [u8; 32], u16) -> Fut,
     Fut: Future<Output = Result<T, ConnectReply>>,
+    P: FnOnce(Option<G>, [u8; 32]) -> PFut,
+    PFut: Future<Output = Result<(), ConnectReply>>,
 {
     let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
     let read = tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut req));
@@ -812,6 +840,20 @@ where
     if proto::unknown_flags(flags) {
         let refused = ConnectReply::Failed(proto::UNKNOWN_FLAGS.into());
         let _ = stream.write_all(&refused.encode()).await;
+        return None;
+    }
+    // A probe (speed design M2, M3; raven-node asks it only with the warm
+    // gate open): one try in the friend's group, whose refusal by the
+    // friend's service is its answer; then the connection closes, and
+    // nothing reached the friend's raven-node. A failed one moves the
+    // friend to a new group.
+    if flags & proto::CONNECT_PROBE != 0 {
+        let probed = proto::probe_in_groups(CONNECT_WAIT, book, hs_id, flags, |group| {
+            probe(group, hs_id)
+        })
+        .await;
+        let reply = probed.err().unwrap_or(ConnectReply::Ok);
+        let _ = stream.write_all(&reply.encode()).await;
         return None;
     }
     // The first try in the friend's isolation group (the default one until
@@ -1276,15 +1318,17 @@ mod tests {
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The tries of one fake connect: each one's group and when it began.
-    type TriesMade = Vec<(Option<u32>, Duration)>;
+    /// The tries of one fake connect: each one's group, when it began, and
+    /// whether it was a probe's.
+    type TriesMade = Vec<(Option<u32>, Duration, bool)>;
 
     /// One connect request with `flags` through [`answer_connect`], each try
     /// made by a fake Tor: a try in the default group meets a dead circuit
     /// (Arti gives up its BEGIN after [`STREAM_CONNECT_TIMEOUT`]), a try in
-    /// any other group opens a stream after 1 s. The reply raven-node reads,
+    /// any other group opens a stream after 1 s, or for a probe gets the
+    /// friend's refusal of its port after 1 s. The reply raven-node reads,
     /// whether a Tor stream was handed back, and each try as (its group, when
-    /// it began).
+    /// it began, a probe's).
     async fn connect_with_flags(
         book: &Mutex<proto::IsolationBook<u32>>,
         flags: u8,
@@ -1299,7 +1343,7 @@ mod tests {
         let log = Arc::clone(&tries);
         let open = move |group: Option<u32>, hs_id: [u8; 32], port: u16| {
             assert_eq!((hs_id, port), ([6u8; 32], 4242), "the request's own");
-            log.lock().unwrap().push((group, began.elapsed()));
+            log.lock().unwrap().push((group, began.elapsed(), false));
             async move {
                 if group.is_none() {
                     tokio::time::sleep(STREAM_CONNECT_TIMEOUT).await;
@@ -1309,7 +1353,20 @@ mod tests {
                 Ok(tokio::io::duplex(64).0)
             }
         };
-        let opened = answer_connect(&mut helper, &token, book, open).await;
+        let log = Arc::clone(&tries);
+        let probe = move |group: Option<u32>, hs_id: [u8; 32]| {
+            assert_eq!(hs_id, [6u8; 32], "the request's own");
+            log.lock().unwrap().push((group, began.elapsed(), true));
+            async move {
+                if group.is_none() {
+                    tokio::time::sleep(STREAM_CONNECT_TIMEOUT).await;
+                    return Err(ConnectReply::Timeout("tor timeout".into()));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(())
+            }
+        };
+        let opened = answer_connect(&mut helper, &token, book, open, probe).await;
         drop(helper);
         let mut head = [0u8; 2];
         node.read_exact(&mut head).await.unwrap();
@@ -1325,16 +1382,21 @@ mod tests {
 
     /// Version 3 in the real helper (the loopback helper's twin is
     /// `onion::tests::a_connect_with_an_unknown_flag_is_refused`): a request
-    /// with a flag this version does not know (bits 1 and 2 are kept for the
-    /// keep-warm probe and optimistic data) is refused with no Tor try, never
-    /// served as if it were clear; the known flags reach the tries. Flags 0 is
+    /// with a flag this version does not know (bit 2 is kept for optimistic
+    /// data) is refused with no Tor try, never served as if it were clear;
+    /// the known flags reach the tries. Flags 0 is
     /// version 2's request: the first try in the friend's group (here the
     /// default one, its circuit dead), the fresh one after Arti gave it up.
     /// A hedge starts the fresh try 2 s after a first one with no stream;
     /// fresh first makes the first try in a new group, with no hedge.
     #[tokio::test(start_paused = true)]
     async fn a_connect_with_an_unknown_flag_is_refused_and_known_flags_reach_the_tries() {
-        for flags in [1u8 << 1, 1 << 2, 1 << 7, (1 << 1) | proto::CONNECT_HEDGE] {
+        for flags in [
+            1u8 << 2,
+            1 << 7,
+            (1 << 2) | proto::CONNECT_HEDGE,
+            (1 << 2) | proto::CONNECT_PROBE,
+        ] {
             let book = Mutex::new(proto::IsolationBook::new(next_group));
             let (reply, opened, tries) = connect_with_flags(&book, flags).await;
             assert_eq!(
@@ -1350,7 +1412,11 @@ mod tests {
             (0, true, STREAM_CONNECT_TIMEOUT),
             (proto::CONNECT_HEDGE, true, proto::CONNECT_HEDGE_AFTER),
             (proto::CONNECT_FRESH_FIRST, false, secs(0)),
-            (proto::CONNECT_FLAGS, false, secs(0)),
+            (
+                proto::CONNECT_FRESH_FIRST | proto::CONNECT_HEDGE,
+                false,
+                secs(0),
+            ),
         ] {
             let book = Mutex::new(proto::IsolationBook::new(next_group));
             let (reply, opened, tries) = connect_with_flags(&book, flags).await;
@@ -1361,5 +1427,31 @@ mod tests {
             assert_eq!(tries.len(), if first_default { 2 } else { 1 }, "{flags:#x}");
             assert_eq!(tries[0].0.is_none(), first_default, "{flags:#x}: {tries:?}");
         }
+    }
+    /// A probe (speed design M2, M3) in the real helper: one try, in the
+    /// friend's group and through `probe` (to the self-check port, which the
+    /// friend's service refuses), never through `open`, and never a stream.
+    /// On a dead circuit it fails after Arti's BEGIN timeout with no fresh
+    /// try, and moves the friend to a new group: the next probe, or the
+    /// next connect, builds fresh circuits there and is answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_is_answered_with_no_stream_and_a_failed_one_moves_the_friend() {
+        let book = Mutex::new(proto::IsolationBook::new(next_group));
+        let (reply, opened, tries) = connect_with_flags(&book, proto::CONNECT_PROBE).await;
+        assert_eq!(
+            reply,
+            ConnectReply::Timeout("tor timeout".into()),
+            "{tries:?}"
+        );
+        assert!(!opened, "no stream");
+        assert_eq!(tries, [(None, Duration::ZERO, true)], "one try, a probe's");
+        let moved = book.lock().unwrap().first_try(&[6u8; 32]);
+        assert!(moved.is_some(), "the friend has a new group");
+        let (reply, opened, tries) = connect_with_flags(&book, proto::CONNECT_PROBE).await;
+        assert_eq!((reply, opened), (ConnectReply::Ok, false));
+        assert_eq!(tries, [(moved, Duration::ZERO, true)], "in the new group");
+        let (reply, opened, tries) = connect_with_flags(&book, 0).await;
+        assert_eq!((reply, opened), (ConnectReply::Ok, true));
+        assert_eq!(tries, [(moved, Duration::ZERO, false)], "a connect there");
     }
 }

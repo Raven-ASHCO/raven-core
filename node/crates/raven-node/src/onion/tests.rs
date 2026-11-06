@@ -357,6 +357,10 @@ async fn side_with(dir: &Path, registry: &Path, knobs: loopback::Knobs) -> Side 
     }
 }
 
+/// Streams the in-memory forward listeners took ([`serve_forward_in_memory`]):
+/// each one a helper's stream that reached a raven-node.
+static FORWARDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// [`serve_forward`] on a listener in memory ([`memnet`], for a test on the
 /// paused clock): the helper's header before any slot, a slot per circuit
 /// in this helper life, then the Raven link listener of the onion carrier
@@ -373,6 +377,7 @@ async fn serve_forward_in_memory(
     let admission = Admission::for_circuits(limits);
     let life = admission.new_life();
     while let Ok(stream) = listener.accept().await {
+        FORWARDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (dd, id) = (data_dir.clone(), identity.clone());
         let admission = Arc::clone(&admission);
         tokio::spawn(async move {
@@ -735,14 +740,18 @@ async fn one_circuit_cannot_take_every_onion_slot() {
 /// fresh try (a new isolation group) starts at once, with no pause, and
 /// delivers. The dials after it reuse that fresh group at once. Before,
 /// each of them met the dead circuit again (in the field: a 10 s timeout,
-/// a 2 s pause and a whole new rendezvous per dial).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// a 2 s pause and a whole new rendezvous per dial). In memory on the
+/// paused clock (`Knobs::memory`): a dial on a working circuit costs no
+/// time there (no connect delay, no latency), so the first dial takes the
+/// dead circuit's timeout exactly and each later one nothing ([`about`]).
+#[tokio::test(start_paused = true)]
 async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let stale = Duration::from_secs(3);
     let Some(f) = Friends::with(loopback::Knobs {
         stale,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -753,21 +762,24 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     let sealed = seal(f.a.path(), &f.alice, &f.key_ab, "past a dead circuit");
     let mut took = Vec::new();
     for _ in 0..3 {
-        let began = Instant::now();
+        let began = tokio::time::Instant::now();
         let replies = f.alice_redials_bob(&sealed).await.expect("delivered");
         took.push(began.elapsed());
         assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
     }
     let counts = loopback::Counts::read(&f.a.path().join(TOR_DIR));
     eprintln!("three dials past a dead shared circuit: {took:?}, {counts:?}");
-    assert!(took[0] >= stale, "{took:?} {counts:?}");
+    assert!(
+        about(took[0], stale),
+        "the first dial: one timeout, then the fresh try at once: {took:?} {counts:?}"
+    );
     assert!(
         took[0] < stale + proto::CONNECT_RETRY_PAUSE,
         "the fresh try waited after the timeout: {took:?} {counts:?}"
     );
     for t in &took[1..] {
         assert!(
-            *t < stale,
+            about(*t, Duration::ZERO),
             "a later dial met the dead circuit: {took:?} {counts:?}"
         );
     }
@@ -776,7 +788,8 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
         loopback::Counts {
             connects: 3,
             tries: 4,
-            stale: 1
+            stale: 1,
+            probes: 0
         },
         "{took:?}"
     );
@@ -785,18 +798,21 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
 /// The stage record (speed groundwork, D1): each onion dial keeps one
 /// record of durations, its steps split where the time goes. Over a
 /// loopback Tor whose every connect takes `delay` and whose every byte
-/// arrives `latency` later (one round trip r = 2 x latency): the connect
-/// is at least `delay`, and Noise, the hellos and the receipt are one round
-/// trip each (never two), the frame write only local work. The connect's
-/// two parts add up to it. A send's check (no frames) has no write and no
-/// receipt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// arrives `latency` later (one round trip r = 2 x latency), in memory on
+/// the paused clock (`Knobs::memory`: local work takes no time there, so a
+/// step takes its model time exactly, give or take [`TICK`]): the connect
+/// is `delay`, and Noise, the hellos and the receipt are one round trip
+/// each (never two), the frame write no time (local work only). The
+/// connect's two parts add up to it. A send's check (no frames) has no
+/// write and no receipt.
+#[tokio::test(start_paused = true)]
 async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let (delay, latency) = (Duration::from_millis(900), Duration::from_millis(200));
     let Some(f) = Friends::with(loopback::Knobs {
         delay,
         latency,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -827,12 +843,12 @@ async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
     eprintln!("stage records: {records:?}");
     assert_eq!(records.len(), 2, "one record per dial: {records:?}");
     let ms = |d: Duration| u32::try_from(d.as_millis()).unwrap();
-    let (r, delay, slack) = (2 * ms(latency), ms(delay), 350);
-    // One round trip, give or take local work, never two.
+    let (r, delay, tick) = (2 * ms(latency), ms(delay), ms(TICK));
+    // One round trip exactly (timers end on a whole millisecond), never two.
     let one_trip = |step: &str, got: Option<u32>| {
         let got = got.unwrap_or_else(|| panic!("no {step}: {records:?}"));
         assert!(
-            (r..r + slack).contains(&got),
+            (r..r + tick).contains(&got),
             "{step} {got} ms, r {r}: {records:?}"
         );
     };
@@ -848,7 +864,7 @@ async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
     for record in [sent, checked] {
         let connect = record.connect_ms.expect("connect");
         assert!(
-            (delay..delay + slack).contains(&connect),
+            (delay..delay + tick).contains(&connect),
             "connect: {record:?}"
         );
         assert_eq!(
@@ -860,7 +876,7 @@ async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
         one_trip("hello", record.hello_ms);
     }
     one_trip("receipt", sent.receipt_ms);
-    assert!(sent.write_ms.expect("write") < slack, "{sent:?}");
+    assert!(sent.write_ms.expect("write") < tick, "local work: {sent:?}");
     assert_eq!(
         (checked.write_ms, checked.receipt_ms),
         (None, None),
@@ -2228,7 +2244,8 @@ async fn with_the_hedge_gate_shut_a_dead_circuit_costs_its_timeout_as_before() {
         loopback::Counts {
             connects: 2,
             tries: 3,
-            stale: 1
+            stale: 1,
+            probes: 0
         }
     );
     assert_eq!(pool.len(), 0, "nothing kept");
@@ -2260,7 +2277,8 @@ async fn a_dead_circuit_costs_two_seconds_with_the_hedge_gate_open() {
         loopback::Counts {
             connects: 1,
             tries: 2,
-            stale: 1
+            stale: 1,
+            probes: 0
         }
     );
     assert_eq!(inbox(f._b.path()), ["past a dead circuit, hedged"]);
@@ -2320,7 +2338,8 @@ async fn after_a_failed_link_the_next_connect_goes_fresh_first() {
         loopback::Counts {
             connects: before.connects + 1,
             tries: before.tries + 1,
-            stale: before.stale
+            stale: before.stale,
+            probes: before.probes
         },
         "one try, in a new group"
     );
@@ -2329,7 +2348,7 @@ async fn after_a_failed_link_the_next_connect_goes_fresh_first() {
 }
 
 /// A helper refuses a connect request with a flag it does not know (here
-/// bit 1, kept for the keep-warm probe): never served as if it were clear.
+/// bit 2, kept for optimistic data): never served as if it were clear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_connect_with_an_unknown_flag_is_refused() {
     let _one_at_a_time = LAB_ONION.lock().await;
@@ -2346,7 +2365,7 @@ async fn a_connect_with_an_unknown_flag_is_refused() {
         &f.side_a.token,
         &f.side_b.hs_id,
         raven_core::onion::ONION_VIRTUAL_PORT,
-        1 << 1,
+        1 << 2,
     ))
     .await
     .unwrap();
@@ -2359,6 +2378,115 @@ async fn a_connect_with_an_unknown_flag_is_refused() {
         ConnectReply::Failed(proto::UNKNOWN_FLAGS.into())
     );
     assert_eq!(f.counts().tries, 0, "no try made");
+}
+
+// ── M2 and M3: the probe (Tor speed Stage A, speed design M2, M3) ──────────
+
+/// Speed design M2 and M3: a probe through the helper
+/// ([`proto::CONNECT_PROBE`]) is answered by the friend's Tor alone: the
+/// friend's raven-node gets no stream (its forward listener takes none),
+/// and the helper counts no connect. The first builds the friend's
+/// circuit (a rendezvous and one round trip), the next rides it (one round
+/// trip), and a send after them rides it too: its check and message cost
+/// their 4 round trips with no rendezvous.
+#[tokio::test(start_paused = true)]
+async fn a_probe_opens_no_raven_link_on_the_friend() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        rendezvous: RENDEZVOUS,
+        count: true,
+        memory: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, _gate) = test_pool(warm::LIMITS);
+    let forwarded = FORWARDED.load(std::sync::atomic::Ordering::SeqCst);
+    for (n, want) in [(1, RENDEZVOUS + R), (2, R)] {
+        let began = tokio::time::Instant::now();
+        probe_on(pool, f.a.path(), f.bob_pub, f.side_b.hs_id)
+            .await
+            .expect("the probe was answered");
+        let took = began.elapsed();
+        assert!(about(took, want), "probe {n} took {took:?}, want {want:?}");
+        assert_eq!(
+            f.counts(),
+            loopback::Counts {
+                connects: 0,
+                tries: n,
+                stale: 0,
+                probes: n
+            }
+        );
+        assert_eq!(
+            FORWARDED.load(std::sync::atomic::Ordering::SeqCst),
+            forwarded,
+            "nothing reached a raven-node"
+        );
+    }
+    assert!(inbox(f._b.path()).is_empty());
+    let (acks, took) = f.program_sends(pool, "after two probes").await;
+    assert_eq!(acks, 1);
+    assert!(about(took, 4 * R), "a send after the probes took {took:?}");
+    assert_eq!(f.counts().connects, 1);
+    assert_eq!(inbox(f._b.path()), ["after two probes"]);
+    pool.flush();
+}
+
+/// Speed design M2: a probe that meets a dead circuit fails after Arti's
+/// BEGIN timeout, and the helper moves the friend to a new isolation group:
+/// the next send pays a fresh rendezvous and its 4 round trips, never the
+/// dead circuit's 6 s (here with the hedge gate shut: the helper's own
+/// doing). Bob holds both messages once.
+#[tokio::test(start_paused = true)]
+async fn a_failed_probe_makes_the_next_send_fresh_first() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let kill: &'static std::sync::atomic::AtomicU64 =
+        Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
+    let Some(f) = Friends::with(dead_circuit_knobs(Some(kill))).await else {
+        return;
+    };
+    let (pool, _gate, _hedge) = test_pool_with_hedge(warm::LIMITS);
+    assert_eq!(f.program_sends(pool, "before the kill").await.0, 1);
+    pool.flush();
+    loopback::kill_circuits(kill);
+    let before = f.counts();
+    let began = tokio::time::Instant::now();
+    let probed = probe_on(pool, f.a.path(), f.bob_pub, f.side_b.hs_id).await;
+    let took = began.elapsed();
+    assert!(probed.is_err(), "the dead circuit answered: {probed:?}");
+    assert!(about(took, BEGIN_TIMEOUT), "the probe took {took:?}");
+    assert_eq!(
+        f.counts(),
+        loopback::Counts {
+            tries: before.tries + 1,
+            stale: before.stale + 1,
+            probes: before.probes + 1,
+            ..before
+        }
+    );
+    let (acks, took) = f.program_sends(pool, "after the failed probe").await;
+    let want = RENDEZVOUS + 4 * R;
+    eprintln!(
+        "after a failed probe: {took:?} (R + 4r = {want:?}), {:?}",
+        f.counts()
+    );
+    assert_eq!(acks, 1);
+    assert!(about(took, want), "took {took:?}, want about {want:?}");
+    assert_eq!(
+        f.counts().stale,
+        before.stale + 1,
+        "no try met the dead circuit"
+    );
+    assert_eq!(
+        inbox(f._b.path()),
+        ["before the kill", "after the failed probe"]
+    );
+    pool.flush();
 }
 
 // ── M8: batches pipelined on a kept link (Tor speed Stage A, speed design M8)
@@ -2541,4 +2669,391 @@ async fn a_silent_pooled_link_is_hedged_and_the_copy_is_acked_once() {
     assert!(about(took, want), "took {took:?}, want about {want:?}");
     assert_eq!(inbox(f._b.path()), ["before the kill", "after the kill"]);
     pool.flush();
+}
+
+// ── M2 and M10: keep warm and the resume warm-up (speed design M2, M10) ────
+
+/// A keep warm of one test's own, with `limits`, the gate `gate` and its
+/// probes sharing `pool`: no other test's lock or Tor life ends it.
+fn test_keep(
+    limits: warm::KeepLimits,
+    gate: &'static std::sync::atomic::AtomicBool,
+    pool: &'static warm::WarmPool,
+) -> &'static warm::KeepWarm {
+    Box::leak(Box::new(warm::KeepWarm::new(
+        limits,
+        warm::Gate::Switch(gate),
+        pool,
+    )))
+}
+
+/// Arti keeps an onion service circuit 10 minutes after its last use.
+const ARTI_KEPT: Duration = Duration::from_secs(10 * 60);
+
+/// Loopback Tor for the keep warm tests: a connect takes one round trip r
+/// ([`R`]), every byte arrives r/2 later, a circuit built in a group pays
+/// [`RENDEZVOUS`] first and is gone [`ARTI_KEPT`] after its last use.
+fn kept_circuit_knobs() -> loopback::Knobs {
+    loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        rendezvous: RENDEZVOUS,
+        kept: ARTI_KEPT,
+        count: true,
+        memory: true,
+        ..loopback::Knobs::default()
+    }
+}
+
+/// Speed design M2: a send 25 minutes after the last one pays a fresh
+/// rendezvous (R + 4r: Arti dropped the circuit after 10 minutes), unless
+/// the conversation is kept warm: its probes, every 6 to 9 minutes, keep
+/// the circuit in use, and the send rides it (4r). On loopback Tor with
+/// Arti's 10 minute keep, on the paused clock.
+#[tokio::test(start_paused = true)]
+async fn keep_warm_keeps_the_rendezvous_past_the_kept_span() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let pause = Duration::from_secs(25 * 60);
+    let (acks, first) = f.program_sends(pool, "the first").await;
+    assert_eq!(acks, 1);
+    assert!(
+        about(first, RENDEZVOUS + 4 * R),
+        "a first send took {first:?}"
+    );
+    // No keep warm: after 25 minutes the rendezvous is paid again.
+    tokio::time::sleep(pause).await;
+    let (acks, cold) = f.program_sends(pool, "after a pause, cold").await;
+    assert_eq!(acks, 1);
+    assert!(about(cold, RENDEZVOUS + 4 * R), "a cold send took {cold:?}");
+    // Kept warm: the conversation shows, then 25 minutes of quiet.
+    keep.talked(f.a.path(), &f.bob_pub, Some(f.side_b.hs_id));
+    tokio::time::sleep(pause).await;
+    let probes = f.counts().probes;
+    let (acks, warm) = f.program_sends(pool, "after a pause, kept warm").await;
+    eprintln!(
+        "keep warm: first {first:?}, cold {cold:?}, warm {warm:?}, {probes} probes, {:?}",
+        f.counts()
+    );
+    assert_eq!(acks, 1);
+    assert!(about(warm, 4 * R), "a kept warm send took {warm:?}");
+    assert!((2..=4).contains(&probes), "{probes} probes in 25 minutes");
+    assert_eq!(f.counts().connects, 3, "one stream per send");
+    assert_eq!(
+        inbox(f._b.path()),
+        [
+            "the first",
+            "after a pause, cold",
+            "after a pause, kept warm"
+        ]
+    );
+    pool.flush();
+}
+
+/// Speed design M2: keep warm ends with its conversation (30 minutes after
+/// its last message, chat open or typing) and at its age (60 minutes after
+/// it began, however the conversation goes on): no probe after either, and
+/// a new conversation later is kept warm again. Counted in the loopback
+/// helper's probes, every 7 minutes here.
+#[tokio::test(start_paused = true)]
+async fn keep_warm_stops_after_max_circuit_age_and_conversation_span() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let min = |m: u64| Duration::from_secs(m * 60);
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let limits = warm::KeepLimits {
+        every: (min(7), min(7)),
+        ..warm::KEEP_LIMITS
+    };
+    let keep = test_keep(limits, gate, pool);
+    let (dir, bob, hs) = (f.a.path(), f.bob_pub, Some(f.side_b.hs_id));
+    // One message, then quiet: probes at 7, 14, 21 and 28 minutes; the
+    // conversation ends at 30.
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(min(29)).await;
+    assert_eq!(f.counts().probes, 4);
+    tokio::time::sleep(min(31)).await;
+    assert_eq!(f.counts().probes, 4, "none after the conversation ended");
+    assert_eq!(keep.kept_len(), 0);
+    // A message every 5 minutes for two hours: probes every 7 minutes for
+    // the first 60 (8 of them), then none.
+    for _ in 0..24 {
+        keep.talked(dir, &bob, hs);
+        tokio::time::sleep(min(5)).await;
+    }
+    assert_eq!(f.counts().probes, 4 + 8, "none past the age");
+    assert_eq!(keep.kept_len(), 0);
+    // Its conversation over, a new one is kept warm again.
+    tokio::time::sleep(min(31)).await;
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(min(8)).await;
+    assert_eq!(f.counts().probes, 4 + 8 + 1);
+    assert_eq!(f.counts().connects, 0, "a probe opens no stream");
+    assert!(inbox(f._b.path()).is_empty());
+}
+
+/// Speed design M2: nothing is kept warm with the gate shut, and never a
+/// friend no longer verified or blocked: no probe reaches the helper.
+#[tokio::test(start_paused = true)]
+async fn keep_warm_never_probes_with_the_gate_shut_or_an_unverified_or_blocked_friend() {
+    use crate::outbox::test_rig::contacts;
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let (dir, bob, hs) = (f.a.path(), f.bob_pub, Some(f.side_b.hs_id));
+    let quarter = Duration::from_secs(15 * 60);
+    gate.store(false, std::sync::atomic::Ordering::SeqCst);
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(quarter).await;
+    assert_eq!((f.counts().probes, keep.kept_len()), (0, 0), "gate shut");
+    gate.store(true, std::sync::atomic::Ordering::SeqCst);
+    contacts(dir, &bob, "", "", false);
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(quarter).await;
+    assert_eq!((f.counts().probes, keep.kept_len()), (0, 0), "not verified");
+    contacts(dir, &bob, "", "", true);
+    let mut blocks = raven_core::chat_history::BlockList::default();
+    blocks.block(&hex::encode(bob));
+    blocks.save(dir).unwrap();
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(quarter).await;
+    assert_eq!((f.counts().probes, keep.kept_len()), (0, 0), "blocked");
+    raven_core::chat_history::BlockList::default()
+        .save(dir)
+        .unwrap();
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(quarter).await;
+    assert!(f.counts().probes > 0, "verified and unblocked: kept warm");
+}
+
+/// Speed design M10 (and M2 after a wake): once a new Tor life is ready,
+/// the conversations going on are warmed at once, the most recent first
+/// and up to the cap, under the chat open's limit (no probe within 6
+/// minutes of the circuit's last use); a conversation that ended is not.
+#[tokio::test(start_paused = true)]
+async fn resume_prewarms_the_open_chat_once_tor_is_ready() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let (dir, bob, hs) = (f.a.path(), f.bob_pub, Some(f.side_b.hs_id));
+    keep.talked(dir, &bob, hs);
+    keep.stop(warm::Flush::Pause);
+    assert_eq!(keep.kept_len(), 0, "a pause ends keep warm");
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(f.counts().probes, 0);
+    // Resumed: Tor is ready, the open chat's circuit is warmed at once (a
+    // fresh rendezvous and one round trip; keep warm's own first probe
+    // would come 6 to 9 minutes on).
+    keep.tor_ready();
+    tokio::time::sleep(RENDEZVOUS + 2 * R).await;
+    assert_eq!(f.counts().probes, 1, "warmed at once");
+    // Another Tor life a minute later: within the limit, no probe at once.
+    keep.stop(warm::Flush::NetworkChanged);
+    keep.tor_ready();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(f.counts().probes, 1, "not again within 6 minutes");
+    tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+    assert_eq!(f.counts().probes, 2, "6 minutes after the last");
+    // The conversation over (30 minutes): a new Tor life warms nothing.
+    tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+    let probes = f.counts().probes;
+    keep.stop(warm::Flush::TorEnded);
+    keep.tor_ready();
+    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+    assert_eq!(f.counts().probes, probes, "no conversation, no warm-up");
+    assert_eq!(f.counts().connects, 0);
+}
+
+/// Speed design M10: Tor on Wi-Fi only (`tor_wifi_only`) holds for the
+/// resume warm-up too: on mobile data nothing is probed.
+#[tokio::test(start_paused = true)]
+async fn resume_prewarm_respects_tor_wifi_only() {
+    use raven_core::net_path::{self, PathKind};
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let (dir, bob, hs) = (f.a.path(), f.bob_pub, Some(f.side_b.hs_id));
+    let policy = raven_core::node_policy::NodePolicy {
+        tor_wifi_only: true,
+        ..Default::default()
+    };
+    raven_core::node_policy::save_policy(dir, &policy).unwrap();
+    keep.talked(dir, &bob, hs);
+    keep.stop(warm::Flush::Pause);
+    net_path::set(PathKind::Cellular);
+    keep.tor_ready();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let on_mobile_data = f.counts().probes;
+    // On Wi-Fi again: a network change, then a new Tor life.
+    net_path::set(PathKind::Wifi);
+    keep.stop(warm::Flush::NetworkChanged);
+    keep.tor_ready();
+    tokio::time::sleep(RENDEZVOUS + 2 * R).await;
+    let on_wifi = f.counts().probes;
+    net_path::set(PathKind::Unknown);
+    assert_eq!(on_mobile_data, 0, "nothing on mobile data");
+    assert_eq!(on_wifi, 1, "on Wi-Fi it is, at once");
+}
+
+/// Speed design M2 and M10: a lock forgets the conversations (a new Tor
+/// life warms nothing after it), and a pause ends every kept link and
+/// every probe.
+#[tokio::test(start_paused = true)]
+async fn pause_drops_every_warm_link_and_probe() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let (dir, bob, hs) = (f.a.path(), f.bob_pub, Some(f.side_b.hs_id));
+    assert_eq!(f.program_sends(pool, "a kept link").await.0, 1);
+    keep.talked(dir, &bob, hs);
+    tokio::time::sleep(TICK).await;
+    assert_eq!((pool.len(), keep.kept_len()), (1, 1));
+    pool.flush();
+    keep.stop(warm::Flush::Pause);
+    assert_eq!((pool.len(), keep.kept_len()), (0, 0));
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+    assert_eq!(f.counts().probes, 0, "no probe after the pause");
+    keep.talked(dir, &bob, hs);
+    keep.stop(warm::Flush::Lock);
+    keep.tor_ready();
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+    assert_eq!(f.counts().probes, 0, "the lock forgot the conversation");
+    assert_eq!(keep.kept_len(), 0);
+}
+
+// ── M3: the app's warm-up (Tor speed Stage A, speed design M3) ─────────────
+
+/// Speed design M3: a chat open probes the friend's circuit at once, at
+/// most once per 6 minutes, and the send after it rides the circuit it
+/// built (4r, no rendezvous); typing opens a link with no frame at most
+/// once per WARM_IDLE, kept for the send, which then costs one round trip.
+/// The friend's node gets the sends alone. On loopback Tor on the paused
+/// clock.
+#[tokio::test(start_paused = true)]
+async fn a_warm_up_keeps_its_limits_and_the_send_after_it_rides_it() {
+    use raven_core::ipc::WarmLevel::{Circuit, Link};
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let min = |m: u64| Duration::from_secs(m * 60);
+    let (pool, gate) = test_pool(warm::LIMITS);
+    // Keep warm's own probes (a warm-up shows the conversation) come only
+    // after the test.
+    let limits = warm::KeepLimits {
+        every: (min(60), min(60)),
+        ..warm::KEEP_LIMITS
+    };
+    let keep = test_keep(limits, gate, pool);
+    let (dir, bob) = (f.a.path(), hex::encode(f.bob_pub));
+    let dial = raven_core::onion::dial_for(&f.side_b.hs_id);
+    // A chat open: one probe, which builds the circuit (R + r).
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Circuit).await, Ok(()));
+    tokio::time::sleep(RENDEZVOUS + 2 * R).await;
+    assert_eq!((f.counts().probes, f.counts().connects), (1, 0));
+    tokio::time::sleep(min(1)).await;
+    let soon = warm_up_on(keep, dir, &dial, &bob, Circuit).await;
+    assert_eq!(soon, Err(WarmRefused::Skip("soon")), "within 6 minutes");
+    let (acks, took) = f.program_sends(pool, "after the chat opened").await;
+    assert_eq!(acks, 1);
+    assert!(about(took, 4 * R), "a send after a chat open took {took:?}");
+    tokio::time::sleep(min(6)).await;
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Circuit).await, Ok(()));
+    tokio::time::sleep(2 * R).await;
+    assert_eq!(f.counts().probes, 2, "6 minutes on");
+    // Typing: a link with no frame (3r on the kept circuit), kept.
+    pool.flush();
+    let connects = f.counts().connects;
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Link).await, Ok(()));
+    tokio::time::sleep(4 * R).await;
+    assert_eq!(f.counts().connects, connects + 1, "one link");
+    assert_eq!(pool.len(), 1, "kept for the send");
+    let soon = warm_up_on(keep, dir, &dial, &bob, Link).await;
+    assert_eq!(soon, Err(WarmRefused::Skip("soon")), "within WARM_IDLE");
+    let (acks, took) = f.program_sends(pool, "after typing").await;
+    assert_eq!(acks, 1);
+    assert!(about(took, R), "a send after typing took {took:?}");
+    assert_eq!(f.counts().connects, connects + 1, "it rode the warm link");
+    tokio::time::sleep(warm::WARM_IDLE).await;
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Link).await, Ok(()));
+    assert_eq!(
+        inbox(f._b.path()),
+        ["after the chat opened", "after typing"]
+    );
+    pool.flush();
+}
+
+/// Speed design M3: nothing warms with the gate shut, for a friend not
+/// verified or blocked, on mobile data with Tor on Wi-Fi only, or while
+/// Tor is not ready (a warm-up never waits for it); a key or a route that
+/// is none is no warm-up. No probe and no link reach the helper.
+#[tokio::test(start_paused = true)]
+async fn a_warm_up_is_refused_with_the_gate_shut_and_for_a_friend_not_verified_or_blocked() {
+    use crate::outbox::test_rig::contacts;
+    use raven_core::ipc::WarmLevel::{Circuit, Link};
+    use raven_core::net_path::{self, PathKind};
+    use std::sync::atomic::Ordering::SeqCst;
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let (dir, bob) = (f.a.path(), hex::encode(f.bob_pub));
+    let dial = raven_core::onion::dial_for(&f.side_b.hs_id);
+    let skip = |word| Err(WarmRefused::Skip(word));
+    for level in [Circuit, Link] {
+        gate.store(false, SeqCst);
+        assert_eq!(warm_up_on(keep, dir, &dial, &bob, level).await, skip("off"));
+        gate.store(true, SeqCst);
+        contacts(dir, &f.bob_pub, "", "", false);
+        let not_verified = warm_up_on(keep, dir, &dial, &bob, level).await;
+        contacts(dir, &f.bob_pub, "", "", true);
+        assert_eq!(not_verified, skip("not_verified"));
+        let mut blocks = raven_core::BlockList::default();
+        blocks.block(&bob);
+        blocks.save(dir).unwrap();
+        let blocked = warm_up_on(keep, dir, &dial, &bob, level).await;
+        raven_core::BlockList::default().save(dir).unwrap();
+        assert_eq!(blocked, skip("blocked"));
+        let policy = raven_core::node_policy::NodePolicy {
+            tor_wifi_only: true,
+            ..Default::default()
+        };
+        raven_core::node_policy::save_policy(dir, &policy).unwrap();
+        net_path::set(PathKind::Cellular);
+        let on_mobile_data = warm_up_on(keep, dir, &dial, &bob, level).await;
+        net_path::set(PathKind::Unknown);
+        raven_core::node_policy::save_policy(dir, &Default::default()).unwrap();
+        assert_eq!(on_mobile_data, skip("mobile_data"));
+        let ready = live_lock().take();
+        let not_ready = warm_up_on(keep, dir, &dial, &bob, level).await;
+        *live_lock() = ready;
+        assert_eq!(not_ready, skip("tor_not_ready"));
+        let bad = warm_up_on(keep, dir, "onion:not a route", &bob, level).await;
+        assert!(matches!(bad, Err(WarmRefused::Bad(_))), "{bad:?}");
+        let bad = warm_up_on(keep, dir, &dial, "not a key", level).await;
+        assert!(matches!(bad, Err(WarmRefused::Bad(_))), "{bad:?}");
+    }
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!((f.counts().probes, f.counts().connects), (0, 0));
+    assert_eq!(pool.len(), 0);
 }

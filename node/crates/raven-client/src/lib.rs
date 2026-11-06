@@ -31,6 +31,7 @@ mod node;
 mod profile;
 mod safety;
 mod settings;
+mod warm;
 
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;

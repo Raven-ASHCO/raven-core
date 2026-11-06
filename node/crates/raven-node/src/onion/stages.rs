@@ -37,6 +37,17 @@
 //! that send's stage times, next to its D1 (its dry mode runs over the
 //! loopback helper's warm circuit model; its real mode starts only with the
 //! owner's OK). A test sees its own dials' records through `caught`.
+//!
+//! **The stored line (D1 peer):** in the same lab file, a node that newly
+//! stored a message that came over Tor (the arrivals hook: after the
+//! history kept it, before its ACK) adds `{"stored_ns":N}` ([`stored`]),
+//! N this computer's monotonic clock in ns, the one every process reads
+//! alike (`CLOCK_UPTIME_RAW` on macOS and iOS, `CLOCK_MONOTONIC`
+//! elsewhere; none on Windows). Nothing else: no id, no sender, no
+//! address. The harness sets the file for the friend's node too and takes
+//! D1 peer from the one stored line a send adds, against the same clock
+//! read when the send was accepted. Debug builds with `RAVEN_LAB_TEST_A=1`
+//! only, as the dial lines.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -45,6 +56,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use raven_core::arrivals::ArrivedVia;
 use serde::Serialize;
 use tokio::time::Instant;
 
@@ -254,11 +266,75 @@ fn lab_file_with(
     path.is_absolute().then_some(path)
 }
 
-/// `record` as one JSON line at the end of `path` (made private to this
+/// The stored line ([`stored`]): when, and nothing else.
+#[derive(Serialize)]
+struct Stored {
+    stored_ns: u64,
+}
+
+/// A message that came `via` was newly stored by this node (the arrivals
+/// hook, before its ACK): over Tor, in a debug build with the lab file
+/// ([`lab_file`]), one stored line `{"stored_ns":N}` there ([`Stored`],
+/// [`shared_clock_ns`]; the D1 harness's D1 peer). Nothing for any other
+/// carrier and nothing in a release build.
+pub(crate) fn stored(via: ArrivedVia) {
+    stored_with(via, lab_file, shared_clock_ns);
+}
+
+/// [`stored`]'s rule: the lab file (`lab_file`) is looked at only for a
+/// message over Tor in a debug build, the clock (`now_ns`) only when there
+/// is one.
+fn stored_with(
+    via: ArrivedVia,
+    lab_file: impl FnOnce() -> Option<PathBuf>,
+    now_ns: impl FnOnce() -> Option<u64>,
+) {
+    if !cfg!(debug_assertions) || via != ArrivedVia::Tor {
+        return;
+    }
+    let Some(path) = lab_file() else {
+        return;
+    };
+    if let Some(stored_ns) = now_ns() {
+        append(&path, &Stored { stored_ns });
+    }
+}
+
+/// This computer's monotonic clock in ns, the same for every process on it
+/// (`CLOCK_UPTIME_RAW` on macOS and iOS, as `std::time::Instant` there;
+/// `CLOCK_MONOTONIC` on the other Unix systems), so the D1 harness reads
+/// it alike; `None` where there is none to share (Windows).
+fn shared_clock_ns() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let clock = libc::CLOCK_UPTIME_RAW;
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let clock = libc::CLOCK_MONOTONIC;
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is a valid, writable timespec; clock_gettime only
+        // writes it.
+        if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+            return None;
+        }
+        let secs = u64::try_from(now.tv_sec).ok()?;
+        let nanos = u64::try_from(now.tv_nsec).ok()?;
+        secs.checked_mul(1_000_000_000)?.checked_add(nanos)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// `line` as one JSON line at the end of `path` (made private to this
 /// user); a failure loses the line, never the dial.
-fn append(path: &Path, record: &Record) {
+fn append(path: &Path, line: &impl Serialize) {
     use std::io::Write;
-    let Ok(mut line) = serde_json::to_vec(record) else {
+    let Ok(mut line) = serde_json::to_vec(line) else {
         return;
     };
     line.push(b'\n');
@@ -442,6 +518,52 @@ mod tests {
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
         assert_eq!(lines, vec![serde_json::to_value(&r).unwrap(); 2]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    /// D1 peer: a message stored over Tor adds one stored line to the lab
+    /// file, the shared clock alone (a reading between two taken around
+    /// it); one over any other carrier reads neither the lab file nor the
+    /// clock, and with no lab file the clock is not read. A release build
+    /// writes nothing.
+    #[test]
+    fn a_message_stored_over_tor_adds_one_clock_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f-stages.jsonl");
+        let lab = || Some(path.clone());
+        let before = shared_clock_ns().expect("a shared clock");
+        stored_with(ArrivedVia::Tor, lab, shared_clock_ns);
+        let after = shared_clock_ns().unwrap();
+        for via in ArrivedVia::ALL
+            .into_iter()
+            .filter(|v| *v != ArrivedVia::Tor)
+        {
+            stored_with(
+                via,
+                || panic!("the lab file looked at for {via:?}"),
+                || panic!("the clock read for {via:?}"),
+            );
+        }
+        stored_with(ArrivedVia::Tor, || None, || panic!("the clock read"));
+        if !cfg!(debug_assertions) {
+            assert!(!path.exists(), "a release build writes nothing");
+            return;
+        }
+        let text = std::fs::read_to_string(&path).expect("a stored line");
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        let line = lines[0].as_object().unwrap();
+        assert_eq!(line.keys().collect::<Vec<_>>(), ["stored_ns"], "{text}");
+        let at = line["stored_ns"].as_u64().unwrap();
+        assert!((before..=after).contains(&at), "{before} {at} {after}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

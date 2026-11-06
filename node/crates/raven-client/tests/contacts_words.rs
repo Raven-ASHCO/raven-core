@@ -441,3 +441,87 @@ fn settings_are_checked_and_kept() {
         );
     }
 }
+
+/// Speed design M3 (`contacts.warm`): with the warm gate shut, as in every
+/// release build, nothing warms and the answer says why in one word; a
+/// friend not verified or blocked is refused before anything else, a
+/// stranger is no contact, and `why` is open or typing only. No raven-node
+/// is asked (none runs here). The setting `typing_warm_on_mobile_data` is
+/// on for the desktop until it is set, and kept once set.
+#[test]
+fn contacts_warm_warms_nothing_with_the_gate_shut_or_for_a_friend_not_verified_or_blocked() {
+    let a = profile("Desk W");
+    let b = profile("Desk X");
+    ok(
+        &a.client,
+        "contacts.add",
+        json!({"text": b.me["invite"], "name": "Friend X"}),
+    );
+    let warm = |why: &str| {
+        ok(
+            &a.client,
+            "contacts.warm",
+            json!({"address": b.me["address"], "why": why}),
+        )
+    };
+    for why in ["open", "typing"] {
+        assert_eq!(
+            warm(why),
+            json!({"warming": false, "why": "not_verified"}),
+            "{why}"
+        );
+    }
+    let matched = ok(
+        &a.client,
+        "verify.check_words",
+        json!({"address": b.me["address"], "words": words(&b)}),
+    );
+    assert_eq!(matched["result"], "match", "{matched}");
+    for why in ["open", "typing"] {
+        assert_eq!(warm(why), json!({"warming": false, "why": "off"}), "{why}");
+    }
+    ok(
+        &a.client,
+        "contacts.block",
+        json!({"address": b.me["address"]}),
+    );
+    assert_eq!(warm("typing"), json!({"warming": false, "why": "blocked"}));
+    ok(
+        &a.client,
+        "contacts.unblock",
+        json!({"address": b.me["address"]}),
+    );
+    assert_eq!(warm("open")["why"], "off");
+    for bad in [json!("hover"), json!(""), json!(1)] {
+        assert_eq!(
+            err(
+                &a.client,
+                "contacts.warm",
+                json!({"address": b.me["address"], "why": bad}),
+            ),
+            "BAD_REQUEST",
+            "{bad}"
+        );
+    }
+    let stranger = profile("Desk Y");
+    assert_eq!(
+        err(
+            &a.client,
+            "contacts.warm",
+            json!({"address": stranger.me["address"], "why": "open"}),
+        ),
+        "NOT_A_CONTACT"
+    );
+    // Owner decision 7: on for the desktop until set.
+    let settings = ok(&a.client, "settings.get", json!({}));
+    assert_eq!(settings["typing_warm_on_mobile_data"], true);
+    let set = ok(
+        &a.client,
+        "settings.set",
+        json!({"typing_warm_on_mobile_data": false}),
+    );
+    assert_eq!(set["typing_warm_on_mobile_data"], false);
+    let again = Client::with_data_dir(&a.path);
+    let kept = ok(&again, "settings.get", json!({}));
+    assert_eq!(kept["typing_warm_on_mobile_data"], false);
+}

@@ -272,6 +272,53 @@ Security and speed report 2026-11-05 (TOR-6).
   Before, "(lab)" with the onion gate `false`.
 - **This inventory.** The Onion Carrier V1 row says the same.
 
+## Freeze record changes (2026-11-06, the app's Tor warm-up, lab only)
+
+A behaviour change of the onion dialer behind a gate that stays false, and
+one new local IPC op, not of the wire format: no frame layout, entry type,
+caps bit, card field or vector changed, the listener is unchanged and the
+IPC version stays 1 (an older raven-node answers the new op `IPC_FRAME`).
+Security and speed report 2026-11-05 §7 (speed design M3).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §10: with `onion_gate::ONION_WARM_PRODUCTION_ENABLED` open (false; lab
+  switch `RAVEN_LAB_TOR_WARM`), the app's warm-up (IPC `OnionWarm`, level
+  `circuit` or `link`; the engine's `contacts.warm`, `open` or `typing`):
+  a chat open probes a verified contact's circuit (§6, bit 1) at most once
+  per 6 minutes; typing opens an onion link with no frame, kept for the
+  send, at most once per 20 s. No frame goes early. Refused (`Error`
+  `ONION_WARM_SKIPPED`, one word) with the gate shut, for a contact not
+  verified or blocked, on mobile data with Tor on Wi-Fi only, while Tor is
+  not ready, or within its limit; never while locked (`LOCKED`). §12: a
+  typing warm-up tells the contact's node this node is online and probably
+  writing to it.
+
+## Freeze record changes (2026-11-06, the keep-warm probe and keep warm, lab only)
+
+A behaviour change of the onion dialer and its own Tor helper behind a gate
+that stays false, not of the wire format: no frame layout, entry type, caps
+bit, card field or vector changed, and the listener is unchanged. The local
+helper protocol (between raven-node and its helper on one computer, never on
+the network) stays version 3 and gives meaning to a reserved flag bit.
+Security and speed report 2026-11-05 §7 (speed design M2 and M10).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §6: connect flag bit 1 is *probe*: one try in the contact's isolation
+  group to virtual port 9 of its onion service, which the service refuses;
+  the helper answers status 0 for that refusal and closes the connection, no
+  stream follows, and nothing reaches the contact's node. A failed probe
+  moves the contact to a new isolation group. Bit 2 stays reserved (for
+  optimistic data). A node sets the bit only while
+  `onion_gate::ONION_WARM_PRODUCTION_ENABLED` is open (false; lab switch
+  `RAVEN_LAB_TOR_WARM`). §10: with it open, while a conversation with a
+  verified contact that is not blocked goes on (a chat message either way
+  over Tor within 30 minutes), the node probes the contact's circuit every 6
+  to 9 minutes, at most 4 contacts (2 on the embedded node), each for at
+  most 60 minutes; a lock, a pause, a network change and the end of a helper
+  life end it, and a new helper life that is ready probes the conversations
+  still going on at once (not within 6 minutes of a circuit's last use). Tor
+  on Wi-Fi only holds. §1 and §12 say so.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: a UPnP mapping used only once seen from outside)
 
 A behaviour change of the port mapping client and of the friend relay's

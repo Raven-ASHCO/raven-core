@@ -143,7 +143,8 @@ mod tests {
 
     /// A pipe carries bytes both ways and its end; a dropped listener's
     /// address is refused, never dialled as a socket; under MemoryOnly a
-    /// real address is refused too.
+    /// real listener is refused too, by the guard (no socket is opened),
+    /// and reached once MemoryOnly is gone.
     #[tokio::test(start_paused = true)]
     async fn a_listener_in_memory_is_reached_and_then_gone() {
         let mut listener = Listener::bind();
@@ -163,8 +164,26 @@ mod tests {
         drop(listener);
         let gone = connect(addr).await.map(|_| ()).unwrap_err();
         assert_eq!(gone.kind(), io::ErrorKind::ConnectionRefused);
-        let _only = MemoryOnly::new();
-        let real = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
-        assert!(connect(real).await.is_err(), "no socket under MemoryOnly");
+        // A real listener at a free loopback port (never one of Raven's
+        // own): a connect to it works, so only the guard can refuse it.
+        let socket = loop {
+            let socket = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = socket.local_addr().unwrap().port();
+            if !(7420..=7427).contains(&port) && port != 17420 {
+                break socket;
+            }
+        };
+        let real = socket.local_addr().unwrap();
+        let only = MemoryOnly::new();
+        let refused = connect(real).await.map(|_| ()).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            io::ErrorKind::Other,
+            "the guard refused it, not the socket: {refused}"
+        );
+        assert!(refused.to_string().contains("dialled a real socket"));
+        drop(only);
+        let reached = connect(real).await.expect("a real socket once it is gone");
+        assert!(matches!(reached, Stream::Left(_)), "a TCP stream");
     }
 }

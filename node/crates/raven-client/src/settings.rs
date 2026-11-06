@@ -3,6 +3,7 @@
 //! - `desktop_settings.json` (plain, written atomically and owner-only):
 //!   `receive`, `reduced_motion`, `when_quit` and `lock_on_sleep`. Nothing in
 //!   it names anyone (raven-core's at-rest registry lists it as plain).
+//!   `typing_warm_on_mobile_data` is kept there too once it was set.
 //! - The user's own name: `desktop_private.rms` (raven-core's at-rest file
 //!   of kind `DesktopPrivate`), as the terminal app keeps its own in
 //!   `tui_private.rms` (privacy pack PP.24): sealed under the profile's
@@ -68,6 +69,10 @@ pub struct Settings {
     pub keep_chats_days: Option<u64>,
     pub forget_addresses: bool,
     pub lock_on_sleep: bool,
+    /// May a typing warm-up (`contacts.warm`, speed design M3) use mobile
+    /// data: `None` until set, this build's default
+    /// ([`Settings::typing_warm_on_mobile_data`]).
+    pub typing_warm_on_mobile_data: Option<bool>,
 }
 
 /// What `desktop_settings.json` holds: the settings that name nobody.
@@ -77,6 +82,8 @@ struct Stored<'a> {
     reduced_motion: bool,
     when_quit: &'a str,
     lock_on_sleep: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    typing_warm_on_mobile_data: Option<bool>,
 }
 
 /// What `desktop_private.rms` holds.
@@ -118,6 +125,7 @@ impl Default for Settings {
             keep_chats_days: Some(30),
             forget_addresses: true,
             lock_on_sleep: false,
+            typing_warm_on_mobile_data: None,
         }
     }
 }
@@ -158,6 +166,7 @@ pub fn save(data_dir: &Path, settings: &Settings) -> Result<(), String> {
         reduced_motion: settings.reduced_motion,
         when_quit: &settings.when_quit,
         lock_on_sleep: settings.lock_on_sleep,
+        typing_warm_on_mobile_data: settings.typing_warm_on_mobile_data,
     };
     let raw = serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())?;
     raven_core::atomic_write_private(&path(data_dir), &raw)
@@ -370,7 +379,24 @@ impl Settings {
         );
         map.insert("forget_addresses".into(), self.forget_addresses.into());
         map.insert("lock_on_sleep".into(), self.lock_on_sleep.into());
+        map.insert(
+            "typing_warm_on_mobile_data".into(),
+            self.typing_warm_on_mobile_data().into(),
+        );
         Value::Object(map)
+    }
+
+    /// May a typing warm-up use mobile data here: as set, else on for the
+    /// desktop and off for the iPhone (the embedded node; owner decision 7,
+    /// 2026-11-06).
+    pub fn typing_warm_on_mobile_data(&self) -> bool {
+        self.typing_warm_on_mobile_data_for(crate::node::embedded_mode())
+    }
+
+    /// [`Self::typing_warm_on_mobile_data`] where the node is `embedded`
+    /// in the app or not.
+    fn typing_warm_on_mobile_data_for(&self, embedded: bool) -> bool {
+        self.typing_warm_on_mobile_data.unwrap_or(!embedded)
     }
 
     /// `settings.set`'s partial update; every field is checked before any is
@@ -425,6 +451,9 @@ impl Settings {
         if let Some(v) = args.opt_bool("lock_on_sleep")? {
             next.lock_on_sleep = v;
         }
+        if let Some(v) = args.opt_bool("typing_warm_on_mobile_data")? {
+            next.typing_warm_on_mobile_data = Some(v);
+        }
         Ok(next)
     }
 }
@@ -444,6 +473,38 @@ mod tests {
 
     fn args(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
+    }
+
+    /// Owner decision 7 (2026-11-06): a typing warm-up may use mobile data
+    /// on the desktop and not on the iPhone (the embedded node) until the
+    /// setting says otherwise; `settings.set` takes a bool only, and the
+    /// file keeps it once set.
+    #[test]
+    fn typing_warm_on_mobile_data_is_on_for_the_desktop_and_off_for_the_iphone() {
+        let s = Settings::default();
+        assert!(s.typing_warm_on_mobile_data_for(false), "the desktop");
+        assert!(!s.typing_warm_on_mobile_data_for(true), "the iPhone");
+        let on = s
+            .apply(&Args(&args(json!({"typing_warm_on_mobile_data": true}))))
+            .unwrap();
+        assert!(on.typing_warm_on_mobile_data_for(true));
+        let off = s
+            .apply(&Args(&args(json!({"typing_warm_on_mobile_data": false}))))
+            .unwrap();
+        assert!(!off.typing_warm_on_mobile_data_for(false));
+        assert!(s
+            .apply(&Args(&args(json!({"typing_warm_on_mobile_data": "yes"}))))
+            .is_err());
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &s).unwrap();
+        let plain = std::fs::read_to_string(path(dir.path())).unwrap();
+        assert!(!plain.contains("typing_warm"), "unset: not written {plain}");
+        save(dir.path(), &off).unwrap();
+        let Loaded::Read(read) = load(dir.path()) else {
+            panic!("the file reads back");
+        };
+        assert_eq!(read.typing_warm_on_mobile_data, Some(false));
+        assert_eq!(off.to_json()["typing_warm_on_mobile_data"], false);
     }
 
     #[test]

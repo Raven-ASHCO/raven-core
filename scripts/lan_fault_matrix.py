@@ -869,6 +869,20 @@ LAB_SWITCHES = (
     # frames, optimistic data, the two-way warm link), never a caller's value.
     'RAVEN_LAB_TOR_WARM', 'RAVEN_LAB_TOR_HEDGE', 'RAVEN_LAB_TOR_EARLY',
     'RAVEN_LAB_TOR_OPTIMISTIC', 'RAVEN_LAB_TOR_WARM_LINK',
+    # The engine's Tor tests' lab names (raven-client tests/net_tor.rs sets
+    # them in its own process: an ACK lost after the write, and the loopback
+    # helper's connect counts, latency, one circuit per service, bootstrap
+    # time and dead shared circuit) and route hints' loopback LAN address
+    # (carrier_matrix C94 and C99 set it), never a caller's value; no
+    # scenario here sets them (the D1 harness sets three of the helper's
+    # for its own profiles).
+    'RAVEN_LAB_CLOSE_BEFORE_ACK', 'RAVEN_LAB_LAN_ADDR_LOOPBACK',
+    'RAVEN_LAB_TOR_LOOPBACK_COUNT', 'RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS',
+    'RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT', 'RAVEN_LAB_TOR_LOOPBACK_READY_MS',
+    'RAVEN_LAB_TOR_LOOPBACK_STALE_MS',
+    # Keep warm's lab knob (the D1 harness sets it for its own sender in
+    # CI's patched arm); no scenario here sets it.
+    'RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS',
 )
 # The debug lab switches a caller's value may reach the nodes through: the
 # session-reset level (the caller's opt-in to the reset scenarios, RESET_ON)

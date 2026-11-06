@@ -47,6 +47,9 @@ fn log_arrival(a: &Arrival) {
     if a.via == ArrivedVia::Tor {
         crate::delivery_paths::carrier_worked(&a.sender, raven_core::OutboxCarrier::Onion);
     }
+    // When it was stored, for the D1 harness's D1 peer: a debug lab run's
+    // stage record file only, the clock alone.
+    crate::onion::stages::stored(a.via);
     let tag = netutil::link_tag(&a.sender);
     eprintln!("raven-node inbox: {}", arrival_line(&tag, a.via, a.group));
 }

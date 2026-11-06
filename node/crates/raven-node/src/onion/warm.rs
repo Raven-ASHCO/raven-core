@@ -60,11 +60,22 @@
 //! link and goes again on a fresh one, fresh first (the batch hedge,
 //! [`ride`]): the friend answers a copy it holds as the same message, with
 //! the same ACK.
+//!
+//! **Keep warm** (speed design M2 and M10, the warm gate): while a
+//! conversation with a verified friend goes on, [`KeepWarm`] probes its
+//! rendezvous circuit through the helper every 6 to 9 minutes
+//! ([`super::probe_on`], a refused stream on the friend's Tor), so a send
+//! after a pause longer than Arti's 10 minutes still rides it; once a new
+//! Tor life is ready, the conversations going on are probed at once. A lab
+//! run of the D1 harness scales its times to the loopback helper's kept
+//! circuit, or turns it off ([`KEEP_WARM_EVERY_ENV`], debug builds with
+//! `RAVEN_LAB_TEST_A=1` only).
 
 use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use raven_core::OutboxCarrier;
@@ -572,6 +583,27 @@ fn blocked(data_dir: &Path, contact: &[u8; 32], offer: &[u8]) -> Result<bool, St
     raven_core::lan_dispatch::lan_peer_blocked(data_dir, &peer, contact)
 }
 
+/// Blocking: may this profile warm its Tor path to `contact` (speed design
+/// M2, M3): a verified contact (fingerprint pinned) not on the block list.
+/// An unreadable store says no.
+pub(crate) fn may_warm(data_dir: &Path, contact: &[u8; 32]) -> bool {
+    warm_refusal(data_dir, contact).is_none()
+}
+
+/// Blocking: why this profile may not warm its Tor path to `contact`
+/// ([`may_warm`]), in a word of `raven_core::ipc::WARM_SKIP_WORDS`:
+/// `not_verified` (no pinned fingerprint, or the contact store unreadable)
+/// or `blocked` (on the block list, or the list unreadable).
+pub(crate) fn warm_refusal(data_dir: &Path, contact: &[u8; 32]) -> Option<Skip> {
+    let pinned = raven_core::contact_is_pinned(data_dir, contact).unwrap_or(false);
+    if !raven_core::carrier_allowed_for_contact(OutboxCarrier::Onion, pinned) {
+        return Some("not_verified");
+    }
+    let unblocked = raven_core::chat_history::BlockList::load_checked(data_dir)
+        .is_ok_and(|list| !list.is_blocked(&hex::encode(contact)));
+    (!unblocked).then_some("blocked")
+}
+
 /// The process's kept links: the sends programs make over Tor
 /// (`crate::ipc_server`, [`crate::onion::dial_with_meta`]).
 pub(crate) static WARM: WarmPool = WarmPool::new(
@@ -598,12 +630,13 @@ pub(crate) enum Flush {
 static FLUSHES: [std::sync::atomic::AtomicU32; 4] =
     [const { std::sync::atomic::AtomicU32::new(0) }; 4];
 
-/// Close every link of the process's pool ([`WARM`]).
+/// Close every link of the process's pool ([`WARM`]), and end keep warm
+/// ([`KEEP`]; a lock forgets its conversations too).
 pub(crate) fn flush(why: Flush) {
     #[cfg(test)]
     FLUSHES[why as usize].fetch_add(1, Ordering::SeqCst);
-    let _ = why;
     WARM.flush();
+    KEEP.stop(why);
 }
 
 /// How often [`flush`] ran for `why` in this process.
@@ -944,6 +977,624 @@ async fn next_reply(replies: &mut mpsc::UnboundedReceiver<ReplyWait>, wait: Dura
     }
 }
 
+// ── M2: keep warm (Tor speed Stage A, speed design M2 and M10) ─────────────
+
+/// A conversation goes on this long after its last message either way over
+/// Tor, or the app's last chat open or typing in it ([`KeepWarm`]).
+pub(crate) const CONVERSATION_SPAN: Duration = Duration::from_secs(30 * 60);
+/// Keep warm probes a friend's circuit this often, uniformly at random
+/// between the two: under Arti's 10 minutes after a circuit's last use
+/// ([`super::proto::GROUP_KEPT`]).
+pub(crate) const KEEP_WARM_EVERY: (Duration, Duration) =
+    (Duration::from_secs(6 * 60), Duration::from_secs(9 * 60));
+/// Keep warm ends for a friend this long after it began for it, in one Tor
+/// life and one conversation: Arti drops the circuit 10 minutes after its
+/// last use, and the next use after that builds a new rendezvous.
+pub(crate) const MAX_CIRCUIT_AGE: Duration = Duration::from_secs(60 * 60);
+/// Friends kept warm at once: as many as kept links (4, or 2 on the
+/// embedded node).
+pub(crate) const KEEP_WARM_MAX: usize = WARM_POOL;
+/// A chat open probes a friend's circuit at most once per this (speed
+/// design M3); a probe of any kind, or a link of ours that worked, counts.
+pub(crate) const OPEN_WARM_EVERY: Duration = Duration::from_secs(6 * 60);
+/// Conversations remembered at most: past it the one quiet longest goes.
+const TALKS_KEPT: usize = 64;
+
+/// A [`KeepWarm`]'s limits ([`KEEP_LIMITS`]; tests scale them).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KeepLimits {
+    /// [`CONVERSATION_SPAN`].
+    pub(crate) span: Duration,
+    /// [`KEEP_WARM_EVERY`].
+    pub(crate) every: (Duration, Duration),
+    /// [`MAX_CIRCUIT_AGE`].
+    pub(crate) age: Duration,
+    /// [`KEEP_WARM_MAX`].
+    pub(crate) cap: usize,
+    /// [`OPEN_WARM_EVERY`].
+    pub(crate) open_every: Duration,
+    /// A typing warm up at most once per this ([`WARM_IDLE`]).
+    pub(crate) typing_every: Duration,
+}
+
+/// The process's keep warm limits.
+pub(crate) const KEEP_LIMITS: KeepLimits = KeepLimits {
+    span: CONVERSATION_SPAN,
+    every: KEEP_WARM_EVERY,
+    age: MAX_CIRCUIT_AGE,
+    cap: KEEP_WARM_MAX,
+    open_every: OPEN_WARM_EVERY,
+    typing_every: WARM_IDLE,
+};
+
+/// Debug builds with `RAVEN_LAB_TEST_A=1` only (the D1 harness, whose dry
+/// mode's loopback helper keeps a circuit seconds, not Arti's 10 minutes):
+/// `RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS=<ms>` makes [`KEEP`] probe every `ms`
+/// to 1.5 x `ms` and end after 10 x `ms` (never slower or longer than
+/// [`KEEP_WARM_EVERY`] and [`MAX_CIRCUIT_AGE`]: as 6 to 9 minutes against
+/// Arti's 10, and an hour); `0` keeps no friend warm (its arm "patched
+/// without keep warm"; the app's warm-ups go on). Read once.
+pub(crate) const KEEP_WARM_EVERY_ENV: &str = "RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS";
+
+/// [`KEEP`]'s limits from `base`: the lab knob ([`KEEP_WARM_EVERY_ENV`],
+/// its `value`) is read only when `lab_test_a` in a debug build; a value
+/// that is no number of ms changes nothing.
+fn lab_keep_limits(
+    base: KeepLimits,
+    lab_test_a: impl FnOnce() -> bool,
+    value: impl FnOnce() -> Option<OsString>,
+) -> KeepLimits {
+    if !cfg!(debug_assertions) || !lab_test_a() {
+        return base;
+    }
+    let Some(ms) = value()
+        .and_then(|v| v.into_string().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    else {
+        return base;
+    };
+    if ms == 0 {
+        return KeepLimits { cap: 0, ..base };
+    }
+    let at_most = |ms: u64, real: Duration| Duration::from_millis(ms).min(real);
+    KeepLimits {
+        every: (
+            at_most(ms, base.every.0),
+            at_most(ms.saturating_mul(3) / 2, base.every.1),
+        ),
+        age: at_most(ms.saturating_mul(10), base.age),
+        ..base
+    }
+}
+
+/// One conversation with a friend, in memory only: who and when, never
+/// what.
+struct Talk {
+    data_dir: PathBuf,
+    contact: [u8; 32],
+    /// The friend's onion service as its last dial or warm-up named it
+    /// (none yet: the contact book's binding is used).
+    hs_id: Option<[u8; 32]>,
+    /// Its last message either way over Tor, chat open or typing.
+    active: Instant,
+    /// When the friend's circuit was last in use: a probe of any kind, or
+    /// a link of ours that worked.
+    circuit_used: Option<Instant>,
+    /// Its last typing warm-up.
+    typed: Option<Instant>,
+    /// Kept warm in this Tor life: since when, and when its next probe is
+    /// due.
+    kept: Option<(Instant, Instant)>,
+    /// Its keep warm ran its age in this Tor life: not again in this
+    /// conversation.
+    aged: bool,
+    /// Its last probe failed (or found no route): no keep warm until the
+    /// conversation shows again.
+    failed: bool,
+}
+
+impl Talk {
+    fn same(&self, data_dir: &Path, contact: &[u8; 32]) -> bool {
+        self.contact == *contact && self.data_dir == data_dir
+    }
+
+    fn going_on(&self, limits: &KeepLimits, now: Instant) -> bool {
+        now.saturating_duration_since(self.active) < limits.span
+    }
+
+    /// Still worth remembering at `now`: its conversation goes on, or a
+    /// rate limit of its warm-ups still runs.
+    fn worth_keeping(&self, limits: &KeepLimits, now: Instant) -> bool {
+        let within = |at: Option<Instant>, span: Duration| {
+            at.is_some_and(|at| now.saturating_duration_since(at) < span)
+        };
+        self.going_on(limits, now)
+            || within(self.circuit_used, limits.open_every)
+            || within(self.typed, limits.typing_every)
+    }
+}
+
+/// Speed design M2 (warm gate only): while a conversation with a verified
+/// friend goes on (a message either way over Tor within
+/// [`CONVERSATION_SPAN`], or the app's chat open or typing), its
+/// rendezvous circuit is probed every [`KEEP_WARM_EVERY`] through the
+/// helper ([`super::probe_on`]: a refused stream on the friend's Tor,
+/// nothing on its raven-node), so a send after a pause longer than Arti's
+/// 10 minutes still rides it. At most [`KEEP_WARM_MAX`] friends at once,
+/// each for at most [`MAX_CIRCUIT_AGE`]; a lock, a pause, a network change
+/// and the end of a Tor life end it ([`flush`]), and a new Tor life that is
+/// ready starts it again for the conversations going on, each with a probe
+/// at once (the resume warm-up, M10: [`Self::tor_ready`]). It also keeps
+/// the rate limits of the app's warm-ups (M3, [`Self::warm_up`]).
+pub(crate) struct KeepWarm {
+    limits: KeepLimits,
+    /// [`KEEP`] only: a lab run's knob may change `limits`
+    /// ([`KEEP_WARM_EVERY_ENV`]); they are kept here once read.
+    lab: bool,
+    lab_limits: OnceLock<KeepLimits>,
+    gate: Gate,
+    /// The kept links whose gates and failed links the probes share.
+    pool: &'static WarmPool,
+    inner: Mutex<KeepInner>,
+    /// Wakes the task when the conversations change.
+    news: tokio::sync::Notify,
+}
+
+struct KeepInner {
+    talks: Vec<Talk>,
+    /// The task while it runs: it ends once no friend is kept warm, or with
+    /// the runtime it ran on.
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Why a warm-up warms nothing ([`KeepWarm::warm_up`], [`warm_refusal`]):
+/// one of `raven_core::ipc::WARM_SKIP_WORDS`.
+pub(crate) type Skip = &'static str;
+
+impl KeepWarm {
+    /// Keep warm with `limits`, its own `gate`, its probes sharing `pool`
+    /// (a test's own keeper: no lab knob).
+    #[cfg(test)]
+    pub(crate) const fn new(limits: KeepLimits, gate: Gate, pool: &'static WarmPool) -> Self {
+        Self::made(limits, gate, pool, false)
+    }
+
+    /// Keep warm with `limits`, its own `gate`, its probes sharing `pool`;
+    /// with `lab` (the process's [`KEEP`] only), the lab knob may change
+    /// `limits` ([`Self::limits`]).
+    const fn made(limits: KeepLimits, gate: Gate, pool: &'static WarmPool, lab: bool) -> Self {
+        Self {
+            limits,
+            lab,
+            lab_limits: OnceLock::new(),
+            gate,
+            pool,
+            inner: Mutex::new(KeepInner {
+                talks: Vec::new(),
+                task: None,
+            }),
+            news: tokio::sync::Notify::const_new(),
+        }
+    }
+
+    /// Its limits: as made, or for [`KEEP`] as a lab run's knob sets them
+    /// ([`lab_keep_limits`], read once).
+    fn limits(&self) -> KeepLimits {
+        if !self.lab {
+            return self.limits;
+        }
+        *self.lab_limits.get_or_init(|| {
+            lab_keep_limits(
+                self.limits,
+                raven_core::pair_init::lab_test_a_enabled,
+                || std::env::var_os(KEEP_WARM_EVERY_ENV),
+            )
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, KeepInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Its gate is open.
+    pub(crate) fn live(&self) -> bool {
+        self.gate.open()
+    }
+
+    /// The kept links its probes share.
+    pub(crate) fn pool(&self) -> &'static WarmPool {
+        self.pool
+    }
+
+    /// `contact`'s conversation shows now (a message either way over Tor,
+    /// the app's chat open or typing; `hs_id`: its onion service, when the
+    /// caller knows it): it goes on for [`CONVERSATION_SPAN`] more, and keep
+    /// warm takes it up when it has room. Nothing while the gate is shut.
+    pub(crate) fn talked(
+        &'static self,
+        data_dir: &Path,
+        contact: &[u8; 32],
+        hs_id: Option<[u8; 32]>,
+    ) {
+        if !self.live() {
+            return;
+        }
+        let now = Instant::now();
+        let mut inner = self.lock();
+        let at = self.talk_at(&mut inner, data_dir, contact, now);
+        let talk = &mut inner.talks[at];
+        if !talk.going_on(&self.limits(), now) {
+            // A new conversation: its keep warm may run its age again.
+            talk.aged = false;
+        }
+        talk.active = now;
+        talk.failed = false;
+        if hs_id.is_some() {
+            talk.hs_id = hs_id;
+        }
+        self.ensure_task(&mut inner);
+        drop(inner);
+        self.news.notify_one();
+    }
+
+    /// Where `contact`'s conversation is in `inner` (a new one, when none:
+    /// the one quiet longest goes first when [`TALKS_KEPT`] are kept).
+    fn talk_at(
+        &self,
+        inner: &mut KeepInner,
+        data_dir: &Path,
+        contact: &[u8; 32],
+        now: Instant,
+    ) -> usize {
+        if let Some(at) = inner.talks.iter().position(|t| t.same(data_dir, contact)) {
+            return at;
+        }
+        if inner.talks.len() >= TALKS_KEPT {
+            if let Some(oldest) = (0..inner.talks.len()).min_by_key(|&i| inner.talks[i].active) {
+                inner.talks.swap_remove(oldest);
+            }
+        }
+        inner.talks.push(Talk {
+            data_dir: data_dir.to_path_buf(),
+            contact: *contact,
+            hs_id: None,
+            active: now,
+            circuit_used: None,
+            typed: None,
+            kept: None,
+            aged: false,
+            failed: false,
+        });
+        inner.talks.len() - 1
+    }
+
+    /// A dial of ours to `contact`'s onion service `hs_id` worked, with
+    /// `frames` (none: a check): the friend's circuit was in use (for the
+    /// first probe and the chat open's limit; a probe already planned stays
+    /// as it is, since a batch on a kept link opens no stream and Arti
+    /// counts streams), and a chat message in it shows the conversation.
+    /// Nothing while the gate is shut.
+    pub(crate) fn dialled(
+        &'static self,
+        data_dir: &Path,
+        contact: &[u8; 32],
+        hs_id: [u8; 32],
+        frames: &[Vec<u8>],
+    ) {
+        if !self.live() {
+            return;
+        }
+        if frames.iter().any(|f| is_chat(f)) {
+            self.talked(data_dir, contact, Some(hs_id));
+        }
+        let now = Instant::now();
+        let mut inner = self.lock();
+        if let Some(talk) = inner.talks.iter_mut().find(|t| t.same(data_dir, contact)) {
+            talk.circuit_used = Some(now);
+            talk.hs_id = Some(hs_id);
+        }
+    }
+
+    /// A frame from `contact` over Tor: a chat message in it shows the
+    /// conversation. Nothing while the gate is shut.
+    pub(crate) fn heard(&'static self, data_dir: &Path, contact: &[u8; 32], frame: &[u8]) {
+        if self.live() && is_chat(frame) {
+            self.talked(data_dir, contact, None);
+        }
+    }
+
+    /// The app's warm-up of `level` for `contact` at its onion service
+    /// `hs_id` (speed design M3), asked now: `Ok` when it may go ahead (it
+    /// counts for its rate limit from now), else why not: the gate is shut
+    /// (`off`), or the same warm-up ran for the friend within its limit
+    /// (`soon`: a chat open once per [`OPEN_WARM_EVERY`], and not while its
+    /// circuit was in use within that; typing once per [`WARM_IDLE`]).
+    /// Either way the conversation shows ([`Self::talked`]).
+    pub(crate) fn warm_up(
+        &'static self,
+        data_dir: &Path,
+        contact: &[u8; 32],
+        hs_id: [u8; 32],
+        level: raven_core::ipc::WarmLevel,
+    ) -> Result<(), Skip> {
+        use raven_core::ipc::WarmLevel;
+        if !self.live() {
+            return Err("off");
+        }
+        self.talked(data_dir, contact, Some(hs_id));
+        let now = Instant::now();
+        let limits = self.limits();
+        let mut inner = self.lock();
+        let at = self.talk_at(&mut inner, data_dir, contact, now);
+        let talk = &mut inner.talks[at];
+        let (last, every) = match level {
+            WarmLevel::Circuit => (&mut talk.circuit_used, limits.open_every),
+            WarmLevel::Link => (&mut talk.typed, limits.typing_every),
+        };
+        if last.is_some_and(|at| now.saturating_duration_since(at) < every) {
+            return Err("soon");
+        }
+        *last = Some(now);
+        // Either opens a stream on the friend's circuit (a refused one, or
+        // the link's).
+        talk.circuit_used = Some(now);
+        Ok(())
+    }
+
+    /// Why every kept link closes ([`flush`]): keep warm ends (its circuits
+    /// went with Tor, or will); a lock also forgets every conversation, and
+    /// the others keep them for the resume warm-up ([`Self::tor_ready`]).
+    pub(crate) fn stop(&self, why: Flush) {
+        let mut inner = self.lock();
+        if why == Flush::Lock {
+            inner.talks.clear();
+        }
+        for talk in &mut inner.talks {
+            talk.kept = None;
+            talk.aged = false;
+        }
+        if let Some(task) = inner.task.take() {
+            task.abort();
+        }
+    }
+
+    /// A new Tor life is ready (after a wake, an app resume, a network
+    /// change or any other start; speed design M10): keep warm starts again
+    /// for the conversations going on, the most recent first and up to its
+    /// cap, each with a probe at once, unless its circuit was in use within
+    /// [`OPEN_WARM_EVERY`] (the same limit as a chat open's). Nothing while
+    /// the gate is shut.
+    pub(crate) fn tor_ready(&'static self) {
+        if !self.live() {
+            return;
+        }
+        let now = Instant::now();
+        let limits = self.limits();
+        let mut inner = self.lock();
+        let mut waiting: Vec<usize> = (0..inner.talks.len())
+            .filter(|&i| {
+                let t = &inner.talks[i];
+                t.kept.is_none() && !t.aged && t.going_on(&limits, now)
+            })
+            .collect();
+        waiting.sort_by_key(|&i| std::cmp::Reverse(inner.talks[i].active));
+        let kept = inner.talks.iter().filter(|t| t.kept.is_some()).count();
+        for i in waiting.into_iter().take(limits.cap.saturating_sub(kept)) {
+            let talk = &mut inner.talks[i];
+            let first = talk
+                .circuit_used
+                .map_or(now, |at| (at + limits.open_every).max(now));
+            talk.kept = Some((now, first));
+            talk.failed = false;
+        }
+        self.ensure_task(&mut inner);
+        drop(inner);
+        self.news.notify_one();
+    }
+
+    /// Starts the task unless one runs (one gone with its runtime does not),
+    /// on this thread's runtime (none: the next note on one starts it).
+    fn ensure_task(&'static self, inner: &mut KeepInner) {
+        if inner.task.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        inner.task = Some(tokio::spawn(self.run()));
+    }
+
+    /// The task: the probes due, then a sleep until the next one (or news),
+    /// while any friend is kept warm.
+    async fn run(&'static self) {
+        loop {
+            let (due, next) = self.plan(Instant::now());
+            for (data_dir, contact, hs_id) in due {
+                self.probe(&data_dir, contact, hs_id).await;
+            }
+            let Some(next) = next else {
+                return;
+            };
+            tokio::select! {
+                () = tokio::time::sleep_until(next) => {}
+                () = self.news.notified() => {}
+            }
+        }
+    }
+
+    /// One look at the conversations at `now`: keep warm ends for a friend
+    /// whose conversation is over or whose keep warm ran its age, its room
+    /// goes to a conversation going on (the most recent first; its first
+    /// probe a full interval after its circuit's last use), the probes due
+    /// now are taken, and conversations no longer worth keeping are
+    /// forgotten. The probes to make (each friend's profile, key and onion
+    /// service, when known) and when to look next: `None` once no friend
+    /// is kept warm (the task ends; the next note starts another).
+    #[allow(clippy::type_complexity)]
+    fn plan(&self, now: Instant) -> (Vec<(PathBuf, [u8; 32], Option<[u8; 32]>)>, Option<Instant>) {
+        let limits = self.limits();
+        let mut inner = self.lock();
+        if !self.live() {
+            inner.talks.clear();
+            inner.task = None;
+            return (Vec::new(), None);
+        }
+        inner.talks.retain(|t| t.worth_keeping(&limits, now));
+        let mut due = Vec::new();
+        for talk in &mut inner.talks {
+            let Some((since, next)) = talk.kept else {
+                continue;
+            };
+            if !talk.going_on(&limits, now) {
+                talk.kept = None;
+            } else if now.saturating_duration_since(since) >= limits.age {
+                talk.kept = None;
+                talk.aged = true;
+            } else if next <= now {
+                due.push((talk.data_dir.clone(), talk.contact, talk.hs_id));
+                talk.kept = Some((since, now + jitter(limits.every)));
+            }
+        }
+        let mut waiting: Vec<usize> = (0..inner.talks.len())
+            .filter(|&i| {
+                let t = &inner.talks[i];
+                t.kept.is_none() && !t.aged && !t.failed && t.going_on(&limits, now)
+            })
+            .collect();
+        waiting.sort_by_key(|&i| std::cmp::Reverse(inner.talks[i].active));
+        let kept = inner.talks.iter().filter(|t| t.kept.is_some()).count();
+        for i in waiting.into_iter().take(limits.cap.saturating_sub(kept)) {
+            let talk = &mut inner.talks[i];
+            // From the circuit's last use while Arti may still keep it, else
+            // from the conversation's last word (the probe then builds it).
+            let from = match talk.circuit_used {
+                Some(at) if now.saturating_duration_since(at) < super::proto::GROUP_KEPT => at,
+                _ => talk.active,
+            };
+            talk.kept = Some((now, (from + jitter(limits.every)).max(now)));
+        }
+        let next = inner
+            .talks
+            .iter()
+            .filter_map(|t| t.kept.map(|(_, next)| next))
+            .min();
+        if next.is_none() {
+            inner.task = None;
+        }
+        (due, next)
+    }
+
+    /// One keep-warm probe of `contact`'s circuit at `hs_id` (none: the
+    /// contact book's binding), [`super::probe_on`]. One that failed, or a
+    /// friend with no onion route, ends keep warm for it until its
+    /// conversation shows again.
+    async fn probe(&'static self, data_dir: &Path, contact: [u8; 32], hs_id: Option<[u8; 32]>) {
+        let hs_id = match hs_id {
+            Some(hs_id) => Some(hs_id),
+            None => {
+                let dd = data_dir.to_path_buf();
+                internet_direct::blocking(move || Ok(book_onion(&dd, &contact)))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+        };
+        let probed = match hs_id {
+            Some(hs_id) => super::probe_on(self.pool, data_dir, contact, hs_id).await,
+            None => Err("no onion route".into()),
+        };
+        let mut inner = self.lock();
+        let talk = inner.talks.iter_mut().find(|t| t.same(data_dir, &contact));
+        match probed {
+            Ok(()) => {
+                if let Some(talk) = talk {
+                    talk.circuit_used = Some(Instant::now());
+                }
+            }
+            Err(e) => {
+                if let Some(talk) = talk {
+                    talk.kept = None;
+                    talk.failed = true;
+                }
+                drop(inner);
+                crate::netutil::log_limited(
+                    &KEEP_LOG,
+                    "raven-node onion",
+                    format_args!("keep warm: a probe failed ({})", probe_failure_words(&e)),
+                );
+            }
+        }
+    }
+
+    /// The friends kept warm now (tests).
+    #[cfg(test)]
+    pub(crate) fn kept_len(&self) -> usize {
+        self.lock()
+            .talks
+            .iter()
+            .filter(|t| t.kept.is_some())
+            .count()
+    }
+}
+
+/// Keep warm's log lines: at most one per 10 minutes, states only.
+static KEEP_LOG: crate::netutil::LogLimiter =
+    crate::netutil::LogLimiter::new(Duration::from_secs(600));
+
+/// A probe's failure in a few fixed words for the log (never an address,
+/// never Tor's own text).
+fn probe_failure_words(e: &str) -> &'static str {
+    if e.starts_with(super::ONION_NOT_READY) {
+        "Tor not ready"
+    } else if e.starts_with(super::ONION_UNREACHABLE) {
+        "the friend's onion service did not answer"
+    } else if e.starts_with(raven_core::CONTACT_NOT_VERIFIED) {
+        "not a verified friend"
+    } else {
+        "other"
+    }
+}
+
+/// Blocking: `contact`'s onion service from the contact book: the newest
+/// binding its own key signed, for a verified contact only.
+fn book_onion(data_dir: &Path, contact: &[u8; 32]) -> Option<[u8; 32]> {
+    raven_core::outbox::contact_routes(data_dir, contact)
+        .ok()
+        .flatten()
+        .filter(|routes| routes.pinned)
+        .and_then(|routes| routes.onion)
+        .map(|binding| binding.hs_id)
+}
+
+/// A chat message (not a PairInit, not a receipt): what shows a
+/// conversation.
+fn is_chat(frame: &[u8]) -> bool {
+    use raven_core::envelope::{EnvType, Envelope};
+    Envelope::unpack(frame).is_some_and(|e| e.env_type == EnvType::Message as u8)
+        && matches!(
+            raven_core::classify_packed_envelope(frame),
+            raven_core::PairInitOobClassify::NotPairInitOob
+        )
+}
+
+/// A time between the two of `every`, uniformly at random.
+fn jitter((low, high): (Duration, Duration)) -> Duration {
+    let span = u64::try_from(high.saturating_sub(low).as_millis()).unwrap_or(u64::MAX);
+    if span == 0 {
+        return low;
+    }
+    low + Duration::from_millis(rand::random::<u64>() % (span + 1))
+}
+
+/// The process's keep warm: the conversations of this process's profile,
+/// its probes through [`WARM`]'s gates.
+pub(crate) static KEEP: KeepWarm = KeepWarm::made(
+    KEEP_LIMITS,
+    Gate::Live(raven_core::onion_gate::onion_warm_live),
+    &WARM,
+    true,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,5 +1631,123 @@ mod tests {
                 "a keeper after its runtime stopped"
             );
         });
+    }
+
+    /// Speed design M2 and M10: keep warm takes at most its cap of friends
+    /// at once (4, or 2 on the embedded node), first come while it has
+    /// room; a new Tor life takes the conversations going on again, the
+    /// most recent first, up to the same cap. On the paused clock, before
+    /// any probe is due.
+    #[tokio::test(start_paused = true)]
+    async fn keep_warm_takes_its_cap_and_the_resume_the_most_recent_first() {
+        let switch = |on: bool| -> &'static std::sync::atomic::AtomicBool {
+            Box::leak(Box::new(std::sync::atomic::AtomicBool::new(on)))
+        };
+        let (gate, hedge) = (switch(true), switch(false));
+        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool::new(
+            LIMITS,
+            Gate::Switch(gate),
+            Gate::Switch(hedge),
+        )));
+        let keep: &'static KeepWarm = Box::leak(Box::new(KeepWarm::new(
+            KEEP_LIMITS,
+            Gate::Switch(gate),
+            pool,
+        )));
+        let kept = || -> Vec<u8> {
+            let mut kept: Vec<u8> = keep
+                .lock()
+                .talks
+                .iter()
+                .filter(|t| t.kept.is_some())
+                .map(|t| t.contact[0])
+                .collect();
+            kept.sort_unstable();
+            kept
+        };
+        let dir = Path::new("/nonexistent/keep-warm-cap-test");
+        let friends = u8::try_from(KEEP_LIMITS.cap + 2).unwrap();
+        for n in 0..friends {
+            keep.talked(dir, &[n; 32], None);
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        tokio::task::yield_now().await;
+        let first_come: Vec<u8> = (0..friends - 2).collect();
+        assert_eq!(kept(), first_come, "the first {} only", KEEP_LIMITS.cap);
+        keep.stop(Flush::NetworkChanged);
+        assert!(kept().is_empty());
+        keep.tor_ready();
+        let most_recent: Vec<u8> = (2..friends).collect();
+        assert_eq!(kept(), most_recent, "the {} most recent", KEEP_LIMITS.cap);
+    }
+
+    /// The D1 harness's keep warm knob ([`KEEP_WARM_EVERY_ENV`]): read only
+    /// in a lab run; `ms` makes the probes come every `ms` to 1.5 x `ms`
+    /// and keep warm end after 10 x `ms`, never slower or longer than the
+    /// real limits; `0` keeps no friend warm; anything else changes
+    /// nothing. Only the process's keeper reads it.
+    #[test]
+    fn the_keep_warm_knob_is_read_only_in_a_lab_run() {
+        let same = |a: KeepLimits, b: KeepLimits| format!("{a:?}") == format!("{b:?}");
+        let knob = |v: &str| lab_keep_limits(KEEP_LIMITS, || true, || Some(v.into()));
+        let never = || -> Option<OsString> { panic!("read outside a lab run") };
+        assert!(same(
+            lab_keep_limits(KEEP_LIMITS, || false, never),
+            KEEP_LIMITS
+        ));
+        assert!(same(
+            lab_keep_limits(KEEP_LIMITS, || true, || None),
+            KEEP_LIMITS
+        ));
+        for word in ["", "soon", "-5", "1.5", "27 s"] {
+            assert!(same(knob(word), KEEP_LIMITS), "{word:?}");
+        }
+        if !cfg!(debug_assertions) {
+            assert!(
+                same(knob("27000"), KEEP_LIMITS),
+                "a release build reads nothing"
+            );
+            return;
+        }
+        let lab = knob("27000");
+        assert_eq!(
+            (lab.every, lab.age),
+            (
+                (Duration::from_secs(27), Duration::from_millis(40_500)),
+                Duration::from_secs(270)
+            )
+        );
+        let rest = KeepLimits {
+            every: KEEP_LIMITS.every,
+            age: KEEP_LIMITS.age,
+            ..lab
+        };
+        assert!(
+            same(rest, KEEP_LIMITS),
+            "only the probes and the age: {lab:?}"
+        );
+        let slow = knob(&u64::MAX.to_string());
+        assert_eq!((slow.every, slow.age), (KEEP_WARM_EVERY, MAX_CIRCUIT_AGE));
+        let off = knob("0");
+        assert_eq!(off.cap, 0, "{off:?}");
+        assert!(same(
+            KeepLimits {
+                cap: KEEP_LIMITS.cap,
+                ..off
+            },
+            KEEP_LIMITS
+        ));
+        let test_pool: &'static WarmPool = Box::leak(Box::new(WarmPool::new(
+            LIMITS,
+            Gate::Switch(Box::leak(Box::new(std::sync::atomic::AtomicBool::new(
+                true,
+            )))),
+            Gate::Switch(Box::leak(Box::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))),
+        )));
+        let test_keeper = KeepWarm::new(KEEP_LIMITS, Gate::Live(|| true), test_pool);
+        assert!(KEEP.lab && !test_keeper.lab);
     }
 }

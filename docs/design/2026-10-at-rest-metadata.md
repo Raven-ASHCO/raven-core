@@ -1779,7 +1779,7 @@ the lab backend), and Windows' K_hist `chat_history_key.dpapi` (DPAPI-wrapped, P
 | `identity.backend`, `identity.binding`, `keystore.backend` | own identity bookkeeping |
 | `device_x25519.pub` (and the lab's `lab_device_x25519.pub`) | a public key |
 | `erase_in_progress` | the erase marker (PP.16, section 4.14): no content |
-| `desktop_settings.json` (the desktop apps' engine) | the apps' settings that name nobody (receive, motion, what quitting does, lock on sleep); the user's name is in `desktop_private.rms` (section 6.1) and the chat-keeping time in `privacy.json` (`chat_keep`, PP.9); erase removes it |
+| `desktop_settings.json` (the desktop apps' engine) | the apps' settings that name nobody (receive, motion, what quitting does, lock on sleep, typing warm-ups on mobile data); the user's name is in `desktop_private.rms` (section 6.1) and the chat-keeping time in `privacy.json` (`chat_keep`, PP.9); erase removes it |
 | `*.lock.sqlite` (and `-wal`, `-shm`, `-journal`) | empty lock databases; the per-friend send lock is named by a keyed hash in a sealed profile (PP.6, section 4.4), and an older build's, named by the friend's key, is deleted there (section 4.22) |
 | `raven-node.sock`, `raven-node.sock.lock` | the IPC endpoint |
 | `raven-node-service.log`, `raven-node.log`, `raven-node.err` | capped logs, counts and fixed codes only (cutoff pack M3 / CP.8); the legacy `raven-node run` prints received text to stderr and is out of scope |
