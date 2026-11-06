@@ -858,8 +858,12 @@ LAB_SWITCHES = (
     'RAVEN_LAB_TOR', 'RAVEN_LAB_TOR_LOOPBACK', 'RAVEN_LAB_TOR_HEAD_START_MS',
     'RAVEN_LAB_TOR_LOOPBACK_STALL', 'RAVEN_LAB_TOR_LOOPBACK_OBSOLETE',
     'RAVEN_LAB_TOR_LOOPBACK_DELAY_MS',
-    # The onion dials' stage record file (speed groundwork, D1): only the D1
-    # harness (scripts/tor_d1_harness.py) sets it.
+    # The D1 measurement's lab names, never a caller's value: the loopback
+    # helper's warm circuit model (a fresh rendezvous, Arti's kept circuit)
+    # and the onion dials' stage record file. scripts/tor_d1_harness.py sets
+    # them for its own two lab profiles (the warm circuit model in its dry
+    # mode only); no scenario here does.
+    'RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS', 'RAVEN_LAB_TOR_LOOPBACK_KEPT_MS',
     'RAVEN_LAB_TOR_STAGES',
     # Tor speed Stage A's five lab switches (warm links, hedges, early
     # frames, optimistic data, the two-way warm link), never a caller's value.

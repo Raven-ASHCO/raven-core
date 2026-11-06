@@ -277,20 +277,34 @@ async fn side(dir: &Path, registry: &Path) -> Side {
     side_with(dir, registry, loopback::Knobs::default()).await
 }
 
-/// [`side`] with its loopback helper's `knobs`.
+/// [`side`] with its loopback helper's `knobs` (with `knobs.memory`, its
+/// forward listener in memory too: [`serve_forward_in_memory`]).
 async fn side_with(dir: &Path, registry: &Path, knobs: loopback::Knobs) -> Side {
     let identity = Arc::new(raven_core::load_identity_required(dir).unwrap());
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .unwrap();
-    let forward = listener.local_addr().unwrap();
     let token: [u8; proto::TOKEN_LEN] = rand::random();
-    let serving = tokio::spawn(serve_forward(
-        listener,
-        Arc::new(std::sync::Mutex::new(token)),
-        dir.to_path_buf(),
-        identity,
-    ));
+    let (forward, serving) = if knobs.memory {
+        let listener = memnet::Listener::bind();
+        let forward = listener.local_addr();
+        let serving = tokio::spawn(serve_forward_in_memory(
+            listener,
+            token,
+            dir.to_path_buf(),
+            identity,
+        ));
+        (forward, serving.abort_handle())
+    } else {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let forward = listener.local_addr().unwrap();
+        let serving = tokio::spawn(serve_forward(
+            listener,
+            Arc::new(std::sync::Mutex::new(token)),
+            dir.to_path_buf(),
+            identity,
+        ));
+        (forward, serving.abort_handle())
+    };
     let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
     let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
     let registry = registry.to_path_buf();
@@ -335,11 +349,52 @@ async fn side_with(dir: &Path, registry: &Path, knobs: loopback::Knobs) -> Side 
         forward,
         token,
         _tasks: vec![
-            AbortOnDrop(serving.abort_handle()),
+            AbortOnDrop(serving),
             AbortOnDrop(helper.abort_handle()),
             AbortOnDrop(draining.abort_handle()),
         ],
         _stdin: stdin,
+    }
+}
+
+/// [`serve_forward`] on a listener in memory ([`memnet`], for a test on the
+/// paused clock): the helper's header before any slot, a slot per circuit
+/// in this helper life, then the Raven link listener of the onion carrier
+/// under the onion limits, as there. Not the parts that need a TCP stream
+/// (the loopback source check, and the wait for Noise message 1 by a peek,
+/// which takes no byte and no time of its own), nor a token that changes.
+async fn serve_forward_in_memory(
+    mut listener: memnet::Listener,
+    token: [u8; proto::TOKEN_LEN],
+    data_dir: PathBuf,
+    identity: Arc<Identity>,
+) {
+    let limits = netutil::ONION_INBOUND;
+    let admission = Admission::for_circuits(limits);
+    let life = admission.new_life();
+    while let Ok(stream) = listener.accept().await {
+        let (dd, id) = (data_dir.clone(), identity.clone());
+        let admission = Arc::clone(&admission);
+        tokio::spawn(async move {
+            let Ok((stream, circuit)) = check_token(stream, &token).await else {
+                return;
+            };
+            let Ok(mut slot) = admission.admit_in_life(circuit_source(circuit), life) else {
+                return;
+            };
+            let displaced = slot.displaced();
+            let work = async move {
+                ONION_LINK.require_live()?;
+                internet_direct::serve_inbound_on(
+                    ONION_LINK, dd, id, stream, limits, &mut slot, None, None, None,
+                )
+                .await
+            };
+            tokio::select! {
+                _ = tokio::time::timeout(limits.lifetime, work) => {}
+                () = displaced.notified() => {}
+            }
+        });
     }
 }
 
@@ -499,6 +554,9 @@ struct Friends {
     key_ab: raven_core::indexed_session_store::IndexedSessionRecordKey,
     side_a: Side,
     side_b: Side,
+    /// With the knobs' `memory`: both sides are in memory, and no real
+    /// socket is dialled on this thread while they live.
+    _memory_only: Option<memnet::MemoryOnly>,
 }
 
 impl Friends {
@@ -508,7 +566,10 @@ impl Friends {
     }
 
     /// [`Self::new`] with Alice's loopback helper's `knobs` (the one this
-    /// process dials through).
+    /// process dials through). With `alice_knobs.memory`, Bob's side is in
+    /// memory too: a test on the paused clock
+    /// (`#[tokio::test(start_paused = true)]`, a current thread runtime)
+    /// then times its sends in the model's round trips alone.
     async fn with(alice_knobs: loopback::Knobs) -> Option<Self> {
         use crate::outbox::test_rig::{contacts, lab_backends, pair};
         if !lab_backends() || !raven_core::onion_live_enabled() {
@@ -536,8 +597,14 @@ impl Friends {
         raven_core::lan_dispatch::cache_peer_bundle(a.path(), &b_bundle).unwrap();
         raven_core::lan_dispatch::cache_peer_bundle(b.path(), &a_bundle).unwrap();
         let key_ab = pair(a.path(), &alice, b.path(), &bob, &a_bundle, &b_bundle);
+        let memory = alice_knobs.memory;
+        let memory_only = memory.then(memnet::MemoryOnly::new);
         let side_a = side_with(a.path(), registry.path(), alice_knobs).await;
-        let side_b = side(b.path(), registry.path()).await;
+        let bob_knobs = loopback::Knobs {
+            memory,
+            ..loopback::Knobs::default()
+        };
+        let side_b = side_with(b.path(), registry.path(), bob_knobs).await;
         *live_lock() = Some(Live {
             token: side_a.token,
             connect: Some(side_a.connect),
@@ -552,6 +619,7 @@ impl Friends {
             key_ab,
             side_a,
             side_b,
+            _memory_only: memory_only,
         })
     }
 
@@ -1689,15 +1757,25 @@ async fn a_ready_helper_whose_self_checks_reach_the_service_is_kept() {
 
 // ── W1: kept links (Tor speed Stage A, speed design M1) ────────────────────
 
-/// One Tor round trip in the W1 tests that time a send: a loopback connect
-/// takes it, and every byte arrives half of it later. Local work in a send
-/// (a debug build: about 0.4 s for a send of 7 round trips) stays well
-/// under it, so the round trips counted are the network's.
+/// One Tor round trip in the W1, M5 and M8 tests that time a send: a
+/// loopback connect takes it, and every byte arrives half of it later.
+/// Those tests run the loopback Tor model in memory on tokio's paused clock
+/// (`Knobs::memory`, [`memnet`]): local work takes no time there, and only
+/// the model's timers and the code's own waits move the clock. So a send
+/// takes its round trips (and timeouts) exactly, whatever the load on the
+/// computer (on the wall clock, CPU load stretched a send of 7 round trips
+/// to 8 in a full run).
 const R: Duration = Duration::from_millis(1000);
 
-/// `took` in round trips of [`R`], rounded down.
-fn trips(took: Duration) -> u128 {
-    took.as_millis() / R.as_millis()
+/// What may come on top of a time of whole round trips and timeouts on the
+/// paused clock: timers end on a whole millisecond. Far less than the
+/// model's smallest step (a byte's latency, r/2), so one round trip more or
+/// less, or a timeout waited out, never passes for it.
+const TICK: Duration = Duration::from_millis(5);
+
+/// `took` is `want` on the paused clock ([`TICK`]).
+fn about(took: Duration, want: Duration) -> bool {
+    took >= want && took < want + TICK
 }
 
 /// A pool of one test's own, with `limits` and its own gate switch (open):
@@ -1732,11 +1810,12 @@ fn test_pool_with_hedge(
     (pool, gate, hedge)
 }
 
-/// Waits until `ok` holds, at most `within`.
+/// Waits until `ok` holds, at most `within` (on the paused clock, if the
+/// test runs on it).
 async fn until(what: &str, within: Duration, ok: impl Fn() -> bool) {
-    let end = Instant::now() + within;
+    let end = tokio::time::Instant::now() + within;
     while !ok() {
-        assert!(Instant::now() < end, "{what}");
+        assert!(tokio::time::Instant::now() < end, "{what}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -1775,10 +1854,11 @@ impl Friends {
     /// A program's send of `text` to Bob, as the app's engine makes it: its
     /// check, then its message (sealed first, local work outside the time
     /// taken, and queued so the next send can seal its own). How many ACKs
-    /// came, and how long the check and the message took.
+    /// came, and how long the check and the message took (on the paused
+    /// clock, if the test runs on it).
     async fn program_sends(&self, pool: &'static warm::WarmPool, text: &str) -> (usize, Duration) {
         let sealed = seal_as(self.a.path(), &self.alice, &self.key_ab, text, true);
-        let began = Instant::now();
+        let began = tokio::time::Instant::now();
         let check = self
             .program_dials(pool, ONION_WAITS, &[])
             .await
@@ -1798,14 +1878,15 @@ impl Friends {
 /// stream, as the message rides its check's link; its next send within
 /// WARM_IDLE costs 1 round trip and no stream, its check answered from the
 /// kept link. On loopback Tor whose connect takes one round trip r and
-/// whose every byte arrives r/2 later.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// whose every byte arrives r/2 later (in memory, on the paused clock: [`R`]).
+#[tokio::test(start_paused = true)]
 async fn a_send_after_the_check_rides_the_checks_link() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(loopback::Knobs {
         delay: R,
         latency: R / 2,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -1816,13 +1897,13 @@ async fn a_send_after_the_check_rides_the_checks_link() {
     let (acks, first) = f.program_sends(pool, "first, on one link").await;
     assert_eq!(acks, 1);
     assert_eq!(f.connects(), 1, "one Tor stream: {first:?}");
-    assert_eq!(trips(first), 4, "a first send took {first:?}, r {R:?}");
+    assert!(about(first, 4 * R), "a first send took {first:?}, r {R:?}");
     assert_eq!(pool.len(), 1, "its link is kept");
     let (acks, second) = f.program_sends(pool, "second, within WARM_IDLE").await;
     assert_eq!(acks, 1);
     eprintln!("a first send {first:?}, a warm send {second:?}, r {R:?}");
     assert_eq!(f.connects(), 1, "no other Tor stream: {second:?}");
-    assert_eq!(trips(second), 1, "a warm send took {second:?}, r {R:?}");
+    assert!(about(second, R), "a warm send took {second:?}, r {R:?}");
     assert_eq!(
         inbox(f._b.path()),
         ["first, on one link", "second, within WARM_IDLE"]
@@ -1833,13 +1914,14 @@ async fn a_send_after_the_check_rides_the_checks_link() {
 /// With the warm gate shut nothing changes: each send is a check of 3
 /// round trips and a message link of 4, two Tor streams, and no link is
 /// kept.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn with_the_warm_gate_shut_a_send_opens_two_links_as_before() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(loopback::Knobs {
         delay: R,
         latency: R / 2,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -1853,7 +1935,7 @@ async fn with_the_warm_gate_shut_a_send_opens_two_links_as_before() {
         eprintln!("a send with the gate shut {took:?}, r {R:?}");
         assert_eq!(acks, 1);
         assert_eq!(f.connects(), 2 * n, "{took:?}");
-        assert_eq!(trips(took), 7, "a send took {took:?}, r {R:?}");
+        assert!(about(took, 7 * R), "a send took {took:?}, r {R:?}");
         assert_eq!(pool.len(), 0, "nothing kept");
     }
 }
@@ -1932,12 +2014,13 @@ async fn a_blocked_or_unpinned_contact_or_a_held_gate_closes_the_kept_link() {
 /// one (its reply may still come, and would be taken for the next batch's).
 /// The resend then opens a fresh link and gets exactly one ACK, and Bob
 /// holds the message once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_batch_that_timed_out_never_returns_its_link() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(loopback::Knobs {
         latency: R / 2,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -2029,11 +2112,12 @@ async fn the_pool_drops_every_link_on_a_flush() {
 /// A kept link carries a batch only within its limits, scaled down here:
 /// idle past `idle` or older than `age`, the keeper closes it, and the next
 /// send opens a fresh link; one that carried `frames` frames is not kept.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_link_idle_old_or_full_is_retired_not_reused() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(loopback::Knobs {
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -2105,14 +2189,9 @@ fn dead_circuit_knobs(kill: Option<&'static std::sync::atomic::AtomicU64>) -> lo
         rendezvous: RENDEZVOUS,
         kill,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     }
-}
-
-/// `took` is about `want`: not less (give or take a timer's tick), and less
-/// than one round trip more (local work in a debug build).
-fn about(took: Duration, want: Duration) -> bool {
-    took + Duration::from_millis(50) >= want && took < want + R
 }
 
 impl Friends {
@@ -2126,7 +2205,7 @@ impl Friends {
 /// whose circuit is dead costs Arti's BEGIN timeout, a rendezvous and its
 /// 7 round trips (a check of 3 on the fresh circuit, a message link of 4),
 /// 6 s + R + 7r: two Tor streams, three tries, one on the dead circuit.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn with_the_hedge_gate_shut_a_dead_circuit_costs_its_timeout_as_before() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(dead_circuit_knobs(None)).await else {
@@ -2160,7 +2239,7 @@ async fn with_the_hedge_gate_shut_a_dead_circuit_costs_its_timeout_as_before() {
 /// costs 2 s, not Arti's 6 s BEGIN timeout; the check's link is kept and
 /// the message rides it: 2 s + R + 4r in all (6 s + R + 7r with the gates
 /// shut), one Tor stream and two tries.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_dead_circuit_costs_two_seconds_with_the_hedge_gate_open() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(dead_circuit_knobs(None)).await else {
@@ -2194,7 +2273,7 @@ async fn a_dead_circuit_costs_two_seconds_with_the_hedge_gate_open() {
 /// a rendezvous and 4 round trips, no try on the dead circuit and no 2 s
 /// hedge wait. Bob holds the message once (the copy on the dead circuit
 /// never reached him).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn after_a_failed_link_the_next_connect_goes_fresh_first() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let kill: &'static std::sync::atomic::AtomicU64 =
@@ -2223,7 +2302,7 @@ async fn after_a_failed_link_the_next_connect_goes_fresh_first() {
     );
     assert_eq!(pool.len(), 0, "the silent link is not kept");
     assert_eq!(f.counts(), before, "it rode the kept link");
-    let began = Instant::now();
+    let began = tokio::time::Instant::now();
     let replies = f
         .program_dials(pool, ONION_WAITS, &[sealed])
         .await
@@ -2322,13 +2401,14 @@ fn message_id(sealed: &[u8]) -> [u8; 16] {
 /// message (the listener answers frame after frame, so replies go to the
 /// batches first in, first out): no other Tor stream, and Bob holds each
 /// message once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn three_quick_sends_share_one_warm_link_and_each_gets_its_receipt() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(loopback::Knobs {
         delay: R,
         latency: R / 2,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -2343,7 +2423,7 @@ async fn three_quick_sends_share_one_warm_link_and_each_gets_its_receipt() {
         .iter()
         .map(|text| seal_as(f.a.path(), &f.alice, &f.key_ab, text, true))
         .collect();
-    let (f, began) = (&f, Instant::now());
+    let (f, began) = (&f, tokio::time::Instant::now());
     let send = |sealed: &Vec<u8>| {
         let sealed = sealed.clone();
         async move {
@@ -2357,7 +2437,7 @@ async fn three_quick_sends_share_one_warm_link_and_each_gets_its_receipt() {
     for ((replies, took), sealed) in [a, b, c].into_iter().zip(&sealed) {
         let replies = replies.expect("delivered");
         assert_eq!(f.acked(&replies), [message_id(sealed)], "its own ACK");
-        assert_eq!(trips(took), 1, "took {took:?}, r {R:?}");
+        assert!(about(took, R), "took {took:?}, r {R:?}");
     }
     assert_eq!(f.connects(), 1, "no other Tor stream");
     let mut held = inbox(f._b.path());
@@ -2371,13 +2451,14 @@ async fn three_quick_sends_share_one_warm_link_and_each_gets_its_receipt() {
 /// closed: the batch that stopped ends with no ACK (unconfirmed: its retry
 /// gets a duplicate ACK), the one behind it goes again on a fresh link and
 /// gets its own ACK, never the other's.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_reply_count_drift_ends_unconfirmed_never_misattributed() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::with(loopback::Knobs {
         delay: R,
         latency: R / 2,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -2421,7 +2502,7 @@ async fn a_reply_count_drift_ends_unconfirmed_never_misattributed() {
 /// the first copy, answers the copy: one ACK, its own, and Bob holds the
 /// message once. (With the hedge gate shut a kept link's batch waits out its
 /// wait as before: `a_batch_that_timed_out_never_returns_its_link`.)
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_silent_pooled_link_is_hedged_and_the_copy_is_acked_once() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let kill: &'static std::sync::atomic::AtomicU64 =
@@ -2439,7 +2520,7 @@ async fn a_silent_pooled_link_is_hedged_and_the_copy_is_acked_once() {
     );
     loopback::kill_circuits(kill);
     let sealed = seal_as(f.a.path(), &f.alice, &f.key_ab, "after the kill", true);
-    let began = Instant::now();
+    let began = tokio::time::Instant::now();
     let check = f
         .program_dials(pool, ONION_WAITS, &[])
         .await
@@ -2457,10 +2538,7 @@ async fn a_silent_pooled_link_is_hedged_and_the_copy_is_acked_once() {
         f.counts()
     );
     assert_eq!(f.acked(&replies), [message_id(&sealed)], "one ACK, its own");
-    assert!(
-        took + Duration::from_millis(50) >= want && took < want + 2 * R,
-        "took {took:?}, want about {want:?}"
-    );
+    assert!(about(took, want), "took {took:?}, want about {want:?}");
     assert_eq!(inbox(f._b.path()), ["before the kill", "after the kill"]);
     pool.flush();
 }

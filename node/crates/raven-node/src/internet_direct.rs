@@ -1203,16 +1203,26 @@ const WARM_READ_AHEAD: usize = 4;
 /// there, and the stream is lost for good). Dropping it stops the reader
 /// and closes the stream.
 pub(crate) struct WarmHalves {
-    write: tokio::net::tcp::OwnedWriteHalf,
+    write: WarmWrite,
     frames: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
     reader: tokio::task::JoinHandle<()>,
 }
 
+/// The half of a warm link's stream its task writes on (in tests the
+/// stream may be in memory: `crate::onion::memnet`).
+#[cfg(not(test))]
+type WarmWrite = tokio::net::tcp::OwnedWriteHalf;
+#[cfg(test)]
+type WarmWrite = tokio::io::WriteHalf<crate::onion::HelperStream>;
+
 impl WarmHalves {
     /// `stream`, after a batch that read every frame it waited for (no read
     /// stopped part way).
-    pub(crate) fn split(stream: tokio::net::TcpStream) -> Self {
+    pub(crate) fn split(stream: crate::onion::HelperStream) -> Self {
+        #[cfg(not(test))]
         let (mut read, write) = stream.into_split();
+        #[cfg(test)]
+        let (mut read, write) = tokio::io::split(stream);
         let (tx, frames) = tokio::sync::mpsc::channel(WARM_READ_AHEAD);
         let reader = tokio::spawn(async move {
             loop {

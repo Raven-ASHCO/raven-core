@@ -68,7 +68,6 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use raven_core::OutboxCarrier;
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -211,7 +210,7 @@ impl WarmLink {
     /// began. Its task starts now.
     pub(crate) fn new(
         key: WarmKey,
-        link: OpenLink<TcpStream>,
+        link: OpenLink<super::HelperStream>,
         opened: Instant,
         written: u32,
         trip: Option<Duration>,
