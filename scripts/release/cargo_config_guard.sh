@@ -128,6 +128,13 @@ raven_entries_stay() {
   esac
 }
 
+# 0 when this user owns the path (bash's -O: the effective uid). The self
+# test redefines it, in a subshell only, to stand a folder of its own in for
+# one another account owns (it changes no owner); nothing else does.
+raven_owns() {
+  [[ -O "$1" ]]
+}
+
 raven_prepare_build_root() {
   local parent root
   parent="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || {
@@ -148,7 +155,7 @@ raven_prepare_build_root() {
     echo "the build folder $root is not a folder: remove it, and find out who put it there" >&2
     return 1
   fi
-  if [[ ! -O "$root" ]]; then
+  if ! raven_owns "$root"; then
     echo "the build folder $root belongs to another account: have it removed, and find out who put it there" >&2
     return 1
   fi

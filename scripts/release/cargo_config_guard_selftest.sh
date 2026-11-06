@@ -3,9 +3,10 @@
 # lock-updates-local-5; security review 2026-11 DEP-1): a cargo
 # configuration in a folder above the build folder, in it, or in the build's
 # cargo home stops the reproducible build; none lets it run. So does a
-# rustup toolchain file above it, a build folder that is a symlink, and an
-# outer .cargo another account could write into while cargo starts; the
-# build folder is made private, and the pinned toolchain is always exported.
+# rustup toolchain file above it, a build folder that is a symlink or
+# another account's, and an outer .cargo another account could write into
+# while cargo starts; the build folder is made private, and the pinned
+# toolchain is always exported.
 # Needs no build (rustc and cargo are stand-in scripts); runs in a moment.
 #
 # Usage: bash scripts/release/cargo_config_guard_selftest.sh
@@ -111,6 +112,25 @@ raven_prepare_build_root "$D/outer/old-root" >/dev/null 2>"$D/err" || rc=$?
 rc=0
 raven_prepare_build_root "$D/outer/file-root" >/dev/null 2>"$D/err" || rc=$?
 [[ "$rc" -eq 1 ]] || check "a build folder that is a file must be refused (rc=$rc)"
+# A build folder another account owns (left in /tmp by its build, or put
+# there for this one) is refused and left as it is: never made private, never
+# used. No second account and no owner change: raven_owns, the guard's owner
+# test, is redefined in a subshell to say this folder of the test's is
+# another account's.
+mkdir -m 755 "$D/outer/foreign-root"
+: >"$D/outer/foreign-root/keep"
+rc=0
+(
+  raven_owns() {
+    [[ "$1" != "$D/outer/foreign-root" && -O "$1" ]]
+  }
+  raven_prepare_build_root "$D/outer/foreign-root" >/dev/null 2>"$D/err"
+) || rc=$?
+[[ "$rc" -eq 1 ]] || check "a build folder another account owns must be refused (rc=$rc)"
+grep -q "$D/outer/foreign-root belongs to another account" "$D/err" \
+  || check "the refusal must say the build folder belongs to another account"
+[[ "$(mode_of "$D/outer/foreign-root")" == drwxr-xr-x && -f "$D/outer/foreign-root/keep" ]] \
+  || check "a build folder another account owns must be left as it is, not $(mode_of "$D/outer/foreign-root")"
 
 # 2. The .cargo beside the build folder (/tmp/.cargo for the real build):
 # an empty one another account owns or can write passes both config checks,
