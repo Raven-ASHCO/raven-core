@@ -41,9 +41,12 @@ Python reference `protocol/reference/raven_protocol/lan_beacon.py`, and the vect
 
 **What the contact gate already does on every LAN link** (raven-node `lan_direct` `handle_inbound`;
 raven-core `lan_dispatch` `link_admission`):
-1. Pre-authentication slots per IP, and a handshake deadline. A contact holds at most 4
-   authenticated links: a newer one that authenticates closes that contact's oldest, so one
-   contact on several addresses cannot hold every slot (LAN-ADM-2).
+1. Pre-authentication slots per source, and a handshake deadline. A source is an IPv4 address,
+   an IPv6 host on the local network (link-local, unique-local, or inside a prefix of this host's
+   networks) its whole address, as in the penalty box, since every link-local host shares
+   fe80::/64 and every SLAAC host one LAN's /64 (LAN-ADM-1); any other IPv6 source is its /64. A
+   contact holds at most 4 authenticated links: a newer one that authenticates closes that
+   contact's oldest, so one contact on several addresses cannot hold every slot (LAN-ADM-2).
 2. Noise XX. The responder's static key travels in m2, encrypted under ee. A passive observer does
    not see it. Anyone who connects does, and it is stable per identity (the D7 residual).
 3. The dialer's signed bind comes first.

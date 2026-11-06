@@ -950,6 +950,94 @@ async fn a_remote_ipv6_source_at_the_lan_listener_is_its_64() {
     );
 }
 
+/// LAN-ADM-1: the LAN listener's per-source caps keyed every IPv6 source
+/// by its /64, so one host's handshakes on the Wi-Fi (link-local,
+/// unique-local or SLAAC: one /64 for every host of a LAN) used up the
+/// slots of all its IPv6 neighbours, and a friend there was refused at the
+/// source cap. A local IPv6 source is now its whole address there, by the
+/// penalty box's rule (sensing-2); a source from outside this computer's
+/// networks keeps the /64 cap, and so does every IPv6 source at the
+/// Internet listener.
+#[test]
+fn a_lan_neighbour_is_admitted_past_another_ones_handshakes() {
+    use crate::netutil::{Admission, Refused, PRODUCTION_INBOUND};
+    let _on_link = OnLinkForTest::set(
+        |ip| matches!(ip, IpAddr::V6(v6) if v6.segments()[..4] == [0x2001, 0xdb8, 7, 1]),
+    );
+    let cap = PRODUCTION_INBOUND.max_handshaking_per_ip;
+    let hold = |adm: &Arc<Admission>, ip: IpAddr| -> Vec<_> {
+        (0..cap).map(|_| adm.admit(ip).expect("room")).collect()
+    };
+    for (bad, friend) in [
+        ("fe80::bad:1", "fe80::f00d:2"),
+        ("2001:db8:7:1::bad", "2001:db8:7:1::f00d"),
+        ("fd00:7:1::bad", "fd00:7:1::f00d"),
+    ] {
+        let adm = Admission::for_addresses(PRODUCTION_INBOUND, OutboxCarrier::Lan);
+        let (bad, friend): (IpAddr, IpAddr) = (bad.parse().unwrap(), friend.parse().unwrap());
+        let _held = hold(&adm, bad);
+        assert_eq!(adm.admit(bad).err(), Some(Refused::SourceCap), "{bad}");
+        assert!(adm.admit(friend).is_ok(), "{friend} is a source of its own");
+    }
+    // From outside this computer's networks, and anything at the Internet
+    // listener: the /64, whatever the interface ID.
+    for (carrier, net) in [
+        (OutboxCarrier::Lan, "2001:db8:9:1"),
+        (OutboxCarrier::Internet, "2001:db8:9:1"),
+        (OutboxCarrier::Internet, "2001:db8:7:1"),
+    ] {
+        let adm = Admission::for_addresses(PRODUCTION_INBOUND, carrier);
+        let _held = hold(&adm, format!("{net}::1").parse().unwrap());
+        assert_eq!(
+            adm.admit(format!("{net}::2").parse().unwrap()).err(),
+            Some(Refused::SourceCap),
+            "{carrier:?} {net}::/64"
+        );
+    }
+}
+
+/// LAN-ADM-1: one rule for both keys. On each carrier, a listener's cap key
+/// puts two sources together exactly when the penalty box's key does.
+#[test]
+fn the_admission_key_groups_sources_as_the_penalty_box_does() {
+    let on_link =
+        |ip: IpAddr| matches!(ip, IpAddr::V6(v6) if v6.segments()[..4] == [0x2001, 0xdb8, 7, 1]);
+    let sources: Vec<IpAddr> = [
+        "fe80::1",
+        "fe80::2",
+        "fd00:7::1",
+        "fd00:7::2",
+        "2001:db8:7:1::1",
+        "2001:db8:7:1::2",
+        "2001:db8:9:1::1",
+        "2001:db8:9:1::2",
+        "2001:db8:9:2::1",
+        "198.51.100.1",
+        "198.51.100.2",
+        "::ffff:198.51.100.1",
+        "::ffff:198.51.100.3",
+    ]
+    .iter()
+    .map(|s| s.parse().unwrap())
+    .collect();
+    for carrier in [
+        OutboxCarrier::Lan,
+        OutboxCarrier::Internet,
+        OutboxCarrier::P2p,
+    ] {
+        for &a in &sources {
+            for &b in &sources {
+                assert_eq!(
+                    admission_key_with(a, carrier, on_link)
+                        == admission_key_with(b, carrier, on_link),
+                    penalty_key_with(a, carrier, on_link) == penalty_key_with(b, carrier, on_link),
+                    "{carrier:?}: {a} and {b}"
+                );
+            }
+        }
+    }
+}
+
 /// Loopback (other local profiles, every harness) is never banned, unless
 /// the debug switch `RAVEN_LAB_SEC_PENALTY_LOOPBACK=1` says so. (Its own
 /// loopback address, so a ban never touches another test's.)

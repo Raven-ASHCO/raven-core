@@ -699,13 +699,52 @@ pub(crate) fn penalty_key_with(
     carrier: OutboxCarrier,
     on_link: impl Fn(IpAddr) -> bool,
 ) -> SourceKey {
-    let local = carrier == OutboxCarrier::Lan
-        && matches!(ip.to_canonical(), IpAddr::V6(_))
-        && raven_core::paths::lan_source_is_local(ip, on_link);
-    if local {
+    if local_source_with(ip, carrier, on_link) {
         SourceKey::of_local(ip)
     } else {
         SourceKey::of(ip)
+    }
+}
+
+/// Is `ip`, met on `carrier`, an IPv6 host on the local network, which is
+/// its whole address rather than its /64? At the LAN listener and the
+/// beacon a link-local, unique-local or loopback address, or one inside a
+/// prefix of this computer's networks (`on_link`). The one rule of the
+/// penalty box's key ([`penalty_key_with`]) and of the LAN listener's
+/// per-source caps ([`admission_key_with`]).
+pub(crate) fn local_source_with(
+    ip: IpAddr,
+    carrier: OutboxCarrier,
+    on_link: impl Fn(IpAddr) -> bool,
+) -> bool {
+    carrier == OutboxCarrier::Lan
+        && matches!(ip.to_canonical(), IpAddr::V6(_))
+        && raven_core::paths::lan_source_is_local(ip, on_link)
+}
+
+/// The per-source cap key of a listener on `carrier` for a connection from
+/// `ip` (`netutil::Admission::for_addresses`): [`admission_key_with`], with
+/// this computer's own networks ([`lan_on_link`]).
+pub(crate) fn admission_key(ip: IpAddr, carrier: OutboxCarrier) -> IpAddr {
+    admission_key_with(ip, carrier, lan_on_link)
+}
+
+/// [`admission_key`] with `on_link` telling whether an address is on one of
+/// this computer's networks. An IPv6 host on the local network at the LAN
+/// listener ([`local_source_with`]) is its whole address (LAN-ADM-1): every
+/// link-local host shares fe80::/64 and every SLAAC host one LAN's /64, so
+/// one host's handshakes must not use up its neighbours' slots. Any other
+/// source keeps `netutil::admission_key` (an IPv4 address, an IPv6 /64): a
+/// host on the Internet holds the whole /64.
+pub(crate) fn admission_key_with(
+    ip: IpAddr,
+    carrier: OutboxCarrier,
+    on_link: impl Fn(IpAddr) -> bool,
+) -> IpAddr {
+    if local_source_with(ip, carrier, on_link) {
+        ip.to_canonical()
+    } else {
+        crate::netutil::admission_key(ip)
     }
 }
 

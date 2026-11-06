@@ -157,8 +157,11 @@ bit or vector changed, and the local helper protocol stays version 2.
   it holds. A contact holds at most 4 authenticated links; a newer one closes its oldest (TOR-2).
   §5 now says what these limits defend and what they do not.
 - **LAN Beacon V1 (draft).** [`RAVEN_LAN_BEACON_V1.md`](RAVEN_LAN_BEACON_V1.md) §0: the LAN
-  listener, too, keeps at most 4 authenticated links per contact (LAN-ADM-2), as do the Internet
-  direct, p2p and nearby responders (nearby: 2, its cap per pipe already).
+  listener's per-source caps take an IPv6 host on the local network as its whole address, by the
+  penalty box's rule, instead of its /64, so one host's handshakes no longer use up its IPv6
+  neighbours' slots; a source from outside this host's networks keeps the /64 (LAN-ADM-1). The
+  LAN listener, too, keeps at most 4 authenticated links per contact (LAN-ADM-2), as do the
+  Internet direct, p2p and nearby responders (nearby: 2, its cap per pipe already).
 
 ## Freeze record changes (2026-11-01, a frame-less dial asks for route hints)
 

@@ -1577,7 +1577,12 @@ pub(crate) mod netutil {
                     return Err(Refused::Banned);
                 }
             }
-            let key = admission_key(ip);
+            let key = match self.addresses {
+                // LAN-ADM-1: an IPv6 host on the local network at the LAN
+                // listener is its whole address, as in the penalty box.
+                Some(carrier) => crate::security::admission_key(ip, carrier),
+                None => admission_key(ip),
+            };
             let mut st = lock(&self.state);
             let (mut total, mut handshaking) = (0, 0);
             for c in st.conns.values().filter(|c| c.key == key) {
