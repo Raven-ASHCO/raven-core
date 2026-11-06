@@ -146,8 +146,8 @@ still arrive late, through a friend's custody.
   The receiver deduplicates by `(peer, "in", message_id)`.
 
 **Note (Phase 5a, the long message horizon; informative, no wire change).**
-With `LONG_HORIZON_PRODUCTION_ENABLED` (false; lab only, debug builds with
-`RAVEN_LAB_HORIZON=1`) a Message whose envelope ran out before its deadline
+With `LONG_HORIZON_PRODUCTION_ENABLED` (true in release builds since 2026-10-29;
+a debug build closes it with `RAVEN_LAB_HORIZON=0`) a Message whose envelope ran out before its deadline
 (7 days after it was written) is parked, and the sealer seals it again, under
 the same logical `message_id`, into a newer session once the contact can be
 reached ([`docs/design/2026-10-beyond-24h.md`](../docs/design/2026-10-beyond-24h.md)).
