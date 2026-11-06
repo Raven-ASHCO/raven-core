@@ -144,6 +144,18 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: onion admission)
+
+A behaviour change of the onion listener's admission, not of the wire format: no frame, header,
+caps bit or vector changed, and the local helper protocol stays version 2.
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) §5: a
+  full onion listener never closes a pre-authentication link in its first 10 s (it refuses the
+  newcomer instead), and a rendezvous circuit that lost a pre-authentication link gets no slot in
+  a full listener for the rest of the helper's life (TOR-1). Before, a stranger who holds the card
+  could keep every friend's inbound onion link from completing by opening streams on the circuits
+  it holds. §5 now says what these limits defend and what they do not.
+
 ## Freeze record changes (2026-11-01, a frame-less dial asks for route hints)
 
 A behaviour change of a frozen sender rule, not of the wire format: no frame

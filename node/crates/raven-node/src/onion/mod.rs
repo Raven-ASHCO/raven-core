@@ -1560,8 +1560,12 @@ async fn serve_forward(
 ) -> Infallible {
     let limits = netutil::ONION_INBOUND;
     // No penalty box: every source is the helper (Tor hides who dialled).
-    let admission = Admission::new(limits);
+    // Each source is a rendezvous circuit, which has no say in a full
+    // listener once it lost a pre-auth link in this helper life (TOR-1).
+    let admission = Admission::for_circuits(limits);
     let pre_token = Arc::new(PreToken::default());
+    // The token of the helper life the admission's circuits belong to.
+    let mut life = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
     loop {
         let (stream, peer) = crate::accept_retrying("onion", &mut || listener.accept()).await;
         if !peer.ip().is_loopback() {
@@ -1570,6 +1574,11 @@ async fn serve_forward(
         let _ = stream.set_nodelay(true);
         let (waiting, kicked) = pre_token.enter();
         let token = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
+        if token != life {
+            // A new helper life (§6): its circuit numbers start over.
+            admission.new_life();
+            life = token;
+        }
         let (dd, id) = (data_dir.clone(), identity.clone());
         let (admission, pre_token) = (Arc::clone(&admission), Arc::clone(&pre_token));
         tokio::spawn(async move {

@@ -216,7 +216,7 @@ where
 /// Transport plumbing shared by the LAN-direct and internet-direct dialers and
 /// listeners, so the two carriers cannot drift apart again.
 pub(crate) mod netutil {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::convert::Infallible;
     use std::future::Future;
     use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -1169,6 +1169,11 @@ pub(crate) mod netutil {
         /// Noise handshake, bind and offer exchange: separate from (and much
         /// shorter than) `lifetime`, so an idle connection cannot sit on a slot.
         pub handshake_deadline: Duration,
+        /// A pre-auth connection this young is never displaced: a full
+        /// listener whose pre-auth connections are all younger refuses the
+        /// newcomer instead. Zero: any of them may give way. The onion
+        /// listener's covers a friend's handshake over Tor (TOR-1).
+        pub preauth_grace: Duration,
         /// How long a link waits, before its handshake, for a contact book
         /// this process holds while its key loads ([`book_open_within`]).
         /// Well below a dialer's wait for Noise message 2 (30 s): a dialer
@@ -1183,6 +1188,7 @@ pub(crate) mod netutil {
         max_frames: 64,
         lifetime: Duration::from_secs(120),
         handshake_deadline: Duration::from_secs(10),
+        preauth_grace: Duration::ZERO,
         book_wait: BOOK_WAIT,
     };
 
@@ -1197,16 +1203,20 @@ pub(crate) mod netutil {
         max_frames: 64,
         lifetime: Duration::from_secs(300),
         handshake_deadline: Duration::from_secs(20),
+        preauth_grace: Duration::ZERO,
         book_wait: BOOK_WAIT,
     };
 
     /// The Tor onion carrier's inbound links (RAVEN_ONION_CARRIER_V1 §5):
     /// every one arrives from the Tor helper on loopback, after its token,
     /// with the number of the rendezvous circuit it came on; the admission
-    /// key is that circuit (`crate::onion`), so the per-source caps are per
-    /// circuit and one client's circuit cannot hold every slot (a full
-    /// listener displaces a pre-auth link of the busiest circuit). The
-    /// handshake deadline allows Tor round trips
+    /// key is that circuit (`crate::onion`, [`Admission::for_circuits`]), so
+    /// the per-source caps are per circuit and one client's circuit cannot
+    /// hold every slot (a full listener displaces a pre-auth link of the
+    /// busiest circuit). A pre-auth link is never displaced in its first
+    /// 10 s: a friend's handshake over Tor (about three round trips) is not
+    /// cut by a stranger who keeps opening streams (TOR-1). The handshake
+    /// deadline allows Tor round trips
     /// (`raven_core::onion::ONION_HANDSHAKE_DEADLINE`).
     pub(crate) const ONION_INBOUND: InboundLimits = InboundLimits {
         max_conns: 16,
@@ -1215,6 +1225,7 @@ pub(crate) mod netutil {
         max_frames: 64,
         lifetime: Duration::from_secs(180),
         handshake_deadline: raven_core::onion::ONION_HANDSHAKE_DEADLINE,
+        preauth_grace: Duration::from_secs(10),
         book_wait: BOOK_WAIT,
     };
 
@@ -1275,7 +1286,47 @@ pub(crate) mod netutil {
         /// Still pre-auth: counts against the small per-source cap and may be
         /// displaced by a newcomer.
         handshaking: bool,
+        /// When it was admitted ([`InboundLimits::preauth_grace`]).
+        admitted: Instant,
+        /// The helper life it was admitted in ([`Admission::new_life`]).
+        life: u64,
         displaced: Arc<Notify>,
+    }
+
+    /// At most this many circuits are remembered as having lost a pre-auth
+    /// link ([`Admission::for_circuits`]), the oldest forgotten first: a
+    /// stranger needs a circuit it never used for each one, and so an
+    /// introduction (5 a second per introduction point), so this is minutes
+    /// of them. 16 bytes each.
+    const LOST_CIRCUITS_MAX: usize = 4096;
+
+    /// The circuits that lost a pre-auth link in this helper life (TOR-1).
+    #[derive(Debug, Default)]
+    struct LostCircuits {
+        keys: HashSet<IpAddr>,
+        order: VecDeque<IpAddr>,
+    }
+
+    impl LostCircuits {
+        fn insert(&mut self, key: IpAddr) {
+            if self.keys.insert(key) {
+                self.order.push_back(key);
+                if self.order.len() > LOST_CIRCUITS_MAX {
+                    if let Some(oldest) = self.order.pop_front() {
+                        self.keys.remove(&oldest);
+                    }
+                }
+            }
+        }
+
+        fn contains(&self, key: &IpAddr) -> bool {
+            self.keys.contains(key)
+        }
+
+        fn clear(&mut self) {
+            self.keys.clear();
+            self.order.clear();
+        }
     }
 
     #[derive(Debug, Default)]
@@ -1284,19 +1335,29 @@ pub(crate) mod netutil {
         /// Live connections, oldest first (ids grow with admission order).
         /// At most `max_conns`, so counting by scan is cheap.
         conns: BTreeMap<u64, Conn>,
+        /// The onion listener's ([`Admission::for_circuits`]): the helper's
+        /// current life, and the circuits that lost a pre-auth link in it.
+        life: u64,
+        lost: LostCircuits,
     }
 
     impl AdmissionState {
         /// The pre-auth connection to give up when the listener is full: the
         /// oldest one of the source holding the most pre-auth connections
         /// (a handshake that has had the longest to finish and has not is the
-        /// most likely to be silent). `None` when there is no pre-auth
-        /// connection, or when the newcomer's own source (`mine` pre-auth
-        /// connections) already holds as many as that one: a source at its
-        /// fair share cannot push anyone else out.
-        fn displaceable(&self, mine: usize) -> Option<u64> {
+        /// most likely to be silent), among those at least `grace` old at
+        /// `now`. `None` when there is no such connection, or when the
+        /// newcomer's own source (`mine` pre-auth connections) already holds
+        /// as many as that one: a source at its fair share cannot push anyone
+        /// else out.
+        fn displaceable(&self, mine: usize, now: Instant, grace: Duration) -> Option<u64> {
+            let old_enough = |c: &Conn| now.saturating_duration_since(c.admitted) >= grace;
             let mut best: Option<(u64, usize)> = None;
-            for (&id, conn) in self.conns.iter().filter(|(_, c)| c.handshaking) {
+            for (&id, conn) in self
+                .conns
+                .iter()
+                .filter(|(_, c)| c.handshaking && old_enough(c))
+            {
                 let n = self
                     .conns
                     .values()
@@ -1309,6 +1370,22 @@ pub(crate) mod netutil {
             }
             best.filter(|&(_, n)| n > mine).map(|(id, _)| id)
         }
+
+        /// A pre-auth connection of the circuit `key`, admitted in helper
+        /// life `life`, was displaced or ended: in this life that circuit
+        /// gets no slot in a full listener any more (TOR-1). One of an
+        /// earlier life was another circuit.
+        fn mark_lost(&mut self, key: IpAddr, life: u64) {
+            if life == self.life {
+                self.lost.insert(key);
+            }
+        }
+    }
+
+    /// The admission's clock: tokio's (a paused test runtime moves it), the
+    /// monotonic clock elsewhere.
+    fn admission_now() -> Instant {
+        tokio::time::Instant::now().into_std()
     }
 
     /// Global and per-source admission for one listener. A slot is released
@@ -1317,9 +1394,10 @@ pub(crate) mod netutil {
     ///
     /// A full listener makes room for a newcomer by displacing a pre-auth
     /// connection of a busier source (see `AdmissionState::displaceable`), so a
-    /// pool of silent sockets cannot lock real peers out. Authenticated
-    /// sessions are never displaced, and a source over its own caps is simply
-    /// refused.
+    /// pool of silent sockets cannot lock real peers out; one younger than
+    /// the listener's [`InboundLimits::preauth_grace`] is never displaced.
+    /// Authenticated sessions are never displaced, and a source over its own
+    /// caps is simply refused.
     ///
     /// A listener whose sources are network addresses
     /// ([`Admission::for_addresses`]) also asks the process's penalty box
@@ -1334,6 +1412,9 @@ pub(crate) mod netutil {
         /// applies, keyed as that carrier's sources are
         /// (`security::penalty_key`).
         addresses: Option<OutboxCarrier>,
+        /// The sources are the onion helper's rendezvous circuits
+        /// ([`Self::for_circuits`]).
+        circuits: bool,
     }
 
     /// Why [`Admission::admit`] refused a connection.
@@ -1366,21 +1447,50 @@ pub(crate) mod netutil {
         /// Sources that are keys, not addresses (the p2p responder's, the
         /// radio pipes'): the penalty box never applies.
         pub(crate) fn new(limits: InboundLimits) -> Arc<Self> {
-            Self::with(limits, None)
+            Self::with(limits, None, false)
         }
 
         /// A listener on `carrier` whose sources are network addresses (LAN,
         /// Internet direct): the penalty box applies.
         pub(crate) fn for_addresses(limits: InboundLimits, carrier: OutboxCarrier) -> Arc<Self> {
-            Self::with(limits, Some(carrier))
+            Self::with(limits, Some(carrier), false)
         }
 
-        fn with(limits: InboundLimits, addresses: Option<OutboxCarrier>) -> Arc<Self> {
+        /// The onion carrier's forward listener (RAVEN_ONION_CARRIER_V1 §5):
+        /// each source is a rendezvous circuit, a number the helper never
+        /// reuses within one life (`crate::onion`), and no penalty box
+        /// applies (Tor hides who dialled). A circuit that lost a pre-auth
+        /// link in this helper life (displaced, or ended before it
+        /// authenticated) gets no slot while the listener is full, so it
+        /// displaces nobody (TOR-1): a stranger who opens stream after stream
+        /// on the circuits it holds cannot push a friend's handshake out, and
+        /// each slot it takes from a full listener costs it a circuit it never
+        /// used before. [`Self::new_life`] forgets them.
+        pub(crate) fn for_circuits(limits: InboundLimits) -> Arc<Self> {
+            Self::with(limits, None, true)
+        }
+
+        fn with(
+            limits: InboundLimits,
+            addresses: Option<OutboxCarrier>,
+            circuits: bool,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 state: Mutex::new(AdmissionState::default()),
                 limits,
                 addresses,
+                circuits,
             })
+        }
+
+        /// A new helper life (a new token, RAVEN_ONION_CARRIER_V1 §6): its
+        /// circuit numbers start over, so the circuits that lost a link in
+        /// the last life are forgotten, and a link of the last life that ends
+        /// from now on costs no circuit of this one anything.
+        pub(crate) fn new_life(&self) {
+            let mut st = lock(&self.state);
+            st.life += 1;
+            st.lost.clear();
         }
 
         pub(crate) fn try_admit(self: &Arc<Self>, ip: IpAddr) -> Option<AdmissionSlot> {
@@ -1389,6 +1499,11 @@ pub(crate) mod netutil {
 
         /// [`Self::try_admit`], saying why it refused.
         pub(crate) fn admit(self: &Arc<Self>, ip: IpAddr) -> Result<AdmissionSlot, Refused> {
+            self.admit_at(ip, admission_now())
+        }
+
+        /// [`Self::admit`] at `now` (tests: their own clock).
+        fn admit_at(self: &Arc<Self>, ip: IpAddr, now: Instant) -> Result<AdmissionSlot, Refused> {
             if let Some(carrier) = self.addresses {
                 if crate::security::admit_source(ip, carrier)
                     == raven_core::security_events::Admit::Deny
@@ -1408,8 +1523,19 @@ pub(crate) mod netutil {
                 return Err(Refused::SourceCap);
             }
             if st.conns.len() >= self.limits.max_conns {
-                let victim = st.displaceable(handshaking).ok_or(Refused::Full)?;
+                // TOR-1: a circuit that already lost a pre-auth link in this
+                // helper life gets no slot in a full listener, and so pushes
+                // nobody out.
+                if self.circuits && st.lost.contains(&key) {
+                    return Err(Refused::Full);
+                }
+                let victim = st
+                    .displaceable(handshaking, now, self.limits.preauth_grace)
+                    .ok_or(Refused::Full)?;
                 if let Some(conn) = st.conns.remove(&victim) {
+                    if self.circuits {
+                        st.mark_lost(conn.key, conn.life);
+                    }
                     // Stores a permit, so the wake-up is not lost if the
                     // victim's task has not polled yet.
                     conn.displaced.notify_one();
@@ -1418,11 +1544,14 @@ pub(crate) mod netutil {
             let id = st.next_id;
             st.next_id += 1;
             let displaced = Arc::new(Notify::new());
+            let life = st.life;
             st.conns.insert(
                 id,
                 Conn {
                     key,
                     handshaking: true,
+                    admitted: now,
+                    life,
                     displaced: Arc::clone(&displaced),
                 },
             );
@@ -1477,8 +1606,16 @@ pub(crate) mod netutil {
 
     impl Drop for AdmissionSlot {
         fn drop(&mut self) {
+            let mut st = lock(&self.admission.state);
             // Already gone if it was displaced.
-            lock(&self.admission.state).conns.remove(&self.id);
+            if let Some(conn) = st.conns.remove(&self.id) {
+                // A circuit's link that ended before it authenticated (a
+                // silent stream at its first-message wait, a stranger at the
+                // contact gate, a stalled handshake): TOR-1.
+                if conn.handshaking && self.admission.circuits {
+                    st.mark_lost(conn.key, conn.life);
+                }
+            }
         }
     }
 
@@ -2293,6 +2430,136 @@ pub(crate) mod netutil {
                 adm.try_admit("2001:db8::2".parse().unwrap()).is_none(),
                 "one host cannot dodge the cap with many addresses in its /64"
             );
+        }
+
+        /// The onion listener's source for rendezvous circuit `n`, as
+        /// `crate::onion` makes it: a unique-local /64 per circuit number.
+        fn circuit(n: u64) -> IpAddr {
+            let mut octets = [0u8; 16];
+            octets[0] = 0xfd;
+            octets[1..8].copy_from_slice(&n.to_be_bytes()[1..]);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+
+        /// TOR-1: a stranger who holds the card fills the onion listener with
+        /// silent links on 16 circuits, then keeps opening streams, both on
+        /// the circuits whose link was pushed out and on fresh ones. Each
+        /// newcomer used to displace the oldest pre-auth link, so a friend's
+        /// link was closed before its handshake (about three Tor round trips)
+        /// was done. A friend's link that got a slot now stays through its
+        /// first 10 s, and once it authenticated no stranger displaces it.
+        #[test]
+        fn a_friends_onion_handshake_outlives_a_stranger_who_keeps_reopening() {
+            let adm = Admission::for_circuits(ONION_INBOUND);
+            let t0 = Instant::now();
+            let at = |ms: u64| t0 + Duration::from_millis(ms);
+            let mut stranger: Vec<AdmissionSlot> = (1..=16)
+                .map(|c| adm.admit_at(circuit(c), t0).expect("an empty listener"))
+                .collect();
+            // 11 s later every silent link is past its 10 s: the friend gets
+            // the oldest one's slot.
+            let mut friend = adm
+                .admit_at(circuit(99), at(11_000))
+                .expect("the friend gets a slot");
+            // Its handshake takes a few round trips, and the stranger keeps
+            // opening streams all the while: 64 round its circuits (and one,
+            // 17, it never used yet) and 16 on fresh circuits, all within the
+            // friend's first 10 s.
+            let (mut round, mut fresh) = (0u64, 100u64);
+            for i in 0..80u64 {
+                let source = if i % 5 == 4 {
+                    fresh += 1;
+                    circuit(fresh)
+                } else {
+                    round += 1;
+                    circuit(1 + (round - 1) % 17)
+                };
+                if let Ok(slot) = adm.admit_at(source, at(11_000 + 100 * i)) {
+                    stranger.push(slot);
+                }
+                assert!(friend.is_live(), "the friend's link survived newcomer {i}");
+            }
+            // Its handshake done within those 10 s: no stranger displaces it.
+            friend.authenticated();
+            for i in 0..32u64 {
+                if let Ok(slot) = adm.admit_at(circuit(200 + i), at(30_000 + 100 * i)) {
+                    stranger.push(slot);
+                }
+                assert!(friend.is_live(), "the authenticated link survived {i}");
+            }
+        }
+
+        /// TOR-1: the onion listener never displaces a pre-auth link in its
+        /// first 10 s; full of younger ones it refuses a newcomer. Past that
+        /// the busiest circuit's oldest gives way, as on every listener.
+        #[test]
+        fn a_full_onion_listener_spares_links_in_their_first_10_s() {
+            let adm = Admission::for_circuits(ONION_INBOUND);
+            let t0 = Instant::now();
+            let held: Vec<AdmissionSlot> = (1..=16)
+                .map(|c| adm.admit_at(circuit(c), t0).unwrap())
+                .collect();
+            assert_eq!(
+                adm.admit_at(circuit(17), t0 + Duration::from_millis(9_999))
+                    .err(),
+                Some(Refused::Full),
+                "every link is in its first 10 s"
+            );
+            assert!(held.iter().all(AdmissionSlot::is_live));
+            let _newcomer = adm
+                .admit_at(circuit(17), t0 + Duration::from_secs(10))
+                .expect("past the 10 s");
+            assert!(!held[0].is_live(), "the oldest gave way");
+            assert!(held[1..].iter().all(AdmissionSlot::is_live));
+        }
+
+        /// TOR-1: a circuit that lost a pre-auth link (it ended before it
+        /// authenticated, or was displaced) gets no slot while the listener
+        /// is full, so it displaces nobody; with room it gets one as before.
+        /// A new helper life (a new token) forgets those circuits, as its
+        /// circuit numbers start over, and a link of the last life that ends
+        /// after it costs no circuit of the new one anything.
+        #[test]
+        fn a_circuit_that_lost_a_link_waits_for_room_until_the_next_helper_life() {
+            let adm = Admission::for_circuits(ONION_INBOUND);
+            let t0 = Instant::now();
+            let late = t0 + Duration::from_secs(11);
+            // Circuit 1's silent link ends unauthenticated.
+            drop(adm.admit_at(circuit(1), t0).unwrap());
+            let mut held: Vec<AdmissionSlot> = (2..=17)
+                .map(|c| adm.admit_at(circuit(c), t0).unwrap())
+                .collect();
+            assert_eq!(
+                adm.admit_at(circuit(1), late).err(),
+                Some(Refused::Full),
+                "full: no slot for a circuit that lost a link"
+            );
+            assert!(
+                held.iter().all(AdmissionSlot::is_live),
+                "it displaced nobody"
+            );
+            // A fresh circuit still displaces the oldest link past its first
+            // 10 s, and that link's circuit has lost one now.
+            let fresh = adm.admit_at(circuit(18), late).expect("a fresh circuit");
+            assert!(!held[0].is_live(), "circuit 2's link gave way");
+            assert_eq!(adm.admit_at(circuit(2), late).err(), Some(Refused::Full));
+            // With room they get a slot as before.
+            held.remove(0);
+            drop(fresh);
+            let _back = adm.admit_at(circuit(1), late).expect("room for it");
+            assert_eq!(adm.admit_at(circuit(2), late).err(), Some(Refused::Full));
+            // A new helper life: nothing is held against its circuits.
+            adm.new_life();
+            let _renewed = adm
+                .admit_at(circuit(2), late)
+                .expect("circuit 2 of the new life");
+            assert!(
+                !held[0].is_live(),
+                "circuit 3's link (the last life) gave way"
+            );
+            let _three = adm
+                .admit_at(circuit(3), late)
+                .expect("a link of the last life marks no circuit of this one");
         }
 
         #[test]
