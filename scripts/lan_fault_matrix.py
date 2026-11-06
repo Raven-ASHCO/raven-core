@@ -854,6 +854,9 @@ LAB_SWITCHES = (
     'RAVEN_LAB_TOR', 'RAVEN_LAB_TOR_LOOPBACK', 'RAVEN_LAB_TOR_HEAD_START_MS',
     'RAVEN_LAB_TOR_LOOPBACK_STALL', 'RAVEN_LAB_TOR_LOOPBACK_OBSOLETE',
     'RAVEN_LAB_TOR_LOOPBACK_DELAY_MS',
+    # The onion dials' stage record file (speed groundwork, D1): only the D1
+    # harness (scripts/tor_d1_harness.py) sets it.
+    'RAVEN_LAB_TOR_STAGES',
 )
 # The debug lab switches a caller's value may reach the nodes through: the
 # session-reset level (the caller's opt-in to the reset scenarios, RESET_ON)

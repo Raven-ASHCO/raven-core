@@ -357,6 +357,7 @@ Shown by `raven status --explain tor` and in the docs:
 | Helper path | Next to `raven-node`; debug builds may override it with `RAVEN_TOR_HELPER=<path>`. |
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. |
 | Head start | `RAVEN_LAB_TOR_HEAD_START_MS` (debug only, tests) overrides 1.5 s. |
+| Stage record | Debug builds only (speed groundwork for the D1 measurement, security and speed report 2026-11-05 §7): every onion dial's step times in memory, as durations only (`prep`, `connect` with its `circuit` and `begin` parts, `noise`, `hello`, `write`, `receipt`, `total`; never a key, an onion id, an address or a message). `RAVEN_LAB_TOR_STAGES=<absolute path>` with `RAVEN_LAB_TEST_A=1` appends one JSON line per dial for the D1 harness. Arti gets the circuit and opens the stream in one call, so `circuit` and `begin` split the helper's connect by the one round trip rule (BEGIN to CONNECTED takes as long as the Noise round trip that follows on the same circuit). Release builds keep nothing. |
 
 ## 5. Tests
 

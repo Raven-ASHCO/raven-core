@@ -45,6 +45,7 @@
 
 pub(crate) mod proto;
 pub(crate) mod race;
+pub(crate) mod stages;
 pub(crate) mod watch;
 
 /// The Tor helper's own Arti code, run inside this process (the iOS app;
@@ -1720,8 +1721,32 @@ const ONION_BAD_ROUTE: &str = "onion route must be onion:<64 hex>";
 /// route `dial` ([`raven_core::onion::dial_for`]): the helper's Tor stream,
 /// then the Raven link ([`ONION_LINK`]), `frames` and their replies. Waits
 /// sized for Tor (design §3.5). In the outbox race, `meta.race` claims the
-/// attempt when the link authenticated.
+/// attempt when the link authenticated. A debug build keeps its stage
+/// times ([`stages`]).
 pub(crate) async fn dial_with_meta(
+    data_dir: &Path,
+    dial: &str,
+    expected_pub_hex: &str,
+    frames: &[Vec<u8>],
+    meta: DialMeta,
+) -> Result<Vec<Vec<u8>>, String> {
+    let purpose = if meta.send_check {
+        stages::Purpose::Check
+    } else if meta.race.is_some() {
+        stages::Purpose::Outbox
+    } else {
+        stages::Purpose::Dial
+    };
+    stages::timed(
+        purpose,
+        frames.len(),
+        dial_marked(data_dir, dial, expected_pub_hex, frames, meta),
+    )
+    .await
+}
+
+/// [`dial_with_meta`] itself.
+async fn dial_marked(
     data_dir: &Path,
     dial: &str,
     expected_pub_hex: &str,
@@ -1799,6 +1824,7 @@ async fn connect_via_helper(
             .await
             .map_err(|_| ONION_NOT_READY.to_string())?;
         let _ = stream.set_nodelay(true);
+        stages::mark(stages::Step::Asked);
         stream
             .write_all(&proto::encode_connect(
                 &token,
@@ -1818,7 +1844,10 @@ async fn connect_via_helper(
             .await
             .map_err(|_| ONION_NOT_READY.to_string())?;
         match ConnectReply::decode(head[0], &reason) {
-            ConnectReply::Ok => Ok(stream),
+            ConnectReply::Ok => {
+                stages::mark(stages::Step::Connected);
+                Ok(stream)
+            }
             ConnectReply::NotReady(_) => Err(ONION_NOT_READY.to_string()),
             ConnectReply::Unreachable(why)
             | ConnectReply::Timeout(why)

@@ -696,6 +696,92 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     );
 }
 
+/// The stage record (speed groundwork, D1): each onion dial keeps one
+/// record of durations, its steps split where the time goes. Over a
+/// loopback Tor whose every connect takes `delay` and whose every byte
+/// arrives `latency` later (one round trip r = 2 x latency): the connect
+/// is at least `delay`, and Noise, the hellos and the receipt are one round
+/// trip each (never two), the frame write only local work. The connect's
+/// two parts add up to it. A send's check (no frames) has no write and no
+/// receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let (delay, latency) = (Duration::from_millis(900), Duration::from_millis(200));
+    let Some(f) = Friends::with(loopback::Knobs {
+        delay,
+        latency,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let ((), records) = stages::caught(async {
+        let replies = f
+            .alice_dials_bob("timed over Tor")
+            .await
+            .expect("delivered");
+        assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+        let check = dial_with_meta(
+            f.a.path(),
+            &raven_core::onion::dial_for(&f.side_b.hs_id),
+            &hex::encode(f.bob_pub),
+            &[],
+            DialMeta {
+                send_check: true,
+                ..DialMeta::default()
+            },
+        )
+        .await
+        .expect("the check answered");
+        assert!(!check.is_empty(), "the friend's offer");
+    })
+    .await;
+    eprintln!("stage records: {records:?}");
+    assert_eq!(records.len(), 2, "one record per dial: {records:?}");
+    let ms = |d: Duration| u32::try_from(d.as_millis()).unwrap();
+    let (r, delay, slack) = (2 * ms(latency), ms(delay), 350);
+    // One round trip, give or take local work, never two.
+    let one_trip = |step: &str, got: Option<u32>| {
+        let got = got.unwrap_or_else(|| panic!("no {step}: {records:?}"));
+        assert!(
+            (r..r + slack).contains(&got),
+            "{step} {got} ms, r {r}: {records:?}"
+        );
+    };
+    let (sent, checked) = (&records[0], &records[1]);
+    assert_eq!(
+        (sent.purpose, sent.frames, sent.ok),
+        (stages::Purpose::Dial, 1, true)
+    );
+    assert_eq!(
+        (checked.purpose, checked.frames, checked.ok),
+        (stages::Purpose::Check, 0, true)
+    );
+    for record in [sent, checked] {
+        let connect = record.connect_ms.expect("connect");
+        assert!(
+            (delay..delay + slack).contains(&connect),
+            "connect: {record:?}"
+        );
+        assert_eq!(
+            record.circuit_ms.zip(record.begin_ms).map(|(c, b)| c + b),
+            Some(connect),
+            "{record:?}"
+        );
+        one_trip("noise", record.noise_ms);
+        one_trip("hello", record.hello_ms);
+    }
+    one_trip("receipt", sent.receipt_ms);
+    assert!(sent.write_ms.expect("write") < slack, "{sent:?}");
+    assert_eq!(
+        (checked.write_ms, checked.receipt_ms),
+        (None, None),
+        "{checked:?}"
+    );
+}
+
 /// Tor as a helper that is still starting says it ([`Phase::Starting`],
 /// no connect port yet) until the guard goes; then as it was.
 struct TorStarting;

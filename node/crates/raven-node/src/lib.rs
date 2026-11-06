@@ -962,6 +962,7 @@ pub(crate) mod netutil {
         pub(crate) fn mark_frames_sent(&mut self) {
             self.sent_at = Some(tokio::time::Instant::now());
             self.budget.mark_frames_sent();
+            crate::onion::stages::mark(crate::onion::stages::Step::Written);
         }
 
         /// How long to wait for the first reply.
@@ -988,6 +989,7 @@ pub(crate) mod netutil {
             if is_terminal_reply(&frame) {
                 self.first_reply_at
                     .get_or_insert_with(tokio::time::Instant::now);
+                crate::onion::stages::mark(crate::onion::stages::Step::Receipt);
                 self.seen += 1;
             }
             self.replies.push(frame);

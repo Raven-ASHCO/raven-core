@@ -495,6 +495,7 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
             write_raw(stream, &m1).await?;
             let m2 = read_raw(stream).await?;
             handshake_read(&mut hs, &m2).map_err(|e| e.to_string())?;
+            crate::onion::stages::mark(crate::onion::stages::Step::Noise);
             // As on LAN: neither our static (message 3) nor our signed hello
             // goes to a key that is not the one pinned for this contact (on
             // onion links, the onion link static's pin: TOR-3).
@@ -509,6 +510,7 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
             write_raw(stream, dial.m1()).await?;
             let m2 = read_raw(stream).await.map_err(|e| knock.m2_error(e))?;
             let (remote_static, proof) = knock.read_m2(&mut dial, &m2)?;
+            crate::onion::stages::mark(crate::onion::stages::Step::Noise);
             let step = knock.step(proof, identity, pinned, expected, &remote_static);
             // A seeded knock without a proof: the caller knocks once more
             // with the pair's root (Phase 6b P6.38) before this is an
@@ -562,6 +564,7 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
         crate::security::address_impostor_by(expected, link.carrier, None, &pk);
         return Err("internet hello identity mismatch".into());
     }
+    crate::onion::stages::mark(crate::onion::stages::Step::Hello);
     // Both hellos through: PAD1 from the next frame on when both offered it.
     t.pad = pad_after_hellos(offers, caps);
     Ok((pk, caps, t, remote_static, knocked))
