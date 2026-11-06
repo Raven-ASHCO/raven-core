@@ -1831,9 +1831,49 @@ pub(crate) mod netutil {
         std::eprintln!("{}", stamped(line));
     }
 
+    /// The UTC time, a space, then `line` with every character that could
+    /// start a line or steer the terminal showing the log written as an
+    /// escape ([`LogSafe`]): a field from a peer, a helper or a file cannot
+    /// pass for a line of its own.
     fn stamped(line: std::fmt::Arguments<'_>) -> String {
         let ms = raven_core::clock::now_ms();
-        format!("{} {line}", raven_core::local_time::utc_stamp(ms))
+        let mut out = raven_core::local_time::utc_stamp(ms);
+        out.push(' ');
+        let _ = std::fmt::Write::write_fmt(&mut LogSafe(&mut out), line);
+        out
+    }
+
+    /// Writes text into a log line: C0 and C1 controls, DEL, the bidi
+    /// controls and the line and paragraph separators become `\n`, `\r`,
+    /// `\t` or `\u{..}`; everything else is kept as it is.
+    struct LogSafe<'a>(&'a mut String);
+
+    impl std::fmt::Write for LogSafe<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                match c {
+                    '\n' => self.0.push_str("\\n"),
+                    '\r' => self.0.push_str("\\r"),
+                    '\t' => self.0.push_str("\\t"),
+                    c if c.is_control()
+                        || matches!(
+                            c,
+                            '\u{61c}'
+                                | '\u{200e}'
+                                | '\u{200f}'
+                                | '\u{202a}'..='\u{202e}'
+                                | '\u{2066}'..='\u{2069}'
+                                | '\u{2028}'
+                                | '\u{2029}'
+                        ) =>
+                    {
+                        write!(self.0, "\\u{{{:x}}}", c as u32)?
+                    }
+                    c => self.0.push(c),
+                }
+            }
+            Ok(())
+        }
     }
 
     /// The other side of a link in a log line: a short tag, the same for the
@@ -2079,6 +2119,54 @@ pub(crate) mod netutil {
                 line.ends_with("Z raven-node: BRIDGE lan listen 127.0.0.1:1"),
                 "{line}"
             );
+        }
+
+        /// A field of a log line can come from a peer, a helper or a file
+        /// (an error text, a folder name). It must not start a line of its
+        /// own, which would read as a line raven-node wrote, nor move the
+        /// cursor, clear, recolour or retitle the terminal that shows the
+        /// log, nor turn the order of its text around. Every such character
+        /// is written as an escape ([`stamped`], which every log write
+        /// uses): the line stays one line and still says what came.
+        #[test]
+        fn a_logged_field_cannot_start_a_line_or_steer_a_terminal() {
+            let forged = "2026-11-06T10:00:00Z lan_direct inbound: DELIVERED bytes=1";
+            let field = format!(
+                "x\n{forged}\r\u{1b}[2J\u{1b}]0;t\u{7}\u{9b}31m\u{85}\u{2028}\u{2029}\
+                 \u{202a}\u{202e}\u{2066}\u{2069}\u{200e}\u{200f}\u{61c}\u{7f}\u{0}\t\u{b}\u{c}end"
+            );
+            let line = stamped(format_args!("peer said: {field}"));
+            let steers = |c: char| {
+                c.is_control()
+                    || matches!(
+                        c,
+                        '\u{61c}'
+                            | '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{2028}'
+                            | '\u{2029}'
+                    )
+            };
+            let left: Vec<char> = line.chars().filter(|&c| steers(c)).collect();
+            assert!(left.is_empty(), "{left:?} in {line:?}");
+            assert_eq!(line.lines().count(), 1, "{line:?}");
+            let (stamp, rest) = line.split_once(' ').unwrap();
+            assert!(stamp.ends_with('Z'), "{line:?}");
+            assert_eq!(
+                rest,
+                format!(
+                    "peer said: x\\n{forged}\\r\\u{{1b}}[2J\\u{{1b}}]0;t\\u{{7}}\\u{{9b}}31m\
+                     \\u{{85}}\\u{{2028}}\\u{{2029}}\\u{{202a}}\\u{{202e}}\\u{{2066}}\\u{{2069}}\
+                     \\u{{200e}}\\u{{200f}}\\u{{61c}}\\u{{7f}}\\u{{0}}\\t\\u{{b}}\\u{{c}}end"
+                )
+            );
+            // Text in any script, joiners and emoji included, is kept as it
+            // is, and so is a backslash already in a field (a Windows path).
+            let words = "سلام\u{200c}ها 👋🏽 Grüße C:\\Raven\\data";
+            let line = stamped(format_args!("{words}"));
+            assert_eq!(line.split_once(' ').unwrap().1, words);
         }
 
         #[test]
@@ -4295,7 +4383,10 @@ impl NodeState {
                             let peer_fp = crate::fingerprint_of(&peer_pub);
                             let body = String::from_utf8_lossy(&plaintext);
                             let body = body.trim_end_matches(['\r', '\n']);
-                            eprintln!("\n── INCOMING from {} ──", peer_fp);
+                            // A log line is one line: a field's line break
+                            // is written as an escape (netutil::stamped).
+                            eprintln!();
+                            eprintln!("── INCOMING from {} ──", peer_fp);
                             for line in body.lines() {
                                 eprintln!("│ {}", line);
                             }
