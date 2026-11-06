@@ -4496,9 +4496,10 @@ struct Host {
     dns_answers: DnsAnswers,
     /// INET-STUN-1: each open connection this host dialled at a plain TCP or
     /// QUIC address whose IP no DNS answer had given when it came up, with
-    /// its transport ([`Self::note_plain_dial`]): only these may vouch for
-    /// this host's public IP ([`Self::outside_view`]).
-    dialled_plain: HashMap<ConnectionId, Tr>,
+    /// its transport and whether it asked to leave from the listen port
+    /// ([`Self::note_plain_dial`]): only these may vouch for this host's
+    /// public IP ([`Self::outside_view`]).
+    dialled_plain: HashMap<ConnectionId, (Tr, PortUse)>,
 }
 
 /// Peers [`Host::dialled`] remembers (the oldest go first).
@@ -5949,8 +5950,8 @@ impl Host {
         }
     }
 
-    /// Auto-reach (design §3.2, INET-STUN-1): the IP `peer` saw this host at
-    /// on `conn` (Identify's raw observed address, TCP or QUIC), when that
+    /// Auto-reach (design §3.2, INET-STUN-1): where `peer` saw this host on
+    /// `conn` (Identify's raw observed address, TCP or QUIC), when that
     /// view may vouch for the public address STUN or the router named: a
     /// connection this host dialled directly ([`ConnOrigin::Dialled`]: not
     /// through a relay, not a hole punch, not a circuit address) at a plain
@@ -5973,27 +5974,35 @@ impl Host {
         conn: ConnectionId,
         peer: &PeerId,
         observed: &Multiaddr,
-    ) -> Option<IpAddr> {
+    ) -> Option<crate::autoreach::Sighting> {
         let dialled = lock(&self.handle.conns).origin(conn) == Some(ConnOrigin::Dialled);
         let vouches = self.slots.iter().any(|s| s.peer == *peer)
             || self.gate.class_of(peer).intersects(PeerClass::CONTACT);
         let (tr, at) = raw_endpoint(observed)?;
-        let plain = self.dialled_plain.get(&conn) == Some(&tr);
-        (dialled && vouches && plain).then_some(at.ip())
+        let &(by, port_use) = self.dialled_plain.get(&conn)?;
+        // Over QUIC from the listen socket, the view names that socket's
+        // public mapping: the endpoint STUN's anchor named, or not.
+        (dialled && vouches && by == tr).then_some(crate::autoreach::Sighting {
+            at,
+            quic: tr == Tr::Quic && port_use == PortUse::Reuse,
+        })
     }
 
     /// INET-STUN-1 (design §3.2): connection `id` came up. One this host
     /// dialled at a plain TCP or QUIC address (no circuit, no WebSocket: a
     /// WSS dial may go through the HTTPS proxy or a TLS front, whose address
     /// the peer then sees) whose IP no DNS answer gave ([`DnsAnswers`]) is
-    /// kept with its transport ([`Self::dialled_plain`]).
+    /// kept with its transport and port use ([`Self::dialled_plain`]).
     fn note_plain_dial(&mut self, id: ConnectionId, endpoint: &ConnectedPoint, now: Instant) {
-        let ConnectedPoint::Dialer { address, .. } = endpoint else {
+        let ConnectedPoint::Dialer {
+            address, port_use, ..
+        } = endpoint
+        else {
             return;
         };
         if let Some((tr, to)) = raw_endpoint(address) {
             if !self.dns_answers.gave(to.ip(), now) {
-                self.dialled_plain.insert(id, tr);
+                self.dialled_plain.insert(id, (tr, *port_use));
             }
         }
     }
@@ -7100,8 +7109,9 @@ impl Host {
                 // Auto-reach (design §3.2): a contact's or relay's view on a
                 // connection we dialled directly vouches for the public IP
                 // STUN or the router named before contacts are told it.
-                if let Some(ip) = self.outside_view(connection_id, &peer_id, &info.observed_addr) {
-                    crate::autoreach::observed(ip, raven_core::p2p_local_candidates_enabled());
+                if let Some(seen) = self.outside_view(connection_id, &peer_id, &info.observed_addr)
+                {
+                    crate::autoreach::observed(seen, raven_core::p2p_local_candidates_enabled());
                 }
                 // Phase 4: the same raw view classifies our NAT's mapping.
                 self.nat_observed(connection_id, &peer_id, &info.observed_addr);
@@ -12497,7 +12507,10 @@ mod tests {
             std::time::Instant::now(),
         );
         let observed: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
-        let seen = Some("203.0.113.9".parse::<IpAddr>().unwrap());
+        let seen = Some(crate::autoreach::Sighting {
+            at: "203.0.113.9:40123".parse().unwrap(),
+            quic: false,
+        });
         // Each connection as the swarm loop notes it: dialled (or not) at
         // the peer's IP literal.
         let mut n = 0;
@@ -12589,7 +12602,10 @@ mod tests {
             std::time::Instant::now(),
         );
         let observed: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
-        let seen = Some("203.0.113.9".parse::<IpAddr>().unwrap());
+        let seen = Some(crate::autoreach::Sighting {
+            at: "203.0.113.9:40123".parse().unwrap(),
+            quic: false,
+        });
         // A connection this host dialled at `address`, as the swarm loop
         // notes it when it comes up.
         let mut n = 0;
@@ -12651,10 +12667,17 @@ mod tests {
             None,
             "a contact reached at a DNS answer vouched"
         );
-        // At a literal one: its view counts.
+        // At a literal one: its view counts, and names the listen socket's
+        // QUIC endpoint (the dial reused the listen port).
         let at_literal = format!("/ip4/198.51.100.32/udp/7423/quic-v1/p2p/{contact}");
         let to_contact = dialled(&mut host, contact, &at_literal);
-        assert_eq!(host.outside_view(to_contact, &contact, &quic), seen);
+        assert_eq!(
+            host.outside_view(to_contact, &contact, &quic),
+            Some(crate::autoreach::Sighting {
+                at: "203.0.113.9:40123".parse().unwrap(),
+                quic: true,
+            })
+        );
     }
 
     /// INET-STUN-1: an IP a DNS answer gave counts as one for an hour after

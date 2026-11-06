@@ -143,6 +143,28 @@ this computer at that very IP:
   dialled at its IPv6 address) shows this computer's IPv6 address, which
   vouches for nothing here: the IPv4 address waits for a connection over
   IPv4 (§7).
+- The port needs a sighting of its own (INET-STUN-1 review, 2026-11-06):
+  STUN's port is no more authenticated than its IP, and behind a NAT
+  shared with others whoever controls the answers could name, at the very
+  IP contacts saw, a port forwarded to a host of its own. So the p2p QUIC
+  endpoint (§4.1: the anchor's port, or the listen port where the NAT keeps
+  ports) is told only once a sighting over QUIC from this computer's QUIC
+  listen socket named that very IP and port. A QUIC dial that reuses the
+  listen port (libp2p's default) leaves from that socket, which has the
+  address and port the anchor asked STUN from; where libp2p finds no
+  listen socket to reuse, the view shows a dialer socket's mapping, still
+  this computer's own. At most 8 such endpoints are kept, for 24 hours, and
+  a network change drops them too. Relay slot connections mostly run over
+  TCP (a friend relay offers TCP first), so in practice the endpoint is
+  told once this node dials a contact, or a relay named by a QUIC address,
+  over QUIC.
+- **[OWNER] AR-6, open (§12):** the other guesses still rest on STUN's word
+  that the NAT keeps ports. The TCP forward guess (§4.1), INET_DIRECT and
+  the friend relay's ports (§4.2) take this node's own listen port at a
+  seen IP: on a shared NAT where whoever controls this computer's STUN
+  answers forwarded that port to a host of its own, contacts' dials go
+  there. A router-mapped address's port is likewise unchecked
+  (STRANGER-UPNP-2).
 - The same rule holds for an IPv4 address the router reports (a NAT-PMP, PCP
   or UPnP mapping: answers anyone on this network can forge) or that an
   AutoNAT server confirmed: it goes into DIRECT only once seen at its IP.
@@ -155,8 +177,8 @@ this computer at that very IP:
   path between them therefore never punch to each other: an open owner
   decision, AR-5 (§7, §12).
 - In a loopback lab (the debug local-candidates switch) every node is at
-  127.0.0.1 and every contact sees it there, so that address counts as seen;
-  any other one (127.0.0.2, say) does not.
+  127.0.0.1 and every contact sees it there, so that address and its QUIC
+  endpoints count as seen; any other one (127.0.0.2, say) does not.
 
 ### 3.3 From which local port
 
@@ -291,8 +313,9 @@ No card, log line, status or doctor output names an address.
   AutoNAT confirmed, or reached from outside; an IPv4 one from the router or
   AutoNAT only once seen at its IP, §3.2), the discovered p2p addresses, once
   seen from outside (§3.2):
-  `/ip4/<public>/udp/<anchor or inferred port>/quic-v1` and, where the NAT
-  keeps ports (§3.3), `/ip4/<public>/tcp/<p2p TCP listen port>`. At most 4 global entries as
+  `/ip4/<public>/udp/<anchor or inferred port>/quic-v1` (only once seen at
+  that very IP and port over QUIC, §3.2) and, where the NAT keeps ports
+  (§3.3), `/ip4/<public>/tcp/<p2p TCP listen port>`. At most 4 global entries as
   before, QUIC first within each group. Their change moves the generation, so
   contacts are told at once (announce links, §7 of the spec).
 - **NAT_CLASS (0x22)** carries the STUN class (§3.4) when the classifier has
@@ -474,7 +497,7 @@ back.
 | Both friends behind the same NAT | They meet over LAN; a punch toward the shared public IP needs the router to hairpin and simply fails otherwise. |
 | A friend moved and its old endpoint is stale | Its punches go to the old endpoint and fail until a link (LAN, relay, custody, a forward) brings its new hints; nothing serverless can tell a moved friend's new endpoint to a friend behind address-dependent filtering. |
 | Clocks more than a few seconds apart | Slots do not overlap; punches fail; the other paths work. |
-| A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. It can make this node's own punches fail. (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
+| A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. Nor a port of its own at the seen IP for the QUIC endpoint (§3.2); by claiming the NAT keeps ports it can still have this node guess its listen ports at the seen IP (AR-6). It can make this node's own punches fail. (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
 | Relay slots and contact routes all named by DNS (a relay `via=` name, a friend relay's `--external` name) | No sighting comes from them (§3.2): whoever answers the DNS could pass those connections on. The STUN address is not told until a relay or contact reached at an IP literal sees this computer; until then it is as for a node nobody has seen (below). |
 | Dual-stack network where the relay slots and the contacts this node dials are all reached over IPv6 | Their views name this computer's IPv6 address, so no IPv4 sighting comes (§3.2): the STUN address (IPv4) is not told, and IPv4-only friends cannot dial it directly or punch to it. IPv6 addresses (this computer's own) are told as before. Not done: dialling one relay slot over IPv4 to get that sighting. |
 | No contact or relay has seen this computer from outside yet (a new node; one whose contacts are all on its LAN or behind NATs; no relay slot) | Its public address is not told, so friends cannot dial it directly or punch to it, and its friend relay is not offered without `--external`. It stays reachable through Tor (the onion address in its card), a relay it holds a slot on (set by hand or offered by a friend: that relay's view counts within a minute of the reservation, and so makes the address seen), the LAN, friend custody, and the operator's `relay_external`. The first contact it dials directly over the internet does the same. **[OWNER] AR-5, open (§12):** this costs honest friends something. Two friends behind NATs, neither holding a relay slot and neither reachable directly by the other or by any other contact, never see each other from outside: neither tells its endpoint, so serverless punching between them (§5) never starts, and a friend relay behind a forwarded port is never offered without `--external`. Before INET-STUN-1 both happened on STUN's word alone. A check on the receiving side cannot close the gap: the receiver has no direct path to the sender either, so it has nothing of its own to compare the told address with. |
@@ -495,7 +518,8 @@ back.
   INET_DIRECT and the relay offer only once seen from outside (§3.2); spec
   §4, §6, §11.4 and §13.3 say so. Content only: no frame or field changes.
   After its review the same day, a sighting counts only over a connection
-  to an IP no DNS answer gave and not over a WebSocket (§3.2; spec §6).
+  to an IP no DNS answer gave and not over a WebSocket, and the QUIC
+  endpoint is told only once seen at that very port (§3.2; spec §6).
 
 ## 9. Tests
 
@@ -509,7 +533,8 @@ back.
   `a_router_mapped_ipv4_address_is_told_only_once_seen_from_outside`,
   `only_a_contact_or_own_relay_this_host_dialled_vouches_for_its_ip`,
   `a_relay_slot_named_by_dns_gives_no_sighting`,
-  `dns_answers_count_for_an_hour_and_never_stop_early`.
+  `dns_answers_count_for_an_hour_and_never_stop_early`,
+  `the_quic_endpoint_waits_for_a_quic_view_of_that_very_port`.
 - Harness (`scripts/lan_fault_matrix.py`, `RAVEN_FAULT_AUTOREACH=1`; real
   `ash` and `raven-node` on loopback, two fake STUN servers on loopback,
   never the public list). The nodes meet over Internet direct links: they
@@ -580,9 +605,21 @@ p2p lab switches, from an unpublished test checklist.
   (a) keep the rule for everything told (recommended: otherwise whoever
   answers this computer's DNS or forges the STUN answers on its network
   steers every contact's dials); a friend is seen again once it holds a
-  relay slot (set by hand, or offered by a friend) or dials any contact
-  directly, and a punch needs both friends seen; (b) tell an unseen STUN
-  endpoint for serverless punching only, never for DIRECT dials or the
-  relay offer: the punching friends' packets still go wherever STUN
-  pointed, so a liar there sees their IPs and timing; (c) go back to
-  telling the STUN address unseen, as before 2026-11-06.
+  relay slot reached at an IP address (set by hand, or offered by a
+  friend) or dials a contact directly at one, and its QUIC endpoint, which
+  a punch needs on both sides, once such a connection runs over QUIC
+  (§3.2); (b) tell an unseen STUN endpoint for serverless punching only,
+  never for DIRECT dials or the relay offer: the punching friends'
+  packets still go wherever STUN pointed, so a liar there sees their IPs
+  and timing; (c) go back to telling the STUN address unseen, as before
+  2026-11-06.
+- **AR-6** [OWNER] Open, asked 2026-11-06 (INET-STUN-1 review): the QUIC
+  endpoint waits for a sighting of its very port (§3.2), but the TCP
+  forward guess, INET_DIRECT and the friend relay's ports still take this
+  node's listen ports at a seen IP whenever STUN says the NAT keeps ports.
+  Options: (a) accept it (the dials still authenticate the peer; the host
+  at that port learns the dialling contacts' IPs and times, as any wrong
+  address did before 2026-11-06); (b) require a sighting over TCP from the
+  TCP listen port at that very port before the TCP guess and the friend
+  relay's TCP port, and tell INET_DIRECT only once confirmed; (c) never
+  guess: tell only the QUIC endpoint and confirmed addresses.

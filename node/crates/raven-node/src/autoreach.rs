@@ -157,6 +157,10 @@ struct State {
     /// computer at, on a connection it dialled directly ([`observed`]), and
     /// when last; at most [`MAX_SEEN`].
     seen: HashMap<Ipv4Addr, Instant>,
+    /// The public QUIC endpoints (IP and port) such a peer saw this
+    /// computer's QUIC listen socket at, and when last; at most
+    /// [`MAX_SEEN`] ([`Sighting::quic`]).
+    seen_quic: HashMap<SocketAddrV4, Instant>,
     /// The IP the last "seen" line was about ([`say_seen`]).
     seen_said: Option<Ipv4Addr>,
     /// The Internet direct listener's address, while it listens.
@@ -167,6 +171,9 @@ struct State {
     logged: Option<(Option<Ipv4Addr>, StunClass)>,
     /// "No server answered" was said since the last answer.
     silent_said: bool,
+    /// Tests: a loopback lab without its stand-in for a sighting
+    /// ([`lab_seen`]), so 127.0.0.1 needs a view there as anywhere.
+    strict_lab: bool,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -221,6 +228,7 @@ fn forget_network(s: &mut State) {
     s.refresh = None;
     s.confirmed.clear();
     s.seen.clear();
+    s.seen_quic.clear();
     s.seen_said = None;
 }
 
@@ -557,14 +565,21 @@ fn forward_in(s: &State, lab_local: bool, now: Instant) -> Option<Ipv4Addr> {
 
 /// Did a contact or one of this node's relays see this computer at `ip`
 /// within [`SEEN_FOR`], since the last network change? In a loopback lab
-/// (`lab_local`, the local-candidates switch of debug builds) every node is
-/// at 127.0.0.1 and every contact sees it there, so that one address counts
-/// as seen; any other, 127.0.0.2 say, does not.
+/// that IP may stand in for a sighting ([`lab_seen`]).
 fn seen_at(s: &State, ip: Ipv4Addr, lab_local: bool, now: Instant) -> bool {
     s.seen
         .get(&ip)
         .is_some_and(|at| now.saturating_duration_since(*at) < SEEN_FOR)
-        || (lab_local && ip == Ipv4Addr::LOCALHOST)
+        || lab_seen(s, ip, lab_local)
+}
+
+/// The loopback lab's stand-in for a sighting: under `lab_local` (the
+/// local-candidates switch of debug builds) every node is at 127.0.0.1 and
+/// every contact sees it there, so that one address and its endpoints
+/// count as seen; any other, 127.0.0.2 say, does not. The harness's
+/// scenarios rest on it; tests can turn it off ([`State::strict_lab`]).
+fn lab_seen(s: &State, ip: Ipv4Addr, lab_local: bool) -> bool {
+    lab_local && !s.strict_lab && ip == Ipv4Addr::LOCALHOST
 }
 
 /// The public IP contacts may be told: STUN's ([`best_ip`]) once a contact
@@ -581,7 +596,21 @@ pub(crate) fn seen_ip(ip: Ipv4Addr, lab_local: bool) -> bool {
     with_state(|s| seen_at(s, ip, lab_local, Instant::now()))
 }
 
-/// A contact or one of this node's relays saw this computer at `ip`:
+/// Where a contact or one of this node's relays saw this computer
+/// ([`observed`]): Identify's observed address (canonical), and whether the
+/// connection is a QUIC dial that reused the listen port (libp2p's
+/// default). Such a dial leaves from the QUIC listen socket, which has the
+/// address and port the anchor asked STUN from, so the observed port is
+/// that socket's public mapping. Where libp2p found no listen socket to
+/// reuse, it is a dialer socket's mapping instead: still this computer's,
+/// never a port of the answers' choosing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Sighting {
+    pub(crate) at: SocketAddr,
+    pub(crate) quic: bool,
+}
+
+/// A contact or one of this node's relays saw this computer at `seen`:
 /// Identify's observed address on a connection this computer dialled
 /// directly (no relay circuit, no hole punch, no WebSocket) at an IP no DNS
 /// answer gave, which the p2p host passes on only from a contact the peer
@@ -595,21 +624,25 @@ pub(crate) fn seen_ip(ip: Ipv4Addr, lab_local: bool) -> bool {
 /// (STUN's address is IPv4), and only an address that may be told
 /// ([`usable`]). Kept whether or not STUN discovery is on ([`seen_ip`]); in
 /// memory only, never logged.
-pub(crate) fn observed(ip: IpAddr, lab_local: bool) {
-    if let Some(line) = with_state(|s| observe_in(s, ip, lab_local, Instant::now())) {
+pub(crate) fn observed(seen: Sighting, lab_local: bool) {
+    if let Some(line) = with_state(|s| observe_in(s, seen, lab_local, Instant::now())) {
         eprintln!("{line}");
     }
 }
 
 /// [`observed`] on `s` at `now`: the line to say, if any ([`say_seen`]).
-fn observe_in(s: &mut State, ip: IpAddr, lab_local: bool, now: Instant) -> Option<String> {
-    let IpAddr::V4(ip) = ip else {
+fn observe_in(s: &mut State, seen: Sighting, lab_local: bool, now: Instant) -> Option<String> {
+    let SocketAddr::V4(at) = seen.at else {
         return None;
     };
+    let ip = *at.ip();
     if !usable(ip, lab_local) {
         return None;
     }
     note_seen(s, ip, now);
+    if seen.quic {
+        note_seen_quic(s, at, now);
+    }
     say_seen(s, lab_local, now)
 }
 
@@ -622,6 +655,28 @@ fn note_seen(s: &mut State, ip: Ipv4Addr, now: Instant) {
         }
     }
     s.seen.insert(ip, now);
+}
+
+/// Such a peer saw this computer's QUIC listen socket at `at` at `now`;
+/// with [`MAX_SEEN`] endpoints kept, the oldest gives way.
+fn note_seen_quic(s: &mut State, at: SocketAddrV4, now: Instant) {
+    if !s.seen_quic.contains_key(&at) && s.seen_quic.len() >= MAX_SEEN {
+        let oldest = s.seen_quic.iter().min_by_key(|(_, t)| **t).map(|(a, _)| *a);
+        if let Some(oldest) = oldest {
+            s.seen_quic.remove(&oldest);
+        }
+    }
+    s.seen_quic.insert(at, now);
+}
+
+/// Did a contact or one of this node's relays see this computer's QUIC
+/// listen socket at exactly `at` within [`SEEN_FOR`], since the last
+/// network change? In a loopback lab its IP may stand in ([`lab_seen`]).
+fn quic_seen_at(s: &State, at: SocketAddrV4, lab_local: bool, now: Instant) -> bool {
+    s.seen_quic
+        .get(&at)
+        .is_some_and(|t| now.saturating_duration_since(*t) < SEEN_FOR)
+        || lab_seen(s, *at.ip(), lab_local)
 }
 
 /// The line to say when the address STUN found is now seen from outside
@@ -705,7 +760,9 @@ fn found_in(s: &State, listen: &[Multiaddr], lab_local: bool, now: Instant) -> V
         match (it.next(), it.next(), it.next()) {
             (Some(Protocol::Ip4(_)), Some(Protocol::Udp(port)), Some(Protocol::QuicV1)) => {
                 // The anchor of that port (bound to the wildcard or to this
-                // address), else the listen port where the NAT keeps ports.
+                // address), else the listen port where the NAT keeps ports;
+                // either only once seen at that very endpoint
+                // ([`quic_seen_at`]): STUN's port is no proof either.
                 let mapped = s
                     .anchors
                     .iter()
@@ -713,7 +770,8 @@ fn found_in(s: &State, listen: &[Multiaddr], lab_local: bool, now: Instant) -> V
                     .find_map(|a| a.disc.mapped)
                     .filter(|m| *m.ip() == ip)
                     .map(|m| m.port())
-                    .or(kept.then_some(port));
+                    .or(kept.then_some(port))
+                    .filter(|p| quic_seen_at(s, SocketAddrV4::new(ip, *p), lab_local, now));
                 if let Some(p) = mapped {
                     let text = format!("/ip4/{ip}/udp/{p}/quic-v1");
                     if !quic.contains(&text) {
@@ -1153,10 +1211,14 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// A contact saw this computer at the public IP STUN names now.
-    fn seen_from_outside(s: &mut State, now: Instant) {
+    /// A contact saw this computer at the public IP STUN names now, and its
+    /// QUIC listen socket there at each of `quic` ports.
+    fn seen_from_outside(s: &mut State, now: Instant, quic: &[u16]) {
         let ip = best_ip(s, now).expect("a public IP");
         note_seen(s, ip, now);
+        for port in quic {
+            note_seen_quic(s, SocketAddrV4::new(ip, *port), now);
+        }
     }
 
     #[test]
@@ -1184,7 +1246,7 @@ mod tests {
         };
         // Nothing until a contact or relay saw this computer at that IP.
         assert!(texts(&s).is_empty());
-        seen_from_outside(&mut s, now);
+        seen_from_outside(&mut s, now, &[40001, 17423]);
         // The anchor's exact QUIC endpoint; no TCP guess where the NAT
         // shifts ports.
         assert_eq!(texts(&s), vec!["/ip4/11.0.3.7/udp/40001/quic-v1"]);
@@ -1223,7 +1285,7 @@ mod tests {
             at: now,
         });
         assert!(texts(&s).is_empty());
-        seen_from_outside(&mut s, now);
+        seen_from_outside(&mut s, now, &[17423]);
         assert!(texts(&s).is_empty());
         assert_eq!(found_in(&s, &listen, true, now).len(), 2);
         // Stale after FRESH_FOR.
@@ -1247,7 +1309,7 @@ mod tests {
             }),
             ..State::default()
         };
-        seen_from_outside(&mut s, now);
+        seen_from_outside(&mut s, now, &[17423]);
         s.confirmed.insert(Reached::Tcp, (now, best_ip(&s, now)));
         let f = found_in(&s, &listen, false, now);
         assert_eq!(
@@ -1296,6 +1358,15 @@ mod tests {
             )
         };
         let nothing = (Vec::<String>::new(), None, None);
+        // A view of the QUIC listen socket at the listen port (the NAT
+        // keeps ports): the IP and that endpoint.
+        let quic_view = |s: &mut State, ip: &str, at: Instant| {
+            let seen = Sighting {
+                at: format!("{ip}:17423").parse().unwrap(),
+                quic: true,
+            };
+            observe_in(s, seen, lab, at);
+        };
         let at_7 = (
             vec![
                 "/ip4/203.0.113.7/udp/17423/quic-v1".to_string(),
@@ -1317,7 +1388,7 @@ mod tests {
         assert_eq!(told(&s, t0), nothing, "another IP was seen");
         // A contact saw it at the IP STUN named: the QUIC endpoint, the TCP
         // forward guess, Internet direct and the relay's IP, at that IP.
-        note_seen(&mut s, "203.0.113.7".parse().unwrap(), t0);
+        quic_view(&mut s, "203.0.113.7", t0);
         assert_eq!(told(&s, t0), at_7);
         // The sighting stands while STUN keeps naming that IP, for a day.
         let t1 = t0 + Duration::from_secs(3600);
@@ -1326,7 +1397,7 @@ mod tests {
         let t2 = t0 + SEEN_FOR + Duration::from_secs(1);
         stun(&mut s, "203.0.113.7", t2);
         assert_eq!(told(&s, t2), nothing, "a sighting older than a day");
-        note_seen(&mut s, "203.0.113.7".parse().unwrap(), t2);
+        quic_view(&mut s, "203.0.113.7", t2);
         assert_eq!(told(&s, t2), at_7);
         // A contact reached the QUIC port from outside under that IP: it is
         // confirmed there...
@@ -1346,7 +1417,7 @@ mod tests {
         // confirmation does not carry over once it is.
         stun(&mut s, "198.51.100.9", t2);
         assert_eq!(told(&s, t2), nothing, "an IP nobody saw");
-        note_seen(&mut s, "198.51.100.9".parse().unwrap(), t2);
+        quic_view(&mut s, "198.51.100.9", t2);
         let f = found_in(&s, &listen, lab, t2);
         assert_eq!(f[0].text, "/ip4/198.51.100.9/udp/17423/quic-v1");
         assert!(!f[0].confirmed, "confirmed under another IP");
@@ -1365,7 +1436,7 @@ mod tests {
         // Turned off, nothing is kept.
         s.enabled = false;
         forget_network(&mut s);
-        assert!(s.seen.is_empty() && s.confirmed.is_empty());
+        assert!(s.seen.is_empty() && s.seen_quic.is_empty() && s.confirmed.is_empty());
     }
 
     /// What counts as a sighting: an IPv4 address that may be told (never a
@@ -1381,6 +1452,10 @@ mod tests {
             ..State::default()
         };
         let v4 = |text: &str| -> Ipv4Addr { text.parse().unwrap() };
+        let tcp = |text: &str| Sighting {
+            at: SocketAddr::new(text.parse().unwrap(), 40123),
+            quic: false,
+        };
         for ip in [
             "192.168.1.9",
             "10.0.0.7",
@@ -1388,14 +1463,11 @@ mod tests {
             "2001:db8::7",
             "::1",
         ] {
-            assert_eq!(observe_in(&mut s, ip.parse().unwrap(), false, t0), None);
+            assert_eq!(observe_in(&mut s, tcp(ip), false, t0), None);
         }
         assert!(s.seen.is_empty(), "{:?}", s.seen);
         // In the lab any unicast IPv4 counts; IPv6 never.
-        assert_eq!(
-            observe_in(&mut s, "2001:db8::7".parse().unwrap(), true, t0),
-            None
-        );
+        assert_eq!(observe_in(&mut s, tcp("2001:db8::7"), true, t0), None);
         assert!(s.seen.is_empty());
         // STUN names 203.0.113.7: a sighting there is said once, with no
         // address in the line.
@@ -1404,21 +1476,18 @@ mod tests {
             asked: 2,
             at: t0,
         });
-        let line = observe_in(&mut s, "203.0.113.7".parse().unwrap(), true, t0).unwrap();
+        let line = observe_in(&mut s, tcp("203.0.113.7"), true, t0).unwrap();
         assert_eq!(
             line,
             "raven-node autoreach: public address seen from outside; contacts are told it"
         );
         assert!(!line.contains("203.0"), "{line}");
-        assert_eq!(
-            observe_in(&mut s, "203.0.113.7".parse().unwrap(), true, t0),
-            None
-        );
+        assert_eq!(observe_in(&mut s, tcp("203.0.113.7"), true, t0), None);
         // At most MAX_SEEN IPs: newer sightings push out the oldest.
         for i in 1..=MAX_SEEN {
             let at = t0 + Duration::from_secs(i as u64);
-            let ip = Ipv4Addr::new(198, 51, 100, i as u8);
-            assert_eq!(observe_in(&mut s, IpAddr::V4(ip), true, at), None);
+            let ip = format!("198.51.100.{i}");
+            assert_eq!(observe_in(&mut s, tcp(&ip), true, at), None);
         }
         assert_eq!(s.seen.len(), MAX_SEEN);
         assert!(!seen_at(&s, v4("203.0.113.7"), true, t0), "the oldest went");
@@ -1427,6 +1496,88 @@ mod tests {
         assert!(seen_at(&s, Ipv4Addr::LOCALHOST, true, t0));
         assert!(!seen_at(&s, Ipv4Addr::LOCALHOST, false, t0));
         assert!(!seen_at(&s, v4("127.0.0.2"), true, t0));
+    }
+
+    /// INET-STUN-1 (design §3.2): STUN's port is no more authenticated than
+    /// its IP, and behind a NAT shared with others whoever controls the
+    /// answers could name a port of its own at the seen IP. So the QUIC
+    /// endpoint (the anchor's mapped port, or the listen port where the NAT
+    /// keeps ports) is told only once a contact or relay saw this
+    /// computer's QUIC listen socket at that very IP and port. A view over
+    /// TCP or from another socket, or at another port, vouches for the IP
+    /// alone; a network change forgets them. The loopback lab's stand-in
+    /// covers 127.0.0.1's endpoints too; a strict lab waits for the view.
+    #[test]
+    fn the_quic_endpoint_waits_for_a_quic_view_of_that_very_port() {
+        let t0 = Instant::now();
+        let lab = true;
+        let listen = [ma("/ip4/0.0.0.0/udp/17423/quic-v1")];
+        let told = |s: &State| -> Vec<String> {
+            found_in(s, &listen, lab, t0)
+                .into_iter()
+                .map(|f| f.text)
+                .collect()
+        };
+        let view = |at: &str, quic: bool| Sighting {
+            at: at.parse().unwrap(),
+            quic,
+        };
+        let anchored = |ip: &str, mapped: &str, class| Anchor {
+            local: "0.0.0.0:17423".parse().unwrap(),
+            disc: disc(ip, Some(mapped), class),
+            at: t0,
+        };
+        // STUN named 203.0.113.7:40001 for the QUIC listen socket.
+        let mut s = State {
+            enabled: true,
+            anchors: vec![anchored(
+                "203.0.113.7",
+                "203.0.113.7:40001",
+                StunClass::StableShifted,
+            )],
+            ..State::default()
+        };
+        // Seen at that IP over TCP, and over QUIC from another socket: the
+        // IP is seen, the endpoint is not told.
+        observe_in(&mut s, view("203.0.113.7:51000", false), lab, t0);
+        observe_in(&mut s, view("203.0.113.7:40001", false), lab, t0);
+        assert!(seen_at(&s, "203.0.113.7".parse().unwrap(), lab, t0));
+        assert_eq!(told(&s), Vec::<String>::new(), "a port nobody saw");
+        // The listen socket seen at another port: still not.
+        observe_in(&mut s, view("203.0.113.7:40002", true), lab, t0);
+        assert_eq!(told(&s), Vec::<String>::new(), "another port was seen");
+        // At that very endpoint: told.
+        observe_in(&mut s, view("203.0.113.7:40001", true), lab, t0);
+        assert_eq!(told(&s), vec!["/ip4/203.0.113.7/udp/40001/quic-v1"]);
+        // A NAT that keeps ports: the listen port, once seen there.
+        s.anchors = vec![anchored(
+            "203.0.113.7",
+            "203.0.113.7:17423",
+            StunClass::StableKept,
+        )];
+        assert_eq!(told(&s), Vec::<String>::new());
+        observe_in(&mut s, view("203.0.113.7:17423", true), lab, t0);
+        assert_eq!(told(&s), vec!["/ip4/203.0.113.7/udp/17423/quic-v1"]);
+        // A network change forgets the endpoints with the IPs.
+        forget_network(&mut s);
+        s.anchors = vec![anchored(
+            "203.0.113.7",
+            "203.0.113.7:17423",
+            StunClass::StableKept,
+        )];
+        note_seen(&mut s, "203.0.113.7".parse().unwrap(), t0);
+        assert_eq!(told(&s), Vec::<String>::new(), "an old network's view");
+        // The loopback lab's stand-in: 127.0.0.1 and its endpoints count as
+        // seen. A strict lab waits for a view of that very endpoint.
+        s.anchors = vec![anchored("127.0.0.1", "127.0.0.1:17423", StunClass::NoNat)];
+        let lab_endpoint = vec!["/ip4/127.0.0.1/udp/17423/quic-v1".to_string()];
+        assert_eq!(told(&s), lab_endpoint);
+        s.strict_lab = true;
+        assert_eq!(told(&s), Vec::<String>::new(), "a strict lab's endpoint");
+        observe_in(&mut s, view("127.0.0.1:17424", true), lab, t0);
+        assert_eq!(told(&s), Vec::<String>::new());
+        observe_in(&mut s, view("127.0.0.1:17423", true), lab, t0);
+        assert_eq!(told(&s), lab_endpoint);
     }
 
     #[test]

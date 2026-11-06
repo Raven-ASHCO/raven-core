@@ -467,13 +467,15 @@ therefore MUST NOT send RRH1 without the §3 signal.
     dialled directly (not relayed, not a hole punch, not over a WebSocket)
     at an IP no DNS answer gave it (whoever answered could pass such a
     connection on from a host of its own), within 24 hours and since the
-    sender's last network change. Neither STUN nor router answers
-    are authenticated: without this, whoever answers the sender's DNS for
-    the STUN servers' names, or forges their replies or the router's on its
-    network, could name an address of its own and have every contact dial
-    it. A confirmation (reached from outside) counts for the public IP STUN
-    named when it was made only. IPv6 addresses and the receiver's rules do
-    not change;
+    sender's last network change; the p2p QUIC endpoint only once such a
+    view over QUIC from the sender's QUIC listen socket named that very IP
+    and port (STUN's port is no more authenticated than its IP). Neither
+    STUN nor router answers are authenticated: without this, whoever
+    answers the sender's DNS for the STUN servers' names, or forges their
+    replies or the router's on its network, could name an address of its
+    own and have every contact dial it. A confirmation (reached from
+    outside) counts for the public IP STUN named when it was made only.
+    IPv6 addresses and the receiver's rules do not change;
   - same-LAN listen addresses only on LAN links, at most 2, in listen order:
     local-network listen addresses in the /24 (IPv4) or /64 (IPv6) of the
     link's peer IP, or of an address of the sender's interface on the peer's

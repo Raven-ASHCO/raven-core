@@ -416,8 +416,15 @@ key, and a wrong key ends the link). Two ways to be that listener:
   then see. A malicious verified contact alone cannot steer it either: STUN
   or the router must name the same IP. What is left: the NAT that really
   carries this computer's traffic (a hotel, a carrier), and anyone who
-  routes its packets on the way out (its own uplink, a VPN), is where a
+  routes its packets on the way out (its own uplink, a VPN), are where a
   peer sees it and so where contacts' dials go, as for any public address.
+  The port is checked only for the p2p QUIC endpoint (a sighting over QUIC
+  from the QUIC listen socket at that very port): the guessed ports (the
+  TCP forward guess, INET_DIRECT, the friend relay's ports) still rest on
+  STUN's word that the NAT keeps ports, so behind a shared NAT whoever
+  controls the STUN answers and forwarded that port to a host of its own
+  gets contacts' dials there (owner decision AR-6 in the auto-reach
+  design); a router-mapped address's port likewise (STRANGER-UPNP-2).
   And a limit, not an exposure: a node whose relay slots and contacts are
   all named by DNS is never seen by them, so it tells no public address
   until a relay or contact reached at an IP literal sees it.
