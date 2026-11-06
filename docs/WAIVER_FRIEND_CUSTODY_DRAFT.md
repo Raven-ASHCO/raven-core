@@ -1,27 +1,33 @@
 # DRAFT owner waiver: friend custody ("via a friend"), on the local network and over the internet
 
-> **DRAFT. NOT SIGNED, NOT IN FORCE.** Nothing in the tree depends on this
-> file. `FRIEND_CUSTODY_PRODUCTION_ENABLED` and `FRIEND_CUSTODY_WAN_ENABLED`
-> (`node/crates/raven-core/src/custody_gate.rs`) stay `false` until the owner
-> signs a final copy (renamed to `docs/WAIVER_FRIEND_CUSTODY_<date>.md`), its
-> preconditions (§7) are met, and each flip is applied as its own reviewed
-> commit. Debug builds open custody with the lab unlock `RAVEN_LAB_TEST_A=1`
-> and WAN custody with `RAVEN_LAB_CUSTODY_WAN=1` as well; release builds never
-> read either.
+> **Accepted by the owner on 2026-11-06 (owner decision 4: custody stays on
+> in release).** The owner reads the final text before it is published; no
+> signed, dated copy (`docs/WAIVER_FRIEND_CUSTODY_<date>.md`) exists yet.
+> Nothing in the tree depends on this file. This draft had asked that
+> `FRIEND_CUSTODY_PRODUCTION_ENABLED` and `FRIEND_CUSTODY_WAN_ENABLED`
+> (`node/crates/raven-core/src/custody_gate.rs`) stay `false` until a signed
+> final copy, its preconditions (§7) met and each flip in its own reviewed
+> commit. Both were switched on together in release builds on 2026-10-29
+> (commit b783524), with other gates, after the three-machine field test and
+> before this acceptance; §7 records how. Keeping mail for friends
+> (`raven node custody on`) and using friends as mailboxes (`raven custody
+> use on`) stay each person's choice, off by default. A debug build closes
+> custody with `RAVEN_LAB_TEST_A=0` and WAN custody alone with
+> `RAVEN_LAB_CUSTODY_WAN=0`; release builds never read either.
 
 | | |
 |---|---|
 | **Waiver ID** | `WAIVER-FRIEND-CUSTODY-<date>` (to be assigned on signature) |
 | **Extends** | [`WAIVER-LAN-DIRECT-2026-10-07`](WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md) (its §2 lists mailbox and store-and-forward delivery as not covered) and, for the WAN part, the p2p record [`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md) with its Phase 3 amendment (§10 there) |
-| **Not covered** | Internet direct on TCP 7422: [`WAIVER_INTERNET_DIRECT_DRAFT.md`](WAIVER_INTERNET_DIRECT_DRAFT.md) is unchanged, 7422 stays off (decision D5), and a custody route over it also needs the Internet direct gate |
-| **Approver** | Protocol owner (signature pending) |
+| **Not covered** | Internet direct on TCP 7422: [`WAIVER_INTERNET_DIRECT_DRAFT.md`](WAIVER_INTERNET_DIRECT_DRAFT.md) is unchanged, 7422 stays off (decision D5), and a custody route over it also needs the Internet direct gate. As shipped (2026-10-29) the Internet direct gate is on too, with listening the user's choice, and WAN custody runs on Internet direct, Tor and Bluetooth nearby links as well as p2p (`custody_gate::custody_link_allowed`): wider than this row |
+| **Approver** | Protocol owner: accepted on 2026-11-06 (owner decision 4); the owner reads the final text before publication |
 | **Date drafted** | 2026-10-22 |
 | **Decision** | Enable friend custody (RFC1 V1) between verified friends in default and release builds, first on the local network, later over p2p links, under this waiver instead of waiting for an independent review |
 | **Review by** | `<YYYY-MM-DD>`: at most 3 months after signature |
 | **Withdrawal** | Set `FRIEND_CUSTODY_WAN_ENABLED = false`, or both consts `false`, in `node/crates/raven-core/src/custody_gate.rs` |
 | **Design** | [`design/2026-10-friend-custody.md`](design/2026-10-friend-custody.md) (revision 2, and §19 "Over the internet"); the any-network reachability plan (not published) §3 Phase 3 item 3 (C9) |
 | **Wire** | [`protocol/RAVEN_FRIEND_CUSTODY_V1.md`](../protocol/RAVEN_FRIEND_CUSTODY_V1.md) (RFC1, version byte 1); [`protocol/RAVEN_ROUTE_HINTS_V1.md`](../protocol/RAVEN_ROUTE_HINTS_V1.md) §4 and §12 (RRH1 entries 0x06 CUSTODY_OFFER and 0x07 CUSTODIAN_TAG); vectors `shared-vectors/rvn1/custody/` and `shared-vectors/rvn1/route_hints/rrh1_custody_001.json`, `rrh1_custodian_tag_001.json` |
-| **Companions** | [`SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md`](SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md) (a RELEASE deletes the object; signed before the first flip); the route hints records (learned custody rides RRH1, so it also needs `ROUTE_HINTS_PRODUCTION_ENABLED`) |
+| **Companions** | [`SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md`](SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md) (a RELEASE deletes the object; accepted on 2026-11-06 and applied to the frozen files, after the first flip); the route hints records (learned custody rides RRH1, so it also needs `ROUTE_HINTS_PRODUCTION_ENABLED`) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` ("Friend mailboxes"); [`SAFETY_OFFLINE.md`](SAFETY_OFFLINE.md) §9 |
 | **Real rows** | an unpublished test checklist: R10, R10b, R11g (R10r optional) |
 
@@ -169,7 +175,7 @@ This waiver lapses, and the affected flag MUST be set back to `false`, if:
 Before signature:
 
 - [`SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md`](SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md)
-  signed;
+  signed (accepted on 2026-11-06 and applied, after the flips);
 - carrier_matrix C32 (custody over relay circuits, message and ACK, with a
   byte scan), C33 (the WAN gates and refusals) and C34 (a friend relay and a
   custodian on one node) green on ubuntu, macOS and Windows;
@@ -193,6 +199,15 @@ owner actions, not part of the Phase 3 work):
 At the first flip, the RFC1 status line, the RFC1 row of
 [`protocol/PROTOCOL_VERSIONS.md`](../protocol/PROTOCOL_VERSIONS.md) and the
 freeze hashes are updated in the same commit.
+
+**What happened (recorded 2026-11-06).** Both flags were flipped together
+in commit b783524 (2026-10-29), with the p2p gate and others, after the
+three-machine field test, in which friends kept mail on the local network
+and over the internet ([`FIELD_TEST_2026_10.md`](FIELD_TEST_2026_10.md)):
+not after the real rows R11g, R10 and R10b, not after a signature, and
+while the p2p waiver is unsigned. The RFC1 status line, its row in the
+inventory and the freeze hashes were updated on 2026-11-06, not in the flip
+commit. Owner decision 2026-11-06 (decision 4): custody stays on in release.
 
 ## 7a. Letters (Phase 5b, draft amendment)
 
@@ -251,4 +266,7 @@ name letters and their 7 days.
 
 ## 8. Signature
 
-Not signed.
+Accepted by the owner on 2026-11-06 (owner decision 4: custody stays on in
+release); the owner reads the final text before it is published. No signed,
+dated copy exists yet. The letters amendment (§7a) is not part of this
+acceptance: letters stay held.

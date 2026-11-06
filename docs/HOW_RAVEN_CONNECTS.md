@@ -181,7 +181,7 @@ recipient is, the message waits, and after its deadline it is given up and the s
 [RAVEN_ASYNC_LETTER_V1](../protocol/RAVEN_ASYNC_LETTER_V1.md),
 [RAVEN_DELIVERY_STATE_V1](../protocol/RAVEN_DELIVERY_STATE_V1.md); designs
 [friend custody](design/2026-10-friend-custody.md), [beyond 24 h](design/2026-10-beyond-24h.md);
-the custody errata draft
+the custody errata amendment (accepted 2026-11-06)
 [SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md](SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md);
 [SAFETY_OFFLINE.md](SAFETY_OFFLINE.md).
 

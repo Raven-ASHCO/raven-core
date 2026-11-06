@@ -35,7 +35,7 @@ These are **not** production wire. Do not treat lab vectors or architecture appr
 
 | Profile | Spec | Status | Vectors |
 |---|---|---|---|
-| Friend Custody V1 (`RFC1`) | [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md) | Draft; production disabled (`FRIEND_CUSTODY_PRODUCTION_ENABLED = false`, `FRIEND_CUSTODY_WAN_ENABLED = false`); lab unlock debug `RAVEN_LAB_TEST_A=1`. Custody frames on authenticated direct links carrying unsigned RSO1; custodians discovered through RRH1 §12 (0x06/0x07); the letter ops 0x04-0x06 (§10, replies 0x85-0x86) hold RAL1 letters, served only while the letter gate is open (lab knob `RAVEN_LAB_CUSTODY_BASE_OPS_ONLY=1` turns them off); the handoff ops 0x07-0x08 (replies 0x87-0x88, codes 14-16) belong to Custody Handoff V1 below; production disabled | `shared-vectors/rvn1/custody/rfc1_*_001.json` (letter ops: `rfc1_letter_*_001.json`) |
+| Friend Custody V1 (`RFC1`) | [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md) | Draft; on in release builds since 2026-10-29 (`FRIEND_CUSTODY_PRODUCTION_ENABLED = true`, `FRIEND_CUSTODY_WAN_ENABLED = true`), each side's own consent, not independently reviewed (owner decision 2026-11-06: it stays on; the custody waiver and the errata rule 9 amendment accepted); a debug build closes it with `RAVEN_LAB_TEST_A=0`. RELEASE deletes the object (§6, errata rule 9). Custody frames on authenticated direct links carrying unsigned RSO1; custodians discovered through RRH1 §12 (0x06/0x07); the letter ops 0x04-0x06 (§10, replies 0x85-0x86) hold RAL1 letters, served only while the letter gate is open (lab knob `RAVEN_LAB_CUSTODY_BASE_OPS_ONLY=1` turns them off); the handoff ops 0x07-0x08 (replies 0x87-0x88, codes 14-16) belong to Custody Handoff V1 below; letters and handoffs stay production disabled | `shared-vectors/rvn1/custody/rfc1_*_001.json` (letter ops: `rfc1_letter_*_001.json`) |
 | Custody Handoff V1 (`RHW1` inside RFC1 ops 0x07 HANDOFF / 0x08 TAGS) | [`RAVEN_CUSTODY_HANDOFF_V1.md`](RAVEN_CUSTODY_HANDOFF_V1.md) | Draft; production disabled (`CUSTODY_HANDOFF_PRODUCTION_ENABLED = false`, which also needs `FRIEND_CUSTODY_PRODUCTION_ENABLED`); lab `RAVEN_LAB_CUSTODY_HANDOFF=1` with `RAVEN_LAB_TEST_A=1` in debug builds only, while friend custody is live. Multi-hop friend custody A -> F1 -> F2 -> B under RFC1 version byte 1: HANDOFF carries a 44-byte RHW1 header (FORWARD with the final custodian's key, or DELIVER) and an RFC1 RSO1 of at most 65,461 bytes; TAGS registers or withdraws the link peer's store tags (1-32, merged and sorted); replies HANDOFF_RESULT (47 B) and TAGS_RESULT (17 B), both terminal; codes 14 NEXT_HOP_UNKNOWN, 15 TAG_UNKNOWN, 16 HOP_REFUSED. With the handoff gate closed, or `RAVEN_LAB_CUSTODY_BASE_OPS_ONLY=1`, a listener answers both ops `UNSUPPORTED` like an older one; no existing byte changes. The custodian's store and handlers (P5.19), the requester (P5.20) and raven-node's worker, forwarder and tag registration with the RRH1 `HANDOFF_INBOX` flag (P5.21, `RAVEN_ROUTE_HINTS_V1.md` §4) are in; harness (P5.23): carrier_matrix C54 and C55, lan_fault_matrix s68-s71 and s97b (`RAVEN_FAULT_HANDOFF=1`) | `shared-vectors/rvn1/custody/rhw1_*_001.json`, `rfc1_tags_*_001.json`, `rfc1_handoff_replies_001.json`, `custody/negative/*.json` (written by Rust under `RAVEN_REGEN_RHW1_VECTORS=1`) |
 | App Payload V1 (`RVNAPP/1`) | [`RAVEN_APP_PAYLOAD_V1.md`](RAVEN_APP_PAYLOAD_V1.md) | Draft; on in release builds since October 2026 (`APP_CHANNEL_PRODUCTION_ENABLED = true`, macOS included), not independently reviewed; a debug build closes it with `RAVEN_LAB_TEST_A=0`. Inner frame of an ordinary indexed-session Message (no envelope change); receiver classification always on; the receiver guard (§3.1) takes app payloads only from verified contacts, of registered types, within the size limits and rate windows (30 a minute per sender and type, 120 in total) | `shared-vectors/rdap/agent_sign/delegation_v2_001.json` (AgentSign bytes) |
 | Group V1 (`RVNGRP/1`) | [`RAVEN_GROUP_V1.md`](RAVEN_GROUP_V1.md) | Draft; production disabled (`GROUPS_PRODUCTION_ENABLED = false`, which also needs `LONG_HORIZON_PRODUCTION_ENABLED`); lab `RAVEN_LAB_GROUPS=1` with `RAVEN_LAB_HORIZON=1` and `RAVEN_LAB_TEST_A=1` in debug builds only. Inner frame of an ordinary indexed-session Message (no envelope change): a signed roster (`state`), signed messages (`msg`) delivered by pairwise fan-out with one-hop forwarding to members the author cannot reach, signed receipts, `leave` and `sync`; receiver classification always on | `shared-vectors/rvn1/group/group_v1_001.json` |
@@ -143,6 +143,34 @@ Watch jobs remain **N/A** on this serverless tree (no `RAVEN-WatchApp/` paths). 
 Platform vector consumers outside this workflow: see [`../shared-vectors/README.md`](../shared-vectors/README.md). **.NET / C# `rvn1` CI consumer is NOT YET.**
 
 ---
+
+## Freeze record changes (2026-11-06, release posture: friend custody is on; errata rule 9 amended for RELEASE)
+
+The custody status line records what release builds have done since commit b783524
+(2026-10-29), and two frozen texts take the errata rule 9 amendment, accepted by the owner on
+2026-11-06 (owner decision 4: custody stays on in release; the owner reads the final texts
+before they are published). No frame layout, code, op, reply, caps bit, card field or vector
+changed, and every gate stays as it was. The RELEASE rule is the one release custodians have
+followed since custody was switched on (privacy pack PP.17, `CustodyStore::release`); a
+recipient cannot tell it from the old one, and an older custodian that only hides still
+conforms (the amendment permits early deletion, it does not require proof of it). Security and
+speed report 2026-11-05 (CUST-2).
+
+- **Friend Custody V1 (draft).** [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md)
+  status: on in release builds since 2026-10-29, each side's own consent, not independently
+  reviewed; a debug build closes it with `RAVEN_LAB_TEST_A=0` (WAN custody alone with
+  `RAVEN_LAB_CUSTODY_WAN=0`). Before, "production disabled" with both consts `false` and an
+  owner-signed waiver required. §6: RELEASE by the authenticated recipient deletes the named
+  objects' payload and pair columns, and the digest stays until expiry for dedup, so a
+  re-deposit is DUPLICATE and FETCH never returns it. Before, RELEASE only hid the objects and
+  the payload was deleted at TTL.
+- **Security errata RVN1 2026-08-13.**
+  [`SECURITY_ERRATA_RVN1_2026-08-13.md`](SECURITY_ERRATA_RVN1_2026-08-13.md) rule 9: RFC1
+  RELEASE is the object-bound deletion the rule asks for, so it deletes the object's payload
+  and pair columns and keeps the digest until expiry. Store Object V1 outside RFC1 stays
+  TTL-only. The amendment and its reasoning:
+  [`docs/SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md`](../docs/SECURITY_ERRATA_RULE9_CUSTODY_RELEASE_AMENDMENT_DRAFT.md).
+- **This inventory.** The Friend Custody V1 row says the same.
 
 ## Freeze record changes (2026-11-06, release posture: Bluetooth nearby is on in macOS release builds)
 
