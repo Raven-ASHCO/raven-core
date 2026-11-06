@@ -1334,7 +1334,9 @@ pub(crate) mod netutil {
     /// link ([`Admission::for_circuits`]), the oldest forgotten first: a
     /// stranger needs a circuit it never used for each one, and so an
     /// introduction (5 a second per introduction point), so this is minutes
-    /// of them. 16 bytes each.
+    /// of them. Each is kept twice (its 17-byte key in a hash set and in a
+    /// queue), about 70 bytes with the tables' spare room: under 300 KB in
+    /// all.
     const LOST_CIRCUITS_MAX: usize = 4096;
 
     /// The circuits that lost a pre-auth link in this helper life (TOR-1).
