@@ -291,17 +291,185 @@ fn every_message_says_how_and_when_it_came() {
 }
 
 /// E2 r9 #16: "messages (newest 15)" gave no hint that older ones exist.
+/// The hint names the group by its whole id (ASH-1).
 #[test]
 fn the_messages_header_says_how_many_are_older_and_how_to_see_them() {
-    assert_eq!(messages_header(3, 3, "Hikers"), "messages (3):");
+    let id: GroupId = [0x5a; 16];
+    let whole = "5a".repeat(16);
+    assert_eq!(messages_header(3, 3, &id), "messages (3):");
     assert_eq!(
-        messages_header(20, 45, "Hikers"),
-        "messages (newest 20 of 45; 25 older: `raven group show Hikers --all`):"
+        messages_header(20, 45, &id),
+        format!("messages (newest 20 of 45; 25 older: `raven group show {whole} --all`):")
     );
     assert_eq!(
-        messages_header(20, 21, "Calm test"),
-        "messages (newest 20 of 21; 1 older: `raven group show \"Calm test\" --all`):"
+        messages_header(20, 21, &id),
+        format!("messages (newest 20 of 21; 1 older: `raven group show {whole} --all`):")
     );
+}
+
+/// A group a friend made and signed as its admin, naming me in its roster:
+/// its id.
+fn admin_group(d: &Path, admin: &Identity, me: &Identity, salt: [u8; 16], name: &str) -> GroupId {
+    let id = group::group_id_for(&admin.public_key_bytes(), &salt);
+    let mut state = group::GroupState {
+        group: id,
+        salt,
+        epoch: 1,
+        name: name.into(),
+        admin: admin.public_key_bytes(),
+        issued_ms: now_ms(),
+        members: vec![
+            group::Member {
+                key: admin.public_key_bytes(),
+                label: String::new(),
+            },
+            group::Member {
+                key: me.public_key_bytes(),
+                label: String::new(),
+            },
+        ],
+        sig: [0; 64],
+    };
+    state.sign(admin);
+    let a = admin.public_key_bytes();
+    group::ingest(d, &a, &GroupFrame::State(state), now_ms()).unwrap();
+    id
+}
+
+/// `n` messages the admin wrote in group `id`, their ids starting with
+/// `tag`.
+fn admin_says(d: &Path, admin: &Identity, id: &GroupId, tag: u8, n: u8) {
+    let a = admin.public_key_bytes();
+    for i in 0..n {
+        let mut mid = [tag; 16];
+        mid[15] = i;
+        let mut m = GroupMsg {
+            group: *id,
+            id: mid,
+            epoch: 1,
+            from: [0; 32],
+            sent_ms: now_ms(),
+            body: format!("note {i}"),
+            sig: [0; 64],
+            relay: Vec::new(),
+        };
+        m.sign(admin);
+        group::ingest(d, &a, &GroupFrame::Msg(m), now_ms()).unwrap();
+    }
+}
+
+/// The messages header `raven group show` printed.
+fn header_of(shown: &str) -> &str {
+    shown
+        .lines()
+        .find(|l| l.starts_with("messages ("))
+        .unwrap_or_else(|| panic!("no messages header in {shown}"))
+}
+
+/// ASH-1: the hint to the older messages names the group by its whole id,
+/// never by the name its admin chose. A name may hold what a shell runs
+/// once the command is pasted, quotes that end the word, or text a command
+/// reads as an option; a plain name gets the same hint.
+#[test]
+fn the_older_messages_hint_names_the_group_by_its_whole_id() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let admin = Identity::from_seed(&[0xA1; 32]);
+    let (dir, me) = profile(&[("Ana", &admin)]);
+    let d = dir.path();
+    let names = [
+        "Book club $(touch pwned)",
+        "a`id`b",
+        "q\" ; id ; \"",
+        "it's 'quoted'",
+        "x;id",
+        "x|id",
+        "x&calc",
+        "x>out <in",
+        "!!",
+        "%PATH%",
+        "\u{201c}curly\u{201d}; calc",
+        "--all",
+        "-rf",
+        "Hikers",
+    ];
+    for (n, name) in names.into_iter().enumerate() {
+        let tag = n as u8 + 1;
+        let id = admin_group(d, &admin, &me, [tag; 16], name);
+        admin_says(d, &admin, &id, tag, 21);
+        let shown = plain(
+            &cmd_group(
+                d,
+                GroupArg::Show {
+                    group: hex::encode(id),
+                    all: false,
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            header_of(&shown),
+            format!(
+                "messages (newest 20 of 21; 1 older: `raven group show {} --all`):",
+                hex::encode(id)
+            ),
+            "{name}"
+        );
+    }
+}
+
+/// ASH-1 end to end: the command in the hint pastes as five plain words
+/// and its id finds the same group, also next to groups their admins named
+/// with its whole id and with its first 8 hex characters. Run as given, it
+/// lists every message.
+#[test]
+fn the_older_messages_hint_pastes_safely_and_finds_the_same_group() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let admin = Identity::from_seed(&[0xA1; 32]);
+    let (dir, me) = profile(&[("Ana", &admin)]);
+    let d = dir.path();
+    let id = admin_group(d, &admin, &me, [0x51; 16], "Book club $(touch pwned)");
+    admin_says(d, &admin, &id, 0x51, 21);
+    let whole = hex::encode(id);
+    admin_group(d, &admin, &me, [0x52; 16], &whole);
+    admin_group(d, &admin, &me, [0x53; 16], &whole[..8]);
+    let shown = plain(
+        &cmd_group(
+            d,
+            GroupArg::Show {
+                group: "book club $(touch pwned)".into(),
+                all: false,
+            },
+        )
+        .unwrap(),
+    );
+    let header = header_of(&shown);
+    let command = header.split('`').nth(1).unwrap_or_default();
+    assert!(
+        !command.contains(|c| "$`\"';|&<>(){}[]%!*?~#\\".contains(c)),
+        "{command}"
+    );
+    let words: Vec<&str> = command.split_whitespace().collect();
+    assert_eq!(words.len(), 5, "{command}");
+    assert_eq!(words[..3], ["raven", "group", "show"], "{command}");
+    assert_eq!(words[4], "--all", "{command}");
+    assert_eq!(group::find(d, words[3]), Ok(id), "{command}");
+    let every = plain(
+        &cmd_group(
+            d,
+            GroupArg::Show {
+                group: words[3].into(),
+                all: true,
+            },
+        )
+        .unwrap(),
+    );
+    assert_eq!(header_of(&every), "messages (21):", "{every}");
 }
 
 /// `--all` lists every message the group keeps; without it the newest 20
@@ -341,7 +509,10 @@ fn show_all_lists_every_message() {
     };
     let some = show(false);
     assert!(
-        some.contains("messages (newest 20 of 23; 3 older: `raven group show Walkers --all`):"),
+        some.contains(&format!(
+            "messages (newest 20 of 23; 3 older: `raven group show {} --all`):",
+            hex::encode(id)
+        )),
         "{some}"
     );
     assert!(!some.contains("walk 2 "), "{some}");

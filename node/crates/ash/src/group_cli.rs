@@ -497,20 +497,20 @@ fn how_it_came(
 
 /// The header of `show`'s messages: how many are shown and, when the group
 /// keeps older ones, how many and how to see them (E2 r9 #16: "messages
-/// (newest 15)" gave no hint that older ones exist).
-fn messages_header(shown: usize, total: usize, group_name: &str) -> String {
+/// (newest 15)" gave no hint that older ones exist). The command names the
+/// group `id` by its whole id, never by its name (ASH-1): the admin chose
+/// the name, and a shell runs what it holds once the command is pasted.
+/// [`group::find`] takes a whole id before any name, so a group named like
+/// this id cannot make the command ambiguous, as a group named like its
+/// first 8 hex characters makes the short id.
+fn messages_header(shown: usize, total: usize, id: &GroupId) -> String {
     if total <= shown {
         return format!("messages ({shown}):");
     }
-    let name = sanitize_terminal_line(group_name);
-    let arg = if name.contains(char::is_whitespace) {
-        format!("\"{name}\"")
-    } else {
-        name
-    };
     format!(
-        "messages (newest {shown} of {total}; {} older: `raven group show {arg} --all`):",
-        total - shown
+        "messages (newest {shown} of {total}; {} older: `raven group show {} --all`):",
+        total - shown,
+        hex::encode(id)
     )
 }
 
@@ -559,7 +559,7 @@ fn show_lines(data_dir: &Path, id: &GroupId, all: bool) -> Result<Vec<String>, S
     if history.is_empty() {
         lines.push(format!("{C_DIM}no messages yet{C_RESET}"));
     } else {
-        lines.push(messages_header(history.len(), total, &s.name));
+        lines.push(messages_header(history.len(), total, &s.id));
         let now = now_ms();
         let names = group::friend_names(data_dir);
         lines.extend(history.iter().map(|m| message_line(&view, m, &names, now)));
