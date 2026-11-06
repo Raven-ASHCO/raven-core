@@ -16,6 +16,12 @@
 #             profile, capped at 1 MiB, made owner only before the start, and
 #             sends nothing to the systemd journal (no log at all where
 #             systemd is older than 240 and cannot append to a file).
+#   WINLIN-3  windows_service.ps1 and windows_relay.ps1 give -BinDir (the
+#             programs a logon task starts) an explicit, protected ACL: one
+#             Protect-BinDir, the same in both, that checks the owner, drops
+#             what the folder inherited, allows only the user, SYSTEM and
+#             Administrators, and reads the result back; called right after
+#             the folder is made, never in render-only mode or an uninstall.
 #
 # Then each check is shown to catch a copy that undoes it, so a check that
 # can no longer fail is caught too. Runs on ubuntu CI and under macOS
@@ -220,6 +226,81 @@ StandardError=null' ]] \
     || fail "linux_systemd_user.sh: a data folder with a control character is not refused"
 }
 
+# The PowerShell function NAME of FILE, from its `function NAME(` line to the
+# first `}` at column 0.
+ps_fn_of() {
+  awk -v start="^function $1[(]" '$0 ~ start { on = 1 } on { print } on && /^[}]/ { exit }' "$2"
+}
+
+# The number of the first line of CODE after line FROM that is exactly TEXT,
+# or 0.
+line_after() {
+  awk -v from="$2" -v text="$3" 'NR > from + 0 && $0 == text { print NR; found = 1; exit }
+    END { if (!found) print 0 }' <<<"$1"
+}
+
+# WINLIN-3: windows_service.ps1 (SERVICE) and windows_relay.ps1 (RELAY) give
+# -BinDir an explicit, protected ACL.
+check_windows() {
+  local service=$1 relay=$2 fn frag code n_def n_new n_render n_else n_resolve
+  fn="$(ps_fn_of Protect-BinDir "$service")"
+  checks=$((checks + 1))
+  if [[ -z "$fn" || "$fn" != "$(ps_fn_of Protect-BinDir "$relay")" ]]; then
+    fail "Protect-BinDir is missing, or differs between windows_service.ps1 and windows_relay.ps1"
+  fi
+  for frag in '$allowed = @($user, "S-1-5-18", "S-1-5-32-544")' \
+    'GetOwner([System.Security.Principal.SecurityIdentifier]).Value' \
+    'if ($allowed -notcontains $owner) {' \
+    '/inheritance:r /grant:r "*${user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"' \
+    'if ($LASTEXITCODE -ne 0) {' \
+    'if (-not $acl.AreAccessRulesProtected) {' \
+    'GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])'; do
+    checks=$((checks + 1))
+    [[ "$fn" == *"$frag"* ]] || fail "Protect-BinDir lacks $frag"
+  done
+  checks=$((checks + 1))
+  if grep -qiE 'Set-Acl|SetAccessControl' <<<"$fn"; then
+    fail "Protect-BinDir writes the ACL with Set-Acl (it asks for the audit privilege) instead of icacls"
+  fi
+
+  # windows_service.ps1: after the folder is made and resolved, in the branch
+  # that is not render-only (that one shows -BinDir as given and changes
+  # nothing), and only there.
+  code="$(code_of "$service")"
+  n_def="$(line_of "$code" 'function Protect-BinDir([string]$Dir) {' line)"
+  n_render="$(line_of "$code" 'if ($renderOnly) {' line)"
+  n_else="$(line_after "$code" "$n_render" '} else {')"
+  n_new="$(line_after "$code" "$n_else" 'New-Item -ItemType Directory -Force -Path $BinDir | Out-Null')"
+  n_resolve="$(line_after "$code" "$n_new" '$BinDir = (Resolve-Path -LiteralPath $BinDir).Path')"
+  in_order "windows_service.ps1: Protect-BinDir is not defined first, then called right after -BinDir is made and resolved outside render-only" \
+    "$n_def" "$n_render" "$n_else" "$n_new" "$n_resolve" "$(line_after "$code" "$n_resolve" 'Protect-BinDir $BinDir')"
+  checks=$((checks + 1))
+  [[ "$(line_after "$code" "$n_resolve" 'Protect-BinDir $BinDir')" -eq $((n_resolve + 1)) \
+    && "$(count_of "$code" 'Protect-BinDir $BinDir')" -eq 1 ]] \
+    || fail "windows_service.ps1: Protect-BinDir \$BinDir is not the one call, on the line after -BinDir is resolved"
+
+  # windows_relay.ps1: right after -BinDir is made and resolved, before
+  # kit.conf is read from it; not for -Uninstall, which only removes files.
+  code="$(code_of "$relay")"
+  n_def="$(line_of "$code" 'function Protect-BinDir([string]$Dir) {' line)"
+  n_new="$(line_of "$code" 'New-Item -ItemType Directory -Force -Path $BinDir | Out-Null' line)"
+  n_resolve="$(line_after "$code" "$n_new" '$BinDir = (Resolve-Path -LiteralPath $BinDir).Path')"
+  in_order "windows_relay.ps1: Protect-BinDir is not defined first, then called right after -BinDir is made and resolved" \
+    "$n_def" "$n_new" "$n_resolve" "$(line_of "$code" '$kitConf = Join-Path $BinDir "kit.conf"' line)"
+  checks=$((checks + 1))
+  [[ "$(line_after "$code" "$n_resolve" 'if (-not $Uninstall) { Protect-BinDir $BinDir }')" -eq $((n_resolve + 1)) \
+    && "$(count_of "$code" 'Protect-BinDir $BinDir')" -eq 1 ]] \
+    || fail "windows_relay.ps1: Protect-BinDir \$BinDir is not the one call, on the line after -BinDir is resolved"
+}
+
+# check_windows with a copy of one of the two scripts.
+check_service_copy() {
+  check_windows "$1" "$INSTALL/windows_relay.ps1"
+}
+check_relay_ps1_copy() {
+  check_windows "$INSTALL/windows_service.ps1" "$1"
+}
+
 # FILE with TEXT (a fixed string) in its first line that holds it replaced
 # by WITH (\n is a new line).
 replace() {
@@ -286,8 +367,25 @@ caught "an old systemd falls back to the journal" check_user_unit "$USER_UNIT" \
 caught "the log file keeps the umask" check_user_unit "$USER_UNIT" \
   '(umask 077 && : >>"$SERVICE_LOG")' '(: >>"$SERVICE_LOG")'
 
+check_windows "$INSTALL/windows_service.ps1" "$INSTALL/windows_relay.ps1"
+
+SERVICE_PS1="$INSTALL/windows_service.ps1"
+RELAY_PS1="$INSTALL/windows_relay.ps1"
+caught "the service installer keeps the inherited ACL" check_service_copy "$SERVICE_PS1" 'Protect-BinDir $BinDir' ''
+caught "the relay installer keeps the inherited ACL" check_relay_ps1_copy "$RELAY_PS1" \
+  'if (-not $Uninstall) { Protect-BinDir $BinDir }' ''
+caught "render-only changes the ACL" check_service_copy "$SERVICE_PS1" \
+  '$BinDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BinDir)' \
+  '$BinDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BinDir)\n    Protect-BinDir $BinDir'
+caught "the folder keeps what it inherits" check_service_copy "$SERVICE_PS1" '/inheritance:r ' ''
+caught "the two copies drift" check_relay_ps1_copy "$RELAY_PS1" '"*S-1-5-32-544:(OI)(CI)F"' '"*S-1-5-32-545:(OI)(CI)F"'
+caught "the ACL is not read back" check_service_copy "$SERVICE_PS1" \
+  'if (-not $acl.AreAccessRulesProtected) {' 'if ($false) {'
+caught "any owner is taken" check_service_copy "$SERVICE_PS1" \
+  'if ($allowed -notcontains $owner) {' 'if ($false) {'
+
 if [[ "$failures" -ne 0 ]]; then
   echo "installer_hardening_selftest: $failures of $checks checks failed" >&2
   exit 1
 fi
-echo "installer_hardening_selftest OK ($checks checks; linux_relay.sh and linux_systemd_user.sh, each check caught a copy that undoes it)"
+echo "installer_hardening_selftest OK ($checks checks; linux_relay.sh, linux_systemd_user.sh, windows_service.ps1 and windows_relay.ps1, each check caught a copy that undoes it)"

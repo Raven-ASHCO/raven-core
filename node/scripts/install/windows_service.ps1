@@ -149,6 +149,39 @@ if ($Upnp -and ($Upnp -notmatch '^[01]$')) {
 }
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 
+# Security review 2026-11, WINLIN-3: -BinDir holds the programs a logon task starts as you, so
+# no other account may change them. A new folder takes the permissions of its parent (under a
+# drive root every signed in user may add and change files), and New-Item -Force keeps an
+# existing folder as it is. So the folder must belong to you, SYSTEM or the Administrators
+# group, and it gets an ACL of its own that inherits nothing: full control for you, SYSTEM and
+# Administrators (what the installer copies in takes it), read back before anything is copied.
+# Never a drive root. The same function is in windows_service.ps1 and windows_relay.ps1.
+function Protect-BinDir([string]$Dir) {
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @($user, "S-1-5-18", "S-1-5-32-544")
+    $driveRoot = [System.IO.Path]::GetPathRoot($Dir)
+    if ($driveRoot -and ($Dir.TrimEnd('\') -eq $driveRoot.TrimEnd('\'))) {
+        throw "-BinDir $Dir is a drive root: pick a folder of its own for the Raven programs"
+    }
+    $owner = (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($allowed -notcontains $owner) {
+        throw "-BinDir $Dir belongs to another account ($owner): pick a folder of your own"
+    }
+    & icacls.exe $Dir /inheritance:r /grant:r "*${user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls could not make -BinDir $Dir private (exit $LASTEXITCODE; a FAT32 or exFAT drive keeps no permissions: use a folder on an NTFS drive)"
+    }
+    $acl = Get-Acl -LiteralPath $Dir
+    if (-not $acl.AreAccessRulesProtected) {
+        throw "-BinDir $Dir still takes the permissions of its parent"
+    }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if (($rule.AccessControlType -eq "Allow") -and ($allowed -notcontains $rule.IdentityReference.Value)) {
+            throw "-BinDir $Dir still lets $($rule.IdentityReference.Value) in: pick a folder of your own"
+        }
+    }
+}
+
 if ($renderOnly) {
     # Render-only creates nothing: the folders are shown as given, made absolute.
     $DataDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DataDir)
@@ -159,6 +192,7 @@ if ($renderOnly) {
     # Task Scheduler runs with another working directory: register absolute paths only.
     $DataDir = (Resolve-Path -LiteralPath $DataDir).Path
     $BinDir = (Resolve-Path -LiteralPath $BinDir).Path
+    Protect-BinDir $BinDir
 }
 
 # UPnP (owner decision Q8, "ask once at setup"): -Upnp decides. Without it, an

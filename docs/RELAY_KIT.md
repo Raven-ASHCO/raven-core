@@ -161,7 +161,9 @@ automatic sleep off in System Settings (the kit does not).
 **Windows.** `windows_relay.ps1` registers a per-user logon task with the same
 Task Scheduler settings as the node's own task, the relay folder
 `%LOCALAPPDATA%\RavenRelay` and `raven-relay.cmd` next to the binaries in
-`%LOCALAPPDATA%\RavenRelayBin`. Parameters: `-PublicHost`, `-Port`,
+`%LOCALAPPDATA%\RavenRelayBin`, a folder the kit makes private to you (an ACL
+of its own for you, SYSTEM and Administrators, nothing inherited; security
+review 2026-11, WINLIN-3). Parameters: `-PublicHost`, `-Port`,
 `-Tcp443 direct|7443|off` (http.sys or IIS may already hold 443), `-NoAutonat`,
 `-Prebuilt`, `-Lab`, `-Uninstall`, `-Rollback`. Details:
 [`WINDOWS_SERVICE.md`](../node/scripts/install/WINDOWS_SERVICE.md).

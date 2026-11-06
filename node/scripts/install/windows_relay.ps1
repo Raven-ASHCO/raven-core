@@ -58,11 +58,45 @@ function Fail-Settings([string]$Message) {
     exit 2
 }
 
+# Security review 2026-11, WINLIN-3: -BinDir holds the programs a logon task starts as you, so
+# no other account may change them. A new folder takes the permissions of its parent (under a
+# drive root every signed in user may add and change files), and New-Item -Force keeps an
+# existing folder as it is. So the folder must belong to you, SYSTEM or the Administrators
+# group, and it gets an ACL of its own that inherits nothing: full control for you, SYSTEM and
+# Administrators (what the installer copies in takes it), read back before anything is copied.
+# Never a drive root. The same function is in windows_service.ps1 and windows_relay.ps1.
+function Protect-BinDir([string]$Dir) {
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @($user, "S-1-5-18", "S-1-5-32-544")
+    $driveRoot = [System.IO.Path]::GetPathRoot($Dir)
+    if ($driveRoot -and ($Dir.TrimEnd('\') -eq $driveRoot.TrimEnd('\'))) {
+        throw "-BinDir $Dir is a drive root: pick a folder of its own for the Raven programs"
+    }
+    $owner = (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($allowed -notcontains $owner) {
+        throw "-BinDir $Dir belongs to another account ($owner): pick a folder of your own"
+    }
+    & icacls.exe $Dir /inheritance:r /grant:r "*${user}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls could not make -BinDir $Dir private (exit $LASTEXITCODE; a FAT32 or exFAT drive keeps no permissions: use a folder on an NTFS drive)"
+    }
+    $acl = Get-Acl -LiteralPath $Dir
+    if (-not $acl.AreAccessRulesProtected) {
+        throw "-BinDir $Dir still takes the permissions of its parent"
+    }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if (($rule.AccessControlType -eq "Allow") -and ($allowed -notcontains $rule.IdentityReference.Value)) {
+            throw "-BinDir $Dir still lets $($rule.IdentityReference.Value) in: pick a folder of your own"
+        }
+    }
+}
+
 foreach ($dir in @($RelayDir, $BinDir)) {
     if ($dir -match '["%\r\n]') { Fail-Settings "-RelayDir and -BinDir must not contain a double quote, % or a newline" }
 }
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 $BinDir = (Resolve-Path -LiteralPath $BinDir).Path
+if (-not $Uninstall) { Protect-BinDir $BinDir }
 $kitConf = Join-Path $BinDir "kit.conf"
 
 # kit.conf: plain KEY=VALUE lines, parsed (never run), the same keys as the Linux and macOS kits.

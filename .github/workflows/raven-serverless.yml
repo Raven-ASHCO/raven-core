@@ -215,9 +215,12 @@ jobs:
       # below 1024), root only on a first install, and never chowns that
       # folder recursively (WINLIN-1); the Linux user unit appends its output
       # to the capped raven-node-service.log in the profile and sends nothing
-      # to the journal (PRIV-3). Static: bash -n, grep and awk on the
-      # installers and on copies that undo each part (each must be caught),
-      # plus the unit's two printing functions. No installer runs.
+      # to the journal (PRIV-3); both Windows installers give -BinDir an
+      # explicit, protected ACL through one Protect-BinDir, outside
+      # render-only mode (WINLIN-3; the Windows job runs them). Static: bash
+      # -n, grep and awk on the installers and on copies that undo each part
+      # (each must be caught), plus the unit's two printing functions. No
+      # installer runs.
       - name: Installer hardening (installer_hardening_selftest.sh)
         run: bash node/scripts/install/installer_hardening_selftest.sh
 
