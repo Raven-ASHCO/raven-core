@@ -191,19 +191,19 @@ where
     });
     let mut stdin = BufReader::new(input).lines();
     let Ok(Some(first)) = stdin.next_line().await else {
-        return 2;
+        return refused(events, writer).await;
     };
     let Ok(config) = serde_json::from_str::<Config>(&first) else {
         events.local("bad config line");
-        return 2;
+        return refused(events, writer).await;
     };
     if config.v != proto::PROTO_VERSION {
         events.local("unknown protocol version");
-        return 2;
+        return refused(events, writer).await;
     }
     let Some(token) = proto::parse_token(&config.token) else {
         events.local("bad token");
-        return 2;
+        return refused(events, writer).await;
     };
     // The helper channel (macOS, Linux) or raven-node's loopback forward
     // listener (Windows).
@@ -211,7 +211,7 @@ where
         Ok(to_node) => to_node,
         Err(what) => {
             events.local(what);
-            return 2;
+            return refused(events, writer).await;
         }
     };
     let state_dir = PathBuf::from(&config.state_dir);
@@ -262,9 +262,23 @@ where
         code = EXIT_OBSOLETE;
     }
     tor.abort();
+    said(events, writer).await;
+    code
+}
+
+/// [`said`], then 2: the config line refused.
+async fn refused(events: Events, writer: tokio::task::JoinHandle<()>) -> i32 {
+    said(events, writer).await;
+    2
+}
+
+/// `events` closed and its writer given half a second to write what is
+/// left: the helper's last words reach raven-node before [`serve`]
+/// returns (a helper process exits right after, and a line still with
+/// the writer task would be lost).
+async fn said(events: Events, writer: tokio::task::JoinHandle<()>) {
     drop(events);
     let _ = tokio::time::timeout(Duration::from_millis(500), writer).await;
-    code
 }
 
 /// The guard state (Arti's `state/` under its state directory) set aside,
@@ -1081,6 +1095,60 @@ mod tests {
             .and_then(|(_, rest)| rest.split_once('}'))
             .map_or("", |(timeouts, _)| timeouts);
         assert!(timeouts.contains("connect_timeout: 6s"), "{text}");
+    }
+
+    /// A config line the helper refuses gets its words to raven-node before
+    /// [`serve`] returns: a helper process exits right after (its runtime
+    /// ends, and a line still with the writer task is lost), and raven-node
+    /// says "install Raven again" for another version only when the words
+    /// came. One thread: nothing runs between `serve`'s return and the read.
+    #[tokio::test]
+    async fn the_words_for_a_refused_config_line_are_written_before_serve_returns() {
+        let good = Config {
+            v: proto::PROTO_VERSION,
+            state_dir: "/nonexistent/raven-tor".into(),
+            token: hex::encode([1u8; proto::TOKEN_LEN]),
+            forward: "127.0.0.1:9".into(),
+            port: 4242,
+            fresh_state: false,
+        };
+        let line = |config: Config| proto::line(&config);
+        let refused = [
+            (
+                line(Config {
+                    v: proto::PROTO_VERSION + 1,
+                    ..good.clone()
+                }),
+                "unknown protocol version",
+            ),
+            ("not a config\n".to_string(), "bad config line"),
+            (
+                line(Config {
+                    token: "00".into(),
+                    ..good.clone()
+                }),
+                "bad token",
+            ),
+            (
+                line(Config {
+                    forward: "192.0.2.1:9".into(),
+                    ..good.clone()
+                }),
+                "forward address is not loopback",
+            ),
+        ];
+        for (first, words) in refused {
+            let (mut to_helper, input) = tokio::io::duplex(4096);
+            let (output, mut from_helper) = tokio::io::duplex(4096);
+            to_helper.write_all(first.as_bytes()).await.unwrap();
+            assert_eq!(serve(input, output, channel::Handed::Nothing).await, 2);
+            let mut got = vec![0u8; 4096];
+            let n = futures::FutureExt::now_or_never(from_helper.read(&mut got))
+                .unwrap_or_else(|| panic!("no words yet when serve returned: {words}"))
+                .unwrap();
+            let said = String::from_utf8_lossy(&got[..n]);
+            assert!(said.contains(words), "{words}: {said}");
+        }
     }
 
     // ── The rendezvous circuits (TOR-5), with fake clients ─────────────────
