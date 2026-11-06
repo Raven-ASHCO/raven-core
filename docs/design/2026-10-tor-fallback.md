@@ -235,7 +235,7 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
 | Wait | Direct (today) | Onion |
 |---|---|---|
 | Head start of the direct paths | - | 1.5 s (`ONION_HEAD_START`) |
-| Connect (Tor circuit to the service, rendezvous) | 5 s per address, 20 s per dial | 45 s (`ONION_CONNECT_BUDGET`); first contact is typically 10-30 s. Within it the helper tries once more, at once after a timeout (once Arti has the rendezvous circuit, it waits 6 s for the stream's CONNECTED, not its default 10 s) and 2 s after any other failure (no descriptor, not running, introduction or rendezvous failed), with 12 s or more left for it, in a new isolation group (fresh descriptor, fresh circuits): field test round 8, the first sends to a friend whose node had just restarted failed on the client's cached view of the old service. A fresh try that works makes its group the friend's for the connects that follow in that helper life, and a first try that timed out is never made in its group again (audit T6: Arti hands every connect of one group the same rendezvous circuit while it looks open, a dead one too, so each dial paid the timeout, the pause and a new rendezvous); a friend unused for 10 min is back in the default group |
+| Connect (Tor circuit to the service, rendezvous) | 5 s per address, 20 s per dial | 45 s (`ONION_CONNECT_BUDGET`); first contact is typically 10-30 s. Within it the helper tries once more, at once after a timeout (once Arti has the rendezvous circuit, it waits 6 s for the stream's CONNECTED, not its default 10 s) and 2 s after any other failure (no descriptor, not running, introduction or rendezvous failed), with 12 s or more left for it, in a new isolation group (fresh descriptor, fresh circuits): field test round 8, the first sends to a friend whose node had just restarted failed on the client's cached view of the old service. A fresh try that works makes its group the friend's for the connects that follow in that helper life, and a first try that timed out is never made in its group again (audit T6: Arti hands every connect of one group the same rendezvous circuit while it looks open, a dead one too, so each dial paid the timeout, the pause and a new rendezvous); a friend unused for 10 min is back in the default group. With the hedge gate open (§3.6, lab only) a first try with no stream after 2 s gets the fresh try beside it, and after a failed link the first try goes in a new group |
 | Whole dial | 40-45 s | 75 s (`ONION_DIAL_DEADLINE`) |
 | Frame I/O | 30 s | 30 s |
 | First reply / idle reply | 30 s / 2 s | 30 s / 5 s |
@@ -285,6 +285,22 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
   once the gate is shut (a hold); a lock, a network change, the end of a
   Tor helper's life and the embedded node's pause close them all. The
   listener is unchanged (`raven-node/src/onion/warm.rs`).
+- **Hedge and fresh first** (speed design M5; gate
+  `ONION_HEDGE_PRODUCTION_ENABLED = false`, lab only, §4). With the hedge
+  gate open the dialer asks the helper for flags with each connect (the
+  local helper protocol's version 3, `RAVEN_ONION_CARRIER_V1.md` §6): a
+  hedge, so a first try in the friend's isolation group that has no stream
+  after 2 s (`CONNECT_HEDGE_AFTER`; a healthy BEGIN takes one round trip)
+  gets a fresh try in a new group beside it, the first stream winning and
+  the other try dropped; and fresh first, after a link to that friend failed
+  where the helper cannot see it (no link came up, a batch got no reply in
+  its wait, a kept link died before any reply) within 10 minutes: the first
+  try then goes in a new group at once. On the loopback model (one round
+  trip r, a rendezvous R, Arti's 6 s wait for CONNECTED on a dead circuit)
+  a send past a dead circuit costs 2 s + R + 4r with W1 instead of
+  6 s + R + 7r, and R + 4r after a failed link. The price: one more
+  introduction (and maybe a descriptor fetch) at the friend's service when
+  a hedge fires.
 
 ### 3.7 Robustness around Arti's known gaps
 
@@ -393,7 +409,7 @@ Shown by `raven status --explain tor` and in the docs:
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. |
 | Head start | `RAVEN_LAB_TOR_HEAD_START_MS` (debug only, tests) overrides 1.5 s. |
 | Stage record | Debug builds only (speed groundwork for the D1 measurement, security and speed report 2026-11-05 §7): every onion dial's step times in memory, as durations only (`prep`, `connect` with its `circuit` and `begin` parts, `noise`, `hello`, `write`, `receipt`, `total`; never a key, an onion id, an address or a message). `RAVEN_LAB_TOR_STAGES=<absolute path>` with `RAVEN_LAB_TEST_A=1` appends one JSON line per dial for the D1 harness. Arti gets the circuit and opens the stream in one call, so `circuit` and `begin` split the helper's connect by the one round trip rule (BEGIN to CONNECTED takes as long as the Noise round trip that follows on the same circuit). Release builds keep nothing. |
-| Tor speed, Stage A | Five more gates, every one false, each open only while the onion carrier is, with its lab switch (with `RAVEN_LAB_TEST_A=1`, debug builds only) and a hold of its own in the suite registry: `ONION_WARM_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM`, `feature/onion-warm`: W1 kept links, §3.6), `ONION_HEDGE_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_HEDGE`, `feature/onion-hedge`), `ONION_EARLY_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_EARLY`, `feature/onion-early`), `ONION_OPTIMISTIC_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_OPTIMISTIC`, `feature/onion-optimistic`) and `ONION_WARM_LINK_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM_LINK`, `feature/onion-warm-link`: W2, a wire change). Only W1 acts yet. |
+| Tor speed, Stage A | Five more gates, every one false, each open only while the onion carrier is, with its lab switch (with `RAVEN_LAB_TEST_A=1`, debug builds only) and a hold of its own in the suite registry: `ONION_WARM_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM`, `feature/onion-warm`: W1 kept links, §3.6), `ONION_HEDGE_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_HEDGE`, `feature/onion-hedge`: the connect hedge and fresh first, §3.6), `ONION_EARLY_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_EARLY`, `feature/onion-early`), `ONION_OPTIMISTIC_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_OPTIMISTIC`, `feature/onion-optimistic`) and `ONION_WARM_LINK_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM_LINK`, `feature/onion-warm-link`: W2, a wire change). Only W1 and the connect hedge with fresh first (§3.6) act yet. |
 
 ## 5. Tests
 

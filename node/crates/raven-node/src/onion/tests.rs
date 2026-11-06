@@ -582,6 +582,7 @@ impl Friends {
             &self.side_a.token,
             &self.side_b.hs_id,
             raven_core::onion::ONION_VIRTUAL_PORT,
+            0,
         ))
         .await
         .unwrap();
@@ -1707,13 +1708,28 @@ fn test_pool(
     &'static warm::WarmPool,
     &'static std::sync::atomic::AtomicBool,
 ) {
-    let gate: &'static std::sync::atomic::AtomicBool =
-        Box::leak(Box::new(std::sync::atomic::AtomicBool::new(true)));
+    let (pool, gate, _hedge) = test_pool_with_hedge(limits);
+    (pool, gate)
+}
+
+/// [`test_pool`] with its own hedge gate switch too (shut).
+fn test_pool_with_hedge(
+    limits: warm::Limits,
+) -> (
+    &'static warm::WarmPool,
+    &'static std::sync::atomic::AtomicBool,
+    &'static std::sync::atomic::AtomicBool,
+) {
+    let switch = |on: bool| -> &'static std::sync::atomic::AtomicBool {
+        Box::leak(Box::new(std::sync::atomic::AtomicBool::new(on)))
+    };
+    let (gate, hedge) = (switch(true), switch(false));
     let pool: &'static warm::WarmPool = Box::leak(Box::new(warm::WarmPool::new(
         limits,
         warm::Gate::Switch(gate),
+        warm::Gate::Switch(hedge),
     )));
-    (pool, gate)
+    (pool, gate, hedge)
 }
 
 /// Waits until `ok` holds, at most `within`.
@@ -2065,4 +2081,203 @@ async fn a_link_idle_old_or_full_is_retired_not_reused() {
         assert_eq!(f.program_sends(pool, text).await.0, 1);
         assert_eq!(pool.len(), 0, "a link that carried its frames is not kept");
     }
+}
+
+// ── M5: hedges and fresh first (Tor speed Stage A, speed design M5) ────────
+
+/// A fresh rendezvous in the M5 tests: the first try in an isolation group
+/// pays it before its connect (descriptor, introduction, rendezvous).
+const RENDEZVOUS: Duration = Duration::from_millis(2000);
+/// What a BEGIN on a dead circuit waits before Arti gives up on it (the Arti
+/// helper's stream connect timeout).
+const BEGIN_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Loopback Tor for the M5 tests: a connect takes one round trip r ([`R`])
+/// and every byte arrives r/2 later, a fresh group pays [`RENDEZVOUS`]
+/// first, and the default isolation group's circuit to Bob is dead (a try
+/// in it waits [`BEGIN_TIMEOUT`] and ends "tor timeout"), as is every
+/// circuit built before a rise of `kill`.
+fn dead_circuit_knobs(kill: Option<&'static std::sync::atomic::AtomicU64>) -> loopback::Knobs {
+    loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        stale: BEGIN_TIMEOUT,
+        rendezvous: RENDEZVOUS,
+        kill,
+        count: true,
+        ..loopback::Knobs::default()
+    }
+}
+
+/// `took` is about `want`: not less (give or take a timer's tick), and less
+/// than one round trip more (local work in a debug build).
+fn about(took: Duration, want: Duration) -> bool {
+    took + Duration::from_millis(50) >= want && took < want + R
+}
+
+impl Friends {
+    /// The counts of Alice's helper.
+    fn counts(&self) -> loopback::Counts {
+        loopback::Counts::read(&self.a.path().join(TOR_DIR))
+    }
+}
+
+/// With the hedge and warm gates shut nothing changes: a send to a friend
+/// whose circuit is dead costs Arti's BEGIN timeout, a rendezvous and its
+/// 7 round trips (a check of 3 on the fresh circuit, a message link of 4),
+/// 6 s + R + 7r: two Tor streams, three tries, one on the dead circuit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_the_hedge_gate_shut_a_dead_circuit_costs_its_timeout_as_before() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(dead_circuit_knobs(None)).await else {
+        return;
+    };
+    let (pool, gate, _hedge) = test_pool_with_hedge(warm::LIMITS);
+    gate.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (acks, took) = f
+        .program_sends(pool, "past a dead circuit, gates shut")
+        .await;
+    let want = BEGIN_TIMEOUT + RENDEZVOUS + 7 * R;
+    eprintln!(
+        "gates shut: {took:?} (6 s + R + 7r = {want:?}), {:?}",
+        f.counts()
+    );
+    assert_eq!(acks, 1);
+    assert!(about(took, want), "took {took:?}, want about {want:?}");
+    assert_eq!(
+        f.counts(),
+        loopback::Counts {
+            connects: 2,
+            tries: 3,
+            stale: 1
+        }
+    );
+    assert_eq!(pool.len(), 0, "nothing kept");
+}
+
+/// M5 with W1: the helper hedges a first try that has no stream after
+/// CONNECT_HEDGE_AFTER (2 s) with a fresh one beside it, so a dead circuit
+/// costs 2 s, not Arti's 6 s BEGIN timeout; the check's link is kept and
+/// the message rides it: 2 s + R + 4r in all (6 s + R + 7r with the gates
+/// shut), one Tor stream and two tries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_circuit_costs_two_seconds_with_the_hedge_gate_open() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(dead_circuit_knobs(None)).await else {
+        return;
+    };
+    let (pool, _gate, hedge) = test_pool_with_hedge(warm::LIMITS);
+    hedge.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (acks, took) = f.program_sends(pool, "past a dead circuit, hedged").await;
+    let want = proto::CONNECT_HEDGE_AFTER + RENDEZVOUS + 4 * R;
+    eprintln!(
+        "hedged: {took:?} (2 s + R + 4r = {want:?}), {:?}",
+        f.counts()
+    );
+    assert_eq!(acks, 1);
+    assert!(about(took, want), "took {took:?}, want about {want:?}");
+    assert_eq!(
+        f.counts(),
+        loopback::Counts {
+            connects: 1,
+            tries: 2,
+            stale: 1
+        }
+    );
+    assert_eq!(inbox(f._b.path()), ["past a dead circuit, hedged"]);
+    pool.flush();
+}
+
+/// M5, fresh first (W4): once a link to Bob failed where the helper cannot
+/// see it (here a batch on the kept link whose circuit died with no word,
+/// left unanswered), the next connect goes in a new isolation group at once:
+/// a rendezvous and 4 round trips, no try on the dead circuit and no 2 s
+/// hedge wait. Bob holds the message once (the copy on the dead circuit
+/// never reached him).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_failed_link_the_next_connect_goes_fresh_first() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let kill: &'static std::sync::atomic::AtomicU64 =
+        Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
+    let Some(f) = Friends::with(dead_circuit_knobs(Some(kill))).await else {
+        return;
+    };
+    let (pool, _gate, hedge) = test_pool_with_hedge(warm::LIMITS);
+    hedge.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(f.program_sends(pool, "before the kill").await.0, 1);
+    assert_eq!(pool.len(), 1, "the link is kept");
+    let before = f.counts();
+    loopback::kill_circuits(kill);
+    let sealed = seal_as(f.a.path(), &f.alice, &f.key_ab, "after the kill", true);
+    let short = ReplyWaits {
+        first: R,
+        ..ONION_WAITS
+    };
+    let replies = f
+        .program_dials(pool, short, std::slice::from_ref(&sealed))
+        .await
+        .expect("written on the kept link");
+    assert!(
+        raven_core::outbox::ack_frames(&replies).is_empty(),
+        "no ACK"
+    );
+    assert_eq!(pool.len(), 0, "the silent link is not kept");
+    assert_eq!(f.counts(), before, "it rode the kept link");
+    let began = Instant::now();
+    let replies = f
+        .program_dials(pool, ONION_WAITS, &[sealed])
+        .await
+        .expect("delivered");
+    let took = began.elapsed();
+    let want = RENDEZVOUS + 4 * R;
+    eprintln!(
+        "fresh first: {took:?} (R + 4r = {want:?}), {:?}",
+        f.counts()
+    );
+    assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+    assert!(about(took, want), "took {took:?}, want about {want:?}");
+    assert_eq!(
+        f.counts(),
+        loopback::Counts {
+            connects: before.connects + 1,
+            tries: before.tries + 1,
+            stale: before.stale
+        },
+        "one try, in a new group"
+    );
+    assert_eq!(inbox(f._b.path()), ["before the kill", "after the kill"]);
+    pool.flush();
+}
+
+/// A helper refuses a connect request with a flag it does not know (here
+/// bit 1, kept for the keep-warm probe): never served as if it were clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connect_with_an_unknown_flag_is_refused() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let mut s = TcpStream::connect(f.side_a.connect).await.unwrap();
+    s.write_all(&proto::encode_connect(
+        &f.side_a.token,
+        &f.side_b.hs_id,
+        raven_core::onion::ONION_VIRTUAL_PORT,
+        1 << 1,
+    ))
+    .await
+    .unwrap();
+    let mut head = [0u8; 2];
+    s.read_exact(&mut head).await.unwrap();
+    let mut reason = vec![0u8; usize::from(head[1])];
+    s.read_exact(&mut reason).await.unwrap();
+    assert_eq!(
+        ConnectReply::decode(head[0], &reason),
+        ConnectReply::Failed(proto::UNKNOWN_FLAGS.into())
+    );
+    assert_eq!(f.counts().tries, 0, "no try made");
 }

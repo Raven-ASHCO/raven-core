@@ -34,6 +34,12 @@
 //! longer verified, and all of them once the gate is shut (a security
 //! notice holds it). [`flush`] closes all of them on a lock, a network
 //! change, the end of a Tor helper's life and the embedded node's pause.
+//!
+//! **Hedges** (speed design M5; the hedge gate
+//! [`raven_core::onion_gate::onion_hedge_live`], false in release builds):
+//! the pool also says which connect flags a dial asks the helper for
+//! ([`WarmPool::connect_flags`]): a hedge, or fresh first when the last
+//! link to that onion service failed a moment ago ([`WarmPool::link_failed`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,10 +90,11 @@ pub(crate) const LIMITS: Limits = Limits {
     sweep: SWEEP,
 };
 
-/// The gate a pool follows.
+/// A gate a pool follows.
 pub(crate) enum Gate {
-    /// [`raven_core::onion_gate::onion_warm_live`].
-    Live,
+    /// A release gate: [`raven_core::onion_gate::onion_warm_live`],
+    /// [`raven_core::onion_gate::onion_hedge_live`].
+    Live(fn() -> bool),
     /// A test's own switch.
     #[cfg(test)]
     Switch(&'static std::sync::atomic::AtomicBool),
@@ -96,12 +103,16 @@ pub(crate) enum Gate {
 impl Gate {
     fn open(&self) -> bool {
         match self {
-            Gate::Live => raven_core::onion_gate::onion_warm_live(),
+            Gate::Live(live) => live(),
             #[cfg(test)]
             Gate::Switch(on) => on.load(Ordering::SeqCst),
         }
     }
 }
+
+/// How many onion services a pool remembers a failed link to (fresh first,
+/// [`WarmPool::link_failed`]); past it the oldest is forgotten.
+const FAILED_KEPT: usize = 64;
 
 /// Whose a kept link is: this profile's link to `contact`'s onion service
 /// `hs_id`, through the helper life whose token is `token` (a new life
@@ -183,10 +194,14 @@ impl WarmLink {
     }
 }
 
-/// Kept links, one per friend, and the keeper that looks at them.
+/// Kept links, one per friend, and the keeper that looks at them; and the
+/// onion services whose last link failed (speed design M5).
 pub(crate) struct WarmPool {
     limits: Limits,
+    /// The warm gate (W1).
     gate: Gate,
+    /// The hedge gate (M5).
+    hedge: Gate,
     inner: Mutex<Inner>,
 }
 
@@ -195,16 +210,21 @@ struct Inner {
     /// The keeper task while it runs: it ends once no link is kept, or with
     /// the runtime it ran on (the embedded node's pause stops that one).
     keeper: Option<tokio::task::JoinHandle<()>>,
+    /// Onion services whose last link failed, and when (hedge gate only).
+    failed: Vec<([u8; 32], Instant)>,
 }
 
 impl WarmPool {
-    pub(crate) const fn new(limits: Limits, gate: Gate) -> Self {
+    /// A pool with `limits`, the warm `gate` and the `hedge` gate.
+    pub(crate) const fn new(limits: Limits, gate: Gate, hedge: Gate) -> Self {
         Self {
             limits,
             gate,
+            hedge,
             inner: Mutex::new(Inner {
                 links: Vec::new(),
                 keeper: None,
+                failed: Vec::new(),
             }),
         }
     }
@@ -216,6 +236,50 @@ impl WarmPool {
     /// The pool's gate is open.
     pub(crate) fn live(&self) -> bool {
         self.gate.open()
+    }
+
+    /// The connect flags of a dial to the onion service `hs_id`
+    /// ([`super::proto::encode_connect`], speed design M5): none while the
+    /// hedge gate is shut, as before; with it open a hedge, or fresh first
+    /// when a link to it failed within [`super::proto::GROUP_KEPT`] and none
+    /// worked since ([`Self::link_failed`]).
+    pub(crate) fn connect_flags(&self, hs_id: &[u8; 32]) -> u8 {
+        use super::proto::{CONNECT_FRESH_FIRST, CONNECT_HEDGE, GROUP_KEPT};
+        if !self.hedge.open() {
+            return 0;
+        }
+        let now = Instant::now();
+        let mut inner = self.lock();
+        inner
+            .failed
+            .retain(|(_, at)| now.saturating_duration_since(*at) < GROUP_KEPT);
+        if inner.failed.iter().any(|(id, _)| id == hs_id) {
+            CONNECT_FRESH_FIRST | CONNECT_HEDGE
+        } else {
+            CONNECT_HEDGE
+        }
+    }
+
+    /// A link to `hs_id` failed where the helper cannot see it (no link, a
+    /// batch left unanswered, a kept link dead): its next connect goes fresh
+    /// first, in a new isolation group (W4). Nothing is noted while the
+    /// hedge gate is shut.
+    pub(crate) fn link_failed(&self, hs_id: [u8; 32]) {
+        if !self.hedge.open() {
+            return;
+        }
+        let mut inner = self.lock();
+        inner.failed.retain(|(id, _)| *id != hs_id);
+        if inner.failed.len() >= FAILED_KEPT {
+            inner.failed.remove(0);
+        }
+        inner.failed.push((hs_id, Instant::now()));
+    }
+
+    /// A link to `hs_id` worked: its next connect goes in its friend's
+    /// group again.
+    pub(crate) fn link_worked(&self, hs_id: &[u8; 32]) {
+        self.lock().failed.retain(|(id, _)| id != hs_id);
     }
 
     /// The kept link of `key` when it may carry a batch of `more` frames
@@ -386,7 +450,11 @@ fn blocked(data_dir: &Path, contact: &[u8; 32], offer: &[u8]) -> Result<bool, St
 
 /// The process's kept links: the sends programs make over Tor
 /// (`crate::ipc_server`, [`crate::onion::dial_with_meta`]).
-pub(crate) static WARM: WarmPool = WarmPool::new(LIMITS, Gate::Live);
+pub(crate) static WARM: WarmPool = WarmPool::new(
+    LIMITS,
+    Gate::Live(raven_core::onion_gate::onion_warm_live),
+    Gate::Live(raven_core::onion_gate::onion_hedge_live),
+);
 
 /// Why every kept link closes ([`flush`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -522,8 +590,12 @@ mod tests {
     #[test]
     fn a_keeper_gone_with_its_runtime_is_started_again() {
         let gate = Box::leak(Box::new(std::sync::atomic::AtomicBool::new(true)));
-        let pool: &'static WarmPool =
-            Box::leak(Box::new(WarmPool::new(LIMITS, Gate::Switch(gate))));
+        let hedge = Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)));
+        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool::new(
+            LIMITS,
+            Gate::Switch(gate),
+            Gate::Switch(hedge),
+        )));
         let runtime = || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()

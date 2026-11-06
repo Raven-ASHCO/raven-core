@@ -971,6 +971,11 @@ pub(crate) mod netutil {
             self.seen > 0
         }
 
+        /// The peer's offer was read: the link authenticated.
+        pub(crate) fn linked(&self) -> bool {
+            self.linked_at.is_some()
+        }
+
         pub(crate) fn mark_frames_sent(&mut self) {
             self.sent_at = Some(tokio::time::Instant::now());
             self.budget.mark_frames_sent();

@@ -1795,7 +1795,9 @@ fn onion_progress(waits: ReplyWaits, meta: DialMeta) -> DialProgress {
 /// kept link too: the carrier is live, the contact verified and allowed on
 /// Tor, Tor ready. With the warm gate open, a program's send of a check or
 /// of chat messages (`meta.warm`, [`warm::rides_warm`], in no outbox race)
-/// goes by [`warm_dial`]; anything else dials as before.
+/// goes by [`warm_dial`]; anything else dials as before. With the hedge
+/// gate open its connect asks the helper for a hedge, or fresh first after
+/// a failed link ([`warm::WarmPool::connect_flags`], speed design M5).
 async fn dial_on(
     pool: &'static warm::WarmPool,
     waits: ReplyWaits,
@@ -1837,10 +1839,11 @@ async fn dial_on(
     let outcome = tokio::time::timeout(deadline, async {
         match &warm {
             None => {
+                let flags = pool.connect_flags(&hs_id);
                 internet_direct::dial_session_on(
                     ONION_LINK,
                     data_dir,
-                    || connect_via_helper(helper, token, hs_id),
+                    || connect_via_helper(helper, token, hs_id, flags),
                     &expected,
                     frames,
                     None,
@@ -1865,6 +1868,17 @@ async fn dial_on(
         }
     })
     .await;
+    // M5 (W4): a dial that met a dead or silent circuit (no link, or a
+    // batch left unanswered, or out of time) makes the next connect to this
+    // onion service fresh first; one that went well ends that. Neither
+    // after a refusal on an authenticated link (blocked, a race lost) or
+    // with Tor not ready here.
+    let unanswered = progress.expired().reply;
+    match &outcome {
+        Ok(Ok(())) if !unanswered => pool.link_worked(&hs_id),
+        Ok(Err(e)) if progress.collector.linked() || e.starts_with(ONION_NOT_READY) => {}
+        _ => pool.link_failed(hs_id),
+    }
     let replies = match outcome {
         Ok(Ok(())) => Ok(progress.collector.into_replies()),
         Ok(Err(e)) => Err(e),
@@ -1882,7 +1896,8 @@ async fn dial_on(
 /// link through the helper (`route`: its connect address and token, and
 /// the onion service), which is kept when its batch leaves it clean. A kept
 /// link that fails before any reply gives way to a fresh link with the same
-/// frames, its progress begun again (`again`: its reply waits and meta).
+/// frames, its progress begun again (`again`: its reply waits and meta);
+/// with the hedge gate open that link's connect goes fresh first (M5, W4).
 #[allow(clippy::too_many_arguments)]
 async fn warm_dial(
     pool: &'static warm::WarmPool,
@@ -1899,13 +1914,17 @@ async fn warm_dial(
         match warm::ride(pool, link, expected, frames, progress).await {
             Ok(()) => return Ok(()),
             Err(warm::Rode::Refused(e)) => return Err(e),
-            Err(warm::Rode::Dead) => *progress = onion_progress(again.0, again.1),
+            Err(warm::Rode::Dead) => {
+                pool.link_failed(hs_id);
+                *progress = onion_progress(again.0, again.1);
+            }
         }
     }
+    let flags = pool.connect_flags(&hs_id);
     let mut open = internet_direct::open_link(
         ONION_LINK,
         data_dir,
-        || connect_via_helper(helper, token, hs_id),
+        || connect_via_helper(helper, token, hs_id, flags),
         expected,
         frames,
         None,
@@ -1921,11 +1940,13 @@ async fn warm_dial(
     Ok(())
 }
 
-/// A Tor stream to `hs_id`'s onion service through the helper at `helper`.
+/// A Tor stream to `hs_id`'s onion service through the helper at `helper`,
+/// with the connect `flags` ([`proto::CONNECT_FLAGS`]; 0: as before).
 async fn connect_via_helper(
     helper: SocketAddr,
     token: [u8; proto::TOKEN_LEN],
     hs_id: [u8; 32],
+    flags: u8,
 ) -> Result<TcpStream, String> {
     let work = async {
         let mut stream = TcpStream::connect(helper)
@@ -1938,6 +1959,7 @@ async fn connect_via_helper(
                 &token,
                 &hs_id,
                 raven_core::onion::ONION_VIRTUAL_PORT,
+                flags,
             ))
             .await
             .map_err(|_| ONION_NOT_READY.to_string())?;

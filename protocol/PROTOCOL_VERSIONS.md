@@ -144,6 +144,26 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, Tor connect hedge and fresh first, lab only)
+
+A behaviour change of the onion dialer and its own Tor helper behind a gate
+that stays false, not of the wire format: no frame layout, entry type, caps
+bit, card field or vector changed. The local helper protocol (between
+raven-node and its helper on one computer, never on the network) is version
+3. Security and speed report 2026-11-05 §7 (speed design M5).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §6: a connect request ends with a flags byte (bit 0 fresh first, bit 3
+  hedge; bits 1 and 2 reserved; a helper refuses a bit it does not know with
+  `unknown connect flags`). A node sets them only while
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false; lab switch
+  `RAVEN_LAB_TOR_HEDGE`), else 0, version 2's request. §9: with it open, a
+  first try with no stream after 2 s gets a fresh try in a new isolation
+  group beside it (the first stream wins, the other try is ended), and after
+  a link to a contact failed where the helper cannot see it, the next
+  connect to that contact within 10 minutes goes fresh first. §1: only W1
+  and these act yet.
+
 ## Freeze record changes (2026-11-06, W1 kept Tor links, lab only)
 
 A behaviour change of the onion dialer behind a gate that stays false, not of

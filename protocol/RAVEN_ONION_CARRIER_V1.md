@@ -48,7 +48,8 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
   of a build without the carrier.
 - The Tor speed Stage A gates (`onion_gate::ONION_WARM_PRODUCTION_ENABLED` and four more, all
   false; lab switches `RAVEN_LAB_TOR_WARM` and so on with the Lab Test A unlock, debug builds
-  only; a hold each) open only while this one is. Only W1 acts yet (§10); none changes a frame.
+  only; a hold each) open only while this one is. Only W1 (§10) and the connect hedge with fresh
+  first (§6, §9) act yet; none changes a frame.
 
 ## §2 Roles
 
@@ -121,7 +122,7 @@ Tor runs in a helper process (`raven-tor-helper`, Arti), never in the node. The 
 and talks to it over three channels:
 
 1. **Control (stdin/stdout, one JSON object per line, at most 4096 bytes).**
-   - Node to helper, first line: `{"v":2,"state_dir":"<profile>/tor","token":"<64 hex>",
+   - Node to helper, first line: `{"v":3,"state_dir":"<profile>/tor","token":"<64 hex>",
      "forward":"127.0.0.1:<port>","port":7422,"fresh_state":false}`.
    - Node to helper, later: `{"cmd":"ping","n":N}`, `{"cmd":"self_check","n":N}`,
      `{"cmd":"stop"}`.
@@ -169,9 +170,20 @@ and talks to it over three channels:
      trouble (not within 10 minutes of the last).
    - The helper exits when its stdin closes.
 2. **Outbound (loopback TCP to `connect`).** The node writes `token[32] || hs_id[32] ||
-   port (u16 BE)`; the helper answers `status u8 || reason_len u8 || reason` (status 0 open,
-   1 not ready, 2 unreachable, 3 timeout, 4 failed; reason printable ASCII, at most 120 bytes,
-   never an address), then the stream carries the bytes. A wrong token is closed without a byte.
+   port (u16 BE) || flags u8`; the helper answers `status u8 || reason_len u8 || reason`
+   (status 0 open, 1 not ready, 2 unreachable, 3 timeout, 4 failed; reason printable ASCII, at
+   most 120 bytes, never an address), then the stream carries the bytes. A wrong token is
+   closed without a byte.
+   - `flags`: bit 0 *fresh first*: the first try goes in a new isolation group, not the
+     contact's (the node's last link to that contact failed where the helper cannot see it,
+     §9); bit 3 *hedge*: a first try with no stream after 2 s gets a fresh try in a new group
+     beside it, the first stream wins and the other try is dropped (a stream it opened is
+     ended); with both, fresh first alone. Bits 1 and 2 are reserved (the keep-warm probe and
+     optimistic data). A helper answers a request with a bit it does not know with status 4,
+     `unknown connect flags`, and never serves it as if the bit were clear.
+   - A node sets flags only while `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false;
+     lab switch `RAVEN_LAB_TOR_HEDGE` with the Lab Test A unlock, debug builds only, hold
+     `feature/onion-hedge`); otherwise 0, which asks what version 2 asked.
 3. **Inbound (loopback TCP to `forward`).** For every accepted onion stream the helper connects
    to the node's forward listener and writes `token[32] || circuit (u64 BE)`; then the stream
    carries the bytes. `circuit` is an opaque number the helper gives each rendezvous circuit of
@@ -179,8 +191,9 @@ and talks to it over three channels:
    and it says nothing about who dialled. The node reads this header before it takes any
    admission slot (at most 32 connections may wait for it; one more closes the oldest), and
    closes a connection without the token within 10 s, before any Raven byte.
-   (Version 2 of this local protocol; version 1 sent `token[32]` alone. Node and helper ship
-   together and refuse each other's other version.)
+   (Version 3 of this local protocol. Version 2 had no flags byte in a connect request (item
+   2), and version 1 sent `token[32]` alone here. Node and helper ship together and refuse
+   each other's other version.)
 
 The token is 32 random bytes per helper life. Only ephemeral loopback ports are used.
 
@@ -245,6 +258,18 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   fetches the descriptor again and builds new circuits instead of using what it cached of the
   service before the friend's node restarted. Nothing else differs (same guards, same
   anonymity).
+- **Hedge and fresh first** (Tor speed Stage A; gate
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED = false`, lab switch `RAVEN_LAB_TOR_HEDGE`, §6
+  item 2 flags). A first try with no stream after 2 s gets the fresh try beside it, in a new
+  isolation group, when 12 s or more are left; the first stream wins and the other try is
+  ended. A first try in the contact's group on a dead rendezvous circuit then costs 2 s instead
+  of Arti's 6 s wait for CONNECTED, at the price of one more introduction (and maybe one more
+  descriptor fetch) at the contact's service when the hedge fires. Once a node's link to a
+  contact failed where the helper cannot see it (no link came up, a batch got no reply within
+  its wait, or a kept link died before any reply), the next connect to that contact within
+  10 minutes goes fresh first: its first try in a new isolation group, none in the contact's;
+  a link that works ends that. With the gate shut the node sends no flags and keeps no such
+  record.
 - **Deadlines.** An onion dial of the outbox or of friend custody ends at
   `ONION_DIAL_DEADLINE` (75 s) plus 5 s, not at a direct dial's 45 s.
 - **Friend custody** (WAN custody only, `RAVEN_FRIEND_CUSTODY_V1.md`): a mail friend's onion
