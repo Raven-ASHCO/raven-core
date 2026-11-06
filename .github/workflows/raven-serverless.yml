@@ -127,6 +127,14 @@ jobs:
       # checks run where the Python reference's `cryptography` is installed).
       - name: Release log auditor self-test (check_log.py)
         run: python3 -I scripts/release/check_log.py --self-test
+      # Security review 2026-11 (DEP-1): nothing another local account leaves
+      # in /tmp runs as the reproducible build's builder. A cargo config or a
+      # rustup toolchain file above the build folder, a build folder that is
+      # a symlink, and a /tmp/.cargo others can write stop it; the build
+      # folder is private and the toolchain always pinned (reproduce_check.sh
+      # too). Stand-in rustc and cargo: nothing is built or cloned.
+      - name: Reproducible build guards (cargo_config_guard_selftest.sh)
+        run: bash scripts/release/cargo_config_guard_selftest.sh
       # The secret scanner must still see a real seed after many allow-listed RFC 8032
       # test seeds, and the O6 IPC-surface guard must fire on an injected forbidden op
       # (both used to be silent no-ops). Neither writes anything. The Keychain guard
@@ -1103,6 +1111,11 @@ jobs:
       # most: on Apple silicon a program written over in place is killed.
       - name: Update mesh kit install guard (update_mesh_test.sh selftest, /bin/bash 3.2)
         run: /bin/bash scripts/update_mesh_test.sh selftest
+      # The reproducible build guards of the harness job, here where a
+      # planted /tmp symlink works (macOS has no protected_symlinks), under
+      # /bin/bash 3.2. Stand-ins only: nothing is built or cloned.
+      - name: Reproducible build guards (cargo_config_guard_selftest.sh, /bin/bash 3.2)
+        run: /bin/bash ../scripts/release/cargo_config_guard_selftest.sh
       - name: test raven-core + ash + swarm build
         # Phase 4 (P4.3): the gateway lookup test must find the runner's
         # IPv4 default gateway.

@@ -114,6 +114,17 @@ target="$(value_of target)"
 toolchain="$(value_of toolchain)"
 echo "bundle: Raven $(value_of version) for $target, build serial $(value_of serial), commit $commit, toolchain $toolchain"
 
+# The manifest's toolchain for every rustc and cargo from here on (the
+# commit's build_reproducible.sh pins its own again): a rustup toolchain
+# file or directory override where this runs decides nothing. A plain
+# version only, as build_reproducible.sh writes it: rustup would also take a
+# folder there, and the manifest is not verified here.
+if [[ ! "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "reproduce_check: the manifest names toolchain $toolchain, not a plain version" >&2
+  exit 2
+fi
+export RUSTUP_TOOLCHAIN="$toolchain"
+
 host="$(rustc -vV | sed -n 's/^host: //p')"
 if [[ "$host" != "$target" ]]; then
   echo "reproduce_check: this bundle is for $target; rebuild it on that platform (this one is $host)" >&2
