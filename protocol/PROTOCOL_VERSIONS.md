@@ -144,6 +144,32 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, the keep-warm probe and keep warm, lab only)
+
+A behaviour change of the onion dialer and its own Tor helper behind a gate
+that stays false, not of the wire format: no frame layout, entry type, caps
+bit, card field or vector changed, and the listener is unchanged. The local
+helper protocol (between raven-node and its helper on one computer, never on
+the network) stays version 3 and gives meaning to a reserved flag bit.
+Security and speed report 2026-11-05 §7 (speed design M2 and M10).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §6: connect flag bit 1 is *probe*: one try in the contact's isolation
+  group to virtual port 9 of its onion service, which the service refuses;
+  the helper answers status 0 for that refusal and closes the connection, no
+  stream follows, and nothing reaches the contact's node. A failed probe
+  moves the contact to a new isolation group. Bit 2 stays reserved (for
+  optimistic data). A node sets the bit only while
+  `onion_gate::ONION_WARM_PRODUCTION_ENABLED` is open (false; lab switch
+  `RAVEN_LAB_TOR_WARM`). §10: with it open, while a conversation with a
+  verified contact that is not blocked goes on (a chat message either way
+  over Tor within 30 minutes), the node probes the contact's circuit every 6
+  to 9 minutes, at most 4 contacts (2 on the embedded node), each for at
+  most 60 minutes; a lock, a pause, a network change and the end of a helper
+  life end it, and a new helper life that is ready probes the conversations
+  still going on at once (not within 6 minutes of a circuit's last use). Tor
+  on Wi-Fi only holds. §1 and §12 say so.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: a UPnP mapping used only once seen from outside)
 
 A behaviour change of the port mapping client and of the friend relay's

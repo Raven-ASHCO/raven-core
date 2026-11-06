@@ -54,15 +54,27 @@ pub const CONNECT_REQUEST_LEN: usize = TOKEN_LEN + 32 + 2 + 1;
 /// then the link died or went silent). Hedge gate only
 /// (`onion_gate::onion_hedge_live`).
 pub const CONNECT_FRESH_FIRST: u8 = 1 << 0;
+/// Connect flag: probe (speed design M2 and M3). One try in the friend's
+/// isolation group to [`SELF_CHECK_PORT`], whatever port the request
+/// names, which the friend's onion service refuses (END, DONE): that answer
+/// proves the rendezvous circuit works and keeps it in use (Arti's last
+/// use, the group's kept time), and nothing reaches the friend's
+/// raven-node. The reply says whether it was answered and the helper then
+/// closes the connection: no stream follows. A probe that failed moves the
+/// friend to a new group, so the next connect builds fresh circuits; with
+/// [`CONNECT_FRESH_FIRST`] the try goes in a new group, which becomes the
+/// friend's once answered. No hedge and no second try. Warm gate only
+/// (`onion_gate::onion_warm_live`; [`probe_in_groups`]).
+pub const CONNECT_PROBE: u8 = 1 << 1;
 /// Connect flag: hedge (speed design M5). A first try in the friend's group
 /// that has no stream after [`CONNECT_HEDGE_AFTER`] gets a fresh try in a
 /// new group beside it; the first stream wins, and the other try is dropped
 /// (Arti ends its stream). Hedge gate only.
 pub const CONNECT_HEDGE: u8 = 1 << 3;
-/// The flags this version knows. Bits 1 and 2 are kept for the keep-warm
-/// probe and optimistic data (speed design M2, M6); a helper refuses a
-/// request with a bit it does not know ([`unknown_flags`]).
-pub const CONNECT_FLAGS: u8 = CONNECT_FRESH_FIRST | CONNECT_HEDGE;
+/// The flags this version knows. Bit 2 is kept for optimistic data (speed
+/// design M6); a helper refuses a request with a bit it does not know
+/// ([`unknown_flags`]).
+pub const CONNECT_FLAGS: u8 = CONNECT_FRESH_FIRST | CONNECT_PROBE | CONNECT_HEDGE;
 /// How long a hedged connect waits for a stream in the friend's group before
 /// a fresh try starts beside it: a healthy BEGIN is one onion round trip
 /// (under a second, typically), and Arti gives up one on a dead circuit only
@@ -522,6 +534,55 @@ where
         }
     }
     tried.got
+}
+
+/// A probe ([`CONNECT_PROBE`], speed design M2 and M3) of the onion service
+/// `key` within `budget`: one try, `probe(group)`, in the friend's group
+/// from `book` (`None`: the default group), or in a new one with
+/// [`CONNECT_FRESH_FIRST`] in `flags`, which becomes the friend's once the
+/// probe was answered. `Ok`: the service answered (its refusal of the
+/// probe's port counts). A probe that failed or ran out of time moves the
+/// friend to a new group (nothing changes when another connect already
+/// moved it on), so the next connect builds fresh circuits instead of
+/// meeting a dead one. The hedge flag is not used: a probe asks only
+/// whether the friend's circuit still works.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub async fn probe_in_groups<G, F, Fut>(
+    budget: Duration,
+    book: &std::sync::Mutex<IsolationBook<G>>,
+    key: [u8; 32],
+    flags: u8,
+    probe: F,
+) -> Result<(), ConnectReply>
+where
+    G: Clone + PartialEq,
+    F: FnOnce(Option<G>) -> Fut,
+    Fut: Future<Output = Result<(), ConnectReply>>,
+{
+    let lock = || {
+        book.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let fresh_first = flags & CONNECT_FRESH_FIRST != 0;
+    let group = {
+        let mut book = lock();
+        let kept = book.first_try(&key);
+        if fresh_first {
+            Some(book.new_group())
+        } else {
+            kept
+        }
+    };
+    let got = tokio::time::timeout(budget, probe(group.clone()))
+        .await
+        .unwrap_or_else(|_| Err(ConnectReply::Timeout("no circuit in time".into())));
+    let mut book = lock();
+    match (&got, group) {
+        (Ok(()), Some(group)) if fresh_first => book.fresh_succeeded(key, group),
+        (Ok(()), _) => {}
+        (Err(_), used) => book.first_timed_out(key, used),
+    }
+    got
 }
 
 /// The reasons an onion service state may carry ([`Event::Service`]):
@@ -1274,16 +1335,84 @@ mod tests {
         assert_eq!(PROTO_VERSION, 3);
         assert_eq!(CONNECT_REQUEST_LEN, TOKEN_LEN + 32 + 2 + 1);
         let (token, hs) = ([3u8; TOKEN_LEN], [4u8; 32]);
-        for flags in [0, CONNECT_FRESH_FIRST, CONNECT_HEDGE, CONNECT_FLAGS] {
+        // Bit 1 is the probe (speed design M2, M3).
+        assert_eq!(CONNECT_PROBE, 1 << 1);
+        for flags in [
+            0,
+            CONNECT_FRESH_FIRST,
+            CONNECT_PROBE,
+            CONNECT_PROBE | CONNECT_FRESH_FIRST,
+            CONNECT_HEDGE,
+            CONNECT_FLAGS,
+        ] {
             let req = encode_connect(&token, &hs, 7422, flags);
             assert_eq!(req[CONNECT_REQUEST_LEN - 1], flags);
             assert_eq!(decode_connect(&req, &token), Some((hs, 7422, flags)));
             assert!(!unknown_flags(flags), "{flags:#x}");
         }
-        for bit in [1u8 << 1, 1 << 2, 1 << 4, 1 << 7] {
+        for bit in [1u8 << 2, 1 << 4, 1 << 7] {
             assert!(unknown_flags(bit), "{bit:#x}");
             assert!(unknown_flags(bit | CONNECT_HEDGE), "{bit:#x}");
+            assert!(unknown_flags(bit | CONNECT_PROBE), "{bit:#x}");
         }
+    }
+
+    /// A probe (speed design M2): one try, in the friend's group, and no
+    /// second one after a failure. One answered keeps the friend's group;
+    /// one that failed or ran out of time moves the friend to a new group
+    /// (the next first try builds fresh circuits). With fresh first the try
+    /// goes in a new group, the friend's once answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_tries_once_and_a_failed_one_moves_the_friend() {
+        /// One probe that takes `secs` and is answered when `ok`: what it
+        /// gave and the groups it tried.
+        async fn probe(
+            book: &std::sync::Mutex<IsolationBook<u32>>,
+            flags: u8,
+            secs: u64,
+            ok: bool,
+        ) -> (Result<(), ConnectReply>, Vec<Option<u32>>) {
+            let tried: Arc<std::sync::Mutex<Vec<Option<u32>>>> = Arc::default();
+            let log = tried.clone();
+            let got = probe_in_groups(Duration::from_secs(44), book, [13u8; 32], flags, |g| {
+                log.lock().unwrap().push(g);
+                async move {
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    if ok {
+                        Ok(())
+                    } else {
+                        Err(ConnectReply::Timeout("tor timeout".into()))
+                    }
+                }
+            })
+            .await;
+            let tried = tried.lock().unwrap().clone();
+            (got, tried)
+        }
+        let key = [13u8; 32];
+        let book = std::sync::Mutex::new(IsolationBook::new(next_group));
+        // Answered in the default group: the friend stays there.
+        let (got, tried) = probe(&book, CONNECT_PROBE, 1, true).await;
+        assert_eq!((got, tried), (Ok(()), vec![None]));
+        assert_eq!(book.lock().unwrap().first_try(&key), None);
+        // A dead circuit: one try, 6 s, no fresh try; the friend moves on.
+        let t = tokio::time::Instant::now();
+        let (got, tried) = probe(&book, CONNECT_PROBE, 6, false).await;
+        assert!(got.is_err());
+        assert_eq!(tried, vec![None], "one try");
+        assert_eq!(t.elapsed().as_secs(), 6);
+        let moved = book.lock().unwrap().first_try(&key);
+        assert!(moved.is_some(), "a new group for the next connect");
+        // Out of time: the same.
+        let (got, _) = probe(&book, CONNECT_PROBE, 60, true).await;
+        assert_eq!(got, Err(ConnectReply::Timeout("no circuit in time".into())));
+        let again = book.lock().unwrap().first_try(&key);
+        assert!(again.is_some() && again != moved);
+        // Fresh first: a new group, the friend's once answered.
+        let (got, tried) = probe(&book, CONNECT_PROBE | CONNECT_FRESH_FIRST, 1, true).await;
+        assert_eq!(got, Ok(()));
+        assert!(tried[0].is_some() && tried[0] != again, "{tried:?}");
+        assert_eq!(book.lock().unwrap().first_try(&key), tried[0]);
     }
 
     /// One planned try of the hedge tests: where it went, how long it takes,

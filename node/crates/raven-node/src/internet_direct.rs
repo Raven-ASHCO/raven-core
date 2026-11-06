@@ -964,6 +964,11 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         }
         // A frame for us: the contact is here for more than a check.
         seen.now();
+        // Keep warm (speed design M2, warm gate only): a chat message from
+        // a friend over Tor shows the conversation.
+        if link.carrier == OutboxCarrier::Onion {
+            crate::onion::warm::KEEP.heard(&data_dir, &remote_ed, &frame);
+        }
         // A custody handoff FORWARD left here is handed on at once (P5.21).
         let handoff = raven_core::friend_custody::is_handoff_request(&frame);
         let close_before_ack = lab_close_before_ack(&frame);

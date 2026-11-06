@@ -50,6 +50,8 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
   false; lab switches `RAVEN_LAB_TOR_WARM` and so on with the Lab Test A unlock, debug builds
   only; a hold each) open only while this one is. Only W1 with its pipelining (§10), the connect
   hedge with fresh first and the batch hedge (§6, §9) act yet; none changes a frame.
+- Under the warm gate the probe (§6, bit 1), keep warm and the resume warm-up (§10) act too;
+  none changes a frame.
 
 ## §2 Roles
 
@@ -208,9 +210,19 @@ and talks to it over three channels:
      contact's (the node's last link to that contact failed where the helper cannot see it,
      §9); bit 3 *hedge*: a first try with no stream after 2 s gets a fresh try in a new group
      beside it, the first stream wins and the other try is dropped (a stream it opened is
-     ended); with both, fresh first alone. Bits 1 and 2 are reserved (the keep-warm probe and
+     ended); with both, fresh first alone. Bit 1 is *probe* (below); bit 2 is reserved (for
      optimistic data). A helper answers a request with a bit it does not know with status 4,
      `unknown connect flags`, and never serves it as if the bit were clear.
+   - Bit 1 *probe* (Tor speed Stage A, speed design M2 and M3; a node sets it only while
+     `onion_gate::ONION_WARM_PRODUCTION_ENABLED` is open, the hedge gate below being for bits 0
+     and 3): one try in the contact's isolation group (with fresh first, in a new group, which
+     becomes the contact's once answered) to virtual port 9 of the contact's onion service,
+     whatever port the request names. The service refuses that port with END (DONE), as for
+     `self_check`, and the helper takes that refusal as the answer: status 0, then it closes the
+     connection, and no stream follows. It proves the rendezvous circuit works and keeps it in
+     use (or builds one first); nothing reaches the contact's node. A probe that fails is
+     answered as a connect would be and moves the contact to a new isolation group, as a first
+     try that timed out does; it has no hedge and no second try.
    - A node sets flags only while `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false;
      lab switch `RAVEN_LAB_TOR_HEDGE` with the Lab Test A unlock, debug builds only, hold
      `feature/onion-hedge`); otherwise 0, which asks what version 2 asked.
@@ -333,6 +345,21 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   batch whose wait runs out, whose link closes or whose dial is cut closes the link; the batches
   behind it see it closed and go again on a fresh link, so no reply is taken for another
   batch's. A frame that comes with no batch on the link closes it too.
+- Keep warm and the resume warm-up (Tor speed Stage A, speed design M2 and M10; W1's gate):
+  while a conversation with a verified contact that is not blocked goes on (a chat message
+  either way over Tor within the last 30 minutes), the node probes that contact's rendezvous
+  circuit (§6, bit 1) every 6 to 9 minutes, uniformly at random, so Arti keeps it past its 10
+  minutes and a send after a pause rides it. At most 4 contacts at once (2 on the embedded
+  node), each for at most 60 minutes in one helper life and one conversation; keep warm stops
+  then, and Arti closes the circuit 10 minutes after its last use. It ends with the
+  conversation, on a lock (which also forgets the conversations), the embedded node's pause, a
+  network change and the end of a helper's life; a probe that fails ends it for that contact
+  until the conversation shows again. Once a new helper life is ready (after a wake, an app
+  resume or a network change), each conversation still going on gets a probe at once, the most
+  recent first and up to the same cap, but not within 6 minutes of its circuit's last use. A
+  probe needs Tor ready (it never waits for it or starts it), and Tor on Wi-Fi only holds for
+  it. Probes carry no frame; the conversations are kept in memory only (who and when, never
+  what).
 
 ### §5.1 The onion link's Noise static
 
@@ -399,6 +426,10 @@ static (`protocol/reference/tests/test_onion_link.py`).
   onion link's static (§5.1), which matches no LAN or Internet listener.
 - Logs carry states and counts only: never a friend's onion address, never the node's own, and
   never Arti's own text.
+- Keep warm (§10, warm gate only): while a conversation goes on, the contact's Tor sees a
+  refused stream on its service every 6 to 9 minutes, and one rendezvous circuit between the
+  two is kept up to 60 minutes, which gives a timing adversary on its relays longer to watch
+  it; the contact's node sees nothing.
 - The user text is design §3.8.
 
 ## §13 Not in V1

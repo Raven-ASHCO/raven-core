@@ -125,16 +125,19 @@ pub(crate) struct Knobs {
 }
 
 /// One helper life's connect counts ([`COUNT_ENV`]), kept in [`COUNT_FILE`]
-/// as one line: `connects=N tries=N stale=N`.
+/// as one line: `connects=N tries=N stale=N probes=N`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Counts {
     /// Connect requests from raven-node with the right token and port.
     pub(crate) connects: u64,
     /// Connect tries made for them (a first try, and a fresh one after a
-    /// failure worth it).
+    /// failure worth it), and for probes.
     pub(crate) tries: u64,
     /// Tries that met the dead shared circuit ([`STALE_ENV`]).
     pub(crate) stale: u64,
+    /// Probes from raven-node ([`proto::CONNECT_PROBE`]; not in
+    /// `connects`): each one try, and no stream to the friend's service.
+    pub(crate) probes: u64,
 }
 
 impl Counts {
@@ -152,6 +155,7 @@ impl Counts {
                 "connects" => counts.connects = value,
                 "tries" => counts.tries = value,
                 "stale" => counts.stale = value,
+                "probes" => counts.probes = value,
                 _ => {}
             }
         }
@@ -160,8 +164,8 @@ impl Counts {
 
     fn line(&self) -> String {
         format!(
-            "connects={} tries={} stale={}\n",
-            self.connects, self.tries, self.stale
+            "connects={} tries={} stale={} probes={}\n",
+            self.connects, self.tries, self.stale, self.probes
         )
     }
 }
@@ -676,6 +680,61 @@ async fn accept_connects(
             if asked != port {
                 let _ = stream
                     .write_all(&ConnectReply::Unreachable("port refused".into()).encode())
+                    .await;
+                return;
+            }
+            // A probe (speed design M2, M3), as the Arti helper makes it:
+            // one try in the friend's group, which rides its kept circuit
+            // (and keeps it in use) or pays a fresh rendezvous first; the
+            // friend's service refuses the probe's port one round trip
+            // later. Nothing connects to the friend's service: its
+            // raven-node sees nothing.
+            if flags & proto::CONNECT_PROBE != 0 {
+                counter.add(|c| c.probes += 1);
+                let probed = proto::probe_in_groups(CONNECT_WAIT, &book, hs_id, flags, |group| {
+                    let built = kept_circuit(
+                        &mut lock(&circuits),
+                        (group, hs_id),
+                        knobs.kept,
+                        tokio::time::Instant::now(),
+                    )
+                    .map(|built| Life {
+                        kill: knobs.kill,
+                        built,
+                    });
+                    let dead = (group.is_none() && !knobs.stale.is_zero())
+                        || built.is_some_and(|life| life.dead());
+                    let (registry, counter, circuits) =
+                        (registry.clone(), counter.clone(), circuits.clone());
+                    async move {
+                        counter.add(|c| {
+                            c.tries += 1;
+                            c.stale += u64::from(dead);
+                        });
+                        if dead {
+                            tokio::time::sleep(knobs.stale).await;
+                            return Err(ConnectReply::Timeout("tor timeout".into()));
+                        }
+                        if built.is_none() {
+                            tokio::time::sleep(knobs.rendezvous).await;
+                            let life = Life::new(knobs.kill);
+                            lock(&circuits)
+                                .entry((group, hs_id))
+                                .or_insert((life.built, tokio::time::Instant::now()));
+                        }
+                        tokio::time::sleep(delay).await;
+                        if !registry.join(hex::encode(hs_id)).is_file() {
+                            return Err(ConnectReply::Unreachable("no descriptor".into()));
+                        }
+                        if let Some(entry) = lock(&circuits).get_mut(&(group, hs_id)) {
+                            entry.1 = tokio::time::Instant::now();
+                        }
+                        Ok(())
+                    }
+                })
+                .await;
+                let _ = stream
+                    .write_all(&probed.err().unwrap_or(ConnectReply::Ok).encode())
                     .await;
                 return;
             }
