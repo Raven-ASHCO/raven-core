@@ -191,6 +191,23 @@ fn gate_checks() -> Vec<Check> {
         (reg::FEATURE_NEARBY, crate::nearby_gate::nearby_live_enabled),
         (reg::FEATURE_OFFLINE_LAN, crate::lan_gate::offline_lan_live),
         (reg::FEATURE_ONION, crate::onion_gate::onion_live_enabled),
+        (
+            reg::FEATURE_ONION_EARLY,
+            crate::onion_gate::onion_early_live,
+        ),
+        (
+            reg::FEATURE_ONION_HEDGE,
+            crate::onion_gate::onion_hedge_live,
+        ),
+        (
+            reg::FEATURE_ONION_OPTIMISTIC,
+            crate::onion_gate::onion_optimistic_live,
+        ),
+        (reg::FEATURE_ONION_WARM, crate::onion_gate::onion_warm_live),
+        (
+            reg::FEATURE_ONION_WARM_LINK,
+            crate::onion_gate::onion_warm_link_live,
+        ),
         (reg::FEATURE_P2P, crate::p2p_gate::p2p_live_enabled),
         (reg::FEATURE_PAIR_SEED, || live(G::PairSeed)),
         (
