@@ -477,6 +477,10 @@ jobs:
           cargo test --locked -p raven-node --features tor-embedded --lib -- \
             onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
             onion::arti:: onion::proto::
+          # The helper channel with Tor in process (the iOS app): the helper is
+          # handed its end of the channel, and onion streams both ways ride it.
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
+            cargo test --locked -p raven-node --features tor-embedded --lib -- onion::channel
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper
@@ -1078,6 +1082,10 @@ jobs:
           cargo test --locked -p raven-node --features tor-embedded --lib -- \
             onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
             onion::arti:: onion::proto::
+          # The helper channel with Tor in process (the iOS app): the helper is
+          # handed its end of the channel, and onion streams both ways ride it.
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
+            cargo test --locked -p raven-node --features tor-embedded --lib -- onion::channel
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper
@@ -1341,6 +1349,10 @@ jobs:
           cargo test --locked -p raven-node --features tor-embedded --lib -- \
             onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
             onion::arti:: onion::proto::
+          # The helper channel with Tor in process (the iOS app): the helper is
+          # handed its end of the channel, and onion streams both ways ride it.
+          RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
+            cargo test --locked -p raven-node --features tor-embedded --lib -- onion::channel
           cargo clippy --locked -p raven-node --features tor --all-targets -- -D warnings
           cargo build --locked -p raven-node --features tor --bin raven-tor-helper
           rm -f target/debug/raven-tor-helper.exe
