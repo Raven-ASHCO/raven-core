@@ -1865,10 +1865,10 @@ fn an_authors_full_share_refuses_only_its_messages_until_its_keys_expire() {
     assert!(done.refused, "the full author's message is not handled");
     assert_eq!(group(&file).messages.len(), 1, "and not stored");
     assert_eq!(file.dropped, dropped, "nor dropped (it comes again)");
-    // Its share counts its messages kept too: an author with 512 messages
-    // in the group and no key seen is full as well.
+    // Its share counts its messages kept too: an author with its share of
+    // messages in the group and no key seen is full as well.
     let mut kept = joined(3, &roster(1, &[2, 3, 4], 1));
-    for n in 0..store::MAX_SEEN_PER_AUTHOR {
+    for n in 0..kept.groups[0].share() {
         kept.groups[0]
             .messages
             .push(stored_msg(n, &key(2), "kept", NOW));
@@ -1899,6 +1899,82 @@ fn an_authors_full_share_refuses_only_its_messages_until_its_keys_expire() {
     assert_eq!(group(&file).messages.len(), 2);
 }
 
+/// G4 share by roster: an author's share is the group's room for message
+/// keys over its members, at least 512: in a group of two the friend's
+/// share is 4,096 within 7 days (its 513th message is taken, its 4,097th
+/// refused), in a group of 16 it is 512.
+#[test]
+fn an_authors_share_is_the_groups_room_over_its_members() {
+    let me = key(3);
+    let none = HashSet::new();
+    let mut pair = joined(3, &roster(1, &[3], 1));
+    let from = hex::encode(key(1));
+    for i in 0..store::MAX_SEEN_PER_AUTHOR {
+        pair.groups[0].seen.push(&from, &format!("{i:032x}"), NOW);
+    }
+    let next = GroupFrame::Msg(msg_with_id(1, 1, "one more", [0x77; 16], &[]));
+    let done = apply(&mut pair, &me, &key(1), &next, &none, NOW);
+    assert!(
+        !done.refused,
+        "a friend's 513th message in a group of two is taken"
+    );
+    assert_eq!(group(&pair).messages.len(), 1);
+    let share = store::MAX_SEEN_PER_GROUP / 2;
+    assert_eq!(pair.groups[0].share(), share);
+    for i in store::MAX_SEEN_PER_AUTHOR..share - 1 {
+        pair.groups[0].seen.push(&from, &format!("{i:032x}"), NOW);
+    }
+    let over = GroupFrame::Msg(msg_with_id(1, 1, "too many", [0x78; 16], &[]));
+    assert!(apply(&mut pair, &me, &key(1), &over, &none, NOW).refused);
+    // Sixteen members: 512 each.
+    let all: Vec<u8> = (2..=16).collect();
+    let mut full = joined(3, &roster(1, &all, 1));
+    assert_eq!(full.groups[0].share(), store::MAX_SEEN_PER_AUTHOR);
+    let from = hex::encode(key(2));
+    for i in 0..store::MAX_SEEN_PER_AUTHOR {
+        full.groups[0].seen.push(&from, &format!("{i:032x}"), NOW);
+    }
+    let next = GroupFrame::Msg(msg_with_id(2, 1, "one more", [0x79; 16], &[]));
+    assert!(apply(&mut full, &me, &key(2), &next, &none, NOW).refused);
+}
+
+/// G4 share, the author's side: every member that took this profile's
+/// messages refuses the one past its share (not ACKed, so its copies would
+/// wait in this profile's queue for each friend, the 32 a friend may have
+/// waiting, for 7 days). Such a message is not sent: `GROUP_QUEUE_FULL`,
+/// nothing stored and no copy made, until the oldest is 7 days old.
+#[test]
+fn a_message_past_your_own_share_is_not_sent() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(1);
+    let d = dir.path();
+    write_friends(d, &[(2, "Bea")]);
+    let gid = create(d, &id(1), "Pair", &[(key(2), "Bea".into())], NOW).unwrap();
+    let mine = hex::encode(key(1));
+    let share = store::MAX_SEEN_PER_GROUP / 2;
+    store::edit(d, |f| {
+        for i in 0..share - 1 {
+            f.groups[0].seen.push(&mine, &format!("{i:032x}"), NOW);
+        }
+        Ok(())
+    })
+    .unwrap();
+    send(d, &id(1), &gid, "the last one this week", NOW + 1).unwrap();
+    let before = store::load(d).unwrap();
+    let err = send(d, &id(1), &gid, "one too many", NOW + 2).unwrap_err();
+    assert_eq!(err.code(), "GROUP_QUEUE_FULL", "{err:?}");
+    assert_eq!(err, GroupError::ShareFull(share));
+    let after = store::load(d).unwrap();
+    assert_eq!(after.groups[0].messages, before.groups[0].messages);
+    assert_eq!(after.groups[0].intents, before.groups[0].intents);
+    // A week after the first ones, it goes.
+    let later = NOW + store::REPLAY_HORIZON_MS;
+    send(d, &id(1), &gid, "a new week", later).unwrap();
+}
+
 /// G4 forwards: a copy of an author at its share that another member
 /// carried (a forward) is dropped and counted, so it is ACKed: the
 /// forwarder cannot send it again on the author's behalf and must not keep
@@ -1911,7 +1987,7 @@ fn a_forwarded_copy_of_a_full_author_is_dropped_and_answered() {
     let none = HashSet::new();
     let mut file = joined(3, &roster(1, &[2, 3, 4], 1));
     let author = hex::encode(key(4));
-    for i in 0..store::MAX_SEEN_PER_AUTHOR {
+    for i in 0..file.groups[0].share() {
         file.groups[0].seen.push(&author, &format!("{i:032x}"), NOW);
     }
     let before = file.dropped;
@@ -1988,13 +2064,13 @@ fn pending_frames_are_taken_again_in_one_read_of_the_store() {
     assert!(ingest(d, &key(1), &state, NOW).unwrap());
     let flooder = hex::encode(key(2));
     store::edit(d, |f| {
-        for i in 0..store::MAX_SEEN_PER_AUTHOR {
+        for i in 0..f.groups[0].share() {
             f.groups[0].seen.push(&flooder, &format!("{i:032x}"), NOW);
         }
         Ok(())
     })
     .unwrap();
-    // Ids none of the keys above has (those are 0 to 511 in hex).
+    // Ids none of the keys above has (those are small numbers in hex).
     let flood: Vec<GroupFrame> = (1..=40u8)
         .map(|n| GroupFrame::Msg(msg_with_id(2, 1, "again", [n; 16], &[])))
         .collect();

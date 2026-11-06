@@ -72,17 +72,22 @@ pub const MAX_MESSAGES_TOTAL: usize = 2_000;
 pub const MAX_MESSAGE_BYTES_TOTAL: usize = 8 * 1024 * 1024;
 /// Message keys kept per group after their messages left `messages`
 /// ([`GroupRecord::seen`]): each until its message is older than
-/// [`REPLAY_HORIZON_MS`]. Every member's share ([`MAX_SEEN_PER_AUTHOR`])
+/// [`REPLAY_HORIZON_MS`]. Every member's share ([`GroupRecord::share`])
 /// fits; over it, the keys of authors who are no member go first (this
 /// profile's own, former members'), so a message a member could still
 /// replay is not forgotten ([`SeenKeys::trim_to`]).
 pub const MAX_SEEN_PER_GROUP: usize = 8_192;
-/// One author's share of a group's room for message keys: its messages kept
-/// here and its keys seen, each until its message is older than
-/// [`REPLAY_HORIZON_MS`]. An author at its share has its next message
-/// refused (not stored and not ACKed, so its sender sends it again later)
-/// until some of its keys expire; every other author's messages are still
-/// taken.
+/// The least share of one author in a group's room for message keys
+/// ([`GroupRecord::share`]: the room over the roster's members, at least
+/// this; 512 in a group of 16, 4,096 in a group of two). An author's share
+/// holds its messages kept here and its keys seen, each until its message
+/// is older than [`REPLAY_HORIZON_MS`]. An author at its share has its
+/// next message refused when it carried it itself (not stored and not
+/// ACKed, so it sends it again later) and dropped when another member
+/// forwarded it, until some of its keys expire; every other author's
+/// messages are still taken. This profile sends no message past its own
+/// share ([`GroupError::ShareFull`]), so no copy of its own waits refused
+/// in its queue for a friend.
 pub const MAX_SEEN_PER_AUTHOR: usize = 512;
 const _: () = assert!(MAX_SEEN_PER_AUTHOR * super::MAX_GROUP_MEMBERS <= MAX_SEEN_PER_GROUP);
 /// A message whose `sent_ms` is older than this is refused (an old signed
@@ -1446,6 +1451,15 @@ impl GroupRecord {
             .filter(|m| m.from == from && fresh(m.sent_ms))
             .count()
             + self.seen.count_by(from, now_ms)
+    }
+
+    /// One author's share of this group's room for message keys
+    /// ([`MAX_SEEN_PER_AUTHOR`]): [`MAX_SEEN_PER_GROUP`] over the roster's
+    /// members (this profile included), at least [`MAX_SEEN_PER_AUTHOR`],
+    /// so every member's share fits in the room together.
+    pub fn share(&self) -> usize {
+        let members = self.state.members.len().clamp(1, super::MAX_GROUP_MEMBERS);
+        (MAX_SEEN_PER_GROUP / members).max(MAX_SEEN_PER_AUTHOR)
     }
 
     /// The seen-key tags of the roster's members but `me` (hex): the keys

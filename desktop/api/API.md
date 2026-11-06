@@ -253,10 +253,16 @@ raven-node).
   receipt) or `failed` (given up). `delivered`/`total` give "Delivered to 3 of 5". `via: "relay"`
   marks a member reached through another member. A member you blocked is sent nothing, not even
   through another member: its entry is `failed` from the start, and its receipts are ignored. A
-  member's Raven takes at most 512 of one author's messages a group within 7 days; past that it
-  does not confirm the next copy, which stays `sent` and is sent again until it is taken or its 7
-  days pass. A copy another member passed on for you past that is dropped there (so it never
-  waits in that member's queue), and that entry stays `waiting`.
+  member's Raven takes an author's share of a group's messages within 7 days: 8,192 over the
+  group's members, at least 512 (4,096 in a group of two, 512 in a group of 16). Yours sends no
+  message past your own share: `groups.send` is `GROUP_QUEUE_FULL` until your oldest of them is 7
+  days old, because every member would refuse it and each copy would wait in your queue for that
+  friend (the 32 messages a friend may have waiting, 1:1 messages included) for 7 days. A copy a
+  member's Raven refuses anyway (its roster is newer than yours, with more members) is not
+  confirmed: it stays `sent`, is sent again until it is taken or its 7 days pass, and counts in
+  your queue for that friend meanwhile. A copy another member passed on for you past that member's
+  share is dropped there (so it never waits in that member's queue), and that entry stays
+  `waiting`.
 - **Leaving and removal.** `status` is `left` after `groups.leave` and `removed` when the admin
   removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`.
 - **Forget** (`groups.forget`): a group you left or were removed from (or one with no other
@@ -815,7 +821,8 @@ Groups add `GROUP_NOT_FOUND`, `GROUP_NOT_ADMIN` (only the admin adds and removes
 `GROUP_NOT_MEMBER` (you left or were removed), `GROUP_TOO_LARGE` (more than 16 members, or 64
 groups: forget one you left), `GROUP_STILL_MEMBER` (only a group you left or were removed from can
 be forgotten), `GROUP_ADMIN_CANNOT_LEAVE`, `GROUP_ALREADY_MEMBER`, `GROUP_BAD_NAME`, `GROUP_QUEUE_FULL` (too many group
-copies still wait; try again once some are delivered) and `GROUP_NO_ROUTE` (none of the other members
+copies still wait; try again once some are delivered; or you sent your share of a group's messages
+within 7 days, see Receipts) and `GROUP_NO_ROUTE` (none of the other members
 is your friend); a member who is not a friend is `NOT_A_CONTACT`, a message over 8,192 bytes
 `MESSAGE_TOO_LONG`.
 

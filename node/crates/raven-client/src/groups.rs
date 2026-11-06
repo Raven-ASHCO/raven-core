@@ -54,6 +54,13 @@ fn held_by(m: &MessageView, key: &Key, state: &str, names: &Names) -> Option<Str
 }
 
 pub(crate) fn group_error(e: GroupError) -> ApiError {
+    if let GroupError::ShareFull(n) = &e {
+        let message = format!(
+            "The members take at most {n} of your messages to this group in 7 days. Try again \
+             once your oldest of them is a week old."
+        );
+        return ApiError::new("GROUP_QUEUE_FULL", message, e.to_string());
+    }
     let (c, message): (&'static str, &str) = match &e {
         GroupError::Hold => (code::NOT_AVAILABLE_YET, ""),
         GroupError::NotFound => (
@@ -98,7 +105,7 @@ pub(crate) fn group_error(e: GroupError) -> ApiError {
             "GROUP_ADMIN_CANNOT_LEAVE",
             "The admin can't leave the group. Remove the other members instead.",
         ),
-        GroupError::QueueFull => (
+        GroupError::QueueFull | GroupError::ShareFull(_) => (
             "GROUP_QUEUE_FULL",
             "Too many group messages are still waiting to go out. Try again once some are \
              delivered.",
@@ -764,6 +771,7 @@ mod tests {
             GroupError::BadBody,
             GroupError::AdminCannotLeave,
             GroupError::QueueFull,
+            GroupError::ShareFull(512),
             GroupError::NoRoute,
             GroupError::NoIdentity,
             GroupError::Store("x".into()),
@@ -773,6 +781,9 @@ mod tests {
             assert!(api.message.ends_with('.'), "{api:?}");
         }
         assert_eq!(group_error(GroupError::Hold).code, code::NOT_AVAILABLE_YET);
+        let share = group_error(GroupError::ShareFull(4096));
+        assert_eq!(share.code, "GROUP_QUEUE_FULL");
+        assert!(share.message.contains("4096"), "{share:?}");
         assert_eq!(
             group_error(GroupError::NotAFriend([0; 32])).code,
             code::NOT_A_CONTACT

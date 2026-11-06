@@ -749,6 +749,10 @@ pub enum GroupError {
     /// Too many copies wait already (the friend's queue or the groups'
     /// share of the outbound stage).
     QueueFull,
+    /// This profile sent its share of the group's messages within 7 days
+    /// ([`store::GroupRecord::share`], the number): the members would refuse
+    /// the next one. Answered as `GROUP_QUEUE_FULL`.
+    ShareFull(usize),
     /// No member of the group is this profile's friend.
     NoRoute,
     /// No identity yet.
@@ -771,7 +775,7 @@ impl GroupError {
             GroupError::BadName => "GROUP_BAD_NAME",
             GroupError::BadBody => "GROUP_BAD_BODY",
             GroupError::AdminCannotLeave => "GROUP_ADMIN_CANNOT_LEAVE",
-            GroupError::QueueFull => "GROUP_QUEUE_FULL",
+            GroupError::QueueFull | GroupError::ShareFull(_) => "GROUP_QUEUE_FULL",
             GroupError::NoRoute => "GROUP_NO_ROUTE",
             GroupError::NoIdentity => "GROUP_NO_IDENTITY",
             GroupError::Store(_) => "GROUP_STORE",
@@ -821,6 +825,10 @@ impl GroupError {
                  delivered."
                     .into()
             }
+            GroupError::ShareFull(n) => format!(
+                "The members take at most {n} of your messages to this group in 7 days; try \
+                 again once your oldest of them is a week old."
+            ),
             GroupError::NoRoute => {
                 "None of the other members is your friend, so nobody can pass it on.".into()
             }

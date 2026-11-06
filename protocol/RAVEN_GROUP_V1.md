@@ -160,13 +160,17 @@ another author's message with the same `id` is a different message), and
 `sent_ms` is within the last 7 days (the message horizon) and at most one
 day ahead of the receiver's clock. A receiver keeps the (`from`, `id`) of
 every message it took until its `sent_ms` is 7 days old, so a message
-cannot be replayed as new. Each author has a share of 512 per group (its
-messages kept and its ids remembered, while their `sent_ms` is within the 7
-days): a `msg` from an author at its share is refused (not ACKed, above)
-until some of its ids expire when `P` is `from`, and dropped (ACKed) when
-another member carried it; every other author's messages are still
-taken. A group remembers at most 8,192 ids (16 authors' shares); over it,
-the ids of authors who are no member go first. When `from` is not in the roster but `epoch` is newer than the
+cannot be replayed as new. Each author has a share of each group: 8,192
+over the roster's members, at least 512 (4,096 in a group of two, 512 in
+a group of 16), held by its messages kept and its ids remembered while
+their `sent_ms` is within the 7 days. A `msg` from an author at its share
+is refused (not ACKed, above) until some of its ids expire when `P` is
+`from`, and dropped (ACKed) when another member carried it; every other
+author's messages are still taken. A sender sends no `msg` past its own
+share (it would be refused by every member that took the others, and each
+copy would wait in its queue for that friend until its horizon). A group
+remembers at most 8,192 ids (every member's share); over it, the ids of
+authors who are no member go first. When `from` is not in the roster but `epoch` is newer than the
 roster and the signature verifies under `from`, the frame is held (§4.3). A
 frame for an unknown group is held too, also only when its signature
 verifies under `from`.

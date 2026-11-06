@@ -4221,7 +4221,7 @@ mod tests {
         let from = hex::encode(m);
         crate::group::store::edit(lab.b_dir.path(), |f| {
             let g = &mut f.groups[0];
-            for i in 0..crate::group::store::MAX_SEEN_PER_AUTHOR {
+            for i in 0..g.share() {
                 g.seen.push(&from, &format!("{i:032x}"), now());
             }
             Ok(())

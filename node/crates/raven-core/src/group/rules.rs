@@ -437,7 +437,7 @@ fn apply_msg(
         // Its key is kept (while its author's share has room), so
         // unblocking the member does not bring this message back as new.
         let from = hex::encode(msg.from);
-        if g.author_share(&from, now_ms) < store::MAX_SEEN_PER_AUTHOR {
+        if g.author_share(&from, now_ms) < g.share() {
             g.seen.push(&from, &id, msg.sent_ms);
         }
         return Applied::change(false);
@@ -450,7 +450,7 @@ fn apply_msg(
     // author, and it must not wait in that member's queue for this profile
     // until its horizon.
     let forwarded = *peer != msg.from;
-    if g.author_share(&hex::encode(msg.from), now_ms) >= store::MAX_SEEN_PER_AUTHOR {
+    if g.author_share(&hex::encode(msg.from), now_ms) >= g.share() {
         return if forwarded { dropped(file) } else { refused() };
     }
     g.messages.push(StoredMsg {
@@ -1027,6 +1027,13 @@ pub fn send(
         }
         if staged + direct.len() > super::park::GROUP_STAGE_BUDGET {
             return Err(GroupError::QueueFull);
+        }
+        // Every member that took this profile's messages refuses one past
+        // its share, not ACKed: its copies would wait in this profile's
+        // queue for each friend until their horizon. It is not sent.
+        let share = g.share();
+        if g.author_share(&hex::encode(me), now_ms) >= share {
+            return Err(GroupError::ShareFull(share));
         }
         let forwarders: Vec<Key> = if relay.is_empty() {
             Vec::new()
