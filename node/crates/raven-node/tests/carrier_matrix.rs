@@ -1043,6 +1043,9 @@ impl Profile {
             "RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT",
             "RAVEN_LAB_TOR_LOOPBACK_READY_MS",
             "RAVEN_LAB_TOR_LOOPBACK_STALE_MS",
+            // Keep warm's lab knob (the D1 harness sets it for its own
+            // sender); no case sets it.
+            "RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS",
         ] {
             cmd.env_remove(k);
         }

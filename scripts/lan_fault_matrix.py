@@ -880,6 +880,9 @@ LAB_SWITCHES = (
     'RAVEN_LAB_TOR_LOOPBACK_COUNT', 'RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS',
     'RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT', 'RAVEN_LAB_TOR_LOOPBACK_READY_MS',
     'RAVEN_LAB_TOR_LOOPBACK_STALE_MS',
+    # Keep warm's lab knob (the D1 harness sets it for its own sender in
+    # CI's patched arm); no scenario here sets it.
+    'RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS',
 )
 # The debug lab switches a caller's value may reach the nodes through: the
 # session-reset level (the caller's opt-in to the reset scenarios, RESET_ON)

@@ -48,8 +48,11 @@ Cases (n per arm; --n CASE=N or --n-all N to change)
       restarts its helper; send at once when Tor is ready (at_ready) and
       30 s after it (ready_30s), 30 each
   CI  cold after idle: a send every 11 min (dry: the kept time and 5 s),
-      past the 10 min of Arti and GROUP_KEPT, 30 (the keep warm arm, M2,
-      is not built yet: skipped)
+      past the 10 min of Arti and GROUP_KEPT, 30 each: plain (the patched
+      arm with keep warm off, RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS=0) and
+      keep_warm (the patched arm with keep warm on in the conversation, M2:
+      it should look like WC; in the dry mode its probes come every 0.6 to
+      0.9 of the kept time, as every 6 to 9 min against the 10 of Arti)
   ER  embedded resume (the tor-embedded engine, --embedded-engine): pause
       and resume the node in the worker process, then send at once, 30
 Arms: base (no Stage A switch) and patched (the Stage A lab switches of
@@ -147,6 +150,8 @@ PURPOSES = ('check', 'outbox', 'dial')
 STAGE_MS = ('prep_ms', 'connect_ms', 'circuit_ms', 'begin_ms', 'noise_ms', 'hello_ms',
             'write_ms', 'receipt_ms')
 DIAL_KEYS = ('purpose', 'frames', 'ok') + STAGE_MS + ('total_ms',)
+# Why a case was skipped (no_keep_warm: written by the harness before keep
+# warm was built; kept so those run files still read).
 SKIP_WHY = {
     'no_contacts_warm': 'contacts.warm is not in this engine (M3 not built)',
     'no_keep_warm': 'keep warm (M2) is not built',
@@ -227,6 +232,14 @@ LOOPBACK_KNOBS = ('RAVEN_LAB_TOR_LOOPBACK_DELAY_MS', 'RAVEN_LAB_TOR_LOOPBACK_LAT
                   'RAVEN_LAB_TOR_LOOPBACK_READY_MS', 'RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT')
 LOCKED_FILE = ('RAVEN_IDENTITY_BACKEND', 'RAVEN_SESSION_BACKEND', 'RAVEN_PREKEY_BACKEND',
                'RAVEN_CHAT_HISTORY_BACKEND')
+# Keep warm's lab knob (raven-node src/onion/warm.rs, read only with
+# RAVEN_LAB_TEST_A=1 in a debug build): its probes every N ms to 1.5 N and
+# its end after 10 N (never slower or longer than the real 6 to 9 min and 60
+# min); 0 keeps no friend warm. Only S's patched arm of CI sets it: 0 in its
+# plain variant, and in the dry mode KEEP_WARM_SHARE of the kept circuit
+# time in its keep_warm variant (as 6 min is of the 10 of Arti).
+KEEP_WARM_KNOB = 'RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS'
+KEEP_WARM_SHARE = 0.6
 # The tools the dry mode loopback check runs (refused without them).
 TOOLS = {'lsof': ('/usr/sbin/lsof', '/usr/bin/lsof', '/bin/lsof'),
          'ps': ('/bin/ps', '/usr/bin/ps')}
@@ -288,15 +301,20 @@ def common_env(caller: dict, lab: Path, mode: str, sim: dict | None,
     return env
 
 
-def sender_env(common: dict, lab: Path, arm: str, patched: tuple) -> dict:
+def sender_env(common: dict, lab: Path, arm: str, patched: tuple,
+               keep_warm_ms: int | None = None) -> dict:
     """S's raven-node: its stage record file, its netwatch lab file and,
-    in the patched arm only, the Stage A lab switches of `patched`."""
+    in the patched arm only, the Stage A lab switches of `patched` and keep
+    warm's lab knob when `keep_warm_ms` is given (KEEP_WARM_KNOB)."""
     env = dict(common)
     for name in STAGE_A.values():
         env.pop(name, None)
+    env.pop(KEEP_WARM_KNOB, None)
     if arm == 'patched':
         for key in patched:
             env[STAGE_A[key]] = '1'
+        if keep_warm_ms is not None:
+            env[KEEP_WARM_KNOB] = str(int(keep_warm_ms))
     env['RAVEN_LAB_TOR_STAGES'] = str(lab / 'raw' / 's-stages.jsonl')
     env['RAVEN_LAB_NETWATCH_EVENTS'] = str(lab / 's.netwatch')
     return env
@@ -307,6 +325,7 @@ def friend_env(common: dict, lab: Path) -> dict:
     env = dict(common)
     for name in STAGE_A.values():
         env.pop(name, None)
+    env.pop(KEEP_WARM_KNOB, None)
     env['RAVEN_LAB_NETWATCH_EVENTS'] = str(lab / 'f.netwatch')
     return env
 
@@ -363,6 +382,10 @@ def stage_a_refusal(env: dict, arm: str, patched: tuple, friend: bool) -> str:
         return 'a Stage A switch without the lab unlock'
     if any(env.get(STAGE_A[key]) != '1' for key in on):
         return 'a Stage A switch with another value than 1'
+    knob = env.get(KEEP_WARM_KNOB)
+    if knob is not None:
+        if friend or arm != 'patched' or not knob.isdigit():
+            return 'the keep warm knob belongs to the patched arm of S only, a number of ms'
     return ''
 
 
@@ -528,6 +551,9 @@ DEBUG_OBJECTS = b'/debug/deps/'
 OVERFLOW_CHECK = b'attempt to add with overflow'
 WARM_MODEL = (b'RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS', b'RAVEN_LAB_TOR_LOOPBACK_KEPT_MS')
 ARTI_IN_PROCESS = b'tor_hsclient'
+# The D1 lab hooks of a raven-node from this tree (debug only): keep warm's
+# lab knob (CI).
+NODE_D1 = (KEEP_WARM_KNOB.encode(),)
 
 
 def engine_name() -> str:
@@ -542,14 +568,15 @@ def build_refusal(bin_dir: Path, mode: str, engine: Path, embedded: Path | None,
                   tor_helper: Path | None) -> str:
     """Why these binaries must not run against lab profiles, or '': each is
     a debug build (a release build refuses the lab backends and would seal
-    a profile with a keychain item), the dry mode has the warm circuit
-    model and no Tor helper next to raven-node, the embedded engine has Tor
-    in process. The engines say their build themselves too (app.info)."""
+    a profile with a keychain item), raven-node has the D1 lab hooks, the
+    dry mode has the warm circuit model and no Tor helper next to
+    raven-node, the embedded engine has Tor in process. The engines say
+    their build themselves too (app.info)."""
     node, ash = bin_dir / 'raven-node', bin_dir / 'ash'
     for p in (node, ash, engine):
         if not p.is_file():
             return f'{p.name} is not in the build folder'
-    need = {node: (NODE_DEBUG,) + (WARM_MODEL if mode == 'dry' else ()),
+    need = {node: (NODE_DEBUG,) + NODE_D1 + (WARM_MODEL if mode == 'dry' else ()),
             ash: (DEBUG_OBJECTS, OVERFLOW_CHECK),
             engine: (DEBUG_OBJECTS,)}
     if embedded is not None:
@@ -571,6 +598,8 @@ def build_refusal(bin_dir: Path, mode: str, engine: Path, embedded: Path | None,
                 return f'{path.name} is not a debug build'
             if WARM_MODEL[0] in missing:
                 return f'{path.name} has no warm circuit model: build it from this tree'
+            if any(n in missing for n in NODE_D1):
+                return f'{path.name} has no D1 lab hooks: build it from this tree'
             if ARTI_IN_PROCESS in missing:
                 return f'{path.name} has no Tor in process: build it with --features tor-embedded'
             return f'{path.name} is not a debug build'
@@ -1763,15 +1792,30 @@ class Run:
         self.worker = Worker(self.engine, self.guard_env(env, arm, False),
                              self.lab / 'logs' / 's.engine.log', self.mode == 'real')
 
-    def start_sender(self, arm: str, embedded: bool, worker: bool = True) -> None:
+    def keep_warm_ms(self, case: str, variant: str, arm: str) -> int | None:
+        """Keep warm's lab knob for S in `arm` of `case` and `variant`
+        (KEEP_WARM_KNOB), or None (unset: as built): CI only, patched arm
+        only; its plain variant without keep warm (0), its keep_warm variant
+        with it, in the dry mode scaled to the kept circuit time."""
+        if case != 'CI' or arm != 'patched':
+            return None
+        if variant != 'keep_warm':
+            return 0
+        if self.mode == 'dry':
+            return max(1, int(KEEP_WARM_SHARE * self.kept_s * 1000))
+        return None
+
+    def start_sender(self, arm: str, embedded: bool, worker: bool = True,
+                     keep_warm_ms: int | None = None) -> None:
         """S for a block: any S before it stopped, then its node (or the
         embedded node in its engine worker) started with the environment of
-        `arm`, and its engine worker."""
+        `arm` (and keep warm's lab knob `keep_warm_ms`), and its engine
+        worker."""
         self.stop_sender()
         assert self.s_node is not None and self.stages is not None
         self.stages.mark()
-        self.arm_env = self.guard_env(sender_env(self.common, self.lab, arm, self.patched), arm,
-                                      False)
+        self.arm_env = self.guard_env(
+            sender_env(self.common, self.lab, arm, self.patched, keep_warm_ms), arm, False)
         self.write_netwatch('s.netwatch')
         self.worker_embedded = embedded
         if embedded:
@@ -1891,11 +1935,9 @@ class Run:
                 if case == 'PW' and not self.warm_built:
                     self.skip(case, variant, 'no_contacts_warm')
                     continue
-                if case == 'CI' and variant == 'keep_warm':
-                    self.skip(case, variant, 'no_keep_warm')
-                    continue
                 for arm, block_no, count in abab(spec['arms'], self.n[case], self.block):
-                    self.start_sender(arm, embedded=(case == 'ER'))
+                    self.start_sender(arm, embedded=(case == 'ER'),
+                                      keep_warm_ms=self.keep_warm_ms(case, variant, arm))
                     for index in range(count + 1):
                         discard = None
                         if index == 0:
@@ -2258,15 +2300,30 @@ def self_test() -> int:
               'RAVEN_TOR_HELPER': '/x/raven-tor-helper', 'RAVEN_LAB_TOR_WARM': '1',
               'RAVEN_LAB_ROUTE_HINTS': '1', 'RAVEN_P2P_LISTEN': '/ip4/0.0.0.0/tcp/0',
               'HTTPS_PROXY': 'http://192.0.2.1:3128', 'RAVEN_PEER': '192.0.2.5:7420',
-              'RAVEN_LAB_TOR_STAGES': '/x/stages', 'RAVEN_KEYSTORE_BACKEND': 'os'}
+              'RAVEN_LAB_TOR_STAGES': '/x/stages', 'RAVEN_KEYSTORE_BACKEND': 'os',
+              KEEP_WARM_KNOB: '1'}
     common = common_env(caller, lab, 'dry', dict(SIM_DEFAULTS))
     s_base = sender_env(common, lab, 'base', DEFAULT_PATCHED)
     s_patched = sender_env(common, lab, 'patched', DEFAULT_PATCHED)
+    s_keep = sender_env(common, lab, 'patched', DEFAULT_PATCHED, 27000)
+    s_keep_base = sender_env(common, lab, 'base', DEFAULT_PATCHED, 27000)
     f_env = friend_env(common, lab)
     w_env = worker_env(s_patched, lab / 's', lab, True)
     leaked = sorted(k for k, v in common.items() if caller.get(k) == v and k not in CALLER_KEEP)
-    envs_ok = all(dry_env_refusal(e) == '' for e in (common, s_base, s_patched, f_env, w_env))
-    stage_ok = (stage_a_refusal(s_base, 'base', DEFAULT_PATCHED, False) == ''
+    envs_ok = all(dry_env_refusal(e) == '' for e in (common, s_base, s_patched, s_keep, f_env,
+                                                      w_env))
+    keep_ok = (s_keep.get(KEEP_WARM_KNOB) == '27000' and KEEP_WARM_KNOB not in s_keep_base
+               and KEEP_WARM_KNOB not in s_patched and KEEP_WARM_KNOB not in f_env
+               and stage_a_refusal(s_keep, 'patched', DEFAULT_PATCHED, False) == ''
+               and stage_a_refusal(sender_env(common, lab, 'patched', DEFAULT_PATCHED, 0),
+                                   'patched', DEFAULT_PATCHED, False) == ''
+               and stage_a_refusal(dict(f_env, **{KEEP_WARM_KNOB: '0'}), 'base',
+                                   DEFAULT_PATCHED, True) != ''
+               and stage_a_refusal(dict(s_base, **{KEEP_WARM_KNOB: '0'}), 'base',
+                                   DEFAULT_PATCHED, False) != ''
+               and stage_a_refusal(dict(s_keep, **{KEEP_WARM_KNOB: 'soon'}), 'patched',
+                                   DEFAULT_PATCHED, False) != '')
+    stage_ok = (keep_ok and stage_a_refusal(s_base, 'base', DEFAULT_PATCHED, False) == ''
                 and stage_a_refusal(s_patched, 'patched', DEFAULT_PATCHED, False) == ''
                 and stage_a_refusal(f_env, 'base', DEFAULT_PATCHED, True) == ''
                 and stage_a_refusal(s_patched, 'base', DEFAULT_PATCHED, False) != ''
@@ -2372,6 +2429,25 @@ def self_test() -> int:
           and timing_refusal('dry', dict(dry, WL=25.0), 45.0) != ''
           and timing_refusal('dry', dict(dry, WC=25.0), 45.0) != '',
           'WL under WARM_IDLE, WC past the listener and inside the kept time, CI past it')
+
+    # Keep warm in the CI arms: only the patched arm sets the knob; plain is
+    # patched without keep warm (0), keep_warm is keep warm on (the dry mode
+    # scaled to the kept time, the real mode as built).
+    with tempfile.TemporaryDirectory() as tmp:
+        base_argv = ['run', '--bin-dir', str(Path(tmp) / 'bin'), '--lab', str(Path(tmp) / 'lab-1')]
+        dry_run = Run(checked_args(parser().parse_args(base_argv)), {})
+        real_run = Run(checked_args(parser().parse_args(
+            base_argv + ['--real-tor', '--tor-helper', str(Path(tmp) / 'raven-tor-helper')])), {})
+    knobs = {(m, c, v, a): r.keep_warm_ms(c, v, a)
+             for m, r in (('dry', dry_run), ('real', real_run))
+             for c, v in (('CI', 'plain'), ('CI', 'keep_warm'), ('WC', 'plain'), ('PW', 'plain'))
+             for a in ('base', 'patched')}
+    want = {k: None for k in knobs}
+    want.update({('dry', 'CI', 'plain', 'patched'): 0, ('real', 'CI', 'plain', 'patched'): 0,
+                 ('dry', 'CI', 'keep_warm', 'patched'): 27000})
+    check('keep_warm_arms', knobs == want and dry_run.mode == 'dry' and real_run.mode == 'real',
+          f"dry keep_warm {knobs[('dry', 'CI', 'keep_warm', 'patched')]} ms, plain "
+          f"{knobs[('dry', 'CI', 'plain', 'patched')]}, real keep_warm as built")
 
     # The analysis of a small run file.
     with tempfile.TemporaryDirectory() as tmp:
@@ -2485,7 +2561,7 @@ def self_test() -> int:
             (b / name).write_bytes(b'\0' + data + b'\0')
             return b / name
 
-        node_ok = NODE_DEBUG + b'.' + b'.'.join(WARM_MODEL)
+        node_ok = NODE_DEBUG + b'.' + b'.'.join(NODE_D1 + WARM_MODEL)
         put('raven-node', node_ok)
         put('ash', DEBUG_OBJECTS + b'.' + OVERFLOW_CHECK)
         engine = put(engine_name(), DEBUG_OBJECTS)
@@ -2498,9 +2574,10 @@ def self_test() -> int:
         put('raven-tor-helper', DEBUG_OBJECTS + OVERFLOW_CHECK)
         outcome['helper_beside'] = build_refusal(b, 'dry', engine, None, None)
         (b / 'raven-tor-helper').unlink()
-        for name, data in (('node_release', b'.'.join(WARM_MODEL)),
+        for name, data in (('node_release', b'.'.join(NODE_D1 + WARM_MODEL)),
                            ('node_release_bare', b'release'),
-                           ('node_no_model', NODE_DEBUG)):
+                           ('node_no_hooks', NODE_DEBUG + b'.' + b'.'.join(WARM_MODEL)),
+                           ('node_no_model', NODE_DEBUG + b'.' + b'.'.join(NODE_D1))):
             put('raven-node', data)
             outcome[name] = build_refusal(b, 'dry', engine, None, None)
         outcome['real_no_model'] = build_refusal(b, 'real', engine, None, helper)
@@ -2519,6 +2596,7 @@ def self_test() -> int:
                     'helper_beside': 'never has raven-tor-helper',
                     'node_release': 'raven-node is not a debug build',
                     'node_release_bare': 'raven-node is not a debug build',
+                    'node_no_hooks': 'raven-node has no D1 lab hooks',
                     'node_no_model': 'raven-node has no warm circuit model',
                     'ash_release': 'ash is not a debug build',
                     'embedded_no_tor': 'has no Tor in process',
@@ -2564,7 +2642,7 @@ def self_test() -> int:
         mine = (set(CLOSED_GATES) | set(LOOPBACK_KNOBS) | set(STAGE_A.values())
                 | {'RAVEN_LAB_TOR_STAGES', 'RAVEN_LAB_TOR_LOOPBACK', 'RAVEN_LAB_TOR',
                    'RAVEN_LAB_TEST_A', 'RAVEN_LAB_AT_REST', 'RAVEN_LAB_ERASE_ROOT',
-                   'RAVEN_LAB_NETWATCH_EVENTS'})
+                   'RAVEN_LAB_NETWATCH_EVENTS', KEEP_WARM_KNOB})
         unknown = sorted(mine - names)
         core = '\n'.join(s.read_text(errors='replace')
                          for s in (crates / 'raven-core' / 'src').rglob('*.rs'))

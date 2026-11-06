@@ -66,12 +66,16 @@
 //! rendezvous circuit through the helper every 6 to 9 minutes
 //! ([`super::probe_on`], a refused stream on the friend's Tor), so a send
 //! after a pause longer than Arti's 10 minutes still rides it; once a new
-//! Tor life is ready, the conversations going on are probed at once.
+//! Tor life is ready, the conversations going on are probed at once. A lab
+//! run of the D1 harness scales its times to the loopback helper's kept
+//! circuit, or turns it off ([`KEEP_WARM_EVERY_ENV`], debug builds with
+//! `RAVEN_LAB_TEST_A=1` only).
 
 use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use raven_core::OutboxCarrier;
@@ -1023,6 +1027,46 @@ pub(crate) const KEEP_LIMITS: KeepLimits = KeepLimits {
     typing_every: WARM_IDLE,
 };
 
+/// Debug builds with `RAVEN_LAB_TEST_A=1` only (the D1 harness, whose dry
+/// mode's loopback helper keeps a circuit seconds, not Arti's 10 minutes):
+/// `RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS=<ms>` makes [`KEEP`] probe every `ms`
+/// to 1.5 x `ms` and end after 10 x `ms` (never slower or longer than
+/// [`KEEP_WARM_EVERY`] and [`MAX_CIRCUIT_AGE`]: as 6 to 9 minutes against
+/// Arti's 10, and an hour); `0` keeps no friend warm (its arm "patched
+/// without keep warm"; the app's warm-ups go on). Read once.
+pub(crate) const KEEP_WARM_EVERY_ENV: &str = "RAVEN_LAB_TOR_KEEP_WARM_EVERY_MS";
+
+/// [`KEEP`]'s limits from `base`: the lab knob ([`KEEP_WARM_EVERY_ENV`],
+/// its `value`) is read only when `lab_test_a` in a debug build; a value
+/// that is no number of ms changes nothing.
+fn lab_keep_limits(
+    base: KeepLimits,
+    lab_test_a: impl FnOnce() -> bool,
+    value: impl FnOnce() -> Option<OsString>,
+) -> KeepLimits {
+    if !cfg!(debug_assertions) || !lab_test_a() {
+        return base;
+    }
+    let Some(ms) = value()
+        .and_then(|v| v.into_string().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    else {
+        return base;
+    };
+    if ms == 0 {
+        return KeepLimits { cap: 0, ..base };
+    }
+    let at_most = |ms: u64, real: Duration| Duration::from_millis(ms).min(real);
+    KeepLimits {
+        every: (
+            at_most(ms, base.every.0),
+            at_most(ms.saturating_mul(3) / 2, base.every.1),
+        ),
+        age: at_most(ms.saturating_mul(10), base.age),
+        ..base
+    }
+}
+
 /// One conversation with a friend, in memory only: who and when, never
 /// what.
 struct Talk {
@@ -1084,6 +1128,10 @@ impl Talk {
 /// the rate limits of the app's warm-ups (M3, [`Self::warm_up`]).
 pub(crate) struct KeepWarm {
     limits: KeepLimits,
+    /// [`KEEP`] only: a lab run's knob may change `limits`
+    /// ([`KEEP_WARM_EVERY_ENV`]); they are kept here once read.
+    lab: bool,
+    lab_limits: OnceLock<KeepLimits>,
     gate: Gate,
     /// The kept links whose gates and failed links the probes share.
     pool: &'static WarmPool,
@@ -1104,10 +1152,21 @@ struct KeepInner {
 pub(crate) type Skip = &'static str;
 
 impl KeepWarm {
-    /// Keep warm with `limits`, its own `gate`, its probes sharing `pool`.
+    /// Keep warm with `limits`, its own `gate`, its probes sharing `pool`
+    /// (a test's own keeper: no lab knob).
+    #[cfg(test)]
     pub(crate) const fn new(limits: KeepLimits, gate: Gate, pool: &'static WarmPool) -> Self {
+        Self::made(limits, gate, pool, false)
+    }
+
+    /// Keep warm with `limits`, its own `gate`, its probes sharing `pool`;
+    /// with `lab` (the process's [`KEEP`] only), the lab knob may change
+    /// `limits` ([`Self::limits`]).
+    const fn made(limits: KeepLimits, gate: Gate, pool: &'static WarmPool, lab: bool) -> Self {
         Self {
             limits,
+            lab,
+            lab_limits: OnceLock::new(),
             gate,
             pool,
             inner: Mutex::new(KeepInner {
@@ -1116,6 +1175,21 @@ impl KeepWarm {
             }),
             news: tokio::sync::Notify::const_new(),
         }
+    }
+
+    /// Its limits: as made, or for [`KEEP`] as a lab run's knob sets them
+    /// ([`lab_keep_limits`], read once).
+    fn limits(&self) -> KeepLimits {
+        if !self.lab {
+            return self.limits;
+        }
+        *self.lab_limits.get_or_init(|| {
+            lab_keep_limits(
+                self.limits,
+                raven_core::pair_init::lab_test_a_enabled,
+                || std::env::var_os(KEEP_WARM_EVERY_ENV),
+            )
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, KeepInner> {
@@ -1149,7 +1223,7 @@ impl KeepWarm {
         let mut inner = self.lock();
         let at = self.talk_at(&mut inner, data_dir, contact, now);
         let talk = &mut inner.talks[at];
-        if !talk.going_on(&self.limits, now) {
+        if !talk.going_on(&self.limits(), now) {
             // A new conversation: its keep warm may run its age again.
             talk.aged = false;
         }
@@ -1249,7 +1323,7 @@ impl KeepWarm {
         }
         self.talked(data_dir, contact, Some(hs_id));
         let now = Instant::now();
-        let limits = self.limits;
+        let limits = self.limits();
         let mut inner = self.lock();
         let at = self.talk_at(&mut inner, data_dir, contact, now);
         let talk = &mut inner.talks[at];
@@ -1295,7 +1369,7 @@ impl KeepWarm {
             return;
         }
         let now = Instant::now();
-        let limits = self.limits;
+        let limits = self.limits();
         let mut inner = self.lock();
         let mut waiting: Vec<usize> = (0..inner.talks.len())
             .filter(|&i| {
@@ -1358,7 +1432,7 @@ impl KeepWarm {
     /// is kept warm (the task ends; the next note starts another).
     #[allow(clippy::type_complexity)]
     fn plan(&self, now: Instant) -> (Vec<(PathBuf, [u8; 32], Option<[u8; 32]>)>, Option<Instant>) {
-        let limits = self.limits;
+        let limits = self.limits();
         let mut inner = self.lock();
         if !self.live() {
             inner.talks.clear();
@@ -1514,10 +1588,11 @@ fn jitter((low, high): (Duration, Duration)) -> Duration {
 
 /// The process's keep warm: the conversations of this process's profile,
 /// its probes through [`WARM`]'s gates.
-pub(crate) static KEEP: KeepWarm = KeepWarm::new(
+pub(crate) static KEEP: KeepWarm = KeepWarm::made(
     KEEP_LIMITS,
     Gate::Live(raven_core::onion_gate::onion_warm_live),
     &WARM,
+    true,
 );
 
 #[cfg(test)]
@@ -1605,5 +1680,74 @@ mod tests {
         keep.tor_ready();
         let most_recent: Vec<u8> = (2..friends).collect();
         assert_eq!(kept(), most_recent, "the {} most recent", KEEP_LIMITS.cap);
+    }
+
+    /// The D1 harness's keep warm knob ([`KEEP_WARM_EVERY_ENV`]): read only
+    /// in a lab run; `ms` makes the probes come every `ms` to 1.5 x `ms`
+    /// and keep warm end after 10 x `ms`, never slower or longer than the
+    /// real limits; `0` keeps no friend warm; anything else changes
+    /// nothing. Only the process's keeper reads it.
+    #[test]
+    fn the_keep_warm_knob_is_read_only_in_a_lab_run() {
+        let same = |a: KeepLimits, b: KeepLimits| format!("{a:?}") == format!("{b:?}");
+        let knob = |v: &str| lab_keep_limits(KEEP_LIMITS, || true, || Some(v.into()));
+        let never = || -> Option<OsString> { panic!("read outside a lab run") };
+        assert!(same(
+            lab_keep_limits(KEEP_LIMITS, || false, never),
+            KEEP_LIMITS
+        ));
+        assert!(same(
+            lab_keep_limits(KEEP_LIMITS, || true, || None),
+            KEEP_LIMITS
+        ));
+        for word in ["", "soon", "-5", "1.5", "27 s"] {
+            assert!(same(knob(word), KEEP_LIMITS), "{word:?}");
+        }
+        if !cfg!(debug_assertions) {
+            assert!(
+                same(knob("27000"), KEEP_LIMITS),
+                "a release build reads nothing"
+            );
+            return;
+        }
+        let lab = knob("27000");
+        assert_eq!(
+            (lab.every, lab.age),
+            (
+                (Duration::from_secs(27), Duration::from_millis(40_500)),
+                Duration::from_secs(270)
+            )
+        );
+        let rest = KeepLimits {
+            every: KEEP_LIMITS.every,
+            age: KEEP_LIMITS.age,
+            ..lab
+        };
+        assert!(
+            same(rest, KEEP_LIMITS),
+            "only the probes and the age: {lab:?}"
+        );
+        let slow = knob(&u64::MAX.to_string());
+        assert_eq!((slow.every, slow.age), (KEEP_WARM_EVERY, MAX_CIRCUIT_AGE));
+        let off = knob("0");
+        assert_eq!(off.cap, 0, "{off:?}");
+        assert!(same(
+            KeepLimits {
+                cap: KEEP_LIMITS.cap,
+                ..off
+            },
+            KEEP_LIMITS
+        ));
+        let test_pool: &'static WarmPool = Box::leak(Box::new(WarmPool::new(
+            LIMITS,
+            Gate::Switch(Box::leak(Box::new(std::sync::atomic::AtomicBool::new(
+                true,
+            )))),
+            Gate::Switch(Box::leak(Box::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))),
+        )));
+        let test_keeper = KeepWarm::new(KEEP_LIMITS, Gate::Live(|| true), test_pool);
+        assert!(KEEP.lab && !test_keeper.lab);
     }
 }
