@@ -979,13 +979,13 @@ All open until recorded; none of it replaces the real rows.
   - C35 no route to the internet: LAN only, and no relay, VPS, UPnP or port
     advice (cutoff study F9);
   - C7f the app channel beyond the LAN (RDAP over Raven beyond the LAN, lab
-    only; `APP_CHANNEL_PRODUCTION_ENABLED` stays held).
+    runs; `APP_CHANNEL_PRODUCTION_ENABLED` has been true since 2026-10-29).
 - **lan_fault_matrix** (`scripts/lan_fault_matrix.py`, macOS and Linux):
   s04/s04b/s04c/s04p (`RAVEN_FAULT_HINTS=1`; s04c also with a real pre-RRH1
   build, `RAVEN_FAULT_OLD_BIN`), s39 and s40 (route hints over p2p), s41-s44
   (friend relays), s45-s47 (the kit), s48, s48c, s49 and s48o (the
   diagnosis; s48o with `RAVEN_FAULT_NETWATCH=1`); and s32b-s32e (RDAP over
-  Raven beyond the LAN, lab only; APP_CHANNEL stays held).
+  Raven beyond the LAN, lab runs; APP_CHANNEL true since 2026-10-29).
 - **netns** (`node/scripts/netns_nat_dcutr.sh`, Linux, root; advisory until
   each has its green streak): `hints`, `friend`, `friend-sleep`, `only443`
   (with its friend relay run) and `diag`
