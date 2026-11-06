@@ -1481,7 +1481,7 @@ impl Controller {
         let messages = history
             .into_iter()
             .map(|m| {
-                let author = super::super::group_cli::author_of(&view, &m.from, &names);
+                let author = bridge::author_of(&view, &m.from, &names);
                 GroupMessage {
                     id: m.id,
                     mine: m.mine,

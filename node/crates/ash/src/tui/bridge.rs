@@ -46,6 +46,9 @@ pub(super) use super::super::{block_saved_contact, unverify_saved_contact};
 pub(super) use super::super::OWN_INVITE_REFUSAL;
 // The identity's first prekey and device certificate (lan_dispatch.rs).
 pub(super) use raven_core::ensure_local_prekey;
+// How `raven group show` names a message's author (APP-02): never under the
+// name of one of your friends unless it is that friend.
+pub(super) use super::super::group_cli::author_of;
 
 /// The listen address a node this app starts uses while receiving is off:
 /// this computer only, any free port.

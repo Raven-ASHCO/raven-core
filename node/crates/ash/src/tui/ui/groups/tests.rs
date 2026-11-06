@@ -1114,6 +1114,8 @@ fn a_member_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
     };
     let (dir, controller, [bea, _cy]) = profile();
     let d = dir.path();
+    let mut app = testkit::app((80, 24));
+    let now = app.now_ms();
     // Bea, as profile() made her; and this profile's key, with the device
     // certificate a profile that took a message has.
     let admin = Identity::from_seed(&[0xBE; 32]);
@@ -1140,7 +1142,7 @@ fn a_member_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
         epoch: 1,
         name: "Book club".into(),
         admin: bea,
-        issued_ms: bridge::now_ms(),
+        issued_ms: now,
         members: vec![
             member(bea, ""),
             member(me.public_key_bytes(), ""),
@@ -1150,13 +1152,7 @@ fn a_member_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
         sig: [0; 64],
     };
     state.sign(&admin);
-    core_group::ingest(
-        d,
-        &bea,
-        &core_group::GroupFrame::State(state),
-        bridge::now_ms(),
-    )
-    .expect("the roster");
+    core_group::ingest(d, &bea, &core_group::GroupFrame::State(state), now).expect("the roster");
     for (n, (author, body)) in [
         (&admin, "Hello club!"),
         (&ola, "Count me in."),
@@ -1170,17 +1166,16 @@ fn a_member_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
             id: [n as u8 + 1; 16],
             epoch: 1,
             from: [0; 32],
-            sent_ms: bridge::now_ms(),
+            sent_ms: now,
             body: body.into(),
             sig: [0; 64],
             relay: Vec::new(),
         };
         m.sign(author);
-        let taken = core_group::ingest(d, &bea, &core_group::GroupFrame::Msg(m), bridge::now_ms());
+        let taken = core_group::ingest(d, &bea, &core_group::GroupFrame::Msg(m), now);
         assert_eq!(taken, Ok(true), "{body}");
     }
     // The app opens Book club, under Bea and Cy on the list.
-    let mut app = testkit::app((80, 24));
     let cmds = app.start(testkit::session(state_file::Receive::Off));
     run_jobs(&mut app, &controller, cmds);
     let cmds = press_all(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
