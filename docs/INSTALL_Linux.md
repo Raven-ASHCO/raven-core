@@ -109,7 +109,8 @@ RAVEN_KEYSTORE_PASSPHRASE_FILE=$HOME/.config/raven/keystore-passphrase \
 User systemd unit runs `raven-node service` (bridge + IPC). Does not require root.
 The data directory (`~/.raven`) is created mode `0700`, and Raven refuses one that
 another account owns, whatever its mode (security review 2026-11, KS-2; root may use any
-folder, as the relay installer's check does). The installer picks the
+folder, though the relay installer checks the relay's folder as the relay's own account,
+WINLIN-1). The installer picks the
 same profile `raven` / `ash` use without `--data-dir` (`RAVEN_DATA_DIR`, then
 `ASH_DATA_DIR`, then a legacy `~/.raven-ash` while `~/.raven` does not exist, else
 `~/.raven`), and writes *absolute*, quoted paths into the unit (`systemd --user`

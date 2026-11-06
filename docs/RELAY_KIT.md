@@ -323,7 +323,18 @@ line is written at most every 300 s, and only when a count changed
   anything is replaced (a held build, a busy port or a bad folder changes
   nothing and restarts the old relay), the old binaries stay as `.prev`, and
   after the restart the relay must report its ports and **the same PeerId**
-  within 20 s, else the `.prev` binaries come back.
+  within 20 s, else the `.prev` binaries come back. On Linux that check runs
+  as the relay's own account (`raven-relay`, through `setpriv` from
+  util-linux: its uid, gid and groups, no new privileges, and
+  `CAP_NET_BIND_SERVICE` alone when a port is below 1024), from a copy root
+  puts in `/usr/local/lib/raven-relay` for the check and removes after it.
+  Root runs it only on a first install, before that account and its folder
+  exist, and nothing in `/var/lib/raven-relay` is changed as root (security
+  review 2026-11, WINLIN-1: SQLite, opening the folder's lock as root, would
+  have played back a journal the relay's account planted there and deleted
+  the file it names). A `/var/lib/raven-relay` without the `raven-relay`
+  account is refused (exit 5): move it away and install with
+  `RAVEN_RELAY_ADOPT=<the moved folder>` to keep its key.
 - **Rollback:** `RAVEN_RELAY_ROLLBACK=1` with the install command (Windows:
   `-Rollback`) swaps the `.prev` binaries back.
 - **Adopt a relay you ran by hand:** `RAVEN_RELAY_ADOPT=<its folder>` (Linux
@@ -355,7 +366,12 @@ over a line.
   listen port is busy or needs a privilege; 5 the relay folder holds a Raven
   profile or a relay already runs in it, or (`--wss-cert`/`--wss-key`) the WSS
   certificate or key cannot be read or does not match: fix it, then start the
-  relay again (`raven-node relay --check` names it).
+  relay again (`raven-node relay --check` names it). Exit 5 also comes from a
+  lock file in the folder that is not empty and has a SQLite journal or WAL
+  file beside it: Raven never leaves that pair, so it is refused instead of
+  played back (no relay runs: move both files out of the folder), and on
+  Linux from a `/var/lib/raven-relay` that exists without the `raven-relay`
+  account (section 11).
 - **443 needs a privilege** (exit 4 on Linux without the unit, or on an old
   macOS): use the kit's unit (Linux), or `RAVEN_RELAY_TCP443=7443` with the
   router's 443 mapped to 7443.

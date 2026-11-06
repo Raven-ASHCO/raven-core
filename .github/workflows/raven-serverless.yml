@@ -210,6 +210,14 @@ jobs:
             exit 1
           fi
           echo "relay kit scripts OK"
+      # Security review 2026-11 (WINLIN-1): the Linux relay kit checks the
+      # relay folder as the relay's account (setpriv, CAP_NET_BIND_SERVICE
+      # only for a port below 1024), root only on a first install, and never
+      # chowns that folder recursively. Static: bash -n, grep and awk on the
+      # installer and on copies that undo each part (each must be caught).
+      # No installer runs.
+      - name: Installer hardening (installer_hardening_selftest.sh)
+        run: bash node/scripts/install/installer_hardening_selftest.sh
 
   # The ordinary SQLite amalgamation (~9.5 MB sqlite3.c) is compiled into every default
   # build and its SHA-256 pins live in the same repo (libsqlite3-sys-raven/build.rs), so

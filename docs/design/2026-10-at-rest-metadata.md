@@ -1810,7 +1810,12 @@ zeros. The setting is per connection (the bundled SQLite is not built with
 contact deletes its remembered session end), `owed_acks.sqlite`, `friend_custody.sqlite`,
 `app_channel.sqlite3` (it had the pragma inline before), and the legacy `queue.sqlite` and
 `forward_queue.sqlite`. Lock databases hold nothing and skip it (`DataDirLock`, `*.lock.sqlite`,
-and `prekey_lifecycle.sqlite`, a lock table only).
+and `prekey_lifecycle.sqlite`, a lock table only). A `DataDirLock` database is never written, so
+one that is not empty with a `-journal` or `-wal` beside it was planted: it is refused before
+SQLite opens it, since SQLite would play that journal back as the account taking the lock and
+delete the super-journal file its trailer names (security review 2026-11, WINLIN-1). The journal
+a holder keeps beside its empty lock, or leaves there when it crashed, is taken as before (SQLite
+deletes it unread).
 
 `paths::checkpoint_truncate` (`PRAGMA wal_checkpoint(TRUNCATE)`) then moves what a delete overwrote
 into the main file and empties the WAL. It runs at the end of `prune_expired_sessions`, of the
