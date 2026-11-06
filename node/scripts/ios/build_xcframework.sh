@@ -21,6 +21,9 @@
 #
 # A debug build honours the lab switches and the file-backed key stores
 # (tests, the simulator); a release build refuses both, as on the desktop.
+# So a release build stops before it starts when the environment switches
+# debug assertions on (RUSTFLAGS, CARGO_PROFILE_RELEASE_*; security review
+# 2026-11, DEP-3), and raven-core refuses to compile then too.
 #
 # A release library keeps no build-machine path (and so no user name) in
 # its strings: the panic locations of the dependencies name their source
@@ -77,6 +80,14 @@ for t in "${TARGETS[@]}"; do
     || fail "the Rust target $t is missing: rustup target add ${TARGETS[*]}"
 done
 
+# ── Debug assertions ─────────────────────────────────────────────────────────
+if [[ "$PROFILE" == release ]]; then
+  # shellcheck source=scripts/release/cargo_config_guard.sh
+  source "$ROOT/scripts/release/cargo_config_guard.sh"
+  raven_no_release_debug_assertions \
+    || fail "unset the debug assertion settings named above for a release library"
+fi
+
 # ── Build-machine paths ──────────────────────────────────────────────────────
 REMAP="${RAVEN_REMAP_PATHS:-}"
 if [[ -z "$REMAP" ]]; then
@@ -115,7 +126,10 @@ for t in "${TARGETS[@]}"; do
   # Only the static library: the rlib and cdylib forms are for the desktop.
   # The debug profile's flag list is empty: macOS's bash 3.2 calls an empty
   # array unbound under set -u, so it expands only when it has a word.
-  cargo rustc -p raven-client --lib ${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"} \
+  # --locked: exactly the audited Cargo.lock, as every other release build
+  # (a lock that no longer fits the manifests stops the build instead of
+  # pulling crate versions nobody reviewed into the App Store library).
+  cargo rustc --locked -p raven-client --lib ${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"} \
     --features "$FEATURES" --target "$t" --crate-type staticlib
   lib="$TARGET_DIR/$t/$PROFILE_DIR/libraven_client.a"
   [[ -f "$lib" ]] || fail "no $lib after the build"

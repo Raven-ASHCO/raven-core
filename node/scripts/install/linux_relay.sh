@@ -198,6 +198,12 @@ if [[ "${RAVEN_RELAY_ROLLBACK:-0}" == 1 ]]; then
   exit 0
 fi
 
+# The check of the relay folder (step 5) runs as the relay's account through
+# setpriv (util-linux).
+if ! command -v setpriv >/dev/null 2>&1 && [[ ! -x /usr/bin/setpriv && ! -x /bin/setpriv ]]; then
+  relay_die "setpriv (util-linux) not found: the kit checks the relay folder as the user $RELAY_USER with it"
+fi
+
 # 3. The binaries to install: built or found as whoever runs this script.
 relay_binaries
 
@@ -217,15 +223,55 @@ restart_old() {
   fi
 }
 
+# A listen port below 1024 needs CAP_NET_BIND_SERVICE: the check (step 5) and
+# the unit (step 8) get that one capability, and only then.
+low_port=0
+for p in $(relay_tcp_ports); do
+  if [[ $p -lt 1024 ]]; then
+    low_port=1
+  fi
+done
+
 # 5. The NEW binary checks the gate, the folder and every port before anything
-# is replaced: as root, so 443 is probed as the unit (CAP_NET_BIND_SERVICE)
-# will bind it. It creates nothing.
+# is replaced. It creates nothing. It runs as the relay's account, as the unit
+# will (security review 2026-11, WINLIN-1): that account controls the folder,
+# so whatever SQLite does to the files in it (a journal it plays back deletes
+# the file the journal names) is done with the relay's rights, never root's.
+# setpriv gives it the account's uid, gid and groups, no new privileges, and
+# CAP_NET_BIND_SERVICE alone when a port is below 1024, so 443 is probed as
+# the unit binds it. It runs root's copy in $LIB_DIR (the account may not
+# read the build folder), from /, with only the variables below. Root runs
+# the check only on a first install: no relay account and no folder yet.
 check_env=(NO_COLOR=1)
 if [[ "$RAVEN_RELAY_LAB" == 1 ]]; then
   check_env+=(RAVEN_LAB_TEST_A=1)
 fi
+check_bin="$LIB_DIR/.raven-node.check"
 rc=0
-as_root env -u RAVEN_LAB_TEST_A "${check_env[@]}" "$RELAY_NODE_BIN" relay --check --data-dir "$STATE_DIR" "${RELAY_ARGS[@]}" || rc=$?
+if relay_uid="$(id -u "$RELAY_USER" 2>/dev/null)"; then
+  relay_gid="$(id -g "$RELAY_USER")"
+  check_caps=(--inh-caps=-all)
+  if [[ $low_port -eq 1 ]]; then
+    check_caps=(--inh-caps=-all,+net_bind_service --ambient-caps=+net_bind_service)
+  fi
+  lib_new=0
+  as_root test -d "$LIB_DIR" || lib_new=1
+  if ! as_root install -d -m 755 "$LIB_DIR" || ! as_root install -m 755 "$RELAY_NODE_BIN" "$check_bin"; then
+    restart_old
+    relay_die "could not copy raven-node into $LIB_DIR for the check"
+  fi
+  (cd / && as_root setpriv --reuid="$relay_uid" --regid="$relay_gid" --init-groups --no-new-privs "${check_caps[@]}" \
+    -- env -i HOME="$STATE_DIR" PATH=/usr/bin:/bin "${check_env[@]}" "$check_bin" relay --check --data-dir "$STATE_DIR" "${RELAY_ARGS[@]}") || rc=$?
+  as_root rm -f "$check_bin"
+  if [[ $lib_new -eq 1 ]]; then
+    as_root rmdir "$LIB_DIR" 2>/dev/null || true
+  fi
+elif as_root test -e "$STATE_DIR" || as_root test -L "$STATE_DIR"; then
+  restart_old
+  relay_die "$STATE_DIR exists, but the user $RELAY_USER does not: the kit checks that folder only as that user. Move the folder away and run the kit again (RAVEN_RELAY_ADOPT=<the moved folder> keeps its relay key)" 5
+else
+  as_root env -u RAVEN_LAB_TEST_A "${check_env[@]}" "$RELAY_NODE_BIN" relay --check --data-dir "$STATE_DIR" "${RELAY_ARGS[@]}" || rc=$?
+fi
 if [[ $rc -ne 0 ]]; then
   relay_check_failed "$rc"
   restart_old
@@ -238,10 +284,10 @@ if ! id -u "$RELAY_USER" >/dev/null 2>&1; then
   as_root useradd --system --user-group --home-dir "$STATE_DIR" --no-create-home --shell "$nologin" "$RELAY_USER"
   relay_note "created the system user $RELAY_USER"
 fi
+# The folder itself only: nothing in it is changed as root (WINLIN-1). The
+# check ran as the relay's account, and every file the kit puts in it is
+# installed as that account's.
 as_root install -d -o "$RELAY_USER" -g "$RELAY_USER" -m 700 "$STATE_DIR"
-# Everything in it belongs to the relay's account (the check ran as root and
-# may have touched its lock file).
-as_root chown -R "$RELAY_USER:$RELAY_USER" "$STATE_DIR"
 if [[ -n "${RAVEN_RELAY_ADOPT:-}" ]]; then
   adopt=$RAVEN_RELAY_ADOPT
   if as_root test -e "$STATE_DIR/relay_key.ed25519"; then
@@ -288,12 +334,6 @@ for a in "${RELAY_ARGS[@]}"; do
     --*) exec_start="$exec_start $a" ;;
     *) exec_start="$exec_start $(sd_quote "$a")" ;;
   esac
-done
-low_port=0
-for p in $(relay_tcp_ports); do
-  if [[ $p -lt 1024 ]]; then
-    low_port=1
-  fi
 done
 if [[ $low_port -eq 1 ]]; then
   caps="# A listen port is below 1024: only this capability, nothing else.

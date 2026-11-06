@@ -281,12 +281,14 @@ fn reject_unresolved_dir(dir: &Path) -> Result<(), String> {
 /// Only for the data directory itself (and directories Raven owns inside it);
 /// never for caller-chosen locations such as export destinations or a
 /// `--forward-db` parent. Fails closed when the mode cannot be restricted,
-/// rather than keeping private state in a shared dir.
+/// rather than keeping private state in a shared dir. A directory another
+/// account owns is refused whatever its mode, and left as it is
+/// ([`owned_by_another_account`], review KS-2).
 pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     reject_unresolved_dir(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -295,6 +297,9 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
         let metadata = std::fs::metadata(dir).map_err(|e| e.to_string())?;
         if !metadata.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
+        }
+        if another_accounts(metadata.uid(), account_uid()) {
+            return Err(another_accounts_folder_text(dir));
         }
         let mode = metadata.permissions().mode();
         if mode & 0o077 != 0 {
@@ -310,12 +315,126 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
         if !metadata.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
         }
+        // Its owner keeps the right to change the ACL back (review KS-2).
+        if owned_by_another_account(dir)? {
+            return Err(another_accounts_folder_text(dir));
+        }
         crate::win_acl::restrict_path(dir, crate::win_acl::Kind::Dir)
     }
     #[cfg(not(any(unix, windows)))]
     {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())
     }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static ACCOUNT_FOR_TESTS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A unit test's seam (review KS-2): this thread checks who owns a folder as
+/// if it ran as account `uid`, until the guard drops. A folder "another
+/// account owns" then needs no chown of a real file.
+#[cfg(all(test, unix))]
+pub(crate) struct AsAccountForTests {
+    was: Option<u32>,
+}
+
+#[cfg(all(test, unix))]
+impl AsAccountForTests {
+    pub(crate) fn uid(uid: u32) -> Self {
+        Self {
+            was: ACCOUNT_FOR_TESTS.with(|account| account.replace(Some(uid))),
+        }
+    }
+
+    /// An account other than the one the tests run as, never root.
+    pub(crate) fn another() -> Self {
+        Self::uid(if crate::ipc::current_euid() == 1 {
+            2
+        } else {
+            1
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for AsAccountForTests {
+    fn drop(&mut self) {
+        ACCOUNT_FOR_TESTS.with(|account| account.set(self.was));
+    }
+}
+
+/// The account a private folder must belong to (review KS-2): the one this
+/// process runs as, or the one a unit test's thread acts as
+/// ([`AsAccountForTests`]).
+#[cfg(unix)]
+fn account_uid() -> u32 {
+    #[cfg(test)]
+    if let Some(uid) = ACCOUNT_FOR_TESTS.with(std::cell::Cell::get) {
+        return uid;
+    }
+    crate::ipc::current_euid()
+}
+
+/// Whether a folder `owner` owns is another account's for a process that
+/// runs as `account`. Root may use any folder (an administrator's own
+/// choice). The Linux relay kit no longer needs that: it runs `relay
+/// --check` as the relay's account (security review 2026-11, WINLIN-1), and
+/// a lock never plays back a journal planted beside it ([`DataDirLock`]).
+#[cfg(unix)]
+fn another_accounts(owner: u32, account: u32) -> bool {
+    account != 0 && owner != account
+}
+
+/// Review KS-2: whether a Windows folder whose owner is `owner` (a SID
+/// string) may hold the private files of `user`: the user, SYSTEM
+/// (`S-1-5-18`) or the Administrators group (`S-1-5-32-544`, the owner of
+/// what an elevated administrator creates). Neither of the last two is
+/// another ordinary account: both can take any folder anyway.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_owner_may_hold(owner: &str, user: &str) -> bool {
+    const SYSTEM: &str = "S-1-5-18";
+    const ADMINISTRATORS: &str = "S-1-5-32-544";
+    !owner.is_empty() && (owner == user || owner == SYSTEM || owner == ADMINISTRATORS)
+}
+
+/// Review KS-2: whether the existing folder `dir` belongs to another account
+/// than the one this process runs as. Its mode or ACL is no protection then:
+/// its owner can open it again at any time, and read, rename or replace what
+/// is written in it. Root may use any folder (Unix); on Windows the user,
+/// SYSTEM and the Administrators group may own it
+/// ([`windows_owner_may_hold`]). Every private folder
+/// ([`ensure_private_dir`]) and `raven erase` (`erase::refusal`) use this
+/// rule. An owner that cannot be read is an error.
+pub(crate) fn owned_by_another_account(dir: &Path) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::metadata(dir).map_err(|e| e.to_string())?.uid();
+        Ok(another_accounts(owner, account_uid()))
+    }
+    #[cfg(windows)]
+    {
+        let owner = crate::win_acl::owner_sid(dir)?;
+        Ok(!windows_owner_may_hold(&owner, crate::win_acl::user_sid()?))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        Ok(false)
+    }
+}
+
+/// The words when a private folder belongs to another account (review
+/// KS-2).
+#[cfg(any(unix, windows))]
+fn another_accounts_folder_text(dir: &Path) -> String {
+    format!(
+        "{} belongs to another account, so Raven will not keep private files in it: use a folder \
+         of your own",
+        dir.display()
+    )
 }
 
 /// Create missing parents of a private file owner-only, without touching the
@@ -405,7 +524,6 @@ pub(crate) fn owner_only_refusal(path: &str, why: &str, volume_acls: Option<bool
     format!("cannot restrict {path} to owner-only: {why}{hint}")
 }
 
-#[cfg(any(unix, windows))]
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
@@ -697,6 +815,50 @@ pub(crate) fn thread_holds_raven_lock() -> bool {
 /// How long [`DataDirLock::acquire`] waits for another holder.
 const DATA_DIR_LOCK_WAIT: Duration = Duration::from_secs(10);
 
+/// Why a lock is refused when SQLite would play a journal back into it
+/// ([`refuse_replayable_lock`]).
+const REPLAYABLE_LOCK: &str = "a SQLite journal or WAL file sits next to it and it is not empty, \
+     which no Raven program leaves, so SQLite would play that journal back as this account. If no \
+     Raven program uses this folder, move both files out of it";
+
+/// Security review 2026-11, WINLIN-1: refuses, before SQLite opens anything,
+/// a lock whose database SQLite would play a journal back into.
+///
+/// A lock database is created empty and never written: a [`DataDirLock`]
+/// only holds `BEGIN EXCLUSIVE`. Its holder keeps a `-journal` beside it
+/// (SQLite opens one for the first page of the new database in its cache),
+/// and a holder that crashed leaves that journal behind, but beside a
+/// database of zero pages SQLite deletes a `-journal` or `-wal` unread, so
+/// waiters and crash leftovers are taken as before. Beside a database that
+/// is not empty, opening it plays a `-journal` back (and deletes the
+/// super-journal its trailer names, wherever that is) or recovers a `-wal`,
+/// as the account that opens it. Only whoever controls the folder makes that
+/// pair, so the lock is refused and both files stay. A pair planted after
+/// this look (a race) is not seen: no account takes a lock in a folder
+/// another ordinary account owns (review KS-2), and the Linux relay kit runs
+/// `relay --check` as the relay's own account.
+fn refuse_replayable_lock(path: &Path, lock_file_name: &str) -> Result<(), String> {
+    let failed = |e: std::io::Error| format!("data-dir lock {lock_file_name}: {e}");
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() && meta.len() == 0 => return Ok(()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(e)),
+    }
+    for suffix in ["-journal", "-wal"] {
+        match std::fs::symlink_metadata(sqlite_sidecar(path, suffix)) {
+            Ok(_) => {
+                return Err(format!(
+                    "lock file {lock_file_name} refused: {REPLAYABLE_LOCK}"
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed(e)),
+        }
+    }
+    Ok(())
+}
+
 impl DataDirLock {
     pub fn acquire(data_dir: &Path, lock_file_name: &str) -> Result<Self, String> {
         Self::acquire_within(data_dir, lock_file_name, DATA_DIR_LOCK_WAIT)
@@ -710,8 +872,10 @@ impl DataDirLock {
         lock_file_name: &str,
         wait: Duration,
     ) -> Result<Self, String> {
-        // Creates/tightens the owner-only data dir, then a 0600 lock file.
         let path = data_dir.join(lock_file_name);
+        // Before anything in the folder is created or changed (WINLIN-1).
+        refuse_replayable_lock(&path, lock_file_name)?;
+        // Creates/tightens the owner-only data dir, then a 0600 lock file.
         let connection = open_private_data_dir_sqlite(&path).map_err(|e| e.to_string())?;
         connection.busy_timeout(wait).map_err(|e| e.to_string())?;
         connection
@@ -743,6 +907,7 @@ impl DataDirLock {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("data-dir lock {lock_file_name}: {e}")),
         }
+        refuse_replayable_lock(&path, lock_file_name)?;
         let flags =
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let connection = match rusqlite::Connection::open_with_flags(&path, flags) {
@@ -986,6 +1151,63 @@ pub(crate) mod scrub_test {
     }
 }
 
+/// Security review 2026-11, WINLIN-1: what the owner of a folder plants so
+/// that SQLite deletes a file outside it when another account takes a lock
+/// there. Shared by the lock tests here and the relay folder's.
+#[cfg(test)]
+pub(crate) mod lock_replay_test {
+    use std::path::{Path, PathBuf};
+
+    /// Words of the refusal ([`super::DataDirLock`]).
+    pub(crate) const REFUSED: &str = "journal or WAL";
+
+    /// What [`victim`] holds.
+    pub(crate) const VICTIM_TEXT: &[u8] = b"keep me\n";
+
+    /// A file outside every Raven folder. Not empty: SQLite deletes only a
+    /// super-journal that is not empty (unixAccess).
+    pub(crate) fn victim(outside: &Path) -> PathBuf {
+        let victim = outside.join("victim.conf");
+        std::fs::write(&victim, VICTIM_TEXT).unwrap();
+        victim
+    }
+
+    /// `victim` is still there, as it was.
+    pub(crate) fn assert_untouched(victim: &Path) {
+        assert_eq!(
+            std::fs::read(victim).ok().as_deref(),
+            Some(VICTIM_TEXT),
+            "SQLite deleted {}, a file outside the folder",
+            victim.display()
+        );
+    }
+
+    /// Plants, in `dir`, a lock database `lock` that is not empty (512
+    /// bytes, not even a SQLite header: the pager replays a journal before
+    /// it reads a page) and a rollback journal beside it whose first byte is
+    /// not zero and whose only content is a super-journal trailer naming
+    /// `victim` (sqlite3.c readSuperJournal: the name, its length and its
+    /// byte sum as big-endian u32, then the journal magic). SQLite takes the
+    /// journal as hot, finds no header in it to play back, deletes it, and
+    /// then deletes the super-journal it names (pager_delsuper), as whoever
+    /// opened the lock.
+    pub(crate) fn plant_hot_journal(dir: &Path, lock: &str, victim: &Path) {
+        let name = victim
+            .to_str()
+            .filter(|name| name.is_ascii())
+            .expect("an ASCII temp path")
+            .as_bytes();
+        let mut journal = vec![b'X'];
+        journal.extend_from_slice(name);
+        journal.extend_from_slice(&u32::try_from(name.len()).unwrap().to_be_bytes());
+        let sum: u32 = name.iter().map(|&byte| u32::from(byte)).sum();
+        journal.extend_from_slice(&sum.to_be_bytes());
+        journal.extend_from_slice(&[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]);
+        std::fs::write(dir.join(lock), [1u8; 512]).unwrap();
+        std::fs::write(dir.join(format!("{lock}-journal")), journal).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,6 +1406,80 @@ mod tests {
             "existing data dir must lose group/other access"
         );
         assert_eq!(mode(&legacy.join(".probe.lock.sqlite")), 0o600);
+    }
+
+    /// Review KS-2: the mode alone made a folder private. A folder another
+    /// account owns is refused whatever its mode (its owner can open it again
+    /// at any time, and read, rename or replace what is written in it), and
+    /// it is never changed. Root may use any folder (an administrator's own
+    /// choice; the Linux relay kit checks the relay's folder as the relay's
+    /// account). Another account is a seam (`AsAccountForTests`): no file
+    /// changes its owner.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_dir_another_account_owns_is_refused_whatever_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let theirs = root.path().join("theirs");
+        let loose = root.path().join("loose");
+        for (dir, bits) in [(&theirs, 0o700), (&loose, 0o755)] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(bits)).unwrap();
+        }
+        {
+            let _other = AsAccountForTests::another();
+            for dir in [&theirs, &loose] {
+                let refused = ensure_private_dir(dir).unwrap_err();
+                assert!(
+                    refused.contains("belongs to another account"),
+                    "{}: {refused}",
+                    dir.display()
+                );
+                // Every store's lock goes through the same rule.
+                assert!(DataDirLock::acquire(dir, ".probe.lock.sqlite").is_err());
+                assert!(!dir.join(".probe.lock.sqlite").exists());
+                assert!(owned_by_another_account(dir).unwrap());
+            }
+            assert_eq!(
+                mode(&loose),
+                0o755,
+                "another account's folder is not changed"
+            );
+        }
+        {
+            let _root = AsAccountForTests::uid(0);
+            assert!(!owned_by_another_account(&theirs).unwrap());
+            ensure_private_dir(&theirs).unwrap();
+        }
+        // The account that owns them may.
+        assert!(!owned_by_another_account(&loose).unwrap());
+        ensure_private_dir(&theirs).unwrap();
+        ensure_private_dir(&loose).unwrap();
+        assert_eq!(mode(&loose), 0o700);
+    }
+
+    /// Review KS-2 on Windows: a private folder's owner must be the user,
+    /// SYSTEM or the Administrators group (the owner of what an elevated
+    /// administrator creates). Another user, the Users group or a well known
+    /// SID such as Everyone owns no Raven folder.
+    #[test]
+    fn a_windows_private_folder_belongs_to_the_user() {
+        let user = "S-1-5-21-111-222-333-1001";
+        for owner in [user, "S-1-5-18", "S-1-5-32-544"] {
+            assert!(windows_owner_may_hold(owner, user), "{owner}");
+        }
+        for owner in [
+            "S-1-5-21-111-222-333-1002",
+            "S-1-5-21-111-222-333-10011",
+            "S-1-5-32-545",
+            "S-1-1-0",
+            "S-1-5-7",
+            "S-1-5-11",
+            "",
+        ] {
+            assert!(!windows_owner_may_hold(owner, user), "{owner:?}");
+        }
     }
 
     #[cfg(unix)]
@@ -1574,5 +1870,97 @@ mod tests {
         let none = checkpoint_truncate(&plain).unwrap();
         assert!(none.completed(), "{none:?}");
         assert_eq!((none.log, none.checkpointed), (-1, -1));
+    }
+
+    /// Security review 2026-11, WINLIN-1: SQLite replays a hot rollback
+    /// journal before it takes a lock, and the super-journal trailer of a
+    /// replayed journal makes it delete the file it names, as whoever takes
+    /// the lock (root, when root checked a folder another account controls).
+    /// A lock database is never written, so a journal beside one that is not
+    /// empty was planted: the lock is refused before SQLite opens anything,
+    /// and the file outside the folder stays.
+    #[test]
+    fn a_lock_beside_a_planted_journal_is_refused_and_deletes_nothing() {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = lock_replay_test::victim(outside.path());
+        let dir = tempfile::tempdir().unwrap();
+        let name = ".probe.lock.sqlite";
+        lock_replay_test::plant_hot_journal(dir.path(), name, &victim);
+        let refused = DataDirLock::acquire_within(dir.path(), name, Duration::ZERO).err();
+        lock_replay_test::assert_untouched(&victim);
+        let refused = refused.expect("the lock was taken");
+        assert!(refused.contains(lock_replay_test::REFUSED), "{refused}");
+        // Nothing replayed it: the journal is where it was.
+        assert!(dir.path().join(format!("{name}-journal")).exists());
+    }
+
+    /// The same for a lock that is taken only while it exists (PP.6).
+    #[test]
+    fn an_existing_lock_beside_a_planted_journal_is_refused_too() {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = lock_replay_test::victim(outside.path());
+        let dir = tempfile::tempdir().unwrap();
+        let name = ".send_legacy.lock.sqlite";
+        lock_replay_test::plant_hot_journal(dir.path(), name, &victim);
+        let refused = DataDirLock::acquire_existing_within(dir.path(), name, Duration::ZERO).err();
+        lock_replay_test::assert_untouched(&victim);
+        let refused = refused.expect("the lock was taken");
+        assert!(refused.contains(lock_replay_test::REFUSED), "{refused}");
+    }
+
+    /// A lock database never takes WAL mode either: a `-wal` beside one
+    /// that is not empty is refused before SQLite opens it (it would recover
+    /// it and make a `-shm` beside it).
+    #[test]
+    fn a_lock_beside_a_planted_wal_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = ".probe.lock.sqlite";
+        std::fs::write(dir.path().join(name), [1u8; 512]).unwrap();
+        std::fs::write(dir.path().join(format!("{name}-wal")), [2u8; 64]).unwrap();
+        let refused = DataDirLock::acquire_within(dir.path(), name, Duration::ZERO)
+            .err()
+            .expect("the lock was taken");
+        assert!(refused.contains(lock_replay_test::REFUSED), "{refused}");
+        assert!(dir.path().join(format!("{name}-wal")).exists());
+        assert!(!dir.path().join(format!("{name}-shm")).exists());
+    }
+
+    /// The refusal covers only what a lock never is. A held lock has a
+    /// journal of its own beside its empty database (SQLite opens one for
+    /// the first page a new database gets in its cache), and a second taker
+    /// still waits for the holder, as before.
+    #[test]
+    fn a_held_lock_keeps_its_journal_and_a_waiter_still_gets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = ".probe.lock.sqlite";
+        let held = DataDirLock::acquire(dir.path(), name).unwrap();
+        assert!(
+            dir.path().join(format!("{name}-journal")).exists(),
+            "a held lock keeps a journal beside it"
+        );
+        assert_eq!(std::fs::metadata(dir.path().join(name)).unwrap().len(), 0);
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let waited = DataDirLock::acquire_within(dir.path(), name, Duration::from_secs(10));
+        holder.join().unwrap();
+        assert!(waited.is_ok(), "{:?}", waited.err());
+    }
+
+    /// A holder that crashed leaves its journal beside the empty lock:
+    /// SQLite deletes it unread (a database of zero pages), so the lock is
+    /// taken as before and nothing the journal names is touched.
+    #[test]
+    fn a_journal_beside_an_empty_lock_is_cleared_and_deletes_nothing() {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = lock_replay_test::victim(outside.path());
+        let dir = tempfile::tempdir().unwrap();
+        let name = ".probe.lock.sqlite";
+        lock_replay_test::plant_hot_journal(dir.path(), name, &victim);
+        std::fs::write(dir.path().join(name), b"").unwrap();
+        drop(DataDirLock::acquire_within(dir.path(), name, Duration::ZERO).unwrap());
+        assert!(!dir.path().join(format!("{name}-journal")).exists());
+        lock_replay_test::assert_untouched(&victim);
     }
 }

@@ -8,18 +8,26 @@
 //! editing columns is detected and the row quarantined. Outbox rows carry no
 //! content. Corruption is an error (`APP_STORE`), never an empty store.
 //!
-//! **At rest (privacy pack PP.12; docs/design/2026-10-at-rest-metadata.md
-//! section 7).** In a sealed profile the store is at schema 3: the sender
-//! device of the inbox, tombstone and quarantine rows is a keyed lookup
-//! (`kh_sender`, [`crate::at_rest::index`] of the device key), and the clear
-//! sender with the other values that name the sender and no query needs
-//! (identity key, certificate hash, creation time) is in each row's sealed
-//! `meta`. A profile that is not sealed keeps schema 2. A schema-2 store in
-//! a sealed profile moves to schema 3 with the rebuild recipe of
-//! [`crate::sqlite_rebuild`] (from `privacy::migrate_all`, and on open);
-//! [`unseal`] is the way back. Without the profile's at-rest key a sealed
-//! profile's store does not open, never a clear fallback. Older builds
-//! refuse schema 3 ("newer than this build").
+//! **At rest (privacy pack PP.12; security review 2026-11, PRIV-1;
+//! docs/design/2026-10-at-rest-metadata.md section 7.2).** In a sealed
+//! profile the store is at schema 4: no column names a friend or an object
+//! in clear. The sender device of the inbox, tombstone and quarantine rows
+//! is a keyed lookup (`kh_sender`, [`crate::at_rest::index`] of the device
+//! key), and the clear sender with the other values that name the sender
+//! and no query needs (identity key, certificate hash, creation time) is in
+//! each row's sealed `meta` (schema 3, PP.12). An outbox record keys the
+//! friend's identity key and device, the local app's reference, the message
+//! id and the object digest, and seals them with the app id and the body
+//! digest in its `meta` (`session_id` stays clear, review R20); a pairing
+//! attempt keys the friend's device (schema 4). A profile that is not
+//! sealed keeps schema 2. A schema-2 or schema-3 store in a sealed profile
+//! moves to schema 4 in one transaction with the rebuild recipe of
+//! [`crate::sqlite_rebuild`] (from `privacy::migrate_all`, the upkeep, and
+//! on open); [`unseal`] is the way back. Without the profile's at-rest key a
+//! sealed profile's store does not open, never a clear fallback. Older
+//! builds refuse schema 4 ("newer than this build"). A final outbox record
+//! goes once its last change is [`APP_OUTBOX_FINAL_RETENTION_MS`] old, at
+//! every upkeep ([`AppStore::maintain`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,19 +40,30 @@ use crate::at_rest::{MetaKeys, Mode, ValueType};
 use crate::sqlite_rebuild::{self as rebuild, Migration, RebuildError, Shape, Steps};
 
 pub const APP_STORE_FILE: &str = "app_channel.sqlite3";
-/// Schema 3 (PP.12): keyed sender devices and sealed `meta`.
-const SCHEMA_VERSION: i64 = 3;
+/// Schema 4 (security review 2026-11, PRIV-1): schema 3, and the outbox and
+/// the pairing budget keyed too.
+const SCHEMA_VERSION: i64 = 4;
+/// Schema 3 (PP.12): keyed sender devices and sealed `meta`; the outbox and
+/// the pairing budget clear (the pack's builds before schema 4).
+const SENDERS_KEYED_VERSION: i64 = 3;
 /// Schema 2: clear sender devices (a profile that is not sealed, and every
 /// older build since `app_quarantine`).
 const CLEAR_VERSION: i64 = 2;
 /// This store's row in `raven_schema`.
 const STORE: &str = "app_channel";
-/// The keyed column that tells the two shapes apart.
+/// The keyed column that tells the sender tables' two shapes apart.
 const KEYED_COLUMN: &str = "kh_sender";
+/// The keyed columns that tell the outbox's and the pairing budget's two
+/// shapes apart (schema 4).
+const OUTBOX_KEYED_COLUMN: &str = "kh_peer_identity";
+const PAIR_KEYED_COLUMN: &str = "kh_peer_device";
 /// The AAD label of an inbox row's `meta`; a quarantined row keeps its
 /// inbox `meta` byte for byte, under the same label.
 const INBOX_META: &str = "app_inbox";
 const TOMBSTONE_META: &str = "app_tombstones";
+/// The AAD labels of an outbox record's and a pairing attempt's `meta`.
+const OUTBOX_META: &str = "app_outbox";
+const PAIR_META: &str = "app_pair_attempts";
 /// The start of the error of a sealed profile's store opened without the
 /// at-rest key (never a clear fallback).
 pub const STORE_KEY_UNAVAILABLE: &str = "APP_STORE: the at-rest key is unavailable";
@@ -402,12 +421,13 @@ pub use crate::sqlite_rebuild::RowReseal;
 /// IMMEDIATE transaction, every inbox row the chat-history key sealed
 /// directly, or that names another epoch than the current one, is opened and
 /// sealed again under the current epoch ([`APP_ROW_V2`]), and (PP.12) every
-/// row `meta` of the inbox, the tombstones and the quarantine not on the
-/// current epoch too; then the WAL is checkpointed (`secure_delete` already
-/// overwrote the old bytes in the file). A sealed profile with its at-rest
-/// keys loaded: no keystore call (the chat-history key comes from the
-/// at-rest key cache). A profile without the store is not touched, and the
-/// bodies of rows set aside stay as they are (they did not open).
+/// row `meta` of the inbox, the tombstones and the quarantine (since schema
+/// 4 the outbox and the pairing budget too) not on the current epoch too;
+/// then the WAL is checkpointed (`secure_delete` already overwrote the old
+/// bytes in the file). A sealed profile with its at-rest keys loaded: no
+/// keystore call (the chat-history key comes from the at-rest key cache). A
+/// profile without the store is not touched, and the bodies of rows set
+/// aside stay as they are (they did not open).
 pub fn reseal_rows(data_dir: &Path) -> Result<RowReseal, String> {
     let mut report = RowReseal::default();
     if !app_store_path(data_dir).exists()
@@ -429,7 +449,6 @@ pub fn reseal_rows(data_dir: &Path) -> Result<RowReseal, String> {
     }
     let mut store = AppStore::open(data_dir, &MetadataOnly)?;
     let s = store.sender_col();
-    let keyed = store.keyed;
     let tx = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -462,40 +481,38 @@ pub fn reseal_rows(data_dir: &Path) -> Result<RowReseal, String> {
         .map_err(AppStore::e)?;
         report.resealed += 1;
     }
-    if keyed {
-        let epoch = current.to_be_bytes().to_vec();
-        for (table, label) in [
-            ("app_inbox", INBOX_META),
-            ("app_quarantine", INBOX_META),
-            ("app_tombstones", TOMBSTONE_META),
-        ] {
-            let metas: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = {
-                let mut stmt = tx
-                    .prepare(&format!(
-                        "SELECT kh_sender, message_id, meta FROM {table}
-                         WHERE substr(meta, 2, 4) != ?1"
-                    ))
-                    .map_err(AppStore::e)?;
-                let mapped = stmt
-                    .query_map(params![epoch], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                    .map_err(AppStore::e)?;
-                mapped.collect::<Result<_, _>>().map_err(AppStore::e)?
-            };
-            for (kh, mid, meta) in metas {
-                let pk = row_pk(&kh, &mid);
-                let Ok(plain) = crate::at_rest::open_row(&keys, label, &pk, &meta) else {
-                    report.unreadable += 1;
-                    continue;
-                };
-                tx.execute(
-                    &format!(
-                        "UPDATE {table} SET meta = ?3 WHERE kh_sender = ?1 AND message_id = ?2"
-                    ),
-                    params![kh, mid, crate::at_rest::seal_row(&keys, label, &pk, &plain)],
-                )
+    let epoch = current.to_be_bytes().to_vec();
+    for (table, label, pk_columns) in meta_tables(&tx).map_err(AppStore::e)? {
+        // Each row by its rowid, with the primary key its meta binds.
+        let metas: Vec<(i64, Vec<u8>, Vec<u8>)> = {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT rowid, meta, {} FROM {table} WHERE substr(meta, 2, 4) != ?1",
+                    pk_columns.join(", ")
+                ))
                 .map_err(AppStore::e)?;
-                report.resealed += 1;
-            }
+            let mapped = stmt
+                .query_map(params![epoch], |r| {
+                    let mut pk = Vec::new();
+                    for i in 0..pk_columns.len() {
+                        pk.extend(r.get::<_, Vec<u8>>(2 + i)?);
+                    }
+                    Ok((r.get(0)?, r.get(1)?, pk))
+                })
+                .map_err(AppStore::e)?;
+            mapped.collect::<Result<_, _>>().map_err(AppStore::e)?
+        };
+        for (rowid, meta, pk) in metas {
+            let Ok(plain) = crate::at_rest::open_row(&keys, label, &pk, &meta) else {
+                report.unreadable += 1;
+                continue;
+            };
+            tx.execute(
+                &format!("UPDATE {table} SET meta = ?2 WHERE rowid = ?1"),
+                params![rowid, crate::at_rest::seal_row(&keys, label, &pk, &plain)],
+            )
+            .map_err(AppStore::e)?;
+            report.resealed += 1;
         }
     }
     tx.commit().map_err(AppStore::e)?;
@@ -726,23 +743,29 @@ pub(crate) fn rows_open_with_hist_key(data_dir: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// The tables whose rows still name a friend in clear at the keyed schema,
-/// which keys only the sender columns: `app_outbox` (the friend's key and
-/// device, the message, session and object ids) and `app_pair_attempts`
-/// (the friend's device). Only the app channel writes them, gated off in
-/// release builds (design 7.2's open item: they have to be keyed before the
-/// gate flips).
-const CLEAR_ROW_TABLES: [&str; 2] = ["app_outbox", "app_pair_attempts"];
+/// The tables that schema 3 (the pack's builds before schema 4) left clear,
+/// with the keyed column of their schema-4 shape: `app_outbox` (the friend's
+/// identity key and device, the local app's reference, the message id, the
+/// object digest) and `app_pair_attempts` (the friend's device). Keyed since
+/// schema 4 (security review 2026-11, PRIV-1).
+const CLEAR_ROW_TABLES: [(&str, &str); 2] = [
+    ("app_outbox", OUTBOX_KEYED_COLUMN),
+    ("app_pair_attempts", PAIR_KEYED_COLUMN),
+];
 
-/// Which of [`CLEAR_ROW_TABLES`] hold rows (by name; nothing is read from a
-/// row): `raven privacy status` does not call such a store keyed (review
-/// E-harness-docs-ci-8). Empty without the store.
+/// Which of [`CLEAR_ROW_TABLES`] are still in their clear shape and hold
+/// rows (by name and shape; nothing is read from a row): `raven privacy
+/// status` does not call such a store keyed (review E-harness-docs-ci-8).
+/// Empty without the store, and for a schema-4 store.
 pub fn clear_tables_with_rows(data_dir: &Path) -> Result<Vec<&'static str>, String> {
     let Some(conn) = peek(data_dir)? else {
         return Ok(Vec::new());
     };
     let mut found = Vec::new();
-    for table in CLEAR_ROW_TABLES {
+    for (table, keyed_column) in CLEAR_ROW_TABLES {
+        if rebuild::shape(&conn, table, keyed_column).map_err(AppStore::e)? != Shape::Clear {
+            continue;
+        }
         let any: bool = conn
             .query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
                 r.get(0)
@@ -780,12 +803,14 @@ pub struct AppStore<'s> {
     /// Rows that failed to open or whose identity did not match (tamper).
     pub quarantined: u64,
     data_dir: PathBuf,
-    /// Schema 3: keyed senders and sealed `meta` (PP.12).
+    /// Schema 3 or 4: keyed senders and sealed `meta` (PP.12).
     keyed: bool,
-    /// A schema-3 store's keys, as this process held them at the open (a
-    /// handle lives for an operation or a few; the lookup key never changes,
-    /// and a `meta` that names an epoch they lack is read with the keys
-    /// held now).
+    /// Schema 4: the outbox and the pairing budget keyed too (PRIV-1).
+    outbox_keyed: bool,
+    /// A schema-3 or schema-4 store's keys, as this process held them at
+    /// the open (a handle lives for an operation or a few; the lookup key
+    /// never changes, and a `meta` that names an epoch they lack is read
+    /// with the keys held now).
     keys: Option<Arc<MetaKeys>>,
 }
 
@@ -861,23 +886,60 @@ fn quarantine_table(create: &str, keyed: bool) -> String {
     }
 }
 
-/// The tables no sender column is in: the same in both shapes.
-const OTHER_TABLES: &str = "CREATE TABLE IF NOT EXISTS app_outbox(
-       peer_identity BLOB NOT NULL, client_ref TEXT NOT NULL, peer_device BLOB NOT NULL,
-       content_type TEXT NOT NULL, app_id BLOB NOT NULL, body_sha256 BLOB NOT NULL,
-       message_id BLOB NOT NULL UNIQUE, session_id BLOB NOT NULL,
-       object_digest BLOB NOT NULL, created_at_ms INTEGER NOT NULL,
-       expires_at_ms INTEGER NOT NULL,
-       state TEXT NOT NULL CHECK(state IN
-         ('queued','sent','delivered','expired','failed','cancelled')),
-       last_error_code TEXT NOT NULL DEFAULT '', attempt_seq INTEGER NOT NULL,
-       updated_at_ms INTEGER NOT NULL,
-       PRIMARY KEY(peer_identity, client_ref));
-     CREATE TABLE IF NOT EXISTS app_consumer(
+/// `app_outbox` as `create`, in either shape. Schema 4 (PRIV-1) keys the
+/// friend's identity key and device, the local app's reference, the message
+/// id and the object digest; their clear values, the app id and the body
+/// digest are in `meta`. The UNIQUE message id keeps its shape (keyed), and
+/// `session_id` stays clear (R20).
+fn outbox_table(create: &str, keyed: bool) -> String {
+    if keyed {
+        format!(
+            "{create}(
+               kh_peer_identity BLOB NOT NULL, kh_client_ref BLOB NOT NULL,
+               kh_peer_device BLOB NOT NULL, content_type TEXT NOT NULL,
+               kh_message_id BLOB NOT NULL UNIQUE, session_id BLOB NOT NULL,
+               kh_object_digest BLOB NOT NULL, created_at_ms INTEGER NOT NULL,
+               expires_at_ms INTEGER NOT NULL,
+               state TEXT NOT NULL CHECK(state IN
+                 ('queued','sent','delivered','expired','failed','cancelled')),
+               last_error_code TEXT NOT NULL DEFAULT '', attempt_seq INTEGER NOT NULL,
+               updated_at_ms INTEGER NOT NULL, meta BLOB NOT NULL,
+               PRIMARY KEY(kh_peer_identity, kh_client_ref));"
+        )
+    } else {
+        format!(
+            "{create}(
+               peer_identity BLOB NOT NULL, client_ref TEXT NOT NULL, peer_device BLOB NOT NULL,
+               content_type TEXT NOT NULL, app_id BLOB NOT NULL, body_sha256 BLOB NOT NULL,
+               message_id BLOB NOT NULL UNIQUE, session_id BLOB NOT NULL,
+               object_digest BLOB NOT NULL, created_at_ms INTEGER NOT NULL,
+               expires_at_ms INTEGER NOT NULL,
+               state TEXT NOT NULL CHECK(state IN
+                 ('queued','sent','delivered','expired','failed','cancelled')),
+               last_error_code TEXT NOT NULL DEFAULT '', attempt_seq INTEGER NOT NULL,
+               updated_at_ms INTEGER NOT NULL,
+               PRIMARY KEY(peer_identity, client_ref));"
+        )
+    }
+}
+
+/// `app_pair_attempts` as `create`, in either shape (schema 4: the device
+/// keyed, its clear value in `meta`).
+fn pair_attempts_table(create: &str, keyed: bool) -> String {
+    if keyed {
+        format!(
+            "{create}(
+               kh_peer_device BLOB NOT NULL, at_ms INTEGER NOT NULL, meta BLOB NOT NULL);"
+        )
+    } else {
+        format!("{create}(peer_device BLOB NOT NULL, at_ms INTEGER NOT NULL);")
+    }
+}
+
+/// The table no friend's value is in: the same in every shape.
+const CONSUMER_TABLE: &str = "CREATE TABLE IF NOT EXISTS app_consumer(
        id INTEGER PRIMARY KEY CHECK(id = 1), consumer TEXT NOT NULL,
-       bound_at_ms INTEGER NOT NULL);
-     CREATE TABLE IF NOT EXISTS app_pair_attempts(
-       peer_device BLOB NOT NULL, at_ms INTEGER NOT NULL);";
+       bound_at_ms INTEGER NOT NULL);";
 
 /// Schema 2 as every build since `app_quarantine` creates it (and this one
 /// in a profile that is not sealed): additive, then stamped.
@@ -887,14 +949,96 @@ fn clear_schema() -> String {
          {}
          {}
          {}
-         {OTHER_TABLES}
+         {}
+         {CONSUMER_TABLE}
+         {}
          {}
          PRAGMA user_version = 2;",
         inbox_table("CREATE TABLE IF NOT EXISTS app_inbox", false),
         tombstones_table("CREATE TABLE IF NOT EXISTS app_tombstones", false),
         tombstones_index("CREATE INDEX IF NOT EXISTS", false),
+        outbox_table("CREATE TABLE IF NOT EXISTS app_outbox", false),
+        pair_attempts_table("CREATE TABLE IF NOT EXISTS app_pair_attempts", false),
         quarantine_table("CREATE TABLE IF NOT EXISTS app_quarantine", false),
     )
+}
+
+/// Schema 4's tables, as a sealed profile's first store creates them.
+fn keyed_schema() -> String {
+    format!(
+        "{} {} {} {} {} {CONSUMER_TABLE} {}",
+        inbox_table("CREATE TABLE IF NOT EXISTS app_inbox", true),
+        tombstones_table("CREATE TABLE IF NOT EXISTS app_tombstones", true),
+        tombstones_index("CREATE INDEX IF NOT EXISTS", true),
+        quarantine_table("CREATE TABLE IF NOT EXISTS app_quarantine", true),
+        outbox_table("CREATE TABLE IF NOT EXISTS app_outbox", true),
+        pair_attempts_table("CREATE TABLE IF NOT EXISTS app_pair_attempts", true),
+    )
+}
+
+/// Which of the store's tables are keyed, by their columns (review R06:
+/// the shape, never the stamp, says what a store is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// A new file: no inbox yet.
+    Missing,
+    /// Schema 2: every table clear.
+    Clear,
+    /// Schema 3 (PP.12): the sender tables keyed; the outbox and the
+    /// pairing budget clear.
+    SendersKeyed,
+    /// Schema 4 (PRIV-1): every table that names a friend keyed.
+    Keyed,
+}
+
+/// The error of a store whose tables mix the shapes in a way no build
+/// writes (every move changes them in one transaction).
+const MIXED_LAYOUT: &str =
+    "APP_STORE: app_channel.sqlite3 mixes keyed and clear tables in a way no build writes";
+
+/// The store's [`Layout`]; `None` for a mix no build writes.
+fn layout(conn: &Connection) -> rusqlite::Result<Option<Layout>> {
+    let inbox = rebuild::shape(conn, "app_inbox", KEYED_COLUMN)?;
+    let outbox = rebuild::shape(conn, "app_outbox", OUTBOX_KEYED_COLUMN)?;
+    let pairs = rebuild::shape(conn, "app_pair_attempts", PAIR_KEYED_COLUMN)?;
+    Ok(match (inbox, outbox, pairs) {
+        (Shape::Missing, _, _) => Some(Layout::Missing),
+        (Shape::Clear, outbox, pairs) if outbox != Shape::Keyed && pairs != Shape::Keyed => {
+            Some(Layout::Clear)
+        }
+        (Shape::Keyed, Shape::Clear, Shape::Clear) => Some(Layout::SendersKeyed),
+        (Shape::Keyed, Shape::Keyed, Shape::Keyed) => Some(Layout::Keyed),
+        _ => None,
+    })
+}
+
+/// A table whose rows carry a sealed `meta`: its name, the AAD label and
+/// the primary-key columns the AAD binds (as stored, in this order).
+type MetaTable = (&'static str, &'static str, &'static [&'static str]);
+
+/// The tables of this store whose rows carry a sealed `meta`, each by its
+/// own shape (the rotation's re-seal and its count).
+fn meta_tables(conn: &Connection) -> rusqlite::Result<Vec<MetaTable>> {
+    const SENDER_PK: &[&str] = &["kh_sender", "message_id"];
+    let mut tables = Vec::new();
+    if rebuild::shape(conn, "app_inbox", KEYED_COLUMN)? == Shape::Keyed {
+        tables.extend([
+            ("app_inbox", INBOX_META, SENDER_PK),
+            ("app_quarantine", INBOX_META, SENDER_PK),
+            ("app_tombstones", TOMBSTONE_META, SENDER_PK),
+        ]);
+    }
+    if rebuild::shape(conn, "app_outbox", OUTBOX_KEYED_COLUMN)? == Shape::Keyed {
+        tables.push((
+            "app_outbox",
+            OUTBOX_META,
+            &["kh_peer_identity", "kh_client_ref"],
+        ));
+    }
+    if rebuild::shape(conn, "app_pair_attempts", PAIR_KEYED_COLUMN)? == Shape::Keyed {
+        tables.push(("app_pair_attempts", PAIR_META, &["kh_peer_device"]));
+    }
+    Ok(tables)
 }
 
 // ── Sealed values (schema 3) ─────────────────────────────────────────────
@@ -958,6 +1102,302 @@ fn unhex(text: &str) -> Result<Vec<u8>, String> {
     hex::decode(text).map_err(|_| "APP_STORE: corrupt row".to_string())
 }
 
+// ── Sealed values (schema 4, security review 2026-11, PRIV-1) ────────────
+
+/// An outbox record's values that name the friend or the object: byte
+/// values as hex, the local app's reference as it is (it may name a task).
+#[derive(Serialize, Deserialize)]
+struct OutboxMeta {
+    peer_identity: String,
+    client_ref: String,
+    peer_device: String,
+    app_id: String,
+    body_sha256: String,
+    message_id: String,
+    object_digest: String,
+}
+
+impl OutboxMeta {
+    fn of(rec: &AppOutRecord) -> Self {
+        Self {
+            peer_identity: hex::encode(rec.peer_identity),
+            client_ref: rec.client_ref.clone(),
+            peer_device: hex::encode(rec.peer_device),
+            app_id: hex::encode(rec.app_id),
+            body_sha256: hex::encode(rec.body_sha256),
+            message_id: hex::encode(rec.message_id),
+            object_digest: hex::encode(rec.object_digest),
+        }
+    }
+
+    /// The keyed lookups of the values it names.
+    fn lookups(&self, keys: &MetaKeys) -> Result<OutboxLookups, String> {
+        Ok(OutboxLookups::of(
+            keys,
+            &unhex(&self.peer_identity)?,
+            &self.client_ref,
+            &unhex(&self.peer_device)?,
+            &unhex(&self.message_id)?,
+            &unhex(&self.object_digest)?,
+        ))
+    }
+}
+
+/// An outbox record's keyed columns (schema 4). Both of the friend's keys
+/// are public keys (value type `device-key`); the reference has its own
+/// type (`client-ref`).
+#[derive(PartialEq, Eq)]
+struct OutboxLookups {
+    identity: Vec<u8>,
+    client_ref: Vec<u8>,
+    device: Vec<u8>,
+    message_id: Vec<u8>,
+    object_digest: Vec<u8>,
+}
+
+impl OutboxLookups {
+    fn of(
+        keys: &MetaKeys,
+        identity: &[u8],
+        client_ref: &str,
+        device: &[u8],
+        message_id: &[u8],
+        object_digest: &[u8],
+    ) -> Self {
+        let kh = |t, value: &[u8]| crate::at_rest::index(keys, t, value).to_vec();
+        Self {
+            identity: kh(ValueType::DeviceKey, identity),
+            client_ref: kh(ValueType::ClientRef, client_ref.as_bytes()),
+            device: kh(ValueType::DeviceKey, device),
+            message_id: kh(ValueType::MessageId, message_id),
+            object_digest: kh(ValueType::ObjectDigest, object_digest),
+        }
+    }
+
+    /// The `meta` AAD: the primary key as stored.
+    fn pk(&self) -> Vec<u8> {
+        row_pk(&self.identity, &self.client_ref)
+    }
+}
+
+fn seal_outbox_meta(keys: &MetaKeys, pk: &[u8], meta: &OutboxMeta) -> Vec<u8> {
+    let plain = Zeroizing::new(serde_json::to_vec(meta).expect("strings serialize"));
+    crate::at_rest::seal_row(keys, OUTBOX_META, pk, &plain)
+}
+
+fn open_outbox_meta(keys: &MetaKeys, pk: &[u8], blob: &[u8]) -> Result<OutboxMeta, String> {
+    let plain = crate::at_rest::open_row(keys, OUTBOX_META, pk, blob)
+        .map_err(|e| format!("APP_STORE: {e}"))?;
+    serde_json::from_slice(&plain).map_err(|_| "APP_STORE: corrupt row".to_string())
+}
+
+/// A pairing attempt's clear device, under its keyed device (the AAD).
+#[derive(Serialize, Deserialize)]
+struct PairMeta {
+    peer_device: String,
+}
+
+fn pair_lookup(keys: &MetaKeys, device: &[u8]) -> Vec<u8> {
+    crate::at_rest::index(keys, ValueType::DeviceKey, device).to_vec()
+}
+
+fn seal_pair_meta(keys: &MetaKeys, kh_device: &[u8], device: &[u8]) -> Vec<u8> {
+    let plain = serde_json::to_vec(&PairMeta {
+        peer_device: hex::encode(device),
+    })
+    .expect("strings serialize");
+    crate::at_rest::seal_row(keys, PAIR_META, kh_device, &plain)
+}
+
+/// A pairing attempt's clear device: its `meta` opened under its keyed
+/// device as stored (the way back and the first half of a re-key).
+fn open_pair_meta(keys: &MetaKeys, kh_device: &[u8], blob: &[u8]) -> Result<Vec<u8>, String> {
+    let plain = crate::at_rest::open_row(keys, PAIR_META, kh_device, blob)
+        .map_err(|e| format!("APP_STORE: {e}"))?;
+    let meta: PairMeta =
+        serde_json::from_slice(&plain).map_err(|_| "APP_STORE: corrupt row".to_string())?;
+    unhex(&meta.peer_device)
+}
+
+/// One schema-4 outbox row as stored.
+struct KeyedOutRow {
+    rowid: i64,
+    lookups: OutboxLookups,
+    content_type: String,
+    session_id: Vec<u8>,
+    created_at_ms: i64,
+    expires_at_ms: i64,
+    state: String,
+    last_error_code: String,
+    attempt_seq: i64,
+    updated_at_ms: i64,
+    meta: Vec<u8>,
+}
+
+/// The columns [`KeyedOutRow::read`] reads, in its order.
+const KEYED_OUT_COLUMNS: &str = "rowid, kh_peer_identity, kh_client_ref, kh_peer_device,
+    kh_message_id, kh_object_digest, content_type, session_id, created_at_ms, expires_at_ms,
+    state, last_error_code, attempt_seq, updated_at_ms, meta";
+
+impl KeyedOutRow {
+    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            rowid: r.get(0)?,
+            lookups: OutboxLookups {
+                identity: r.get(1)?,
+                client_ref: r.get(2)?,
+                device: r.get(3)?,
+                message_id: r.get(4)?,
+                object_digest: r.get(5)?,
+            },
+            content_type: r.get(6)?,
+            session_id: r.get(7)?,
+            created_at_ms: r.get(8)?,
+            expires_at_ms: r.get(9)?,
+            state: r.get(10)?,
+            last_error_code: r.get(11)?,
+            attempt_seq: r.get(12)?,
+            updated_at_ms: r.get(13)?,
+            meta: r.get(14)?,
+        })
+    }
+
+    /// The row's `meta`, opened with `keys` under the row's primary key as
+    /// stored (a `meta` from another row does not open). The way back and
+    /// the first half of a re-key, whose keys may already hold a new lookup
+    /// key: the clear values come from `meta`.
+    fn open_meta(&self, keys: &MetaKeys) -> Result<OutboxMeta, String> {
+        open_outbox_meta(keys, &self.lookups.pk(), &self.meta)
+    }
+
+    /// [`Self::open_meta`], checked against the row's keyed columns (the
+    /// reads: a row whose columns were edited is a bad row).
+    fn open(&self, keys: &MetaKeys) -> Result<OutboxMeta, String> {
+        let meta = self.open_meta(keys)?;
+        if meta.lookups(keys)? != self.lookups {
+            return Err("APP_STORE: corrupt row".into());
+        }
+        Ok(meta)
+    }
+
+    /// The record, from the row and its opened `meta`.
+    fn record(self, meta: OutboxMeta) -> Result<AppOutRecord, String> {
+        let OutboxMeta {
+            peer_identity,
+            client_ref,
+            peer_device,
+            app_id,
+            body_sha256,
+            message_id,
+            object_digest,
+        } = meta;
+        Ok(AppOutRecord {
+            peer_identity: arr(&unhex(&peer_identity)?)?,
+            client_ref,
+            peer_device: arr(&unhex(&peer_device)?)?,
+            content_type: self.content_type,
+            app_id: arr(&unhex(&app_id)?)?,
+            body_sha256: arr(&unhex(&body_sha256)?)?,
+            message_id: arr(&unhex(&message_id)?)?,
+            session_id: arr(&self.session_id)?,
+            object_digest: arr(&unhex(&object_digest)?)?,
+            created_at_ms: u64::try_from(self.created_at_ms).unwrap_or(0),
+            expires_at_ms: u64::try_from(self.expires_at_ms).unwrap_or(0),
+            state: OutState::parse(&self.state)?,
+            last_error_code: self.last_error_code,
+            attempt_seq: u32::try_from(self.attempt_seq).unwrap_or(0),
+        })
+    }
+}
+
+/// One clear outbox row (schema 2 or 3) as stored: byte values of any
+/// length, moved as they are.
+struct ClearOutRow {
+    rowid: i64,
+    identity: Vec<u8>,
+    client_ref: String,
+    device: Vec<u8>,
+    content_type: String,
+    app_id: Vec<u8>,
+    body_sha256: Vec<u8>,
+    message_id: Vec<u8>,
+    session_id: Vec<u8>,
+    object_digest: Vec<u8>,
+    created_at_ms: i64,
+    expires_at_ms: i64,
+    state: String,
+    last_error_code: String,
+    attempt_seq: i64,
+    updated_at_ms: i64,
+}
+
+impl ClearOutRow {
+    fn meta(&self) -> OutboxMeta {
+        OutboxMeta {
+            peer_identity: hex::encode(&self.identity),
+            client_ref: self.client_ref.clone(),
+            peer_device: hex::encode(&self.device),
+            app_id: hex::encode(&self.app_id),
+            body_sha256: hex::encode(&self.body_sha256),
+            message_id: hex::encode(&self.message_id),
+            object_digest: hex::encode(&self.object_digest),
+        }
+    }
+
+    /// A schema-4 row back in clear, from its opened `meta`.
+    fn from_keyed(row: KeyedOutRow, meta: OutboxMeta) -> Result<Self, String> {
+        Ok(Self {
+            rowid: row.rowid,
+            identity: unhex(&meta.peer_identity)?,
+            client_ref: meta.client_ref,
+            device: unhex(&meta.peer_device)?,
+            content_type: row.content_type,
+            app_id: unhex(&meta.app_id)?,
+            body_sha256: unhex(&meta.body_sha256)?,
+            message_id: unhex(&meta.message_id)?,
+            session_id: row.session_id,
+            object_digest: unhex(&meta.object_digest)?,
+            created_at_ms: row.created_at_ms,
+            expires_at_ms: row.expires_at_ms,
+            state: row.state,
+            last_error_code: row.last_error_code,
+            attempt_seq: row.attempt_seq,
+            updated_at_ms: row.updated_at_ms,
+        })
+    }
+}
+
+/// The clear outbox rows (schema 2 or 3), with their rowids.
+fn clear_out_rows(conn: &Connection) -> rusqlite::Result<Vec<ClearOutRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT rowid, peer_identity, client_ref, peer_device, content_type, app_id,
+                body_sha256, message_id, session_id, object_digest, created_at_ms,
+                expires_at_ms, state, last_error_code, attempt_seq, updated_at_ms
+         FROM app_outbox",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ClearOutRow {
+            rowid: r.get(0)?,
+            identity: r.get(1)?,
+            client_ref: r.get(2)?,
+            device: r.get(3)?,
+            content_type: r.get(4)?,
+            app_id: r.get(5)?,
+            body_sha256: r.get(6)?,
+            message_id: r.get(7)?,
+            session_id: r.get(8)?,
+            object_digest: r.get(9)?,
+            created_at_ms: r.get(10)?,
+            expires_at_ms: r.get(11)?,
+            state: r.get(12)?,
+            last_error_code: r.get(13)?,
+            attempt_seq: r.get(14)?,
+            updated_at_ms: r.get(15)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// The at-rest keys this process loaded (never a keystore call).
 fn cached_keys(data_dir: &Path) -> Result<Arc<MetaKeys>, String> {
     crate::at_rest::keys_cached(data_dir).map_err(|e| format!("{STORE_KEY_UNAVAILABLE}: {e}"))
@@ -965,16 +1405,17 @@ fn cached_keys(data_dir: &Path) -> Result<Arc<MetaKeys>, String> {
 
 impl<'s> AppStore<'s> {
     /// Open (creating it) the store, at the schema the profile's mode asks
-    /// for: schema 3 in a sealed profile (created so, or migrated from
-    /// schema 2), schema 2 otherwise. A schema-3 store opens only with the
-    /// at-rest keys loaded, whatever the mode ([`STORE_KEY_UNAVAILABLE`]);
-    /// too little free disk space to migrate leaves a schema-2 store as it
-    /// is until a later pass. An open of a current store writes nothing.
+    /// for: schema 4 in a sealed profile (created so, or migrated from
+    /// schema 2 or 3), schema 2 otherwise. A schema-3 or schema-4 store
+    /// opens only with the at-rest keys loaded, whatever the mode
+    /// ([`STORE_KEY_UNAVAILABLE`]); too little free disk space to migrate
+    /// leaves a schema-2 or schema-3 store as it is until a later pass. An
+    /// open of a current store writes nothing.
     pub fn open(data_dir: &Path, sealer: &'s dyn RowSealer) -> Result<Self, String> {
         Self::open_inner(data_dir, sealer).map(|(store, _)| store)
     }
 
-    /// [`Self::open`], and whether it moved the store to schema 3 now.
+    /// [`Self::open`], and whether it moved the store to schema 4 now.
     fn open_inner(data_dir: &Path, sealer: &'s dyn RowSealer) -> Result<(Self, bool), String> {
         let path = app_store_path(data_dir);
         let sealed = crate::privacy::mode(data_dir) == Mode::Sealed;
@@ -1001,22 +1442,29 @@ impl<'s> AppStore<'s> {
             if version > SCHEMA_VERSION || recorded.is_some_and(|v| v > SCHEMA_VERSION) {
                 return Err("APP_STORE: app_channel.sqlite3 is newer than this build".into());
             }
-            let keys = match rebuild::shape(&conn, "app_inbox", KEYED_COLUMN).map_err(Self::e)? {
-                Shape::Keyed => {
-                    let keys = cached_keys(data_dir)?;
-                    // Stamped again where an older process stamped its own
-                    // number (review R06): never migrated twice.
-                    if version != SCHEMA_VERSION || recorded != Some(SCHEMA_VERSION) {
-                        rebuild::restamp(&mut conn, STORE, SCHEMA_VERSION).map_err(Self::e)?;
-                    }
-                    Some(keys)
+            // Stamped again where an older process stamped its own number on
+            // a keyed store (review R06): never migrated twice.
+            let stamp = |conn: &mut Connection, shape_version: i64| {
+                if version != shape_version || recorded != Some(shape_version) {
+                    rebuild::restamp(conn, STORE, shape_version).map_err(Self::e)?;
                 }
-                Shape::Missing if sealed => {
+                Ok::<(), String>(())
+            };
+            let layout = layout(&conn)
+                .map_err(Self::e)?
+                .ok_or_else(|| MIXED_LAYOUT.to_string())?;
+            let (keys, outbox_keyed) = match layout {
+                Layout::Keyed => {
+                    let keys = cached_keys(data_dir)?;
+                    stamp(&mut conn, SCHEMA_VERSION)?;
+                    (Some(keys), true)
+                }
+                Layout::Missing if sealed => {
                     create_keyed(&mut conn)?;
                     continue;
                 }
-                Shape::Clear if sealed => {
-                    if version != CLEAR_VERSION {
+                Layout::Clear | Layout::SendersKeyed if sealed => {
+                    if layout == Layout::Clear && version != CLEAR_VERSION {
                         // A store from before app_quarantine: schema 2 first.
                         conn.execute_batch(&clear_schema()).map_err(Self::e)?;
                     }
@@ -1028,15 +1476,30 @@ impl<'s> AppStore<'s> {
                         }
                         // Deferred: the store keeps working as it is, and
                         // the next pass (or open) tries again.
-                        Err(RebuildError::NoSpace { .. }) => None,
+                        Err(RebuildError::NoSpace { .. }) if layout == Layout::Clear => {
+                            (None, false)
+                        }
+                        Err(RebuildError::NoSpace { .. }) => {
+                            stamp(&mut conn, SENDERS_KEYED_VERSION)?;
+                            (Some(keys), false)
+                        }
                         Err(e) => return Err(format!("APP_STORE: {e}")),
                     }
                 }
-                Shape::Missing | Shape::Clear => {
+                // A profile that is not sealed (an unsealing that did not
+                // finish): as it is, with the keys this process holds.
+                Layout::SendersKeyed => {
+                    let keys = cached_keys(data_dir)?;
+                    stamp(&mut conn, SENDERS_KEYED_VERSION)?;
+                    (Some(keys), false)
+                }
+                Layout::Missing | Layout::Clear => {
                     if version != CLEAR_VERSION {
                         conn.execute_batch(&clear_schema()).map_err(Self::e)?;
+                        // Its shape read again (the tables it did not add).
+                        continue;
                     }
-                    None
+                    (None, false)
                 }
             };
             return Ok((
@@ -1046,6 +1509,7 @@ impl<'s> AppStore<'s> {
                     quarantined: 0,
                     data_dir: data_dir.to_path_buf(),
                     keyed: keys.is_some(),
+                    outbox_keyed,
                     keys,
                 },
                 migrated,
@@ -1063,9 +1527,77 @@ impl<'s> AppStore<'s> {
         }
     }
 
-    /// The at-rest keys of a schema-3 store (`None`: schema 2).
+    /// The at-rest keys of a schema-3 or schema-4 store (`None`: schema 2).
     fn keys(&self) -> Result<Option<Arc<MetaKeys>>, String> {
         Ok(self.keys.clone())
+    }
+
+    /// The keys of a schema-4 outbox and pairing budget (`None`: their
+    /// columns are clear).
+    fn outbox_keys(&self) -> Option<&MetaKeys> {
+        if self.outbox_keyed {
+            self.keys.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The column an outbox or budget query compares for a friend's device
+    /// key, and the value it binds: the keyed lookup in schema 4.
+    fn device_lookup(&self, device: &[u8]) -> (&'static str, Vec<u8>) {
+        match self.outbox_keys() {
+            Some(keys) => ("kh_peer_device", pair_lookup(keys, device)),
+            None => ("peer_device", device.to_vec()),
+        }
+    }
+
+    /// The column an outbox query compares for a message id, and the value
+    /// it binds: the keyed lookup in schema 4.
+    fn message_lookup(&self, message_id: &[u8]) -> (&'static str, Vec<u8>) {
+        match self.outbox_keys() {
+            Some(keys) => (
+                "kh_message_id",
+                crate::at_rest::index(keys, ValueType::MessageId, message_id).to_vec(),
+            ),
+            None => ("message_id", message_id.to_vec()),
+        }
+    }
+
+    /// A schema-4 outbox row's `meta`, opened and checked against its
+    /// columns: with this handle's keys, and with the keys held now for an
+    /// epoch they lack (a rotation since the open).
+    fn open_out_row(&self, row: &KeyedOutRow) -> Result<OutboxMeta, String> {
+        let keys = self
+            .outbox_keys()
+            .ok_or_else(|| "APP_STORE: corrupt row".to_string())?;
+        row.open(keys).or_else(|_| {
+            let fresh = cached_keys(&self.data_dir)?;
+            row.open(&fresh)
+        })
+    }
+
+    /// The schema-4 outbox records `clause` selects (bound to `params`).
+    fn keyed_records<P: rusqlite::Params>(
+        &self,
+        clause: &str,
+        params: P,
+    ) -> Result<Vec<AppOutRecord>, String> {
+        let rows: Vec<KeyedOutRow> = {
+            let mut stmt = self
+                .conn
+                .prepare(&format!(
+                    "SELECT {KEYED_OUT_COLUMNS} FROM app_outbox WHERE {clause}"
+                ))
+                .map_err(Self::e)?;
+            let mapped = stmt.query_map(params, KeyedOutRow::read).map_err(Self::e)?;
+            mapped.collect::<Result<_, _>>().map_err(Self::e)?
+        };
+        rows.into_iter()
+            .map(|row| {
+                let meta = self.open_out_row(&row)?;
+                row.record(meta)
+            })
+            .collect()
     }
 
     fn e(err: rusqlite::Error) -> String {
@@ -1587,7 +2119,10 @@ impl<'s> AppStore<'s> {
         Ok(true)
     }
 
-    /// Item TTL, tombstone retention and cap. Rows affected.
+    /// Item TTL, tombstone retention and cap, the pairing budget's day, and
+    /// (security review 2026-11, PRIV-1) the outbox's final records once
+    /// their last change is [`APP_OUTBOX_FINAL_RETENTION_MS`] old (before,
+    /// only a later submit removed them). Rows affected.
     pub fn maintain(&mut self, now: u64) -> Result<usize, String> {
         let keys = self.keys()?;
         let (column, keyed) = (self.sender_col(), self.keyed);
@@ -1668,6 +2203,15 @@ impl<'s> AppStore<'s> {
                 params![ms(now)],
             )
             .map_err(Self::e)?;
+        // The state and the time are clear in every shape (the retention and
+        // the eviction order read them).
+        n += tx
+            .execute(
+                "DELETE FROM app_outbox WHERE state IN ('delivered','expired','failed','cancelled')
+                   AND updated_at_ms + ?1 <= ?2",
+                params![ms(APP_OUTBOX_FINAL_RETENTION_MS), ms(now)],
+            )
+            .map_err(Self::e)?;
         n += tx
             .execute(
                 "DELETE FROM app_quarantine WHERE quarantined_at_ms + ?1 <= ?2
@@ -1683,6 +2227,17 @@ impl<'s> AppStore<'s> {
     // ---------------------------------------------------------- outbox
 
     fn record_at(&self, peer: &[u8; 32], client_ref: &str) -> Result<Option<AppOutRecord>, String> {
+        if let Some(keys) = self.outbox_keys() {
+            let identity = crate::at_rest::index(keys, ValueType::DeviceKey, peer);
+            let reference =
+                crate::at_rest::index(keys, ValueType::ClientRef, client_ref.as_bytes());
+            return Ok(self
+                .keyed_records(
+                    "kh_peer_identity = ?1 AND kh_client_ref = ?2",
+                    params![identity.as_slice(), reference.as_slice()],
+                )?
+                .pop());
+        }
         type Row = (
             Vec<u8>,
             String,
@@ -1799,6 +2354,20 @@ impl<'s> AppStore<'s> {
     /// Insert (fresh) or replace (resend) the record after the seal committed.
     /// At the cap the oldest final record is evicted; a live one never is.
     pub fn put_record(&mut self, rec: &AppOutRecord, now: u64) -> Result<(), String> {
+        // Schema 4: the keyed columns and the sealed meta, computed before
+        // the write transaction (the handle's keys; no keystore call).
+        let keyed = self.outbox_keys().map(|keys| {
+            let lookups = OutboxLookups::of(
+                keys,
+                &rec.peer_identity,
+                &rec.client_ref,
+                &rec.peer_device,
+                &rec.message_id,
+                &rec.object_digest,
+            );
+            let meta = seal_outbox_meta(keys, &lookups.pk(), &OutboxMeta::of(rec));
+            (lookups, meta)
+        });
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1810,15 +2379,21 @@ impl<'s> AppStore<'s> {
             params![ms(APP_OUTBOX_FINAL_RETENTION_MS), ms(now)],
         )
         .map_err(Self::e)?;
-        let exists: bool = tx
-            .query_row(
+        let exists: bool = match &keyed {
+            Some((lookups, _)) => tx.query_row(
+                "SELECT 1 FROM app_outbox WHERE kh_peer_identity = ?1 AND kh_client_ref = ?2",
+                params![lookups.identity, lookups.client_ref],
+                |r| r.get::<_, i64>(0),
+            ),
+            None => tx.query_row(
                 "SELECT 1 FROM app_outbox WHERE peer_identity = ?1 AND client_ref = ?2",
                 params![rec.peer_identity.as_slice(), rec.client_ref],
                 |r| r.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(Self::e)?
-            .is_some();
+            ),
+        }
+        .optional()
+        .map_err(Self::e)?
+        .is_some();
         if !exists {
             let n: i64 = tx
                 .query_row("SELECT COUNT(*) FROM app_outbox", [], |r| r.get(0))
@@ -1837,29 +2412,55 @@ impl<'s> AppStore<'s> {
                 }
             }
         }
-        tx.execute(
-            "INSERT OR REPLACE INTO app_outbox (peer_identity, client_ref, peer_device,
-               content_type, app_id, body_sha256, message_id, session_id, object_digest,
-               created_at_ms, expires_at_ms, state, last_error_code, attempt_seq, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                rec.peer_identity.as_slice(),
-                rec.client_ref,
-                rec.peer_device.as_slice(),
-                rec.content_type,
-                rec.app_id.as_slice(),
-                rec.body_sha256.as_slice(),
-                rec.message_id.as_slice(),
-                rec.session_id.as_slice(),
-                rec.object_digest.as_slice(),
-                ms(rec.created_at_ms),
-                ms(rec.expires_at_ms),
-                rec.state.as_str(),
-                rec.last_error_code,
-                i64::from(rec.attempt_seq),
-                ms(now),
-            ],
-        )
+        match keyed {
+            None => tx.execute(
+                "INSERT OR REPLACE INTO app_outbox (peer_identity, client_ref, peer_device,
+                   content_type, app_id, body_sha256, message_id, session_id, object_digest,
+                   created_at_ms, expires_at_ms, state, last_error_code, attempt_seq,
+                   updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    rec.peer_identity.as_slice(),
+                    rec.client_ref,
+                    rec.peer_device.as_slice(),
+                    rec.content_type,
+                    rec.app_id.as_slice(),
+                    rec.body_sha256.as_slice(),
+                    rec.message_id.as_slice(),
+                    rec.session_id.as_slice(),
+                    rec.object_digest.as_slice(),
+                    ms(rec.created_at_ms),
+                    ms(rec.expires_at_ms),
+                    rec.state.as_str(),
+                    rec.last_error_code,
+                    i64::from(rec.attempt_seq),
+                    ms(now),
+                ],
+            ),
+            Some((lookups, meta)) => tx.execute(
+                "INSERT OR REPLACE INTO app_outbox (kh_peer_identity, kh_client_ref,
+                   kh_peer_device, content_type, kh_message_id, session_id, kh_object_digest,
+                   created_at_ms, expires_at_ms, state, last_error_code, attempt_seq,
+                   updated_at_ms, meta)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    lookups.identity,
+                    lookups.client_ref,
+                    lookups.device,
+                    rec.content_type,
+                    lookups.message_id,
+                    rec.session_id.as_slice(),
+                    lookups.object_digest,
+                    ms(rec.created_at_ms),
+                    ms(rec.expires_at_ms),
+                    rec.state.as_str(),
+                    rec.last_error_code,
+                    i64::from(rec.attempt_seq),
+                    ms(now),
+                    meta,
+                ],
+            ),
+        }
         .map_err(Self::e)?;
         tx.commit().map_err(Self::e)?;
         Ok(())
@@ -1873,11 +2474,12 @@ impl<'s> AppStore<'s> {
         code: &str,
         now: u64,
     ) -> Result<bool, String> {
+        let (column, mid) = self.message_lookup(message_id);
         let current: Option<String> = self
             .conn
             .query_row(
-                "SELECT state FROM app_outbox WHERE message_id = ?1",
-                params![message_id.as_slice()],
+                &format!("SELECT state FROM app_outbox WHERE {column} = ?1"),
+                params![mid],
                 |r| r.get(0),
             )
             .optional()
@@ -1891,9 +2493,11 @@ impl<'s> AppStore<'s> {
         let n = self
             .conn
             .execute(
-                "UPDATE app_outbox SET state = ?2, last_error_code = ?3, updated_at_ms = ?4
-                 WHERE message_id = ?1",
-                params![message_id.as_slice(), state.as_str(), code, ms(now)],
+                &format!(
+                    "UPDATE app_outbox SET state = ?2, last_error_code = ?3, updated_at_ms = ?4
+                     WHERE {column} = ?1"
+                ),
+                params![mid, state.as_str(), code, ms(now)],
             )
             .map_err(Self::e)?;
         Ok(n > 0)
@@ -1901,6 +2505,12 @@ impl<'s> AppStore<'s> {
 
     /// The record of one sealed app object, by its message id.
     pub fn record_by_message(&self, message_id: &[u8; 16]) -> Result<Option<AppOutRecord>, String> {
+        if self.outbox_keyed {
+            let (_, mid) = self.message_lookup(message_id);
+            return Ok(self
+                .keyed_records("kh_message_id = ?1", params![mid])?
+                .pop());
+        }
         let key: Option<(Vec<u8>, String)> = self
             .conn
             .query_row(
@@ -1918,12 +2528,15 @@ impl<'s> AppStore<'s> {
 
     /// App objects still in flight to `peer_device` (§8.1 cap).
     pub fn inflight_for_device(&self, peer_device: &[u8; 32]) -> Result<u32, String> {
+        let (column, device) = self.device_lookup(peer_device);
         let n: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM app_outbox
-                 WHERE peer_device = ?1 AND state IN ('queued','sent')",
-                params![peer_device.as_slice()],
+                &format!(
+                    "SELECT COUNT(*) FROM app_outbox
+                     WHERE {column} = ?1 AND state IN ('queued','sent')"
+                ),
+                params![device],
                 |r| r.get(0),
             )
             .map_err(Self::e)?;
@@ -1931,11 +2544,35 @@ impl<'s> AppStore<'s> {
     }
 
     /// Message ids of every app object recorded for `peer_device` (the
-    /// worker's "this has a body" set).
+    /// worker's "this has a body" set). Schema 4: from each record's `meta`;
+    /// a record whose `meta` does not open here names no id and is left
+    /// out (the others are still known).
     pub fn message_ids_for_device(
         &self,
         peer_device: &[u8; 32],
     ) -> Result<std::collections::HashSet<[u8; 16]>, String> {
+        if self.outbox_keyed {
+            let (_, device) = self.device_lookup(peer_device);
+            let rows: Vec<KeyedOutRow> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(&format!(
+                        "SELECT {KEYED_OUT_COLUMNS} FROM app_outbox WHERE kh_peer_device = ?1"
+                    ))
+                    .map_err(Self::e)?;
+                let mapped = stmt
+                    .query_map(params![device], KeyedOutRow::read)
+                    .map_err(Self::e)?;
+                mapped.collect::<Result<_, _>>().map_err(Self::e)?
+            };
+            let mut out = std::collections::HashSet::new();
+            for row in rows {
+                if let Ok(meta) = self.open_out_row(&row) {
+                    out.insert(arr::<16>(&unhex(&meta.message_id)?)?);
+                }
+            }
+            return Ok(out);
+        }
         let mut stmt = self
             .conn
             .prepare("SELECT message_id FROM app_outbox WHERE peer_device = ?1")
@@ -1953,6 +2590,12 @@ impl<'s> AppStore<'s> {
     /// Non-final records (reconcile, §8.6).
     /// Queued or sent records last written at or before `settled_at_ms`.
     pub fn live_records(&self, settled_at_ms: u64) -> Result<Vec<AppOutRecord>, String> {
+        if self.outbox_keyed {
+            return self.keyed_records(
+                "state IN ('queued','sent') AND updated_at_ms <= ?1",
+                params![ms(settled_at_ms)],
+            );
+        }
         let keys: Vec<(Vec<u8>, String)> = {
             let mut stmt = self
                 .conn
@@ -1977,11 +2620,12 @@ impl<'s> AppStore<'s> {
 
     /// Is `message_id` an app outbox object (worker / history bookkeeping)?
     pub fn is_app_message(&self, message_id: &[u8; 16]) -> Result<bool, String> {
+        let (column, mid) = self.message_lookup(message_id);
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM app_outbox WHERE message_id = ?1",
-                params![message_id.as_slice()],
+                &format!("SELECT 1 FROM app_outbox WHERE {column} = ?1"),
+                params![mid],
                 |r| r.get::<_, i64>(0),
             )
             .optional()
@@ -1992,10 +2636,13 @@ impl<'s> AppStore<'s> {
     // ------------------------------------------------- pairing budget
 
     pub fn pair_attempts_today(&self, peer_device: &[u8; 32], now: u64) -> Result<i64, String> {
+        let (column, device) = self.device_lookup(peer_device);
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM app_pair_attempts WHERE peer_device = ?1 AND at_ms > ?2",
-                params![peer_device.as_slice(), ms(now.saturating_sub(86_400_000))],
+                &format!(
+                    "SELECT COUNT(*) FROM app_pair_attempts WHERE {column} = ?1 AND at_ms > ?2"
+                ),
+                params![device, ms(now.saturating_sub(86_400_000))],
                 |r| r.get(0),
             )
             .map_err(Self::e)
@@ -2003,11 +2650,12 @@ impl<'s> AppStore<'s> {
 
     /// When the last automatic PairInit to `peer_device` was spent.
     pub fn last_pair_attempt_at(&self, peer_device: &[u8; 32]) -> Result<Option<u64>, String> {
+        let (column, device) = self.device_lookup(peer_device);
         let at: Option<i64> = self
             .conn
             .query_row(
-                "SELECT MAX(at_ms) FROM app_pair_attempts WHERE peer_device = ?1",
-                params![peer_device.as_slice()],
+                &format!("SELECT MAX(at_ms) FROM app_pair_attempts WHERE {column} = ?1"),
+                params![device],
                 |r| r.get(0),
             )
             .map_err(Self::e)?;
@@ -2023,6 +2671,11 @@ impl<'s> AppStore<'s> {
         now: u64,
         spacing_ms: u64,
     ) -> Result<PairSpend, String> {
+        let (column, device) = self.device_lookup(peer_device);
+        // Schema 4: the device in the attempt's sealed meta.
+        let meta = self
+            .outbox_keys()
+            .map(|keys| seal_pair_meta(keys, &device, peer_device));
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2030,9 +2683,11 @@ impl<'s> AppStore<'s> {
         let _in_tx = crate::paths::HeldMark::transaction();
         let (last, today): (Option<i64>, i64) = tx
             .query_row(
-                "SELECT MAX(at_ms), COALESCE(SUM(at_ms > ?2), 0)
-                 FROM app_pair_attempts WHERE peer_device = ?1",
-                params![peer_device.as_slice(), ms(now.saturating_sub(86_400_000))],
+                &format!(
+                    "SELECT MAX(at_ms), COALESCE(SUM(at_ms > ?2), 0)
+                     FROM app_pair_attempts WHERE {column} = ?1"
+                ),
+                params![device, ms(now.saturating_sub(86_400_000))],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(Self::e)?;
@@ -2045,17 +2700,23 @@ impl<'s> AppStore<'s> {
         if today >= APP_PAIR_BUDGET_PER_DAY {
             return Ok(PairSpend::UsedUp);
         }
-        tx.execute(
-            "INSERT INTO app_pair_attempts (peer_device, at_ms) VALUES (?1, ?2)",
-            params![peer_device.as_slice(), ms(now)],
-        )
+        match meta {
+            None => tx.execute(
+                "INSERT INTO app_pair_attempts (peer_device, at_ms) VALUES (?1, ?2)",
+                params![device, ms(now)],
+            ),
+            Some(meta) => tx.execute(
+                "INSERT INTO app_pair_attempts (kh_peer_device, at_ms, meta) VALUES (?1, ?2, ?3)",
+                params![device, ms(now), meta],
+            ),
+        }
         .map_err(Self::e)?;
         tx.commit().map_err(Self::e)?;
         Ok(PairSpend::Spent)
     }
 }
 
-/// A schema-3 store created in one IMMEDIATE transaction (a sealed
+/// A schema-4 store created in one IMMEDIATE transaction (a sealed
 /// profile's first store). A racing creator's store is kept as it is.
 fn create_keyed(conn: &mut Connection) -> Result<(), String> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")
@@ -2065,14 +2726,7 @@ fn create_keyed(conn: &mut Connection) -> Result<(), String> {
         .map_err(AppStore::e)?;
     let _in_tx = crate::paths::HeldMark::transaction();
     if rebuild::shape(&tx, "app_inbox", KEYED_COLUMN).map_err(AppStore::e)? == Shape::Missing {
-        tx.execute_batch(&format!(
-            "{} {} {} {OTHER_TABLES} {}",
-            inbox_table("CREATE TABLE IF NOT EXISTS app_inbox", true),
-            tombstones_table("CREATE TABLE IF NOT EXISTS app_tombstones", true),
-            tombstones_index("CREATE INDEX IF NOT EXISTS", true),
-            quarantine_table("CREATE TABLE IF NOT EXISTS app_quarantine", true),
-        ))
-        .map_err(AppStore::e)?;
+        tx.execute_batch(&keyed_schema()).map_err(AppStore::e)?;
         rebuild::record(&tx, STORE, SCHEMA_VERSION, false).map_err(AppStore::e)?;
     }
     tx.commit().map_err(AppStore::e)
@@ -2215,10 +2869,12 @@ fn keyed_sender_rows(
         .collect())
 }
 
-/// Schema 2 -> 3 with the rebuild recipe ([`crate::sqlite_rebuild`]): the
-/// inbox, the tombstones and the quarantine rebuilt in one IMMEDIATE
-/// transaction, rowids kept, counts checked before the commit, then the
-/// scrub. The other tables hold no sender column and stay as they are.
+/// Schema 2 or 3 -> 4 with the rebuild recipe ([`crate::sqlite_rebuild`]):
+/// every table still clear rebuilt keyed in one IMMEDIATE transaction (from
+/// schema 2 the inbox, the tombstones, the quarantine, the outbox and the
+/// pairing budget; from schema 3 the outbox and the pairing budget), rowids
+/// kept, counts checked before the commit, then the scrub. `app_consumer`
+/// names no friend and stays as it is.
 fn migrate_forward(
     path: &Path,
     keys: &MetaKeys,
@@ -2230,16 +2886,27 @@ fn migrate_forward(
     rebuild::arm_disk_full(&conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let _in_tx = crate::paths::HeldMark::transaction();
-    // Again inside the transaction: another process may have migrated.
-    if rebuild::shape(&tx, "app_inbox", KEYED_COLUMN)? != Shape::Clear {
-        return Ok(Migration::already());
+    // Again inside the transaction: another process may have migrated (a
+    // mix no build writes is left for the open to refuse).
+    let senders = match layout(&tx)? {
+        Some(Layout::Clear) => true,
+        Some(Layout::SendersKeyed) => false,
+        _ => return Ok(Migration::already()),
+    };
+    let mut before = Vec::new();
+    if senders {
+        for table in ["app_inbox", "app_tombstones", "app_quarantine"] {
+            before.push((table, rebuild::count(&tx, table)?));
+        }
     }
-    let before = [
-        ("app_inbox", rebuild::count(&tx, "app_inbox")?),
-        ("app_tombstones", rebuild::count(&tx, "app_tombstones")?),
-        ("app_quarantine", rebuild::count(&tx, "app_quarantine")?),
-    ];
-    let rows = forward_tables(&tx, keys, &mut steps)?;
+    for table in ["app_outbox", "app_pair_attempts"] {
+        before.push((table, rebuild::count(&tx, table)?));
+    }
+    let mut rows = 0;
+    if senders {
+        rows += forward_tables(&tx, keys, &mut steps)?;
+    }
+    rows += outbox_forward(&tx, keys, &mut steps)?;
     steps.step()?;
     rebuild::verify(&tx, &before)?;
     rebuild::record(&tx, STORE, SCHEMA_VERSION, true)?;
@@ -2254,9 +2921,191 @@ fn migrate_forward(
     })
 }
 
-/// Schema 2 -> 3's tables inside the caller's transaction (the migration,
-/// and the second half of a re-key): the inbox, the quarantine and the
-/// tombstones rebuilt keyed, rowids kept. The rows moved.
+/// The outbox and the pairing budget rebuilt keyed inside the caller's
+/// transaction (schema 3 -> 4, the end of 2 -> 4, and the second half of a
+/// re-key), rowids kept: every value that names the friend or the object is
+/// a keyed lookup or in the row's sealed `meta` (`session_id` stays clear,
+/// R20). Byte values of any length move as they are. The rows moved.
+fn outbox_forward(
+    tx: &rusqlite::Transaction<'_>,
+    keys: &MetaKeys,
+    steps: &mut Steps,
+) -> Result<u32, RebuildError> {
+    let mut rows = 0u32;
+    let leave_one_out = rebuild::drop_one_row();
+    steps.step()?;
+    tx.execute_batch(&outbox_table("CREATE TABLE app_outbox__new", true))?;
+    for (n, row) in clear_out_rows(tx)?.into_iter().enumerate() {
+        if leave_one_out && n == 0 {
+            continue;
+        }
+        steps.step()?;
+        let lookups = OutboxLookups::of(
+            keys,
+            &row.identity,
+            &row.client_ref,
+            &row.device,
+            &row.message_id,
+            &row.object_digest,
+        );
+        let meta = seal_outbox_meta(keys, &lookups.pk(), &row.meta());
+        tx.execute(
+            "INSERT INTO app_outbox__new (rowid, kh_peer_identity, kh_client_ref,
+               kh_peer_device, content_type, kh_message_id, session_id, kh_object_digest,
+               created_at_ms, expires_at_ms, state, last_error_code, attempt_seq,
+               updated_at_ms, meta)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                row.rowid,
+                lookups.identity,
+                lookups.client_ref,
+                lookups.device,
+                row.content_type,
+                lookups.message_id,
+                row.session_id,
+                lookups.object_digest,
+                row.created_at_ms,
+                row.expires_at_ms,
+                row.state,
+                row.last_error_code,
+                row.attempt_seq,
+                row.updated_at_ms,
+                meta,
+            ],
+        )?;
+        rows += 1;
+    }
+    steps.step()?;
+    tx.execute_batch("DROP TABLE app_outbox;")?;
+    steps.step()?;
+    tx.execute_batch("ALTER TABLE app_outbox__new RENAME TO app_outbox;")?;
+    steps.step()?;
+    tx.execute_batch(&pair_attempts_table(
+        "CREATE TABLE app_pair_attempts__new",
+        true,
+    ))?;
+    let attempts: Vec<(i64, Vec<u8>, i64)> = {
+        let mut stmt = tx.prepare("SELECT rowid, peer_device, at_ms FROM app_pair_attempts")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        mapped.collect::<Result<_, _>>()?
+    };
+    for (rowid, device, at) in attempts {
+        steps.step()?;
+        let kh = pair_lookup(keys, &device);
+        tx.execute(
+            "INSERT INTO app_pair_attempts__new (rowid, kh_peer_device, at_ms, meta)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![rowid, kh, at, seal_pair_meta(keys, &kh, &device)],
+        )?;
+        rows += 1;
+    }
+    steps.step()?;
+    tx.execute_batch("DROP TABLE app_pair_attempts;")?;
+    steps.step()?;
+    tx.execute_batch("ALTER TABLE app_pair_attempts__new RENAME TO app_pair_attempts;")?;
+    Ok(rows)
+}
+
+/// Schema 4 -> 2's outbox and pairing budget inside the caller's
+/// transaction (the way back, and the first half of a re-key): the clear
+/// values come from each row's `meta`; rows whose `meta` does not open with
+/// `keys` are left out and counted in `report`. What each table must hold
+/// afterwards.
+fn outbox_back(
+    tx: &rusqlite::Transaction<'_>,
+    keys: &MetaKeys,
+    steps: &mut Steps,
+    report: &mut Migration,
+) -> Result<Vec<(&'static str, i64)>, RebuildError> {
+    let mut expected = Vec::new();
+    let before = rebuild::count(tx, "app_outbox")?;
+    let mut dropped = 0i64;
+    steps.step()?;
+    tx.execute_batch(&outbox_table("CREATE TABLE app_outbox__new", false))?;
+    let records: Vec<KeyedOutRow> = {
+        let mut stmt = tx.prepare(&format!("SELECT {KEYED_OUT_COLUMNS} FROM app_outbox"))?;
+        let mapped = stmt.query_map([], KeyedOutRow::read)?;
+        mapped.collect::<Result<_, _>>()?
+    };
+    for record in records {
+        steps.step()?;
+        let Ok(row) = record
+            .open_meta(keys)
+            .and_then(|meta| ClearOutRow::from_keyed(record, meta))
+        else {
+            dropped += 1;
+            continue;
+        };
+        tx.execute(
+            "INSERT INTO app_outbox__new (rowid, peer_identity, client_ref, peer_device,
+               content_type, app_id, body_sha256, message_id, session_id, object_digest,
+               created_at_ms, expires_at_ms, state, last_error_code, attempt_seq,
+               updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                row.rowid,
+                row.identity,
+                row.client_ref,
+                row.device,
+                row.content_type,
+                row.app_id,
+                row.body_sha256,
+                row.message_id,
+                row.session_id,
+                row.object_digest,
+                row.created_at_ms,
+                row.expires_at_ms,
+                row.state,
+                row.last_error_code,
+                row.attempt_seq,
+                row.updated_at_ms,
+            ],
+        )?;
+        report.rows += 1;
+    }
+    steps.step()?;
+    tx.execute_batch("DROP TABLE app_outbox;")?;
+    steps.step()?;
+    tx.execute_batch("ALTER TABLE app_outbox__new RENAME TO app_outbox;")?;
+    expected.push(("app_outbox", before - dropped));
+    report.dropped += u32::try_from(dropped).unwrap_or(u32::MAX);
+    let before = rebuild::count(tx, "app_pair_attempts")?;
+    let mut dropped = 0i64;
+    steps.step()?;
+    tx.execute_batch(&pair_attempts_table(
+        "CREATE TABLE app_pair_attempts__new",
+        false,
+    ))?;
+    let attempts: Vec<(i64, Vec<u8>, i64, Vec<u8>)> = {
+        let mut stmt =
+            tx.prepare("SELECT rowid, kh_peer_device, at_ms, meta FROM app_pair_attempts")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        mapped.collect::<Result<_, _>>()?
+    };
+    for (rowid, kh, at, meta) in attempts {
+        steps.step()?;
+        let Ok(device) = open_pair_meta(keys, &kh, &meta) else {
+            dropped += 1;
+            continue;
+        };
+        tx.execute(
+            "INSERT INTO app_pair_attempts__new (rowid, peer_device, at_ms) VALUES (?1, ?2, ?3)",
+            params![rowid, device, at],
+        )?;
+        report.rows += 1;
+    }
+    steps.step()?;
+    tx.execute_batch("DROP TABLE app_pair_attempts;")?;
+    steps.step()?;
+    tx.execute_batch("ALTER TABLE app_pair_attempts__new RENAME TO app_pair_attempts;")?;
+    expected.push(("app_pair_attempts", before - dropped));
+    report.dropped += u32::try_from(dropped).unwrap_or(u32::MAX);
+    Ok(expected)
+}
+
+/// Schema 2 -> 3's sender tables inside the caller's transaction (the
+/// migration, and the second half of a re-key): the inbox, the quarantine
+/// and the tombstones rebuilt keyed, rowids kept. The rows moved.
 fn forward_tables(
     tx: &rusqlite::Transaction<'_>,
     keys: &MetaKeys,
@@ -2360,9 +3209,9 @@ fn forward_tables(
     Ok(rows)
 }
 
-/// Schema 3 -> 2 (`raven privacy unseal`, PP.18): the same recipe; rows
-/// whose `meta` does not open with the keys loaded here are left out and
-/// counted (`dropped`), and the count check expects exactly that.
+/// Schema 4 (or 3) -> 2 (`raven privacy unseal`, PP.18): the same recipe;
+/// rows whose `meta` does not open with the keys loaded here are left out
+/// and counted (`dropped`), and the count check expects exactly that.
 fn migrate_back(
     path: &Path,
     keys: &MetaKeys,
@@ -2373,11 +3222,16 @@ fn migrate_back(
     let mut conn = rebuild::dedicated(path)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let _in_tx = crate::paths::HeldMark::transaction();
-    if rebuild::shape(&tx, "app_inbox", KEYED_COLUMN)? != Shape::Keyed {
-        return Ok(Migration::already());
-    }
+    let outbox = match layout(&tx)? {
+        Some(Layout::Keyed) => true,
+        Some(Layout::SendersKeyed) => false,
+        _ => return Ok(Migration::already()),
+    };
     let mut report = Migration::default();
-    let expected = back_tables(&tx, keys, &mut steps, &mut report)?;
+    let mut expected = back_tables(&tx, keys, &mut steps, &mut report)?;
+    if outbox {
+        expected.extend(outbox_back(&tx, keys, &mut steps, &mut report)?);
+    }
     steps.step()?;
     rebuild::verify(&tx, &expected)?;
     rebuild::record(&tx, STORE, CLEAR_VERSION, true)?;
@@ -2388,10 +3242,10 @@ fn migrate_back(
     Ok(report)
 }
 
-/// Schema 3 -> 2's tables inside the caller's transaction (the way back,
-/// and the first half of a re-key): rows whose `meta` does not open with
-/// `keys` are left out and counted in `report`. What each table must hold
-/// afterwards.
+/// Schema 3 -> 2's sender tables inside the caller's transaction (the way
+/// back, and the first half of a re-key): rows whose `meta` does not open
+/// with `keys` are left out and counted in `report`. What each table must
+/// hold afterwards.
 fn back_tables(
     tx: &rusqlite::Transaction<'_>,
     keys: &MetaKeys,
@@ -2510,10 +3364,10 @@ fn back_tables(
 
 /// Privacy pack PP.12, the eager half of the migration
 /// (`privacy::migrate_all`, and the prune passes): in a sealed profile with
-/// its keys loaded, an existing schema-2 store moves to schema 3. `true`
-/// when it moved now.
+/// its keys loaded, an existing schema-2 or schema-3 store moves to schema
+/// 4. `true` when it moved now.
 pub fn migrate(data_dir: &Path) -> Result<bool, String> {
-    // Schema 3 by its header: nothing to open (an older process's stamp still
+    // Schema 4 by its header: nothing to open (an older process's stamp still
     // in the WAL is put right by the next open).
     if !needs_migration(data_dir) || crate::privacy::mode(data_dir) != Mode::Sealed {
         return Ok(false);
@@ -2521,7 +3375,7 @@ pub fn migrate(data_dir: &Path) -> Result<bool, String> {
     AppStore::open_inner(data_dir, &MetadataOnly).map(|(_, migrated)| migrated)
 }
 
-/// Whether the store's header says it is not at schema 3 yet (no SQLite
+/// Whether the store's header says it is not at schema 4 yet (no SQLite
 /// open; a commit still in the WAL is not seen, so `true` may only mean
 /// "look").
 pub fn needs_migration(data_dir: &Path) -> bool {
@@ -2529,8 +3383,8 @@ pub fn needs_migration(data_dir: &Path) -> bool {
     path.exists() && rebuild::header_user_version(&path).is_none_or(|v| v < SCHEMA_VERSION)
 }
 
-/// The way back (`raven privacy unseal`, PP.18): a schema-3 store moves to
-/// schema 2 with the keys this process loaded.
+/// The way back (`raven privacy unseal`, PP.18): a schema-4 (or schema-3)
+/// store moves to schema 2 with the keys this process loaded.
 pub fn unseal(data_dir: &Path) -> Result<Migration, String> {
     let path = app_store_path(data_dir);
     if !path.exists() {
@@ -2541,13 +3395,15 @@ pub fn unseal(data_dir: &Path) -> Result<Migration, String> {
         .map_err(|e| format!("APP_STORE: {e}"))
 }
 
-/// Schema 3 -> 3 under new keys (`raven privacy rotate-meta`, PP.18): in
+/// Schema 4 -> 4 under new keys (`raven privacy rotate-meta`, PP.18): in
 /// one IMMEDIATE transaction on a connection that writes nothing before
-/// the commit ([`rebuild::rekey_connection`]), the three tables go back to
-/// their clear columns and forward again, so every keyed sender is computed
-/// anew and every `meta` sealed under the current epoch; counts checked,
-/// then the scrub. `keys` open every epoch the rows are under. The bodies
-/// are the data-key rotation's ([`reseal_rows`]).
+/// the commit ([`rebuild::rekey_connection`]), every keyed table goes back
+/// to its clear columns and forward again, so every keyed lookup is
+/// computed anew and every `meta` sealed under the current epoch; counts
+/// checked, then the scrub. A schema-3 store's outbox and pairing budget,
+/// clear until then, are keyed with the rest (schema 4). `keys` open every
+/// epoch the rows are under. The bodies are the data-key rotation's
+/// ([`reseal_rows`]).
 fn rekey_store(
     path: &Path,
     keys: &MetaKeys,
@@ -2559,12 +3415,21 @@ fn rekey_store(
     rebuild::arm_disk_full(&conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let _in_tx = crate::paths::HeldMark::transaction();
-    if rebuild::shape(&tx, "app_inbox", KEYED_COLUMN)? != Shape::Keyed {
-        return Ok(Migration::already());
-    }
+    let outbox = match layout(&tx)? {
+        Some(Layout::Keyed) => true,
+        Some(Layout::SendersKeyed) => false,
+        _ => return Ok(Migration::already()),
+    };
     let mut report = Migration::default();
-    let expected = back_tables(&tx, keys, &mut steps, &mut report)?;
-    report.rows = forward_tables(&tx, keys, &mut steps)?;
+    let mut expected = back_tables(&tx, keys, &mut steps, &mut report)?;
+    if outbox {
+        expected.extend(outbox_back(&tx, keys, &mut steps, &mut report)?);
+    } else {
+        for table in ["app_outbox", "app_pair_attempts"] {
+            expected.push((table, rebuild::count(&tx, table)?));
+        }
+    }
+    report.rows = forward_tables(&tx, keys, &mut steps)? + outbox_forward(&tx, keys, &mut steps)?;
     rebuild::verify(&tx, &expected)?;
     rebuild::record(&tx, STORE, SCHEMA_VERSION, true)?;
     tx.commit()?;
@@ -2573,10 +3438,10 @@ fn rekey_store(
     Ok(report)
 }
 
-/// `raven privacy rotate-meta` (PP.18): a schema-3 store is keyed again
-/// with the keys this process holds now (a new `k_index`; the epochs it
-/// holds open the old rows). Nothing to do without a store or on a schema-2
-/// one.
+/// `raven privacy rotate-meta` (PP.18): a schema-4 (or schema-3) store is
+/// keyed again with the keys this process holds now (a new `k_index`; the
+/// epochs it holds open the old rows). Nothing to do without a store or on
+/// a schema-2 one.
 pub fn rekey(data_dir: &Path) -> Result<Migration, String> {
     let path = app_store_path(data_dir);
     if !path.exists() {
@@ -2706,24 +3571,24 @@ pub fn scrub_pending(data_dir: &Path) -> bool {
 }
 
 /// Row `meta` blobs not on epoch `current` (the inbox, the tombstones, the
-/// quarantine; by their first bytes, no key, no lock): the rotation's
-/// old-object count. `0` without a schema-3 store.
+/// quarantine, and since schema 4 the outbox and the pairing budget; by
+/// their first bytes, no key, no lock): the rotation's old-object count.
+/// `0` without a keyed store.
 pub fn meta_rows_off_epoch(data_dir: &Path, current: u32) -> Result<u32, String> {
     let Some(conn) = peek(data_dir)? else {
         return Ok(0);
     };
-    if rebuild::shape(&conn, "app_inbox", KEYED_COLUMN).map_err(AppStore::e)? != Shape::Keyed {
-        return Ok(0);
+    let epoch = current.to_be_bytes().to_vec();
+    let mut n = 0i64;
+    for (table, _, _) in meta_tables(&conn).map_err(AppStore::e)? {
+        n += conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE substr(meta, 2, 4) != ?1"),
+                params![epoch],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(AppStore::e)?;
     }
-    let n: i64 = conn
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM app_inbox WHERE substr(meta, 2, 4) != ?1)
-                  + (SELECT COUNT(*) FROM app_tombstones WHERE substr(meta, 2, 4) != ?1)
-                  + (SELECT COUNT(*) FROM app_quarantine WHERE substr(meta, 2, 4) != ?1)",
-            params![current.to_be_bytes().to_vec()],
-            |r| r.get(0),
-        )
-        .map_err(AppStore::e)?;
     Ok(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
@@ -3230,5 +4095,64 @@ pub(crate) fn create_clear_store_for_tests(data_dir: &Path) {
         .unwrap();
 }
 
+/// Schema 3 exactly as the pack's builds before schema 4 create it in a
+/// sealed profile (PP.12: the sender columns keyed, the outbox and the
+/// pairing budget clear), stamped 3 in the same batch.
+#[cfg(test)]
+pub(crate) const SCHEMA_3_BATCH: &str = "PRAGMA journal_mode=WAL;
+     CREATE TABLE IF NOT EXISTS app_inbox(
+       kh_sender BLOB NOT NULL, message_id BLOB NOT NULL, app_id BLOB NOT NULL,
+       content_type TEXT NOT NULL, received_at_ms INTEGER NOT NULL,
+       expires_at_ms INTEGER NOT NULL, body_len INTEGER NOT NULL, sealed BLOB NOT NULL,
+       meta BLOB NOT NULL,
+       PRIMARY KEY(kh_sender, message_id), UNIQUE(kh_sender, app_id));
+     CREATE TABLE IF NOT EXISTS app_tombstones(
+       kh_sender BLOB NOT NULL, message_id BLOB NOT NULL, app_id BLOB NOT NULL,
+       disposition TEXT NOT NULL CHECK(disposition IN
+         ('done','rejected','expired','revoked','not_contact','blocked')),
+       at_ms INTEGER NOT NULL, meta BLOB NOT NULL, PRIMARY KEY(kh_sender, message_id));
+     CREATE INDEX IF NOT EXISTS app_tombstones_app ON app_tombstones(kh_sender, app_id);
+     CREATE TABLE IF NOT EXISTS app_quarantine(
+       kh_sender BLOB NOT NULL, message_id BLOB NOT NULL, app_id BLOB NOT NULL,
+       content_type TEXT NOT NULL, received_at_ms INTEGER NOT NULL,
+       expires_at_ms INTEGER NOT NULL, body_len INTEGER NOT NULL, sealed BLOB NOT NULL,
+       meta BLOB NOT NULL, quarantined_at_ms INTEGER NOT NULL,
+       PRIMARY KEY(kh_sender, message_id));
+     CREATE TABLE IF NOT EXISTS app_outbox(
+       peer_identity BLOB NOT NULL, client_ref TEXT NOT NULL, peer_device BLOB NOT NULL,
+       content_type TEXT NOT NULL, app_id BLOB NOT NULL, body_sha256 BLOB NOT NULL,
+       message_id BLOB NOT NULL UNIQUE, session_id BLOB NOT NULL,
+       object_digest BLOB NOT NULL, created_at_ms INTEGER NOT NULL,
+       expires_at_ms INTEGER NOT NULL,
+       state TEXT NOT NULL CHECK(state IN
+         ('queued','sent','delivered','expired','failed','cancelled')),
+       last_error_code TEXT NOT NULL DEFAULT '', attempt_seq INTEGER NOT NULL,
+       updated_at_ms INTEGER NOT NULL,
+       PRIMARY KEY(peer_identity, client_ref));
+     CREATE TABLE IF NOT EXISTS app_consumer(
+       id INTEGER PRIMARY KEY CHECK(id = 1), consumer TEXT NOT NULL,
+       bound_at_ms INTEGER NOT NULL);
+     CREATE TABLE IF NOT EXISTS app_pair_attempts(
+       peer_device BLOB NOT NULL, at_ms INTEGER NOT NULL);
+     CREATE TABLE IF NOT EXISTS raven_schema (
+       store TEXT PRIMARY KEY NOT NULL,
+       version INTEGER NOT NULL,
+       scrub_pending INTEGER NOT NULL DEFAULT 0 CHECK(scrub_pending IN (0, 1)));
+     INSERT INTO raven_schema (store, version, scrub_pending) VALUES ('app_channel', 3, 0);
+     PRAGMA user_version = 3;";
+
+/// A schema-3 store at `data_dir` with no rows, as the pack's builds before
+/// schema 4 create it in a sealed profile (tests of other modules too).
+#[cfg(test)]
+pub(crate) fn create_schema_3_store_for_tests(data_dir: &Path) {
+    Connection::open(app_store_path(data_dir))
+        .unwrap()
+        .execute_batch(SCHEMA_3_BATCH)
+        .unwrap();
+}
+
 #[cfg(test)]
 mod sealed_tests;
+
+#[cfg(test)]
+mod outbox_tests;

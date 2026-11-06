@@ -89,12 +89,13 @@ AAD, as every K_hist blob is: moving a profile folder stays unsupported, as it i
 
 `kh = HMAC-SHA256(K_index, "rvn1/meta-index/v1" || type_label || 0x00 || value)`, where
 `type_label` names the **value type** (`device-key`, `rvn1-address`, `message-id`, `object-digest`,
-`nonce`, `object-bytes`), never the table or the column. Equal values give equal `kh` in every
-table, so primary keys, UNIQUE constraints, foreign keys and joins keep their shape. The clear
-values move into one sealed `meta` blob per row. Clear time columns stay only where a query needs
-them, coarsened (`prune_after_hour`, an insertion `seq`). Where a query compares stored wire bytes
-for equality, a keyed digest column (`kh_envelope`, `kh_ack`; value type `object-bytes`) replaces
-the comparison.
+`nonce`, `object-bytes`, `client-ref`: a local app's own reference, the app outbox's
+`kh_client_ref`, security review 2026-11, PRIV-1), never the table or the column. Equal values
+give equal `kh` in every table, so primary keys, UNIQUE constraints, foreign keys and joins keep
+their shape. The clear values move into one sealed `meta` blob per row. Clear time columns stay
+only where a query needs them, coarsened (`prune_after_hour`, an insertion `seq`). Where a query
+compares stored wire bytes for equality, a keyed digest column (`kh_envelope`, `kh_ack`; value
+type `object-bytes`) replaces the comparison.
 
 **Kept clear on purpose (review R20):** random identifiers, or digests of values no file holds
 in clear, naming keychain items: the session store's `record_key`, `session_id`,
@@ -706,8 +707,22 @@ section 7.
   the sender column; the other three name the same sender, so leaving them clear would leave
   `kh_sender` protecting nothing.) The page order and the cursor use `kh_sender`: a total order
   all the same, and the cursor still names the sender in clear (converted at each page). A
-  quarantined row keeps its inbox `meta` byte for byte (label `app_inbox`). `app_outbox` and
-  `app_pair_attempts` are unchanged (section 7.2, open item).
+  quarantined row keeps its inbox `meta` byte for byte (label `app_inbox`). Schema 3 -> 4
+  (security review 2026-11, PRIV-1; section 7.2): `app_outbox` keys the friend's identity key and
+  device (`device-key`), the local app's `client_ref` (`client-ref`), the message id and the
+  object digest, and seals them with the app id and the body digest in the row's `meta` (label
+  `app_outbox`, primary key `kh_peer_identity || kh_client_ref`); `session_id` stays clear (R20).
+  `app_pair_attempts` keys the friend's device (`kh_peer_device`, the clear key in `meta`, label
+  `app_pair_attempts`). A read that returns an outbox record opens its `meta` and checks the
+  keyed columns against it: a row whose columns and `meta` disagree fails the read (`APP_STORE`),
+  and the device's message list leaves it out. A schema-2 store moves straight to 4; a schema-3
+  store from the pack's earlier builds moves its outbox and pairing budget in one rebuild
+  transaction (rowids kept, counts checked, crash safe); with free space short it keeps working
+  at schema 3 and moves at a later pass. `raven privacy unseal` gives schema 2 back byte for byte,
+  and `rotate-meta` keys the store anew (a schema-3 store comes out at 4). The upkeep
+  (`AppStore::maintain`) removes a final outbox record (`delivered`, `expired`, `failed`,
+  `cancelled`) once its last change is `APP_OUTBOX_FINAL_RETENTION_MS` (8 days) old, in every
+  profile; before, only a later submit did.
 - **Keys**: a store handle takes the keys this process holds when it opens (one
   `at_rest::keys_cached`, never the keystore); a `meta` that names an epoch the handle lacks (a
   rotation since) is read with the keys held now; a write with keys a rotation has just replaced
@@ -994,7 +1009,13 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   program could name, such as `contacts.json`, is no proof), never the home folder, a folder above
   it or a filesystem root ("This folder doesn't look like a Raven profile, so erase won't touch it:
   {folder}"), and in a debug build strictly inside `RAVEN_LAB_ERASE_ROOT` (canonical paths; no
-  switch refuses). There is no list of owner paths in product code.
+  switch refuses). Never a folder another account owns, whatever its mode or ACL ("This folder
+  belongs to another account, so erase will not touch it: {folder}"; its owner could put a link in
+  place of a key file while it is overwritten): the rule of every private folder,
+  `paths::owned_by_another_account`, which `paths::ensure_private_dir` applies too, so no store
+  opens in such a folder either (security review 2026-11, KS-2; root may use any folder, and on
+  Windows SYSTEM and the Administrators group may own it). An owner that cannot be read refuses as
+  well. There is no list of owner paths in product code.
 - **Step 1, the stop.** Raven's own login item for this profile (`node_control::own_login_item`)
   is unloaded for the session, then the stop step; the node must be gone within 5 s (no IPC
   answer, the instance lock free), else "Raven is still running, so erase can't continue: ..."
@@ -1036,16 +1057,23 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   and that the search shows none, is checked in the owner's real row R34.
 - **Step 3.** `meta_key.rmk`, `identity.seed`, `device_x25519.secret`, `lab_device_x25519.secret`,
   `relay_key.ed25519` and `friend_relay/relay_key.ed25519` (only while `friend_relay` is a real
-  folder, not a link: review C-deletion-erase-2), and an interrupted write's temp copy of one
-  (`.<name>.tmp.<16 hex>` beside it), get zeros over their length (fsynced), then go: hygiene only
-  (on APFS and SSDs an overwrite lands in new blocks).
+  folder, not a link: review C-deletion-erase-2), every file the registry calls an unsealed key
+  (the Tor helper's keystore `tor/state/keystore/`, at any depth: the onion service key, each time
+  period's keys, the intro points' keys and Arti's `<name>.tmp` of an interrupted key write;
+  security review 2026-11, KS-1 and TOR-7: before, they were deleted without an overwrite, and the
+  intro points' keys, seven levels below the profile, were left), and an interrupted write's temp
+  copy of one (`.<name>.tmp.<16 hex>` beside it), get zeros over their length (fsynced), then go:
+  hygiene only (on APFS and SSDs an overwrite lands in new blocks). The overwrite never follows a
+  link: on Unix the file is opened with `O_NOFOLLOW` (security review 2026-11, KS-2: a link put in
+  place of a key file after its check had its target zeroed).
 - **Step 4, Raven's files only.** Registry-driven: every name and pattern of `at_rest::FILES` with
   `erase: yes` (since PP.16 the relay-folder entries too: in a profile a relay ran in they are
   Raven's; a dedicated relay folder has no identity and is refused) and a quarantine copy of one
   (`<file>.corrupt`, `.corrupt-<n>`, `.corrupt.<n>`) or an interrupted write's temp file beside
-  one (`.<file>.tmp.<16 hex>`); inside Raven's own folders (those the registry names files in) the
-  same rule (the temp files there since review C-deletion-erase-3: before, they were listed as
-  files Raven didn't create). A symbolic link is deleted as a link and never followed: a file is
+  one (`.<file>.tmp.<16 hex>`); inside Raven's own folders (those the registry names files in,
+  and every folder below `tor/` at any depth: the registry's `tor/**`, review TOR-7) the same rule
+  (the temp files there since review C-deletion-erase-3: before, they were listed as files Raven
+  didn't create). A symbolic link is deleted as a link and never followed: a file is
   deleted only while every folder on its way from the data dir is a real one, so a link put in
   place of a folder after the plan was made is refused and reported (review C-deletion-erase-2).
   A pass then looks again for a file a process finished writing after the marker went down (its
@@ -1074,7 +1102,13 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   stays keeps its store, WAL included, for the next run, and the namespace pass takes a head-less
   item and nothing of another profile; a damaged store never ends in Erased while its keys may
   stay; a linked `friend_relay` and a link put in place after the plan are not followed; temp
-  files in Raven's folders go, a key's with its overwrite),
+  files in Raven's folders go, a key's with its overwrite; review KS-1 and TOR-7: the Tor
+  helper's keys, the intro points' keys seven levels down among them, are overwritten and its
+  folder goes; review KS-2: a folder another account owns is refused, through a seam that acts as
+  another account and changes no file's owner, and the zero overwrite never follows a link),
+  raven-core's `paths::tests` (a private folder another account owns is refused whatever its mode
+  and left as it is, root may; the Windows owner rule) and `win_acl::tests` (Windows CI: a folder
+  this process makes passes the owner rule),
   `lan_dispatch::tests::b_still_sends_and_receives`
   (in-process), ash's (`paste_guard_and_non_tty_refusal`, `erase_refuses_while_the_node_still_answers`,
   `failed_stop_leaves_the_profile_usable_and_unmarked`, `after_erase_nothing_of_a_remains_in_the_temp_home`
@@ -1626,7 +1660,8 @@ literal ending in `.json`, `.sqlite`,
 `.sqlite3`, `.bin`, `.seed`, `.secret`, `.vault` or `.dpapi`, every `data_dir.join("...")` and
 `join(format!(...))` name, and the SQLite `CREATE TABLE` statements. Names that occur only in
 tests or vectors were dropped. "Rule" is one of: an RMS1 kind, keyed SQLite columns, already
-protected (keystore or K_hist), or plain with a reason.
+protected (keystore or K_hist), plain with a reason, or an unsealed key with a reason (the Tor
+helper's keystore, section 6.6).
 
 ### 6.1 Sealed JSON files (RMS1)
 
@@ -1698,7 +1733,7 @@ sealed file whose older readers rewrite it when it looks corrupt gets a new name
 | Store | Rule | Step | What it holds |
 |---|---|---|---|
 | `owed_acks.sqlite` (`owed_acks_v1`, `owed_ack_held_v1`) | schema 1 -> 2 (section 7.1): `kh_ack_digest`, `kh_peer`, `kh_custodian`, the ACK bytes sealed, `meta`, `prune_after_hour`; an older build's set-aside copy `owed_acks.sqlite.corrupt-<ms>` is merged back, or sealed in place as kind 64 (R06) | PP.12 (done) | peer keys, sealed ACK envelopes, custodians |
-| `app_channel.sqlite3` (`app_inbox`, `app_tombstones`, `app_outbox`, `app_consumer`, `app_pair_attempts`, `app_quarantine`) | schema 2 -> 3 (section 7.2): `kh_sender` + `meta` in the inbox, tombstones and quarantine; row bodies under the epoch app-row key (PP.10); `app_outbox` and `app_pair_attempts` still clear (open item, section 7.2) | PP.12 (done) | sender devices of app frames |
+| `app_channel.sqlite3` (`app_inbox`, `app_tombstones`, `app_outbox`, `app_consumer`, `app_pair_attempts`, `app_quarantine`) | schema 2 -> 3 (section 7.2): `kh_sender` + `meta` in the inbox, tombstones and quarantine; row bodies under the epoch app-row key (PP.10); schema 3 -> 4: `app_outbox` (`kh_peer_identity`, `kh_client_ref`, `kh_peer_device`, `kh_message_id`, `kh_object_digest` + `meta`) and `app_pair_attempts` (`kh_peer_device` + `meta`) keyed too; a final outbox record goes 8 days after its last change, at every upkeep | PP.12 (done); security review 2026-11, PRIV-1 (done) | sender devices of app frames; the friends a local app sent to (identity key and device), its references, the body digests, the message ids and object digests, and the pairing attempts per friend |
 | `indexed_sessions.sqlite` heads and reset tables (`indexed_session_heads`, `indexed_session_reset`, `endpoint_reseal_ledger`, `peer_reset_state`) | schema 1 -> 2 (sections 4.11, 7.3): kh addresses, device keys and message ids, meta (every time), `created_hour`, `prune_after_hour`; R20 identifiers kept clear; schema 4: the heads' `init_id` keyed too, `kh_init_id` (section 4.22) | PP.13 (done); review B-sealed-stores-1 (done) | both sides' addresses and device keys, session times; with a clear `init_id`, which friend each session is with |
 | `indexed_sessions.sqlite` `peer_session_end`, `peer_session_end_erased` (cutoff CP.6, **not in the plan**) | kh `peer_device` + sealed meta (`ended_at_ms`, `created_to_ms`), `prune_after_hour` for the 30-day prune; moved with PP.13's rebuild | PP.13 (done) | per contact (device key): when its last session ended, and the erase marks of removed contacts |
 | `indexed_sessions.sqlite` `peer_session_renewal` (Phase 3 P3.13, session renewal) | additive in schema 1 (clear columns) and 4 (kh `peer_device` + sealed meta with every other value, `prune_after_hour`); no version change; moved by the rebuilds (forward, back, re-key) with rowids kept; a clear table an older build of the pack left in a store it sealed moves at the next open; removing a contact deletes its row. Phase 6b P6.27 keeps the early re-key in the same row (no new table): three more values in the sealed meta of schema 4 (written only when set), three nullable clear columns in schema 1, added to a table an older build made at the next open (`ALTER TABLE ... ADD COLUMN`) | P3.13 (done); P6.27 (done) | per contact (device key): the shared re-pair budget and backoff, the newest session end seen, a kept PairInit (both devices and addresses), and an early re-key after a security event (when it was asked for, why, the last one) |
@@ -1763,6 +1798,7 @@ the lab backend), and Windows' K_hist `chat_history_key.dpapi` (DPAPI-wrapped, P
 | `outbox_routes.json` `ended` evidence | cutoff review FU-3 | inside kind 4, no change of rule |
 | `peer_session_end`, `peer_session_end_erased` | cutoff CP.6 | keyed with the PP.13 tables |
 | `lan_noise_pins.json.corrupt` | cutoff CP.2 | the `.corrupt` rule (PP.5); `lan_noise_pins.rms` gets no plain quarantine copy |
+| `tor/` (the Tor helper, Arti; owner only): the keystore `tor/state/keystore/` with the onion service key, each time period's keys and the intro points' keys, in clear in Arti's own files; the guards, circuit times, intro point state and replay logs; the cache of public relay documents | the onion carrier, live in release builds since 2026-10; security review 2026-11, KS-1 and TOR-7 (the registry still called it lab only, and erase left the intro points' keys, seven levels down) | `tor/state/keystore/**` is an unsealed key (`Rule::UnsealedKey`: erase writes zeros over every file in it before it deletes it, section 4.14 step 3); `tor/**` is plain (no friend in it; the replay logs show how many introductions arrived, not from whom) and erase deletes it at every depth. Sealing the keys is owner decision OD-T3; until then a copy of the folder lets its holder run this profile's onion service (THREAT_MODEL §3.7a, T3a) |
 
 ### 6.7 Deleting in SQLite (PP.2)
 
@@ -1774,7 +1810,12 @@ zeros. The setting is per connection (the bundled SQLite is not built with
 contact deletes its remembered session end), `owed_acks.sqlite`, `friend_custody.sqlite`,
 `app_channel.sqlite3` (it had the pragma inline before), and the legacy `queue.sqlite` and
 `forward_queue.sqlite`. Lock databases hold nothing and skip it (`DataDirLock`, `*.lock.sqlite`,
-and `prekey_lifecycle.sqlite`, a lock table only).
+and `prekey_lifecycle.sqlite`, a lock table only). A `DataDirLock` database is never written, so
+one that is not empty with a `-journal` or `-wal` beside it was planted: it is refused before
+SQLite opens it, since SQLite would play that journal back as the account taking the lock and
+delete the super-journal file its trailer names (security review 2026-11, WINLIN-1). The journal
+a holder keeps beside its empty lock, or leaves there when it crashed, is taken as before (SQLite
+deletes it unread).
 
 `paths::checkpoint_truncate` (`PRAGMA wal_checkpoint(TRUNCATE)`) then moves what a delete overwrote
 into the main file and empties the WAL. It runs at the end of `prune_expired_sessions`, of the
@@ -1821,7 +1862,7 @@ prune compares; every decision reads the exact time from `meta`. Rowids and inde
 | `owed_ack_held_v1` | `ack_digest` | object digest | `kh_ack_digest` (`object-digest`) |
 | | `custodian` | device key | `kh_custodian` (`device-key`) |
 
-### 7.2 `app_channel.sqlite3` (PP.12: the sender tables done, schema 3)
+### 7.2 `app_channel.sqlite3` (PP.12: the sender tables done, schema 3; security review 2026-11, PRIV-1: the outbox and the pairing budget done, schema 4)
 
 | Table | Column | Holds | Target |
 |---|---|---|---|
@@ -1838,25 +1879,35 @@ prune compares; every decision reads the exact time from `meta`. Rowids and inde
 | | `message_id`, `app_id` | random ids | clear (open item below) |
 | | `disposition`, `at_ms` | a word; time | clear: the retention and the cap's order (8 days) |
 | `app_quarantine` | as `app_inbox` | | as `app_inbox`; its `meta` is the inbox row's, byte for byte; `quarantined_at_ms` clear (its prune) |
-| `app_outbox` | `peer_identity`, `peer_device` | identity key, device key | **open**: `kh_peer_identity`, `kh_peer_device` (`device-key`) |
-| | `message_id`, `object_digest` | message id, object digest | **open**: `kh_message_id` (`message-id`), `kh_object_digest` (`object-digest`) |
-| | `client_ref`, `body_sha256` | RDAP's own reference (may name a task); digest of the body | **open**: `meta` (a keyed digest where a query compares it) |
+| `app_outbox` | `peer_identity`, `peer_device` | identity key, device key | `kh_peer_identity`, `kh_peer_device` (`device-key`), schema 4 |
+| | `client_ref` | RDAP's own reference (may name a task) | `kh_client_ref` (`client-ref`); with `kh_peer_identity` the primary key |
+| | `message_id`, `object_digest` | message id, object digest | `kh_message_id` (`message-id`, UNIQUE), `kh_object_digest` (`object-digest`) |
+| | `app_id`, `body_sha256` | random id; digest of the body (it would confirm a guessed body) | `meta` (no query compares them) |
+| | the clear values of the keyed columns | | `meta` (label `app_outbox`, primary key `kh_peer_identity \|\| kh_client_ref`); a read checks the columns against it |
 | | `session_id` | random session id | clear (R20) |
 | | `content_type`, `state`, `last_error_code`, `attempt_seq` | words, codes, a counter | clear |
-| | `created_at_ms`, `expires_at_ms`, `updated_at_ms` | times | clear: the retention and the eviction order |
+| | `created_at_ms`, `expires_at_ms`, `updated_at_ms` | times | clear: the retention and the eviction order; a final record goes 8 days after `updated_at_ms`, at a submit and at every upkeep |
 | `app_consumer` | `consumer`, `bound_at_ms` | the local consumer's own name; time | clear: no friend data |
-| `app_pair_attempts` | `peer_device` | device key | **open**: `kh_peer_device` |
-| | `at_ms` | time | clear: the daily budget and its spacing |
+| `app_pair_attempts` | `peer_device` | device key | `kh_peer_device` (`device-key`), the clear key in `meta` (label `app_pair_attempts`), schema 4 |
+| | `at_ms` | time | clear: the daily budget and its spacing (24 hours, then the upkeep removes it) |
 
-**Open item (not in the plan's steps).** PP.12 names the sender column only, and no later step
-touches this store: the outbox's and the pairing budget's friend keys, and the store's message
-ids, are still clear. The app channel is gated off in release (`APP_CHANNEL_PRODUCTION_ENABLED =
-false`), so no release profile writes this store; the targets above are for the owner and the
-PP.20 review. Until they are keyed, `raven privacy status` does not call a schema-3 store keyed
-while `app_outbox` or `app_pair_attempts` holds a row (a lab build's app channel wrote it): its
-JSON entry says `"keyed": false` with the tables in `"clear_tables"`, and the store is not counted
-among the encrypted databases (review E-harness-docs-ci-8). Both tables have to be keyed (a
-schema 4) before the app channel's gate flips.
+**Schema 4 (security review 2026-11, PRIV-1).** PP.12 named the sender column only, and this
+section asked for the outbox and the pairing budget to be keyed (a schema 4) before the app
+channel's gate flipped. The gate flipped first (`APP_CHANNEL_PRODUCTION_ENABLED = true`, RDAP
+design P4), so a release profile's schema-3 store kept in clear the friends a local app sent to
+(identity key and device), its references, the body digests, and the message ids and object
+digests that link a record to custodians and relays; a final record stayed until a later submit.
+Schema 4 keys both tables as the table above says (section 4.10). The move runs at the store's
+open, with the pass's store moves and at the upkeep (section 8.1); `raven privacy unseal` goes back
+to schema 2 and `rotate-meta` keys the store anew. `raven privacy status` calls the store keyed
+only when no table in its clear shape holds a row: a schema-3 store whose `app_outbox` or
+`app_pair_attempts` holds a row, before its move, says `"keyed": false` with the tables in
+`"clear_tables"` and is not counted among the encrypted databases (review E-harness-docs-ci-8).
+
+**Open item (not in the plan's steps).** The `message_id` and `app_id` of the inbox, tombstone and
+quarantine rows (random ids the frame carries on the wire) and the inbox's exact `expires_at_ms`
+stay clear; with the sender keyed they name no friend. Removing a contact deletes neither its
+outbox records nor its pairing attempts: they go with the retention above.
 
 ### 7.3 `indexed_sessions.sqlite` (PP.13: heads, bindings, resets, session ends, done, schema 2; PP.14: endpoint tables, done, schema 3; review B-sealed-stores-1: the heads' `init_id`, done, schema 4)
 
@@ -2017,7 +2068,7 @@ Readers accept both forms forever; nothing is converted back except by `raven pr
 | Quarantine copies, temp leftovers | sealed in place; temp files older than 1 h deleted | the same pass | as above |
 | An older build's plain rewrite (a downgrade leftover) | sealed again, the plain noise pins merged | the same pass; `raven status` says so once | as above |
 | History, outbound stage, app rows | the epoch keys (RVNHIST2, RVNOSTG2, 0x02) | the same pass and every rotation pass (section 4.8) | the lock is held: the next pass |
-| `owed_acks.sqlite` 1 -> 2, `app_channel.sqlite3` 2 -> 3 | keyed columns, sealed meta | the pass's store moves, the 10-minute upkeep (`upkeep_stores`) and the store's first open (section 4.10) | free space short or a reader in the way: the store keeps working in its clear schema; `scrub_pending` |
+| `owed_acks.sqlite` 1 -> 2, `app_channel.sqlite3` 2 -> 3 -> 4 (one move from 2 or 3; schema 4: security review 2026-11, PRIV-1) | keyed columns, sealed meta | the pass's store moves, the 10-minute upkeep (`upkeep_stores`) and the store's first open (section 4.10) | free space short or a reader in the way: the store keeps working in its schema (clear, or the app store's schema 3); `scrub_pending` |
 | `indexed_sessions.sqlite` 1 -> 2 -> 3 -> 4 | keyed heads, resets, endpoint tables; the heads' `init_id` keyed (schema 4) | as above, after its journals settle (sections 4.11-4.12, 4.22) | as above, and while a journal is pending |
 | `friend_custody.sqlite` 1 -> 2 | keyed objects, released digests only | as above (section 4.15; custody is gated) | as above |
 | Chat cursors | format 2 (`seq`) for a schema-3 store | with the session store's move (section 4.12) | - |
@@ -2047,7 +2098,7 @@ C90 runs the book's part from plain books.
 | `friend_relay/relay_status.json`, `friend_relay/relay_key.ed25519` | the status reads as corrupt; the key is not 32 bytes | the older build's friend relay does not start (friend relays are gated in release); nothing is replaced |
 | `.send_<keyed>.lock.sqlite` | never taken (the older build uses `.send_<key hex>.lock.sqlite`) | the new build also takes the older name while it exists, so both still exclude each other |
 | `chat_history.json` (RVNHIST2; before PP.10 already a row with `stored_at_ms`, PP.9), stage (RVNOSTG2), app rows (0x02) | `ChatHistoryError::Corrupt` (checked against the PP.1 snapshot: never moved aside, never written over); app rows quarantined | fail closed: no ACK for a received chat, the sender retries |
-| `indexed_sessions.sqlite` (schema 2, PP.13; schema 3, PP.14: a PP.13 build refuses it as well; schema 4, review B-sealed-stores-1: the pack's earlier builds refuse it too), `app_channel.sqlite3`, `friend_custody.sqlite` | newer schema refused (`UnsupportedMetadataSchema` for the session store) | fail closed: the older build cannot send or receive; a racing older process may re-stamp `user_version`, so the new build detects the shape (and the older batch is a no-op on the moved tables: the index names are kept) |
+| `indexed_sessions.sqlite` (schema 2, PP.13; schema 3, PP.14: a PP.13 build refuses it as well; schema 4, review B-sealed-stores-1: the pack's earlier builds refuse it too), `app_channel.sqlite3` (schema 3, PP.12; schema 4, security review 2026-11, PRIV-1: the pack's schema-3 builds refuse it as well, and a racing one's outbox and pairing writes fail on the keyed tables), `friend_custody.sqlite` | newer schema refused (`UnsupportedMetadataSchema` for the session store) | fail closed: the older build cannot send or receive; a racing older process may re-stamp `user_version`, so the new build detects the shape (and the older batch is a no-op on the moved tables: the index names are kept) |
 | `owed_acks.sqlite` | renamed `owed_acks.sqlite.corrupt-<ms>` and rebuilt empty | owed ACKs delayed until the new build merges the set-aside copy back (PP.12); a copy that does not open as the profile's schema 2 is kept sealed (kind 64) and listed by `raven privacy status` |
 | `node_policy.json` | `p2p_relays` and `relay_external` absent (moved) | no relays for the older build's p2p (gated in release anyway); when it saves the policy it writes none and the sidecar stays |
 | `node_policy_peers.rms` `p2p_proxy` (Phase 4 P4.6) | an unknown field: ignored; a PP.6 build that rewrites the sidecar (its relays changed) or removes it (its relays cleared) drops it | the proxy setting reads as `auto` again (WSS proxy dials are gated in release); nothing else changes |
@@ -2122,8 +2173,14 @@ s126-s129 are free.
    file to take: if that older `ash` makes one while this build is already sending to the same
    friend, the two may overlap once (the older build cannot know the keyed name). The keyed name
    exists from this build's first send on, and the older name is taken whenever it exists.
-7. The app store's outbox, its pairing budget and its message ids still name friends in clear
-   (section 7.2, an open item outside the plan's steps); the app channel is gated off in release.
+7. The app store's outbox and pairing budget named friends in clear until schema 4 (security
+   review 2026-11, PRIV-1), while the app channel was already on in release: a copy made before
+   the move holds them, and a schema-3 store waiting for free space keeps writing them clear
+   until it moves (item 8). The inbox's, tombstones' and quarantine's message ids and app ids
+   stay clear (random ids; with the sender keyed they name no friend; section 7.2, an open item
+   outside the plan's steps), and so do the outbox's times and states: the files show when a
+   local app sent, how often, and, with equal keys for equal values, how many records involve the
+   same unknown friend.
 8. A store whose move to its keyed schema waits for free disk space keeps working, and writing,
    in its clear schema until a pass finds the space (section 4.10). The session store's move
    also waits while a journal is pending (section 4.11). An older build that set the
@@ -2191,7 +2248,7 @@ What keeps a later change from writing a friend's data in clear without anyone n
 
 | Guard | Where | What fails it |
 |---|---|---|
-| The file registry | `at_rest::FILES` (`rc/at_rest/registry.rs`): every file and pattern a profile writes, with its rule (sealed kind, epoch keys, keyed SQLite, already protected, plain with a reason, relay folder, lab), its writer lock and whether erase deletes it | `every_profile_file_name_is_classified`: a file name in the production sources of raven-core, raven-node or ash (`.json`, `.sqlite`, `.sqlite3`, `.bin`, `.seed`, `.secret`, `.vault`, `.dpapi`, `.rmk`, `.rms`) that the registry does not cover |
+| The file registry | `at_rest::FILES` (`rc/at_rest/registry.rs`): every file and pattern a profile writes (`*` within a folder, `folder/**` at any depth below it), with its rule (sealed kind, epoch keys, keyed SQLite, already protected, plain with a reason, relay folder, unsealed key with a reason, lab), its writer lock and whether erase deletes it | `every_profile_file_name_is_classified`: a file name in the production sources of raven-core, raven-node or ash (`.json`, `.sqlite`, `.sqlite3`, `.bin`, `.seed`, `.secret`, `.vault`, `.dpapi`, `.rmk`, `.rms`) that the registry does not cover |
 | Who uses the registry | `migrate_all` and the rotation pass (what to seal), `erase::plan` (what to delete), `unseal_all` (what to write back), `raven privacy status` (sealed and plain files), carrier_matrix C87 (the lab backends' files) | - |
 | The SQLite schema guard | `indexed_session_store::tests::sealed_store::no_clear_key_address_or_message_id_columns` | a column of any store (sessions, owed ACKs, the app store, custody, custody handoff, the security ledger) in a sealed profile whose name says address, device, peer, sender, recipient, depositor, custodian, message id, digest or nonce and that is not keyed, unless its list says why (R20's ids, the app store's open item) |
 | Version by shape | each store's open (`sqlite_rebuild`, section 4.10) | an older process's `user_version` stamp never migrates a keyed table twice |
@@ -2215,10 +2272,16 @@ pack on purpose, each with its place:
   and the relays; erase removes it), shell history and terminal scrollback (the guide says so),
   backups and snapshots, the OS temp folder (SQLite temp files are kept in memory during the
   migrations only).
-- **Gated stores not yet keyed**: the app store's outbox, pairing budget and message ids (section
-  7.2, `APP_CHANNEL_PRODUCTION_ENABLED = false`), and the legacy bridge queues `queue.sqlite` and
-  `forward_queue.sqlite` (`secure_delete` only, OD-PP-11).
+- **Gated stores not yet keyed**: the legacy bridge queues `queue.sqlite` and
+  `forward_queue.sqlite` (`secure_delete` only, OD-PP-11). The app store is not gated (the app
+  channel is on in release): its outbox and pairing budget are keyed since schema 4 (security
+  review 2026-11, PRIV-1), and its inbox, tombstone and quarantine message ids stay clear
+  (section 7.2, open item).
 - **Dedicated relay folders** (no identity, so no key root): plain.
+- **The Tor helper's keystore** (`tor/state/keystore/`, section 6.6): the onion service key and
+  the intro points' keys stay in clear in Arti's own files; erase overwrites them. Keeping the key
+  sealed and giving it to the helper only in memory is owner decision OD-T3 (security review
+  2026-11, KS-1).
 - **Lock v2** (a running node that drops its keys, auto-lock on sleep, a Raven passphrase on macOS
   and Windows): Phase 6 (P6.40). Lock v1 stops Raven (section 4.13).
 - **The terminal app's files and rows** (`tui_private.rms`, the settings rows, the overlays):

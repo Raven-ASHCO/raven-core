@@ -88,7 +88,8 @@ decrypt, modify, encrypt with a new nonce, `atomic_write_private` (0600 temp, fs
 directory fsync). The passphrase/KDF runs *before* the lock is taken; if the file changed meanwhile
 the key is re-derived from the passphrase still held in memory. Reads need no lock (rename is atomic).
 
-**Files:** data dir 0700 (`ensure_private_dir`), vault 0600. Opening refuses a symlink, a file not
+**Files:** data dir 0700 (`ensure_private_dir`; one another account owns is refused whatever its
+mode, root excepted: security review 2026-11, KS-2), vault 0600. Opening refuses a symlink, a file not
 owned by the current user, or any group/other bit (`chmod 600 …` in the message).
 
 **Zeroization:** passphrase, derived key, plaintext and per-entry values are `Zeroizing`; argon2's

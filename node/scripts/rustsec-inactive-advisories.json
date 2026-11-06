@@ -1,4 +1,23 @@
 {
   "schema": 1,
-  "inactive_vulnerability_exceptions": []
+  "inactive_vulnerability_exceptions": [],
+  "active_vulnerability_acceptances": [
+    {
+      "advisory_id": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.9.10",
+      "review_by": "2027-02-05",
+      "reachability": "rsa reaches the build only through Arti (tor-llcrypto, tor-key-forge and ssh-key-fork-arti). Raven runs Arti as a Tor client and onion service (arti-client features onion-service-client and onion-service-service, no relay), where Arti uses RSA only to verify signatures with public keys (relay and directory authority identity keys). RUSTSEC-2023-0071 (the Marvin attack) recovers a private key from the timing of private key operations; Raven holds no RSA private key and makes no RSA decryption or signature (its onion service keys are ed25519).",
+      "reason": "No rsa release fixes it (the advisory lists no patched version), and rsa is a required dependency of Arti 0.47.0, so it cannot be dropped without dropping the Tor carrier. Security review 2026-11 (DEP-2). Review again by review_by, or as soon as a patched rsa release or an Arti release without rsa exists."
+    }
+  ],
+  "non_registry_packages": [
+    {
+      "package": "spqr",
+      "version": "1.5.3",
+      "source": "git+https://github.com/signalapp/SparsePostQuantumRatchet?rev=fd320484dcec89004021e6fdc7481825f5f261fa#fd320484dcec89004021e6fdc7481825f5f261fa",
+      "review_by": "2027-05-01",
+      "reason": "Lab only: the optional full-braid-lab feature of raven-core (Full Braid Slice 2) is the only path to it, and that feature turns on mlkem768-incremental-lab, which cannot compile in a release build (compile_error! and the RAVEN_BUILD_PROFILE const assert in raven-core/src/mlkem768_incremental.rs). Pinned to one git revision of the Signal SparsePostQuantumRatchet repository; RustSec matches only crates.io packages, so no advisory is checked against this revision. By review_by, read the upstream security notes for this revision again, or move to a crates.io release."
+    }
+  ]
 }

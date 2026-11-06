@@ -47,7 +47,15 @@ Everything else (sealed letters, custody handoff, relays over WSS and HTTPS prox
 rotation, the LAN beacon, learning connectivity, the Phase 6b security features, session reset and
 renewal, the hybrid ratchet) is compiled in but held off by `*_PRODUCTION_ENABLED = false` gates; a
 release build never reads the `RAVEN_LAB_*` switches that open them in debug builds. CI checks this
-(the "lab switches inert in release" and "production flags as pinned" steps).
+on Linux, macOS and Windows (the "lab switches inert in release" and "production flags as pinned"
+steps, both from `node/scripts/release_inert_tests.sh`), in steps that still run when a step before
+them fails; the RustSec audit runs in a job of its own, so an advisory cannot skip them. Every lab
+switch reader hangs on `debug_assertions`, which a release profile can switch on, so a release build
+with debug assertions does not compile: `raven-core`, `ash` and `raven-node` each hold a const assert
+against it in `src/lib.rs` (only the cargo-fuzz build of `raven-core` is let through), the release
+scripts refuse the flags and profile settings that switch them on before they build, and CI checks
+both (`node/scripts/release_debug_assertions_check.sh` on Linux,
+`scripts/release/cargo_config_guard_selftest.sh`).
 
 ## 2. Components, in priority order
 
@@ -170,8 +178,15 @@ in a debug build with `RAVEN_LAB_TEST_A=1` plus the feature's own switch (for ex
 
 Exact dependency versions are in `node/Cargo.lock` (among them `ml-kem` 0.3.2, `snow` 0.9.6,
 `libp2p` 0.57.0 and, for the Tor helper, `arti-client` 0.47.0). Vendored and patched upstream code
-(SQLite and SQLCipher bindings, a Secret Service client, a time library) is under
-`node/third_party/`, with notes (`RAVEN.md`, `RAVEN_DELTA.md`) on what was changed.
+(SQLite and SQLCipher bindings, `arti-client`, a Secret Service client, a time library) is under
+`node/third_party/`, with notes (`RAVEN.md`, `RAVEN_DELTA.md`) on what was changed. These forks are
+path dependencies, so `Cargo.lock` holds no checksum for them: `node/third_party/forks.json`
+records each one's crates.io archive (its SHA-256) and its exact delta (every modified and added
+file pinned by SHA-256, the files left out), and CI checks every tracked file of each fork against
+it (`node/scripts/verify_vendored_forks.py`, the "Vendored fork provenance vs crates.io" job).
+RustSec checks only crates.io packages, so the dependency audit (`node/scripts/audit_active_dependencies.py`)
+checks each fork as the crates.io release it was forked from, and stops on any other package from
+outside crates.io that is neither a workspace member nor declared in its policy (`spqr`, git, lab only).
 
 ## 5. Out of scope
 

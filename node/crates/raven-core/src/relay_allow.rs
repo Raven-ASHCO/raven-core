@@ -1285,4 +1285,21 @@ mod tests {
             assert!(RELAY_STATUS_STALE_MS > 3 * RELAY_STATUS_HEARTBEAT.as_millis() as u64);
         }
     }
+
+    /// Security review 2026-11, WINLIN-1: `raven-node relay --check` asks
+    /// this about the relay's folder, which another account (the relay's)
+    /// controls, and the Linux kit ran that check as root. A journal planted
+    /// beside its written lock is not replayed: the file the journal names
+    /// stays, and the folder reads as in use, so no relay starts in it.
+    #[test]
+    fn a_planted_journal_in_a_relay_folder_deletes_nothing() {
+        use crate::paths::lock_replay_test;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = lock_replay_test::victim(outside.path());
+        let dir = tempfile::tempdir().unwrap();
+        lock_replay_test::plant_hot_journal(dir.path(), RELAY_LOCK_FILE, &victim);
+        let running = relay_is_running(dir.path());
+        lock_replay_test::assert_untouched(&victim);
+        assert!(running, "a lock that cannot be taken reads as in use");
+    }
 }

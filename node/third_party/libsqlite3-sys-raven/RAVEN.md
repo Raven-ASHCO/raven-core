@@ -29,8 +29,12 @@ Local audited fork of **libsqlite3-sys 0.38.2** (`links = "sqlite3"`).
   no Cargo.lock checksum. `../../scripts/verify_sqlcipher_fork_ordinary_sqlite_upstream.sh`
   re-derives the pins from the upstream archive and byte-compares `sqlite3/`,
   `src/`, `bindgen-bindings/`, `wrapper*.h` and `LICENSE`. SQLite security
-  updates therefore need an explicit vendor refresh + pin update (Dependabot
-  and version-based CVE tracking do not see this path dependency).
+  updates therefore need an explicit vendor refresh + pin update. Dependabot
+  does not see this path dependency. The RustSec audit
+  (`../../scripts/audit_active_dependencies.py`, CI) checks it as crates.io
+  `libsqlite3-sys` 0.38.2, the release it was forked from
+  (`../forks.json`); a SQLite CVE reaches RustSec only when an advisory names
+  a `libsqlite3-sys` version range.
 - `links = "sqlite3"`
 - Upstream MIT license for the Rust/build scaffolding
 - Binding API surface (no unnecessary rewrite)

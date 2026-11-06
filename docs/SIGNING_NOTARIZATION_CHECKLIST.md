@@ -96,9 +96,14 @@ questions, and a release needs both:
 
 1. **Reproducible build:** `scripts/release/build_reproducible.sh --out out/<target>`
    for each target. Its `SHA256SUMS` are the bytes before platform signing.
-   It stops before cargo runs when a cargo configuration sits above its
-   build folder (for example `/tmp/.cargo/config.toml`, which any local
-   account can write): remove it, find out who put it there, and build again.
+   It always pins the toolchain (`RUSTUP_TOOLCHAIN`), and it stops before
+   cargo runs when another local account could change the build through
+   `/tmp`: a cargo configuration or a rustup toolchain file above its build
+   folder (for example `/tmp/.cargo/config.toml` or `/tmp/rust-toolchain.toml`),
+   a build folder that is a symlink or another account's, or a `/tmp/.cargo`
+   that is not the builder's or root's or that others can write (the build
+   makes an empty one and removes it at the end). Remove what it names, find
+   out who put it there, and build again.
 2. **Platform signing** of `out/<target>/bin/*` into a separate folder, as in
    the sections above (macOS: sign, notarize the zip; Windows: signtool;
    Linux: nothing, the shipped bytes are the build's).

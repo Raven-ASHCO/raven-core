@@ -1144,3 +1144,115 @@ fn temp_files_of_interrupted_writes_go_with_ravens_folders() {
     #[cfg(unix)]
     assert_eq!(std::fs::read(&witness.1).unwrap(), [0; 32]);
 }
+
+/// Review KS-1 (interim) and TOR-7: once the onion service ran, the Tor
+/// helper's keystore holds the service's key, each time period's keys and
+/// the intro points' keys (seven levels below the profile). Every one is
+/// overwritten like the profile's own key files, and nothing of the
+/// helper's folder is left.
+#[test]
+fn the_tor_helpers_keys_are_overwritten_and_its_folder_goes() {
+    let _windows = ForTests::on();
+    let dir = sealed_profile();
+    let dd = canonical(&dir);
+    let lid = "01".repeat(32);
+    let keystore = "tor/state/keystore/hss/raven";
+    let keys = [
+        format!("{keystore}/ks_hs_id.ed25519_expanded_private"),
+        format!("{keystore}/ks_hs_blind_id+20412_1440_43200.ed25519_expanded_private"),
+        format!("{keystore}/ks_hs_desc_sign+20412_1440_43200.ed25519_private"),
+        format!("{keystore}/ipts/k_sid+{lid}.ed25519_private"),
+        format!("{keystore}/ipts/k_hss_ntor+{lid}.x25519_private"),
+        // An interrupted key write (Arti writes `<name>.tmp`, then renames).
+        format!("{keystore}/ks_hs_id.tmp"),
+    ];
+    let state = [
+        "tor/state/state.lock".to_owned(),
+        "tor/state/state/guards.json".to_owned(),
+        "tor/state/state.old/guards.json".to_owned(),
+        "tor/state/hss/raven.lock".to_owned(),
+        "tor/state/hss/raven/ipts.json".to_owned(),
+        format!("tor/state/hss/raven/iptreplay/{lid}.bin"),
+        "tor/cache/dir.sqlite3".to_owned(),
+        "tor/cache/dir_blobs/abcd".to_owned(),
+    ];
+    for name in keys.iter().chain(&state) {
+        std::fs::create_dir_all(dd.join(name).parent().unwrap()).unwrap();
+        std::fs::write(dd.join(name), [0x42; 64]).unwrap();
+    }
+    let p = plan(&dd).unwrap();
+    for name in &keys {
+        assert!(
+            p.key_files.contains(&dd.join(name)),
+            "{name} is not an overwritten key file: {:?}",
+            p.key_files
+        );
+    }
+    for name in &state {
+        assert!(p.data_files.contains(&dd.join(name)), "{name}");
+    }
+    assert!(p.left_unknown.is_empty(), "{:?}", p.left_unknown);
+    // A hard link outside the profile sees the zeros.
+    #[cfg(unix)]
+    let witness = {
+        let outside = tempfile::tempdir().unwrap();
+        let witness = outside.path().join("witness");
+        std::fs::hard_link(dd.join(&keys[3]), &witness).unwrap();
+        (outside, witness)
+    };
+    let report = erase(&dd);
+    assert!(report.finished && report.folder_removed, "{report:?}");
+    assert!(report.left_unknown.is_empty(), "{report:?}");
+    #[cfg(unix)]
+    assert_eq!(std::fs::read(&witness.1).unwrap(), [0; 64]);
+}
+
+/// Review KS-2: erase never touches a folder another account owns (its
+/// owner could swap a key file for a link while it is overwritten), by the
+/// rule of every private folder (`paths::ensure_private_dir`); root may.
+/// Another account is a seam: no file changes its owner.
+#[cfg(unix)]
+#[test]
+fn erase_refuses_a_folder_another_account_owns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile = tmp.path().join("p");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("identity.backend"), b"locked-file\n").unwrap();
+    assert_eq!(refusal_with(&profile, None, false, None), None);
+    {
+        let _other = crate::paths::AsAccountForTests::another();
+        let refused = refusal_with(&profile, None, false, None);
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|text| text.contains("belongs to another account")),
+            "{refused:?}"
+        );
+    }
+    {
+        let _root = crate::paths::AsAccountForTests::uid(0);
+        assert_eq!(refusal_with(&profile, None, false, None), None);
+    }
+    // Nothing was changed by the refusal.
+    assert_eq!(files_below(&profile), ["identity.backend"]);
+}
+
+/// Review KS-2: the zero overwrite never follows a link. One put in place of
+/// a key file between its check and its open zeroed the start of the file it
+/// points to, outside the profile.
+#[cfg(unix)]
+#[test]
+fn the_zero_overwrite_never_follows_a_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let victim = tmp.path().join("victim.txt");
+    std::fs::write(&victim, [0x42u8; 64]).unwrap();
+    let link = tmp.path().join(crate::identity_store::SEED_FILE_NAME);
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    overwrite_with_zeros(&link, 64);
+    assert_eq!(std::fs::read(&victim).unwrap(), [0x42u8; 64]);
+    // A key file itself still gets its zeros.
+    let key = tmp.path().join(META_KEY_FILE);
+    std::fs::write(&key, [0x42u8; 64]).unwrap();
+    overwrite_with_zeros(&key, 64);
+    assert_eq!(std::fs::read(&key).unwrap(), [0u8; 64]);
+}

@@ -30,8 +30,10 @@
 //!    starts with this data dir's namespace: one whose head was never
 //!    recorded, or all of them when the store can't be read), so no item of
 //!    another profile is ever named.
-//! 3. The small key files, and an interrupted write's temp copy of one,
-//!    overwritten and then deleted (hygiene only: on APFS and SSDs an
+//! 3. The small key files, every file the registry calls a key (the Tor
+//!    helper's keystore, at any depth: its onion service key and the intro
+//!    points' keys; review KS-1, TOR-7), and an interrupted write's temp copy
+//!    of one, overwritten and then deleted (hygiene only: on APFS and SSDs an
 //!    overwrite lands in new blocks).
 //! 4. Only Raven's files: what the registry ([`crate::at_rest::FILES`])
 //!    names, its declared patterns, quarantine copies (`<file>.corrupt*`)
@@ -101,6 +103,8 @@ const PREKEY_SECRETS_DIR: &str = "prekey-lifecycle-secrets";
 const PREKEY_LAB_FILE: &str = "prekey_lifecycle.protected";
 
 /// Step 3: small files that hold keys, overwritten before they are deleted.
+/// The registry's [`at_rest::Rule::UnsealedKey`] files are overwritten too,
+/// wherever the walk finds them ([`key_file`]).
 const KEY_FILES: &[&str] = &[
     at_rest::META_KEY_FILE,
     crate::identity_store::SEED_FILE_NAME,
@@ -132,6 +136,24 @@ pub fn not_a_profile_text(data_dir: &Path) -> String {
     format!(
         "This folder doesn't look like a Raven profile, so erase won't touch it: {}",
         sanitize_terminal_line(&data_dir.display().to_string())
+    )
+}
+
+/// The refusal for a folder another account owns (review KS-2; the UX
+/// copy).
+pub fn another_account_text(data_dir: &Path) -> String {
+    format!(
+        "This folder belongs to another account, so erase will not touch it: {}",
+        sanitize_terminal_line(&data_dir.display().to_string())
+    )
+}
+
+/// The refusal for a folder whose owner cannot be read (review KS-2).
+fn owner_unknown_text(data_dir: &Path, why: &str) -> String {
+    format!(
+        "Erase cannot tell which account owns this folder, so it will not touch it: {} ({})",
+        sanitize_terminal_line(&data_dir.display().to_string()),
+        sanitize_terminal_line(why)
     )
 }
 
@@ -181,6 +203,15 @@ pub(crate) fn refusal_with(
             Some(root) if dir.starts_with(&root) && dir != root => {}
             _ => return Some(LAB_GUARD_TEXT.to_owned()),
         }
+    }
+    // Review KS-2: never a folder another account owns (its owner could put
+    // a link in place of a key file while it is overwritten), by the rule of
+    // every private folder (`paths::ensure_private_dir`). An owner that
+    // cannot be read refuses too.
+    match crate::paths::owned_by_another_account(&dir) {
+        Ok(false) => {}
+        Ok(true) => return Some(another_account_text(data_dir)),
+        Err(why) => return Some(owner_unknown_text(data_dir, &why)),
     }
     if is_raven_profile(&dir) {
         None
@@ -556,7 +587,7 @@ pub(crate) fn plan_with(dir: &Path, platform: bool) -> Result<ErasePlan, String>
                 continue;
             }
             plan_folder(&mut plan, &taken, entry, &name);
-        } else if key_temp(&name) {
+        } else if key_file(&name) {
             plan.key_files.push(entry);
         } else if ravens_file(&name) {
             plan.data_files.push(entry);
@@ -569,8 +600,9 @@ pub(crate) fn plan_with(dir: &Path, platform: bool) -> Result<ErasePlan, String>
 
 /// One of Raven's folders (`name` below the profile): its files Raven's
 /// or not, and the folders in it the registry names files in, the same way
-/// (`updates/staged/<build serial>/`, P6.47). A link is never followed: it
-/// is not a real folder, so it is listed as it is.
+/// (`updates/staged/<build serial>/`, P6.47; every folder below `tor/`,
+/// TOR-7). A link is never followed: it is not a real folder, so it is
+/// listed as it is.
 fn plan_folder(plan: &mut ErasePlan, taken: &[PathBuf], folder: PathBuf, name: &str) {
     for inner in entries(&folder) {
         let below = inner
@@ -582,7 +614,7 @@ fn plan_folder(plan: &mut ErasePlan, taken: &[PathBuf], folder: PathBuf, name: &
             Some(below) if is_real_dir(&inner) && raven_folder(&below) => {
                 plan_folder(plan, taken, inner, &below)
             }
-            Some(below) if !is_real_dir(&inner) && key_temp(&below) => plan.key_files.push(inner),
+            Some(below) if !is_real_dir(&inner) && key_file(&below) => plan.key_files.push(inner),
             Some(below) if !is_real_dir(&inner) && ravens_file(&below) => {
                 plan.data_files.push(inner)
             }
@@ -631,14 +663,17 @@ fn ravens_file(name: &str) -> bool {
 
 /// A folder the registry names files in (`contact_inbox/`, `friend_relay/`,
 /// `lan_pair_response/`, ...), its patterns' folders too (`updates/staged/*`
-/// for `updates/staged/5`).
+/// for `updates/staged/5`), and every folder below one whose files it names
+/// at any depth (`tor/**`: the Tor helper's intro point keys are seven levels
+/// below the profile, review TOR-7).
 fn raven_folder(name: &str) -> bool {
     let depth = name.split('/').count();
     at_rest::FILES.iter().any(|rule| {
         let segments: Vec<&str> = rule.name.split('/').collect();
         rule.erase
-            && segments.len() > depth
-            && at_rest::registry::glob_match(&segments[..depth].join("/"), name)
+            && ((segments.len() > depth
+                && at_rest::registry::glob_match(&segments[..depth].join("/"), name))
+                || (rule.name.ends_with("/**") && at_rest::registry::glob_match(rule.name, name)))
     })
 }
 
@@ -658,9 +693,17 @@ fn temp_of(name: &str) -> Option<String> {
     Some(format!("{folder}{file}"))
 }
 
-/// A temp copy of one of the [`KEY_FILES`]: overwritten like the key.
-fn key_temp(name: &str) -> bool {
-    temp_of(name).is_some_and(|file| KEY_FILES.contains(&file.as_str()))
+/// A key file the folder walk finds: one the registry calls a key
+/// ([`at_rest::Rule::UnsealedKey`]: every file of the Tor helper's keystore,
+/// its own `<name>.tmp` of an interrupted write included; review KS-1,
+/// TOR-7), or the temp copy of an interrupted write of one of those or of
+/// the [`KEY_FILES`] (`.<name>.tmp.<16 hex>`). Overwritten like the key.
+fn key_file(name: &str) -> bool {
+    let key = |file: &str| {
+        KEY_FILES.contains(&file)
+            || rule_for(file).is_some_and(|rule| matches!(rule.rule, at_rest::Rule::UnsealedKey(_)))
+    };
+    key(name) || temp_of(name).is_some_and(|file| key(&file))
 }
 
 /// Whether every folder of `name` (a `/`-separated path below `dir`) is a
@@ -1013,11 +1056,22 @@ pub(crate) fn remove_file(path: &Path, overwrite: bool) -> Result<bool, String> 
     }
 }
 
+/// Zeros over the first `len` bytes of the file at `path`, fsynced (best
+/// effort). A link is never followed (review KS-2: one put in place of a key
+/// file after its check zeroed the file it points to); on Unix the open
+/// refuses it (`O_NOFOLLOW`).
 fn overwrite_with_zeros(path: &Path, len: u64) {
     use std::io::Write;
     // The key files are small; a larger file is not overwritten whole.
     const MAX: u64 = 64 * 1024 * 1024;
-    let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) else {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let Ok(mut file) = options.open(path) else {
         return;
     };
     let zeros = [0u8; 8192];

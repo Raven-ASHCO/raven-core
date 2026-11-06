@@ -123,6 +123,10 @@ if [[ -z "$FROM" ]]; then
   source "$REPO/scripts/release/cargo_config_guard.sh"
   raven_no_outer_cargo_config "$(dirname "$REPO")" "$CARGO_HOME_DIR" \
     || die "remove the cargo configuration named above (or build in a clean account), then run this again"
+  # Debug assertions in a release build open the lab gates (security review
+  # 2026-11, DEP-3; raven-core, ash and raven-node refuse to compile then too).
+  raven_no_release_debug_assertions \
+    || die "unset the debug assertion settings named above, then run this again"
   case "$HOME$REPO$TARGET_DIR$CARGO_HOME_DIR$RUSTUP_HOME_DIR" in
     *[[:space:]]*) die "a path has a space; RUSTFLAGS cannot carry it (HOME, the repository, the target folder, CARGO_HOME, RUSTUP_HOME)" ;;
   esac

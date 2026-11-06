@@ -18,15 +18,25 @@
 # SOURCE_DATE_EPOCH from the commit time; and a fixed build path: the
 # commit's tracked files are copied to /tmp/raven-reproducible/src and built
 # there with a cargo home of its own (/tmp/raven-reproducible/cargo, no user
-# configuration), both remapped to /raven and /cargo for Rust and C. Cargo
-# also reads a .cargo/config(.toml) in every folder above the one it builds
-# in, and /tmp is open to every local account: the build stops if one is
-# there (or in the build folder or its cargo home), before cargo runs and
-# again after it (scripts/release/cargo_config_guard.sh). Absolute
+# configuration), both remapped to /raven and /cargo for Rust and C. Absolute
 # paths still reach object files (a crate's own folder, compiled in and then
 # dropped by the linker) and change how the linker lays the binary out; a
 # fixed path keeps them the same. On macOS the linker also writes no debug
 # map (it names the toolchain's files by their path in the user's home).
+#
+# /tmp is open to every local account, and nothing another account leaves
+# there may run as the builder (scripts/release/cargo_config_guard.sh):
+# RUSTUP_TOOLCHAIN is always set to the pinned toolchain (it outranks a
+# rust-toolchain.toml above the build folder, whose path toolchain could
+# name any cargo), and rustc and cargo are checked again from the build
+# folder; the build folder is this user's own, private (0700) and never a
+# symlink (on macOS a planted one would lead the build, and its rm -rf of
+# src/, into a folder of the builder); /tmp/.cargo is made by the build
+# (empty, 0755, removed at the end) or must be the builder's or root's
+# with nobody else able to write it, so no config can be renamed into it
+# while cargo starts; and a cargo configuration (or a rustup toolchain
+# file) above the build folder, in it or in its cargo home stops the build,
+# before cargo runs and again after it.
 #
 # These are the binaries before platform signing (notarization,
 # Authenticode): their hashes are each file's rebuild_sha256 in the release
@@ -102,25 +112,16 @@ sha256_of() {
   fi
 }
 
-# The toolchain: the rustc on PATH when it is the pinned one, else the
-# pinned one through rustup (which installs it on first use). The build's
-# own cargo home below must not hide rustup's toolchains.
+# The toolchain: always the pinned one through RUSTUP_TOOLCHAIN, even when
+# the rustc on PATH already says it (rustup installs it on first use; a
+# rustc that is not rustup's ignores the variable and must be the pinned
+# version itself). The build's own cargo home below must not hide rustup's
+# toolchains.
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-rustc_version="$(rustc --version 2>/dev/null || true)"
-case "$rustc_version" in
-  "rustc $TOOLCHAIN "*) ;;
-  *)
-    export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
-    rustc_version="$(rustc --version)"
-    ;;
-esac
-case "$rustc_version" in
-  "rustc $TOOLCHAIN "*) ;;
-  *)
-    echo "build_reproducible: needs rustc $TOOLCHAIN (rustup toolchain install $TOOLCHAIN); found: $rustc_version" >&2
-    exit 1
-    ;;
-esac
+if ! raven_pin_toolchain "$TOOLCHAIN"; then
+  echo "build_reproducible: the pinned toolchain $TOOLCHAIN is needed (above)" >&2
+  exit 1
+fi
 target="$(rustc -vV | sed -n 's/^host: //p')"
 
 commit="$(git -C "$REPO" rev-parse HEAD)"
@@ -135,22 +136,29 @@ fi
 SOURCE_DATE_EPOCH="$(git -C "$REPO" log -1 --format=%ct HEAD)"
 export SOURCE_DATE_EPOCH
 
-# The fixed build folder: this user's, one build at a time, a fresh copy of
-# the tracked files every time (the cargo home is kept: downloads only).
-mkdir -p "$ROOT"
-ROOT="$(cd "$ROOT" && pwd -P)"
-if [[ ! -O "$ROOT" ]]; then
-  echo "build_reproducible: $ROOT belongs to another user; remove it first" >&2
+# The fixed build folder: this user's own and private, never a symlink, one
+# build at a time, a fresh copy of the tracked files every time (the cargo
+# home is kept: downloads only). /tmp's sticky bit keeps another account
+# from swapping the checked folder, or the .cargo beside it, later.
+if ! ROOT="$(raven_prepare_build_root "$ROOT")"; then
+  echo "build_reproducible: the build folder cannot be used (above)" >&2
   exit 1
 fi
+if ! raven_claim_outer_cargo_dir "$(dirname "$ROOT")"; then
+  echo "build_reproducible: a cargo configuration could be put beside the build folder while cargo starts (above)" >&2
+  exit 1
+fi
+outer_cargo_made="${raven_outer_cargo_made:-}"
 if ! mkdir "$ROOT/.lock" 2>/dev/null; then
   echo "build_reproducible: another reproducible build is running ($ROOT/.lock)" >&2
+  [[ -z "$outer_cargo_made" ]] || rmdir "$outer_cargo_made" 2>/dev/null || true
   exit 1
 fi
 cleanup() {
   if [[ "$keep" -eq 0 ]]; then
     rm -rf "$ROOT/src"
   fi
+  [[ -z "$outer_cargo_made" ]] || rmdir "$outer_cargo_made" 2>/dev/null || true
   rmdir "$ROOT/.lock" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -190,10 +198,22 @@ export CARGO_TARGET_DIR="$NODE/target/reproducible"
 export CARGO_TERM_COLOR=never
 
 echo "build_reproducible: $commit ($target, rustc $TOOLCHAIN, SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH) in $SRC"
-# No cargo configuration but the source's own: none above the build folder
-# (another account can write /tmp/.cargo), in it, or in its cargo home.
+# The same toolchain from the folder cargo starts in.
+if ! raven_pin_toolchain "$TOOLCHAIN" "$NODE"; then
+  echo "build_reproducible: the build folder does not get the pinned toolchain $TOOLCHAIN (above)" >&2
+  exit 1
+fi
+# No cargo configuration (or rustup toolchain file) but the source's own:
+# none above the build folder (another account can write /tmp), in it, or
+# in its cargo home.
 if ! raven_no_outer_cargo_config "$ROOT" "$CARGO_HOME"; then
   echo "build_reproducible: a cargo configuration outside the source would change this build; remove it (and find out who put it there), then build again" >&2
+  exit 1
+fi
+# No debug assertions from the environment: they open the lab gates
+# (security review 2026-11, DEP-3; the crates refuse to compile then too).
+if ! raven_no_release_debug_assertions; then
+  echo "build_reproducible: unset the debug assertion settings named above, then build again" >&2
   exit 1
 fi
 # The same packages as build_unsigned.sh; no features.

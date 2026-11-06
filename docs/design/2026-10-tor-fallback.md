@@ -108,6 +108,13 @@ Only ephemeral loopback ports are bound; no Raven port, no public port.
 - Arti generates the onion service key on first start and keeps it in its
   keystore under `<profile>/tor/` (nickname `raven`). The address is stable
   for the profile.
+- At rest (security review 2026-11, KS-1 and TOR-7): the keystore
+  (`tor/state/keystore/`) holds that key and the intro points' keys in
+  clear, in Arti's own files (owner only). The at-rest registry calls each
+  file there an unsealed key, and `raven erase` writes zeros over it before
+  it deletes the helper's folder at every depth. Keeping the key sealed and
+  handing it to the helper only in memory is the owner's decision (OD-T3);
+  until then the exposure is listed in THREAT_MODEL §3.7a (T3a).
 - raven-node signs a **binding** with its Raven identity key:
   `"RAVEN-ONION-BIND-V1" || 0x00 || hs_id_pub[32] || raven_ed_pub[32] ||
   issued_s u64`. The binding on the wire is `hs_id_pub[32] || issued_s u64

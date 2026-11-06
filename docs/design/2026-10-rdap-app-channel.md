@@ -927,9 +927,10 @@ CREATE TABLE app_consumer(id INTEGER PRIMARY KEY CHECK(id = 1), consumer TEXT NO
 CREATE TABLE app_pair_attempts(peer_device BLOB NOT NULL, at_ms INTEGER NOT NULL);
 ```
 
+- **Shapes at rest:** the tables above are a profile that is not sealed (schema 2). A sealed profile keys every column that names a friend (schema 3: the sender tables; schema 4 since security review 2026-11, PRIV-1: `app_outbox` and `app_pair_attempts` too, with the outbox's references, message ids and object digests; `session_id` clear); see `docs/design/2026-10-at-rest-metadata.md` §7.2. The API and its answers for intact rows are the same in every shape.
 - **Outbox rows** carry no content. Their metadata is comparable to the session store's own clear outbox metadata.
 - **Outbox state** is monotonic: `delivered` is final, the same rule as `chat_history::delivery_after`.
-- **Outbox capacity:** at most 512 records. Final records are kept 8 days so `client_ref` stays idempotent. At the cap the oldest final record is evicted; a live record is never evicted, and the submit fails with `APP_STORE` instead.
+- **Outbox capacity:** at most 512 records. Final records are kept 8 days so `client_ref` stays idempotent; a submit and, since security review 2026-11 (PRIV-1), every upkeep (`AppStore::maintain`) remove them after that. At the cap the oldest final record is evicted; a live record is never evicted, and the submit fails with `APP_STORE` instead.
 - **Lock order:**
   - Sender: PeerSendLock → session-store transaction. The app store is written in the callback, after commit.
   - Receiver: session-store transaction → app store (read only, for admit). After commit: app store write.

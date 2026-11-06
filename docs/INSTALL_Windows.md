@@ -38,7 +38,8 @@ gate describe features that stay held, or say so.
 Task Scheduler / service helper: `scripts/install/windows_service.ps1`
 (builds with `--locked`). Its default `-DataDir` is the profile `raven.exe` /
 `ash.exe` use without `--data-dir` (`RAVEN_DATA_DIR`, then `ASH_DATA_DIR`, then
-`%USERPROFILE%\.raven`); binaries go to `%LOCALAPPDATA%\RavenNode` (`-BinDir`).
+`%USERPROFILE%\.raven`); binaries go to `%LOCALAPPDATA%\RavenNode` (`-BinDir`),
+which the helper makes private to you (see the ACL paragraph under Identity seed).
 The named pipe is per user, not per profile, so a daemon installed with any other
 `-DataDir` must be addressed with `--data-dir <that dir>` on every CLI command, or
 the CLI would ping a daemon that serves a different profile.
@@ -987,4 +988,21 @@ root can on Unix). Files that other programs create in the folder inherit the
 same entry. The ACL is set before a file's contents are written and read back
 afterwards; when that fails (for example a profile on a FAT32 or exFAT drive,
 which has no ACLs) Raven refuses to use the folder instead of keeping private
-state readable by others. Check it with `icacls "$env:USERPROFILE\.raven"`.
+state readable by others. A folder that another account owns is refused too,
+whatever its ACL (security review 2026-11, KS-2): its owner could change the
+ACL back at any time. Your account, SYSTEM and the Administrators group (the
+owner of what an elevated administrator creates) may own it. Check it with
+`icacls "$env:USERPROFILE\.raven"` (and the owner with
+`(Get-Acl "$env:USERPROFILE\.raven").Owner`).
+
+The folder of the programs (`-BinDir` of `windows_service.ps1`, default
+`%LOCALAPPDATA%\RavenNode`, and of the relay kit's `windows_relay.ps1`) gets an
+ACL of its own too, set by the installer before it copies a binary in: full
+control for your account, SYSTEM and the Administrators group, nothing inherited
+and no entry for anyone else, read back afterwards (security review 2026-11,
+WINLIN-3). Without it a custom folder such as `C:\RavenNode` would take the
+drive root's permissions, under which every signed in user may change files,
+and your logon task would start their program as you. A folder another account
+owns, a drive root, or a drive without ACLs is refused; pick a folder of its
+own, since it becomes private to you. Check it with
+`icacls "$env:LOCALAPPDATA\RavenNode"`.

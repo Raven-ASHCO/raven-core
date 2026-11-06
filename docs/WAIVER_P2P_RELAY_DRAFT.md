@@ -879,7 +879,14 @@ over p2p (Phase 3, its own record) and Swift / iOS.
   ports only; `stopped (N connection(s) closed)`); the Linux unit's sandbox
   (`ProtectSystem=strict`, `ProtectHome=yes`, `NoNewPrivileges=yes`,
   `PrivateTmp=yes`) and caps (`MemoryMax=256M`, `TasksMax=256`,
-  `LimitNOFILE=4096`, `IPAccounting=yes`). Fuzz target `relay_inputs` covers
+  `LimitNOFILE=4096`, `IPAccounting=yes`). The Linux installer checks the
+  relay folder as the relay's account (`setpriv`, `CAP_NET_BIND_SERVICE` only
+  for a port below 1024; root only on a first install, before that account
+  exists) and changes nothing in it as root, so code running as the relay
+  account gets no root action out of the next update (security review
+  2026-11, WINLIN-1; `installer_hardening_selftest.sh` in CI); and a Raven
+  lock beside which a SQLite journal or WAL was planted is refused before
+  SQLite opens it (`paths::DataDirLock`). Fuzz target `relay_inputs` covers
   what a person pastes and what a relay folder holds.
 - **Diagnosis:** the reason block is ASCII, at most 120 bytes, without an
   address, PeerId, key or name; an unknown reason is shown as no reason;

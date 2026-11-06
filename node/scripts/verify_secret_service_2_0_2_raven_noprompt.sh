@@ -12,7 +12,7 @@ EXPECTED_LICENSE_MIT="0d13fdf5615ccc7e7123b58b5c88b0d2bbabe345cd70b94e094ee44034
 # MODIFIED file (e.g. src/session.rs: DH / secret handling) and regenerates the digest
 # would still pass. Pinning the digest file's own hash here makes every legitimate
 # re-freeze an edit of THIS script, which CODEOWNERS routes to crypto/assurance review.
-EXPECTED_PATCH_DIGEST_SHA256="c1381f6acc96fed642e5de9ec08c99f96fbe06246d3db6274c62d55349353bb6"
+EXPECTED_PATCH_DIGEST_SHA256="43587a5bf6dc8b87167ddea80584ea7a7609948355d5eae3a6401f293c5418a4"
 CRATE_URL="https://static.crates.io/crates/secret-service/secret-service-2.0.2.crate"
 
 fail() {
@@ -90,7 +90,6 @@ UPSTREAM="$WORK/unpack/secret-service-2.0.2"
 [[ -d "$UPSTREAM" ]] || fail "upstream root missing"
 
 MODIFIED=(
-  Cargo.lock
   Cargo.toml
   src/collection.rs
   src/error.rs
@@ -107,8 +106,13 @@ ADDED=(
   RAVEN_PATCH_MANIFEST
   tests/raven_r0_hard_stop.rs
 )
-PATCH_DIGEST_FILES=(
+# Upstream files the fork leaves out. Upstream ships a Cargo.lock for its
+# examples; the fork builds inside Raven's workspace (node/Cargo.lock), and
+# its .gitignore keeps a lock out of git, so a clean checkout has none.
+REMOVED=(
   Cargo.lock
+)
+PATCH_DIGEST_FILES=(
   Cargo.toml
   NOTICE
   PROVENANCE.md
@@ -141,6 +145,10 @@ contains() {
 while IFS= read -r upstream_file; do
   relative="${upstream_file#"$UPSTREAM/"}"
   fork_file="$FORK/$relative"
+  if contains "$relative" "${REMOVED[@]}"; then
+    [[ ! -e "$fork_file" && ! -L "$fork_file" ]] || fail "declared left out, but present: $relative"
+    continue
+  fi
   [[ -f "$fork_file" && ! -L "$fork_file" ]] || fail "missing upstream file: $relative"
   if contains "$relative" "${MODIFIED[@]}"; then
     cmp -s "$upstream_file" "$fork_file" && fail "declared modification is unchanged: $relative"
@@ -164,6 +172,10 @@ done
 for relative in "${ADDED[@]}"; do
   [[ -f "$FORK/$relative" && ! -e "$UPSTREAM/$relative" ]] \
     || fail "added allow-list entry mismatch: $relative"
+done
+for relative in "${REMOVED[@]}"; do
+  [[ -f "$UPSTREAM/$relative" && ! -e "$FORK/$relative" ]] \
+    || fail "removed allow-list entry mismatch: $relative"
 done
 
 [[ "$(sha256_file "$FORK/LICENSE-APACHE")" == "$EXPECTED_LICENSE_APACHE" ]] \

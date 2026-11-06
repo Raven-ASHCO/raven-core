@@ -342,6 +342,9 @@ pub enum ValueType {
     Nonce,
     /// Stored wire bytes compared for equality (`kh_envelope`, `kh_ack`).
     ObjectBytes,
+    /// A local app's own reference for a payload it submitted (the app
+    /// outbox's `kh_client_ref`, schema 4; security review 2026-11, PRIV-1).
+    ClientRef,
 }
 
 impl ValueType {
@@ -353,6 +356,7 @@ impl ValueType {
             ValueType::ObjectDigest => "object-digest",
             ValueType::Nonce => "nonce",
             ValueType::ObjectBytes => "object-bytes",
+            ValueType::ClientRef => "client-ref",
         }
     }
 }

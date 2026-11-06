@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "about": "The crates.io forks Raven vendors as path dependencies ([patch.crates-io] in node/Cargo.toml), so Cargo.lock holds no checksum for them. node/scripts/verify_vendored_forks.py checks each folder against its crates.io archive (crate_sha256 is the archive's SHA256, as the crates.io index records it) plus exactly this delta: modified and added files at the SHA256 of the fork's bytes, removed files absent. node/scripts/audit_active_dependencies.py audits each fork under its upstream name and version. A change to a vendored file is a change to this record, which crypto and assurance review (CODEOWNERS).",
+  "forks": [
+    {
+      "path": "node/third_party/arti-client-0.47.0-raven",
+      "lock_name": "arti-client",
+      "lock_version": "0.47.0",
+      "upstream": {
+        "name": "arti-client",
+        "version": "0.47.0",
+        "crate_sha256": "43e6531f26fe6f44d71dabdc63b7845bae81547cc738aa942f0e3e482f776388"
+      },
+      "why": "arti#1932: told instead of exiting when the Tor network requires a protocol this Arti lacks (RAVEN_DELTA.md)",
+      "delta": {
+        "modified": {
+          "Cargo.toml": "ba363ae5eb2f4a9d5de91a30aed512c62362156d729be16ec436b40487e5f104",
+          "src/client.rs": "b91a18e9bcbb95e328b857e97e380460c9ab96b7047a77f3b796bb4aeee00ecd",
+          "src/lib.rs": "a88951c420cf88aecf4b0d30885c504675bdf832f2ad310f61d0a3f39388da34"
+        },
+        "added": {
+          ".gitignore": "7fddeb99c2f6a8bf0c57f8ec992f4f3dd643174aaf358faaa704d9ae103eddda",
+          "RAVEN_DELTA.md": "4cd5fd99a143f758873b87f96c5fe72ecaf9cbc96d4abf47fc79ed0e79a10f99",
+          "src/raven_delta.rs": "398cf91c76145e16fcba780062690aab6d5531f9eda08710475744cfbcd00f9b"
+        },
+        "removed": [
+          "Cargo.lock"
+        ]
+      }
+    },
+    {
+      "path": "node/third_party/saturating-time-0.5.0-raven",
+      "lock_name": "saturating-time",
+      "lock_version": "0.5.0",
+      "upstream": {
+        "name": "saturating-time",
+        "version": "0.5.0",
+        "crate_sha256": "a586db154f85f3faf78398c37b6792d71f99d2253d3277571e14f8a8c6e49a65"
+      },
+      "why": "arti#2726: the limit search ends on a clock that counts 100 ns ticks (RAVEN_DELTA.md)",
+      "delta": {
+        "modified": {
+          ".gitignore": "7fddeb99c2f6a8bf0c57f8ec992f4f3dd643174aaf358faaa704d9ae103eddda",
+          "Cargo.toml": "dde912cd93e39fc99be548136254a6c6d43e6ed4169048d0b7f7abab5186a44f",
+          "src/internal.rs": "0078fa1a5c42b5ccbc2da9acf2702c42d283f19f41662257953f9573c40d3c60",
+          "src/lib.rs": "7ea87c84352915e288a269bc8015f459ef1b414dda0f2e25d2a24d4950a264db"
+        },
+        "added": {
+          "RAVEN_DELTA.md": "a94606231c7e37389453fccdbc319164d250f254945988741c161b7c6bdc768b"
+        },
+        "removed": [
+          ".cargo_vcs_info.json",
+          "Cargo.lock"
+        ]
+      }
+    },
+    {
+      "path": "node/third_party/secret-service-2.0.2-raven-noprompt",
+      "lock_name": "secret-service",
+      "lock_version": "2.0.2",
+      "upstream": {
+        "name": "secret-service",
+        "version": "2.0.2",
+        "crate_sha256": "e1da5c423b8783185fd3fecd1c8796c267d2c089d894ce5a93c280a5d3f780a2"
+      },
+      "why": "Task 0B.3 R0: no-prompt, DH-only Secret Service calls with zeroized buffers (RAVEN_DELTA.md, PROVENANCE.md)",
+      "delta": {
+        "modified": {
+          "Cargo.toml": "132d4ade07d6081f1894f917c6b38f3046e4fd0b3020da61ff26271031be6090",
+          "src/collection.rs": "4e9f8bbe93caf05fa269da5cc9198a60b9f8b3b5322fe0f8d217f1371899647b",
+          "src/error.rs": "70fa7cb10c03259b91c35c424572286813110096deb7de376d7503942f1ebc75",
+          "src/item.rs": "cf308ad47528ad9562165cdb2bad07924deff75da3b71bc4b076252244acc942",
+          "src/proxy/mod.rs": "7426d49e8297ba6f41d36959ca3b94f4c04d4c38a92da72137066f438a188a99",
+          "src/session.rs": "68fa271d8ff3d8bca27c110f201700d23bb156051ebf84f439d0be863f161638",
+          "src/util.rs": "812cbf6790c2950a54bed26d38301ebd6eea41677b317eda9e9582eff9356c2c"
+        },
+        "added": {
+          "NOTICE": "92f92a4cb41c8c9177b877c5ad954ceedc6385fb9b9a608cf3301215cd310f59",
+          "PROVENANCE.md": "ddfb86f8ad4b6c349c5d8454a15ff3294a74ac87d624b16d80507081d4ae16a2",
+          "RAVEN_DELTA.md": "85864a50cfdc54306820dd98772b1213fd9e4cb551a1ab53e568d296574ff191",
+          "RAVEN_PATCH_DIGEST": "43587a5bf6dc8b87167ddea80584ea7a7609948355d5eae3a6401f293c5418a4",
+          "RAVEN_PATCH_MANIFEST": "6bfa16f394ee91d8f8ebcc516714f503c24c97936146a3817d9efb79a2be99e1",
+          "tests/raven_r0_hard_stop.rs": "b7d86a6996246de5dced136c1c5202fac220c45d66df4584ed2d2a3940fd8fad"
+        },
+        "removed": [
+          "Cargo.lock"
+        ]
+      }
+    },
+    {
+      "path": "node/third_party/libsqlite3-sys-raven",
+      "lock_name": "libsqlite3-sys",
+      "lock_version": "0.38.2+raven.sqlcipher.4.17.0",
+      "upstream": {
+        "name": "libsqlite3-sys",
+        "version": "0.38.2",
+        "crate_sha256": "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+      },
+      "why": "Task 0A.2: the single links=sqlite3 owner, with the frozen SQLCipher 4.17.0 amalgamation for the lab build (RAVEN.md)",
+      "delta_verifier": "node/scripts/verify_sqlcipher_fork_ordinary_sqlite_upstream.sh"
+    }
+  ],
+  "not_forks": [
+    {
+      "path": "node/third_party/raven-sqlcipher-profile-guard",
+      "why": "Raven's own crate (a workspace member), with no upstream"
+    },
+    {
+      "path": "node/third_party/sqlcipher-4.17.0",
+      "why": "the SQLCipher 4.17.0 amalgamation of the lab SQLCipher build, not a crate: PROVENANCE.md and node/scripts/verify_sqlcipher_4_17.sh"
+    }
+  ]
+}
