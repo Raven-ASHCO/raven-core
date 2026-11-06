@@ -144,6 +144,25 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, the onion link pin)
+
+A behaviour change of a frozen rule, not of the wire format: no frame layout,
+entry type, caps bit, card field or vector changed, and every gate stays as it
+was.
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §5.1: each node pins each contact's onion link static, trust on first use
+  (a keyed digest in its Noise pin store under a row of its own, sealed in a
+  sealed profile), records it after every verified onion link with that
+  contact, whichever side dialled, and ends an onion dial whose responder
+  shows another static after Noise message 2 (`NOISE_PIN_MISMATCH`), before
+  its message 3 and its signed hello. Before, onion links used no pin, so
+  whoever held a copy of the onion service key could answer at the onion
+  address and learn which friends dial and when. Pinned again by the
+  contact's own verified onion link, by a newer binding naming another onion
+  service key, or by removing the contact. Peers see no difference; the
+  first onion dial to a contact is still trust on first use.
+
 ## Freeze record changes (2026-11-01, a frame-less dial asks for route hints)
 
 A behaviour change of a frozen sender rule, not of the wire format: no frame

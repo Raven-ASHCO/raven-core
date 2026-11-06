@@ -276,10 +276,34 @@ onion_static = HKDF-SHA256(salt = "rvn1/onion-noise/v1", IKM = identity seed,
   direct, p2p and nearby links use. It is stable, and names nothing beyond the onion address
   the card already shows.
 - The RIH1 hello signs the static with the handshake hash (as on Internet direct), so a contact
-  still authenticates it; Tor authenticates the onion service, whose key the identity signs
-  (§3).
-- Noise pins (M0) are neither checked nor recorded on onion links: a pin records the device
-  static.
+  still authenticates it, but the dialer reads the listener's hello only after its own message 3
+  and its own signed hello. Tor authenticates only the onion service key, which the identity
+  signs (§3); the binding does not name this static. So whoever holds a copy of that key but not
+  the identity seed could answer at the onion address and read the dialer's static and signed
+  hello. The onion link pin (next) stops that after the first verified onion link.
+- **The onion link pin.** Each node pins each contact's onion link static, trust on first use,
+  and checks it as a Noise pin (M0) is checked:
+  - The pin is HMAC-SHA256 under the node's pin key (M0: HKDF of its identity seed), over the
+    domain `rvn1/onion-link-pin/v1`, the contact's identity key and the static; never the static
+    itself. It is kept with the node's Noise pins (`lan_noise_pins.json`; the sealed
+    `lan_noise_pins.rms` in a sealed profile) under a row of its own:
+    SHA-256(`rvn1/onion-link-pin-row/v1` || the contact's identity key).
+  - Recorded after each verified onion link with the contact, whichever side dialled (the
+    contact's hello signed the static). A new static replaces the pin.
+  - Checked by the dialer after message 2: another static ends the dial with
+    `NOISE_PIN_MISMATCH` before message 3, so that responder never sees the dialer's static or
+    hello. A pin store that exists but cannot be read dials nothing over Tor
+    (`NOISE_PIN_UNAVAILABLE`).
+  - Pinned again: the contact's own verified onion link to this node records its current
+    static; a newer binding (§3, from a fresh card or an RRH1 entry over any carrier) naming
+    another `hs_id` forgets the pin, so the next verified onion link pins again; removing the
+    contact forgets it. A binding of the same `hs_id` signed again keeps it. A contact restored
+    from its seed answers with the same static (it is derived from the seed), so it needs none of
+    these.
+  - Always on with the carrier (no gate of its own). Nothing new is sent: no wire change.
+  - The first onion dial before any verified onion link with that contact is still trust on
+    first use, as is the first after a binding naming another `hs_id`.
+- Noise pins (M0) of the device static are neither checked nor recorded on onion links.
 - Nodes from before this rule answered onion links with the device static. The carrier has
   never been on in a release build, so no deployed node does.
 

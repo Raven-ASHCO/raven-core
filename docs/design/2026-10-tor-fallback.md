@@ -123,6 +123,19 @@ Only ephemeral loopback ports are bound; no Raven port, no public port.
   its `experimental-api` feature, which has no stability promise. Owner
   decision OD-T3 lists the trade-off (a restored profile gets a new onion
   address).
+- **The onion link pin** (protocol §5.1). The binding names the onion
+  service key, not the onion link's Noise static, and Tor authenticates only
+  that key. So whoever copies the key (it is in `<profile>/tor/`) could answer
+  at the address and read the dialer's static and signed hello before the
+  dialer reads the listener's hello. Each node therefore pins each contact's
+  onion link static after the first verified onion link (either side
+  dialled), as a keyed digest in its Noise pin store (sealed in a sealed
+  profile), and a dial that meets another static stops after Noise message 2
+  (`NOISE_PIN_MISMATCH`). It is pinned again by the contact's own verified
+  onion link, by a newer binding naming another onion key (a fresh card, or
+  route hints on any link), and by removing the contact. The static comes from
+  the identity seed, so a friend restored from its seed (new onion address,
+  same static) is never stopped. No wire change.
 
 ### 3.3 Where friends learn it
 
@@ -422,6 +435,13 @@ within 10 s each; steps 7-9 deliver without a manual restart.
 - **Presence.** Anyone holding a card can tell when its owner is online
   (descriptor and intro point answers). Same class as an Internet direct
   address today, without the IP.
+- **A copy of the onion service key.** It is kept in the clear under
+  `<profile>/tor/` (sealing it waits on OD-T3). With the onion link pin
+  (§3.2) a copy answers no pinned dial; still open: the first onion dial
+  to a contact before any verified onion link, and the first after a binding
+  naming another onion key, can be answered by a copy holder, who then reads
+  the dialer's identity (a binding that also names the static would close
+  this; it changes the wire).
 - **Resource use.** One published service keeps intro circuits up; desktop
   CPU and memory for this are unmeasured (field test step 10 adds them).
 - **Duplicates.** Possible only when both paths complete the handshake at
