@@ -46,6 +46,9 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
 - With the gate closed a node starts no Tor helper, publishes no onion service, makes no onion
   dial, prints no `onion=` card field and sends no RRH1 ONION entry. Its plans are exactly those
   of a build without the carrier.
+- The Tor speed Stage A gates (`onion_gate::ONION_WARM_PRODUCTION_ENABLED` and four more, all
+  false; lab switches `RAVEN_LAB_TOR_WARM` and so on with the Lab Test A unlock, debug builds
+  only; a hold each) open only while this one is. Only W1 acts yet (§10); none changes a frame.
 
 ## §2 Roles
 
@@ -258,6 +261,14 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   the learning prober and the update exchange plan no onion route.
 - A rendezvous circuit is kept by Arti for 10 minutes after its last use, then closed.
 - Channel padding `reduced`.
+- W1, kept links (Tor speed Stage A; gate `onion_gate::ONION_WARM_PRODUCTION_ENABLED = false`,
+  lab switch `RAVEN_LAB_TOR_WARM` with the Lab Test A unlock, debug builds only, hold
+  `feature/onion-warm`; open only while §1's gate is): a program's send keeps the dialer's link
+  after a batch that got every reply it waited for, for the next batch to the same contact,
+  within 20 s of that batch, 120 s of the link's dial and 56 frames, at most 4 links (2 on the
+  embedded node) and one per contact. No link is opened for it with nothing to send, and no
+  frame changes: the listener reads one frame after another on a link, as before, within its
+  own limits (§5).
 
 ### §5.1 The onion link's Noise static
 

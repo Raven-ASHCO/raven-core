@@ -206,6 +206,19 @@ fn seal(
     key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
     text: &str,
 ) -> Vec<u8> {
+    seal_as(dir, identity, key, text, false)
+}
+
+/// [`seal`], and `queued`: handed to the outbox as `raven send` hands it,
+/// so the session takes a next message behind it (one prepared message per
+/// lane). Unqueued, the message stays prepared.
+fn seal_as(
+    dir: &Path,
+    identity: &Identity,
+    key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
+    text: &str,
+    queued: bool,
+) -> Vec<u8> {
     use raven_core::indexed_session_store::{AuthorizedEndpointDevice, IndexedSessionStore};
     let now = raven_core::clock::now_ms();
     let (cert, registry) = raven_core::device_cert::ensure_local_device_certificate(
@@ -226,9 +239,13 @@ fn seal(
         (now + 3_600_000).min(end),
         now,
         &mut rand::rngs::OsRng,
-        &mut |_digest: &[u8; 32], bytes: &[u8]| {
+        &mut |digest: &[u8; 32], bytes: &[u8]| {
             sealed = Some(bytes.to_vec());
-            Err(())
+            if queued {
+                Ok(*digest)
+            } else {
+                Err(())
+            }
         },
     );
     sealed.expect("sealed")
@@ -1667,4 +1684,385 @@ async fn a_ready_helper_whose_self_checks_reach_the_service_is_kept() {
         panic!("ended after {ran:?}: {end:?}");
     }
     assert!(restarts.may_repair(now_for_watchdogs()), "no repair");
+}
+
+// ── W1: kept links (Tor speed Stage A, speed design M1) ────────────────────
+
+/// One Tor round trip in the W1 tests that time a send: a loopback connect
+/// takes it, and every byte arrives half of it later. Local work in a send
+/// (a debug build: about 0.4 s for a send of 7 round trips) stays well
+/// under it, so the round trips counted are the network's.
+const R: Duration = Duration::from_millis(1000);
+
+/// `took` in round trips of [`R`], rounded down.
+fn trips(took: Duration) -> u128 {
+    took.as_millis() / R.as_millis()
+}
+
+/// A pool of one test's own, with `limits` and its own gate switch (open):
+/// no other test's lock, network change or helper end empties it.
+fn test_pool(
+    limits: warm::Limits,
+) -> (
+    &'static warm::WarmPool,
+    &'static std::sync::atomic::AtomicBool,
+) {
+    let gate: &'static std::sync::atomic::AtomicBool =
+        Box::leak(Box::new(std::sync::atomic::AtomicBool::new(true)));
+    let pool: &'static warm::WarmPool = Box::leak(Box::new(warm::WarmPool::new(
+        limits,
+        warm::Gate::Switch(gate),
+    )));
+    (pool, gate)
+}
+
+/// Waits until `ok` holds, at most `within`.
+async fn until(what: &str, within: Duration, ok: impl Fn() -> bool) {
+    let end = Instant::now() + within;
+    while !ok() {
+        assert!(Instant::now() < end, "{what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+impl Friends {
+    /// The Tor streams Alice's helper connected so far.
+    fn connects(&self) -> u64 {
+        loopback::Counts::read(&self.a.path().join(TOR_DIR)).connects
+    }
+
+    /// A program's dial of `frames` to Bob (none: a send's check), as
+    /// `ipc_server` asks it, with the kept links of `pool` and the reply
+    /// `waits`.
+    async fn program_dials(
+        &self,
+        pool: &'static warm::WarmPool,
+        waits: ReplyWaits,
+        frames: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        dial_with_pool(
+            pool,
+            waits,
+            self.a.path(),
+            &raven_core::onion::dial_for(&self.side_b.hs_id),
+            &hex::encode(self.bob_pub),
+            frames,
+            DialMeta {
+                send_check: frames.is_empty(),
+                warm: true,
+                ..DialMeta::default()
+            },
+        )
+        .await
+    }
+
+    /// A program's send of `text` to Bob, as the app's engine makes it: its
+    /// check, then its message (sealed first, local work outside the time
+    /// taken, and queued so the next send can seal its own). How many ACKs
+    /// came, and how long the check and the message took.
+    async fn program_sends(&self, pool: &'static warm::WarmPool, text: &str) -> (usize, Duration) {
+        let sealed = seal_as(self.a.path(), &self.alice, &self.key_ab, text, true);
+        let began = Instant::now();
+        let check = self
+            .program_dials(pool, ONION_WAITS, &[])
+            .await
+            .expect("the check answered");
+        assert!(!check.is_empty(), "the friend's offer");
+        let replies = self
+            .program_dials(pool, ONION_WAITS, &[sealed])
+            .await
+            .expect("delivered");
+        let took = began.elapsed();
+        (raven_core::outbox::ack_frames(&replies).len(), took)
+    }
+}
+
+/// W1 (speed design M1): with the warm gate open, a program's first send
+/// over Tor (its check, then its message) costs 4 round trips and one Tor
+/// stream, as the message rides its check's link; its next send within
+/// WARM_IDLE costs 1 round trip and no stream, its check answered from the
+/// kept link. On loopback Tor whose connect takes one round trip r and
+/// whose every byte arrives r/2 later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_after_the_check_rides_the_checks_link() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, _gate) = test_pool(warm::LIMITS);
+    let (acks, first) = f.program_sends(pool, "first, on one link").await;
+    assert_eq!(acks, 1);
+    assert_eq!(f.connects(), 1, "one Tor stream: {first:?}");
+    assert_eq!(trips(first), 4, "a first send took {first:?}, r {R:?}");
+    assert_eq!(pool.len(), 1, "its link is kept");
+    let (acks, second) = f.program_sends(pool, "second, within WARM_IDLE").await;
+    assert_eq!(acks, 1);
+    eprintln!("a first send {first:?}, a warm send {second:?}, r {R:?}");
+    assert_eq!(f.connects(), 1, "no other Tor stream: {second:?}");
+    assert_eq!(trips(second), 1, "a warm send took {second:?}, r {R:?}");
+    assert_eq!(
+        inbox(f._b.path()),
+        ["first, on one link", "second, within WARM_IDLE"]
+    );
+    pool.flush();
+}
+
+/// With the warm gate shut nothing changes: each send is a check of 3
+/// round trips and a message link of 4, two Tor streams, and no link is
+/// kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_the_warm_gate_shut_a_send_opens_two_links_as_before() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    gate.store(false, std::sync::atomic::Ordering::SeqCst);
+    for (n, text) in (1..).zip(["one", "two"]) {
+        let (acks, took) = f.program_sends(pool, text).await;
+        eprintln!("a send with the gate shut {took:?}, r {R:?}");
+        assert_eq!(acks, 1);
+        assert_eq!(f.connects(), 2 * n, "{took:?}");
+        assert_eq!(trips(took), 7, "a send took {took:?}, r {R:?}");
+        assert_eq!(pool.len(), 0, "nothing kept");
+    }
+}
+
+/// A kept link closes once its friend is blocked or no longer verified, or
+/// the warm gate is held (a security notice holds it: raven-core
+/// `speed_gates_need_the_carrier_their_switch_and_no_hold`); the keeper
+/// looks every sweep. And a batch for a friend blocked a moment ago, before
+/// any sweep, does not ride the kept link: nothing is sent and no stream
+/// opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_or_unpinned_contact_or_a_held_gate_closes_the_kept_link() {
+    use crate::outbox::test_rig::contacts;
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let block = |on: bool| {
+        let mut blocks = raven_core::BlockList::default();
+        if on {
+            blocks.block(&hex::encode(f.bob_pub));
+        }
+        blocks.save(f.a.path()).unwrap();
+    };
+    let (pool, gate) = test_pool(warm::Limits {
+        sweep: Duration::from_millis(50),
+        ..warm::LIMITS
+    });
+    for case in ["blocked", "unpinned", "held"] {
+        assert_eq!(f.program_sends(pool, case).await.0, 1, "{case}");
+        assert_eq!(pool.len(), 1, "{case}: kept");
+        match case {
+            "blocked" => block(true),
+            "unpinned" => contacts(f.a.path(), &f.bob_pub, "", "", false),
+            _ => gate.store(false, std::sync::atomic::Ordering::SeqCst),
+        }
+        until(
+            &format!("{case}: the keeper closes the kept link"),
+            Duration::from_secs(5),
+            || pool.len() == 0,
+        )
+        .await;
+        match case {
+            "blocked" => block(false),
+            "unpinned" => contacts(f.a.path(), &f.bob_pub, "", "", true),
+            _ => gate.store(true, std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+    let (pool, _gate) = test_pool(warm::Limits {
+        sweep: Duration::from_secs(600),
+        ..warm::LIMITS
+    });
+    assert_eq!(f.program_sends(pool, "kept").await.0, 1);
+    assert_eq!(pool.len(), 1);
+    let connects = f.connects();
+    block(true);
+    let sealed = seal_as(f.a.path(), &f.alice, &f.key_ab, "after the block", true);
+    let err = f
+        .program_dials(pool, ONION_WAITS, &[sealed])
+        .await
+        .unwrap_err();
+    block(false);
+    assert!(err.contains("blocked peer"), "{err}");
+    assert_eq!(pool.len(), 0, "the kept link is closed");
+    assert_eq!(f.connects(), connects, "and no stream opened");
+    assert!(!inbox(f._b.path()).contains(&"after the block".to_string()));
+}
+
+/// A batch whose reply wait ran out never leaves its link kept: not a fresh
+/// link (its read may have stopped part way through a frame), nor a kept
+/// one (its reply may still come, and would be taken for the next batch's).
+/// The resend then opens a fresh link and gets exactly one ACK, and Bob
+/// holds the message once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_that_timed_out_never_returns_its_link() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        latency: R / 2,
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, _gate) = test_pool(warm::LIMITS);
+    // Longer than nothing, shorter than the round trip the ACK takes.
+    let short = ReplyWaits {
+        first: R / 3,
+        ..ONION_WAITS
+    };
+    let acks = |replies: &[Vec<u8>]| raven_core::outbox::ack_frames(replies).len();
+    let sealed = seal(f.a.path(), &f.alice, &f.key_ab, "late");
+    let replies = f
+        .program_dials(pool, short, std::slice::from_ref(&sealed))
+        .await
+        .expect("the link opened");
+    assert_eq!(acks(&replies), 0, "no ACK within the wait");
+    assert_eq!(f.connects(), 1);
+    assert_eq!(pool.len(), 0, "a fresh link whose wait ran out is not kept");
+    let check = f
+        .program_dials(pool, ONION_WAITS, &[])
+        .await
+        .expect("the check answered");
+    assert!(!check.is_empty());
+    assert_eq!(
+        (f.connects(), pool.len()),
+        (2, 1),
+        "the check's link is kept"
+    );
+    let replies = f
+        .program_dials(pool, short, std::slice::from_ref(&sealed))
+        .await
+        .expect("the batch ended");
+    assert_eq!(acks(&replies), 0, "no ACK within the wait");
+    assert_eq!(f.connects(), 2, "it rode the kept link");
+    assert_eq!(pool.len(), 0, "a kept link whose wait ran out is closed");
+    let replies = f
+        .program_dials(pool, ONION_WAITS, &[sealed])
+        .await
+        .expect("delivered");
+    assert_eq!(acks(&replies), 1, "exactly one ACK");
+    assert_eq!(f.connects(), 3, "on a fresh link");
+    assert_eq!(inbox(f._b.path()), ["late"], "Bob holds it once");
+    pool.flush();
+}
+
+/// Every kept link closes at a flush, and the next send opens a fresh link.
+/// The process's pool is flushed ([`warm::flush`]) at a network change and
+/// at the end of the onion task here, at a lock (the lock tests), at the
+/// end of a helper life and at the embedded node's pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_pool_drops_every_link_on_a_flush() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, _gate) = test_pool(warm::LIMITS);
+    assert_eq!(f.program_sends(pool, "before the flush").await.0, 1);
+    assert_eq!((f.connects(), pool.len()), (1, 1));
+    pool.flush();
+    assert_eq!(pool.len(), 0);
+    assert_eq!(f.program_sends(pool, "after the flush").await.0, 1);
+    assert_eq!((f.connects(), pool.len()), (2, 1), "a fresh link");
+    pool.flush();
+    // No helper is live now: the network change restarts none.
+    drop(f);
+    let count = warm::flushes_for_test;
+    let before = count(warm::Flush::NetworkChanged);
+    network_changed(false);
+    assert!(
+        count(warm::Flush::NetworkChanged) > before,
+        "network change"
+    );
+    let before = count(warm::Flush::TorEnded);
+    drop(LiveGuard);
+    assert!(
+        count(warm::Flush::TorEnded) > before,
+        "the onion task's end"
+    );
+}
+
+/// A kept link carries a batch only within its limits, scaled down here:
+/// idle past `idle` or older than `age`, the keeper closes it, and the next
+/// send opens a fresh link; one that carried `frames` frames is not kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_idle_old_or_full_is_retired_not_reused() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let sweep = Duration::from_millis(50);
+    for (case, limits) in [
+        (
+            "idle",
+            warm::Limits {
+                idle: Duration::from_millis(700),
+                sweep,
+                ..warm::LIMITS
+            },
+        ),
+        (
+            "old",
+            warm::Limits {
+                age: Duration::from_millis(1500),
+                sweep,
+                ..warm::LIMITS
+            },
+        ),
+    ] {
+        let (pool, _gate) = test_pool(limits);
+        let connects = f.connects();
+        assert_eq!(f.program_sends(pool, case).await.0, 1, "{case}");
+        assert_eq!(pool.len(), 1, "{case}: kept");
+        until(
+            &format!("{case}: the keeper closes the kept link"),
+            Duration::from_secs(5),
+            || pool.len() == 0,
+        )
+        .await;
+        assert_eq!(f.program_sends(pool, case).await.0, 1, "{case}");
+        assert_eq!(f.connects(), connects + 2, "{case}: a fresh link");
+        pool.flush();
+    }
+    let (pool, _gate) = test_pool(warm::Limits {
+        frames: 1,
+        ..warm::LIMITS
+    });
+    for text in ["full", "full again"] {
+        assert_eq!(f.program_sends(pool, text).await.0, 1);
+        assert_eq!(pool.len(), 0, "a link that carried its frames is not kept");
+    }
 }

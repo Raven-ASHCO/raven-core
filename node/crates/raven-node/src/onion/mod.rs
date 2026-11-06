@@ -46,6 +46,7 @@
 pub(crate) mod proto;
 pub(crate) mod race;
 pub(crate) mod stages;
+pub(crate) mod warm;
 pub(crate) mod watch;
 
 /// The Tor helper's own Arti code, run inside this process (the iOS app;
@@ -373,6 +374,8 @@ struct LiveGuard;
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
+        // Its helper's streams end with it: no batch may ride one (W1).
+        warm::flush(warm::Flush::TorEnded);
         *live_lock() = None;
         raven_core::onion_gate::set_onion_ready(false);
         update_status(|s| *s = Status::default());
@@ -419,8 +422,10 @@ static RESTART_WHY: Mutex<Option<End>> = Mutex::new(None);
 /// netwatch's hook: this computer's paths are stale (a network gone or
 /// back, the default route moved) or it woke from sleep. A running helper is
 /// restarted at once (Arti handles neither, #2705, #594); a helper waiting
-/// for its next start starts now. Nothing while no onion task runs.
+/// for its next start starts now. Nothing while no onion task runs. Every
+/// kept link closes (W1): its stream may ride a path that is gone.
 pub(crate) fn network_changed(woke: bool) {
+    warm::flush(warm::Flush::NetworkChanged);
     if live_lock().is_none() {
         return;
     }
@@ -856,6 +861,8 @@ async fn supervise(
             live.connect = None;
         }
         raven_core::onion_gate::set_onion_ready(false);
+        // The helper's streams went with its life (W1: no kept link stays).
+        warm::flush(warm::Flush::TorEnded);
         // The Tor network requires a protocol this Tor lacks: no restart
         // can help (Arti would end the same way, or refuse to start), and an
         // obsolete client must not keep trying. Off until Raven is updated.
@@ -1717,13 +1724,43 @@ pub(crate) const ONION_UNREACHABLE: &str = "ONION_UNREACHABLE: the contact's oni
 /// The route is no onion route.
 const ONION_BAD_ROUTE: &str = "onion route must be onion:<64 hex>";
 
+/// Tor's reply waits (design §3.5): today's first-reply wait, and an idle
+/// wait sized for a Tor round trip.
+const ONION_WAITS: ReplyWaits = ReplyWaits {
+    first: netutil::PRODUCTION_REPLY_WAITS.first,
+    idle: raven_core::onion::ONION_REPLY_IDLE,
+};
+
 /// An onion dial to the verified contact `expected_pub_hex` at the onion
 /// route `dial` ([`raven_core::onion::dial_for`]): the helper's Tor stream,
 /// then the Raven link ([`ONION_LINK`]), `frames` and their replies. Waits
 /// sized for Tor (design §3.5). In the outbox race, `meta.race` claims the
 /// attempt when the link authenticated. A debug build keeps its stage
-/// times ([`stages`]).
+/// times ([`stages`]). A program's send (`meta.warm`) uses the process's
+/// kept links ([`warm::WARM`]) while the warm gate is open.
 pub(crate) async fn dial_with_meta(
+    data_dir: &Path,
+    dial: &str,
+    expected_pub_hex: &str,
+    frames: &[Vec<u8>],
+    meta: DialMeta,
+) -> Result<Vec<Vec<u8>>, String> {
+    dial_with_pool(
+        &warm::WARM,
+        ONION_WAITS,
+        data_dir,
+        dial,
+        expected_pub_hex,
+        frames,
+        meta,
+    )
+    .await
+}
+
+/// [`dial_with_meta`] with the kept links of `pool` and the reply `waits`.
+async fn dial_with_pool(
+    pool: &'static warm::WarmPool,
+    waits: ReplyWaits,
     data_dir: &Path,
     dial: &str,
     expected_pub_hex: &str,
@@ -1740,13 +1777,28 @@ pub(crate) async fn dial_with_meta(
     stages::timed(
         purpose,
         frames.len(),
-        dial_marked(data_dir, dial, expected_pub_hex, frames, meta),
+        dial_on(pool, waits, data_dir, dial, expected_pub_hex, frames, meta),
     )
     .await
 }
 
-/// [`dial_with_meta`] itself.
-async fn dial_marked(
+/// A Tor dial's progress: the reply `waits`, Tor's connect budget, the
+/// outbox race it is in and whether it is a send's check.
+fn onion_progress(waits: ReplyWaits, meta: DialMeta) -> DialProgress {
+    let mut progress = DialProgress::with_connect("ONION", waits, ONION_CONNECT_BUDGET);
+    progress.collector.set_race(meta.race);
+    progress.send_check = meta.send_check;
+    progress
+}
+
+/// [`dial_with_pool`] itself. Every dial runs the checks, a batch on a
+/// kept link too: the carrier is live, the contact verified and allowed on
+/// Tor, Tor ready. With the warm gate open, a program's send of a check or
+/// of chat messages (`meta.warm`, [`warm::rides_warm`], in no outbox race)
+/// goes by [`warm_dial`]; anything else dials as before.
+async fn dial_on(
+    pool: &'static warm::WarmPool,
+    waits: ReplyWaits,
     data_dir: &Path,
     dial: &str,
     expected_pub_hex: &str,
@@ -1778,28 +1830,40 @@ async fn dial_marked(
     // Counted as running until it ends, however it ends (E2 r40: a send
     // whose friend Tor is still dialling need not wait for Tor again).
     let _running = crate::delivery_paths::onion_dial_started(&expected);
-    let mut progress = DialProgress::with_connect(
-        "ONION",
-        ReplyWaits {
-            first: netutil::PRODUCTION_REPLY_WAITS.first,
-            idle: raven_core::onion::ONION_REPLY_IDLE,
-        },
-        ONION_CONNECT_BUDGET,
-    );
-    progress.collector.set_race(meta.race);
-    progress.send_check = meta.send_check;
-    let outcome = tokio::time::timeout(
-        deadline,
-        internet_direct::dial_session_on(
-            ONION_LINK,
-            data_dir,
-            || connect_via_helper(helper, token, hs_id),
-            &expected,
-            frames,
-            None,
-            &mut progress,
-        ),
-    )
+    let mut progress = onion_progress(waits, meta);
+    // W1: decided once per dial; the pool asks the gate again at checkout.
+    let warm = (meta.warm && meta.race.is_none() && warm::rides_warm(frames) && pool.live())
+        .then(|| warm::WarmKey::new(data_dir, expected, hs_id, token));
+    let outcome = tokio::time::timeout(deadline, async {
+        match &warm {
+            None => {
+                internet_direct::dial_session_on(
+                    ONION_LINK,
+                    data_dir,
+                    || connect_via_helper(helper, token, hs_id),
+                    &expected,
+                    frames,
+                    None,
+                    &mut progress,
+                )
+                .await
+            }
+            Some(key) => {
+                let route = (helper, token, hs_id);
+                warm_dial(
+                    pool,
+                    key,
+                    (waits, meta),
+                    data_dir,
+                    route,
+                    &expected,
+                    frames,
+                    &mut progress,
+                )
+                .await
+            }
+        }
+    })
     .await;
     let replies = match outcome {
         Ok(Ok(())) => Ok(progress.collector.into_replies()),
@@ -1811,6 +1875,50 @@ async fn dial_marked(
     let replies = replies?;
     crate::delivery_paths::note(&expected, OutboxCarrier::Onion, None, frames, &replies);
     Ok(replies)
+}
+
+/// W1 ([`warm`]): a program's batch (`frames`; none: its send's check) for
+/// `key`'s friend, on its kept link when one may carry it, else on a fresh
+/// link through the helper (`route`: its connect address and token, and
+/// the onion service), which is kept when its batch leaves it clean. A kept
+/// link that fails before any reply gives way to a fresh link with the same
+/// frames, its progress begun again (`again`: its reply waits and meta).
+#[allow(clippy::too_many_arguments)]
+async fn warm_dial(
+    pool: &'static warm::WarmPool,
+    key: &warm::WarmKey,
+    again: (ReplyWaits, DialMeta),
+    data_dir: &Path,
+    (helper, token, hs_id): (SocketAddr, [u8; proto::TOKEN_LEN], [u8; 32]),
+    expected: &[u8; 32],
+    frames: &[Vec<u8>],
+    progress: &mut DialProgress,
+) -> Result<(), String> {
+    let began = tokio::time::Instant::now();
+    if let Some(link) = pool.checkout(key, frames.len()) {
+        match warm::ride(pool, link, expected, frames, progress).await {
+            Ok(()) => return Ok(()),
+            Err(warm::Rode::Refused(e)) => return Err(e),
+            Err(warm::Rode::Dead) => *progress = onion_progress(again.0, again.1),
+        }
+    }
+    let mut open = internet_direct::open_link(
+        ONION_LINK,
+        data_dir,
+        || connect_via_helper(helper, token, hs_id),
+        expected,
+        frames,
+        None,
+        progress,
+    )
+    .await?;
+    let mut io = internet_direct::DialIo::stream(&mut open.stream);
+    internet_direct::run_batch_on(&mut io, &mut open.state, frames, progress).await?;
+    let (spent, written) = (io.spent(), io.written());
+    if !spent && (frames.is_empty() || progress.collector.all_answered()) {
+        pool.checkin(warm::WarmLink::new(key.clone(), open, began, written));
+    }
+    Ok(())
 }
 
 /// A Tor stream to `hs_id`'s onion service through the helper at `helper`.

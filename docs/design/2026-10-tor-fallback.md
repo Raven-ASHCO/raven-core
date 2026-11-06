@@ -266,6 +266,25 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
   new rendezvous), and an idle friend costs nothing after that.
 - Channel padding is set to `reduced` (laptops on battery; research §3.4:
   padding is most of Tor's idle cost on 4G).
+- **W1, kept links** (Tor speed Stage A, security and speed report
+  2026-11-05 §7, speed design M1; gate `ONION_WARM_PRODUCTION_ENABLED =
+  false`, lab only, §4). With the warm gate open, a program's send over Tor
+  (`raven send`, an app's engine, over IPC) keeps its link open after a
+  batch that got every reply it waited for, for the next batch to the same
+  friend: within 20 s of the last batch (`WARM_IDLE`, below the listener's
+  30 s read deadline), 120 s of the link's dial (`WARM_AGE`, below the onion
+  listener's 180 s lifetime) and 56 frames (`WARM_FRAMES`, below its 64); 4
+  links at most, 2 on the embedded node, one per friend. The message then
+  rides its check's link (a first send costs 4 round trips instead of 7),
+  and a send within 20 s costs one, its check answered from the kept link
+  with the friend's offer and no traffic. Nothing is opened with nothing to
+  send. A kept link is read by a task of its own, so no wait stops part way
+  through a frame, and a link whose wait ran out is never kept. The dial's
+  checks run again before every batch; a keeper closes the link of a friend
+  blocked, removed or no longer verified within a second, and all of them
+  once the gate is shut (a hold); a lock, a network change, the end of a
+  Tor helper's life and the embedded node's pause close them all. The
+  listener is unchanged (`raven-node/src/onion/warm.rs`).
 
 ### 3.7 Robustness around Arti's known gaps
 
@@ -374,6 +393,7 @@ Shown by `raven status --explain tor` and in the docs:
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. |
 | Head start | `RAVEN_LAB_TOR_HEAD_START_MS` (debug only, tests) overrides 1.5 s. |
 | Stage record | Debug builds only (speed groundwork for the D1 measurement, security and speed report 2026-11-05 §7): every onion dial's step times in memory, as durations only (`prep`, `connect` with its `circuit` and `begin` parts, `noise`, `hello`, `write`, `receipt`, `total`; never a key, an onion id, an address or a message). `RAVEN_LAB_TOR_STAGES=<absolute path>` with `RAVEN_LAB_TEST_A=1` appends one JSON line per dial for the D1 harness. Arti gets the circuit and opens the stream in one call, so `circuit` and `begin` split the helper's connect by the one round trip rule (BEGIN to CONNECTED takes as long as the Noise round trip that follows on the same circuit). Release builds keep nothing. |
+| Tor speed, Stage A | Five more gates, every one false, each open only while the onion carrier is, with its lab switch (with `RAVEN_LAB_TEST_A=1`, debug builds only) and a hold of its own in the suite registry: `ONION_WARM_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM`, `feature/onion-warm`: W1 kept links, §3.6), `ONION_HEDGE_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_HEDGE`, `feature/onion-hedge`), `ONION_EARLY_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_EARLY`, `feature/onion-early`), `ONION_OPTIMISTIC_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_OPTIMISTIC`, `feature/onion-optimistic`) and `ONION_WARM_LINK_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM_LINK`, `feature/onion-warm-link`: W2, a wire change). Only W1 acts yet. |
 
 ## 5. Tests
 

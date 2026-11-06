@@ -1417,12 +1417,17 @@ async fn handle_onion_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
     if let Some(refusal) = refuse_custody_frames(v, &frames) {
         return refusal;
     }
+    // A program's send: its link may stay open for its next batch, or ride
+    // one still open (W1, warm gate only; `crate::onion::warm`).
     let work = crate::onion::dial_with_meta(
         data_dir,
         &onion_dial,
         &expected_pub_hex,
         &frames,
-        send_dial_meta(&frames),
+        crate::learning::DialMeta {
+            warm: true,
+            ..send_dial_meta(&frames)
+        },
     );
     let within = raven_core::onion::ONION_DIAL_DEADLINE + Duration::from_secs(5);
     let started = std::time::Instant::now();

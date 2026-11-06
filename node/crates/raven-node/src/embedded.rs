@@ -467,6 +467,8 @@ fn stop_locked(wait: Duration) -> bool {
 pub fn pause(data_dir: &Path) -> bool {
     let _turn = turn();
     controller().paused = Some(data_dir.to_path_buf());
+    // The Tor links kept for a send's next batch go before Tor does (W1).
+    crate::onion::warm::flush(crate::onion::warm::Flush::Pause);
     stop_locked(STOP_WAIT)
 }
 
@@ -480,6 +482,8 @@ pub fn pause(data_dir: &Path) -> bool {
 pub fn pause_keeping_nearby(config: &NodeConfig) -> Result<bool, String> {
     let _turn = turn();
     controller().paused = Some(config.data_dir().to_path_buf());
+    // The Tor links kept for a send's next batch go before Tor does (W1).
+    crate::onion::warm::flush(crate::onion::warm::Flush::Pause);
     let was = stop_locked(STOP_WAIT);
     start_locked(config, Kind::Background)?;
     Ok(was)

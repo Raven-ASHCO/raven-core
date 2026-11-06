@@ -1132,10 +1132,163 @@ async fn serve_listener(
     .await
 }
 
-/// Send `frames` and collect the replies into `progress` (see
-/// `lan_direct::exchange_frames`). Our RRH1 goes first when the listener's
-/// hello asked for it; the listener's is consumed by `hints`, never
-/// collected as a reply.
+/// Where a dialer's batch writes and reads its frames ([`run_batch_on`]):
+/// the link's own stream, or a warm link's halves, whose frames a task of
+/// their own reads ([`WarmHalves`]; W1, `crate::onion::warm`). It counts
+/// the frames it wrote and notes when the link can carry no other batch
+/// (`spent`): a wait that ran out (on a stream, a read stopped part way
+/// through a frame), a close or an unreadable frame, a failed write, or our
+/// own end of the link.
+pub(crate) struct DialIo<'a, S> {
+    wire: Wire<'a, S>,
+    written: u32,
+    spent: bool,
+}
+
+enum Wire<'a, S> {
+    Stream(&'a mut S),
+    Warm(&'a mut WarmHalves),
+}
+
+impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
+    /// The link's own stream.
+    pub(crate) fn stream(stream: &'a mut S) -> Self {
+        Self {
+            wire: Wire::Stream(stream),
+            written: 0,
+            spent: false,
+        }
+    }
+
+    /// One frame of ours ([`write_inet_frame`]).
+    async fn send(&mut self, cipher: &mut LinkCipher, payload: &[u8]) -> Result<(), String> {
+        let sent = match &mut self.wire {
+            Wire::Stream(stream) => write_inet_frame(&mut **stream, cipher, payload).await,
+            Wire::Warm(halves) => write_inet_frame(&mut halves.write, cipher, payload).await,
+        };
+        if sent.is_ok() {
+            self.written += 1;
+        } else {
+            self.spent = true;
+        }
+        sent
+    }
+
+    /// The next frame within `wait` ([`read_reply`]).
+    async fn reply(&mut self, cipher: &mut LinkCipher, wait: Duration) -> ReplyWait {
+        let got = match &mut self.wire {
+            Wire::Stream(stream) => read_reply(&mut **stream, cipher, wait).await,
+            Wire::Warm(halves) => halves.reply(cipher, wait).await,
+        };
+        if !matches!(got, ReplyWait::Frame(_)) {
+            self.spent = true;
+        }
+        got
+    }
+
+    /// Our side of the link ends (on Tor the stream's END).
+    async fn end(&mut self) {
+        self.spent = true;
+        let _ = match &mut self.wire {
+            Wire::Stream(stream) => stream.shutdown().await,
+            Wire::Warm(halves) => halves.write.shutdown().await,
+        };
+    }
+
+    /// The link can carry no other batch.
+    pub(crate) fn spent(&self) -> bool {
+        self.spent
+    }
+
+    /// Frames written through it.
+    pub(crate) fn written(&self) -> u32 {
+        self.written
+    }
+}
+
+impl<'a> DialIo<'a, tokio::net::TcpStream> {
+    /// A warm link's halves.
+    pub(crate) fn warm(halves: &'a mut WarmHalves) -> Self {
+        Self {
+            wire: Wire::Warm(halves),
+            written: 0,
+            spent: false,
+        }
+    }
+}
+
+/// How many frames a warm link's reader holds before it waits for a batch
+/// to take them: a peer that floods the link fills nothing more.
+const WARM_READ_AHEAD: usize = 4;
+
+/// A warm link's stream (W1, `crate::onion::warm`), split in two: batches
+/// write on one half, and a task of its own reads the other, whole frames
+/// only and with no deadline, into a channel. A batch's waits then run out
+/// on the channel, never part way through a frame (a read under
+/// [`read_reply`]'s deadline can stop there, and the stream is lost for
+/// good), and a frame or a close between two batches shows
+/// ([`Self::idle_clean`]). Dropping it stops the task and closes the stream.
+pub(crate) struct WarmHalves {
+    write: tokio::net::tcp::OwnedWriteHalf,
+    frames: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl WarmHalves {
+    /// `stream`, after a batch that read every frame it waited for (no read
+    /// stopped part way).
+    pub(crate) fn split(stream: tokio::net::TcpStream) -> Self {
+        let (mut read, write) = stream.into_split();
+        let (tx, frames) = tokio::sync::mpsc::channel(WARM_READ_AHEAD);
+        let reader = tokio::spawn(async move {
+            loop {
+                let got = read_raw_untimed(&mut read).await;
+                let end = got.is_err();
+                if tx.send(got).await.is_err() || end {
+                    return;
+                }
+            }
+        });
+        Self {
+            write,
+            frames,
+            reader,
+        }
+    }
+
+    /// Nothing came on the link since its last batch, and it did not close:
+    /// it may carry the next one.
+    pub(crate) fn idle_clean(&mut self) -> bool {
+        !self.reader.is_finished()
+            && matches!(
+                self.frames.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            )
+    }
+
+    /// The next frame within `wait`: [`read_reply`]'s outcomes, with the
+    /// wait on the channel.
+    async fn reply(&mut self, cipher: &mut LinkCipher, wait: Duration) -> ReplyWait {
+        match tokio::time::timeout(wait, self.frames.recv()).await {
+            Ok(Some(Ok(ct))) => match cipher.open(&ct) {
+                Ok(frame) => ReplyWait::Frame(frame),
+                Err(why) => ReplyWait::Closed(why),
+            },
+            Ok(Some(Err(why))) => ReplyWait::Closed(why),
+            Ok(None) => ReplyWait::Closed(PEER_CLOSED.into()),
+            Err(_) => ReplyWait::Idle,
+        }
+    }
+}
+
+impl Drop for WarmHalves {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// [`exchange_frames_on`] over the link's own `stream`.
+#[cfg(test)]
 async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     transport: &mut LinkCipher,
@@ -1143,31 +1296,52 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     hints: &mut crate::hints::LinkCtl,
     progress: &mut DialProgress,
 ) -> Result<(), String> {
+    exchange_frames_on(
+        &mut DialIo::stream(stream),
+        transport,
+        frames,
+        hints,
+        progress,
+    )
+    .await
+}
+
+/// Send `frames` and collect the replies into `progress` (see
+/// `lan_direct::exchange_frames`). Our RRH1 goes first when the listener's
+/// hello asked for it; the listener's is consumed by `hints`, never
+/// collected as a reply.
+async fn exchange_frames_on<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut DialIo<'_, S>,
+    transport: &mut LinkCipher,
+    frames: &[Vec<u8>],
+    hints: &mut crate::hints::LinkCtl,
+    progress: &mut DialProgress,
+) -> Result<(), String> {
     progress.stage = "sending frames";
     if let Some(ours) = hints.outgoing().await {
-        write_inet_frame(stream, transport, &ours).await?;
+        io.send(transport, &ours).await?;
         hints.written();
     }
     // RUP1 (P6.49): our HAVE after the hellos and RRH1, when the listener's
     // hello set bit 10; requests only once its HAVE came.
     if let Some(have) = hints.update().outgoing().await {
-        write_inet_frame(stream, transport, &have).await?;
+        io.send(transport, &have).await?;
     }
     if frames
         .iter()
         .any(|f| raven_core::update_exchange::is_rup1(f))
     {
-        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         crate::update_exchange::check_requests(frames, hints.update())?;
     }
     for frame in frames {
-        write_inet_frame(stream, transport, frame).await?;
+        io.send(transport, frame).await?;
     }
     if frames.is_empty() {
         // The listener's hello said it sends an RRH1 (or a HAVE, RUP1):
         // read them before closing (unread data at close can reset the
         // connection).
-        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         return Ok(());
     }
     progress.frames_sent = true;
@@ -1180,9 +1354,9 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
         // end; an RRH1 it may still send unasked is read to the end of its
         // side, as unread data at close would reset the link.
         progress.stage = "reading the listener's route hints";
-        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         if hints.may_tell_unasked() {
-            read_to_the_end(stream, transport, hints, progress).await?;
+            read_to_the_end(io, transport, hints, progress).await?;
         }
         return Ok(());
     }
@@ -1190,12 +1364,12 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     let wait = progress.collector.first_wait();
     let mut more = progress
         .collector
-        .first(read_reply_hints(stream, transport, wait, hints).await?)?;
+        .first(read_reply_hints(io, transport, wait, hints).await?)?;
     while more {
         let wait = progress.collector.idle_wait();
         more = progress
             .collector
-            .next(read_reply_hints(stream, transport, wait, hints).await?)?;
+            .next(read_reply_hints(io, transport, wait, hints).await?)?;
     }
     Ok(())
 }
@@ -1203,7 +1377,7 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
 /// [`read_reply`] that consumes the peer's RRH1 within the same wait (see
 /// `lan_direct::read_reply_hints`).
 async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
+    io: &mut DialIo<'_, S>,
     transport: &mut LinkCipher,
     wait: Duration,
     hints: &mut crate::hints::LinkCtl,
@@ -1211,7 +1385,7 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
     let deadline = tokio::time::Instant::now() + wait;
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let got = read_reply(stream, transport, left).await;
+        let got = io.reply(transport, left).await;
         crate::security::dial_reply(&got, hints);
         let ReplyWait::Frame(frame) = &got else {
             return Ok(got);
@@ -1219,7 +1393,7 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
         // The listener's HAVE (RUP1, P6.49): taken, never a reply.
         if let Some(answer) = hints.update().dialer_take(frame).await {
             if let Some(ours) = answer {
-                write_inet_frame(stream, transport, &ours).await?;
+                io.send(transport, &ours).await?;
             }
             continue;
         }
@@ -1230,7 +1404,7 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
             return Ok(ReplyWait::Closed("too many route hint frames".into()));
         }
         if let Some(ours) = hints.outgoing().await {
-            write_inet_frame(stream, transport, &ours).await?;
+            io.send(transport, &ours).await?;
             hints.written();
         }
     }
@@ -1241,20 +1415,20 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
 /// HAVE) while either is still expected, each within `wait` (see
 /// `lan_direct::read_peer_frames`). Without either it reads nothing.
 async fn read_peer_frames<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
+    io: &mut DialIo<'_, S>,
     transport: &mut LinkCipher,
     hints: &mut crate::hints::LinkCtl,
     wait: Duration,
 ) -> Result<(), String> {
     while hints.expects_peer_frame() || hints.update().expects_have() {
-        let got = read_reply(stream, transport, wait).await;
+        let got = io.reply(transport, wait).await;
         crate::security::dial_reply(&got, hints);
         let ReplyWait::Frame(frame) = got else {
             break;
         };
         if let Some(answer) = hints.update().dialer_take(&frame).await {
             if let Some(ours) = answer {
-                write_inet_frame(stream, transport, &ours).await?;
+                io.send(transport, &ours).await?;
             }
         } else if !hints.take(&frame).await {
             break;
@@ -1271,16 +1445,16 @@ async fn read_peer_frames<S: AsyncRead + AsyncWrite + Unpin>(
 /// (Tor streams have no half close), and the helper then closes ours. A
 /// frame that is not a route hint is kept as a reply.
 async fn read_to_the_end<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
+    io: &mut DialIo<'_, S>,
     transport: &mut LinkCipher,
     hints: &mut crate::hints::LinkCtl,
     progress: &mut DialProgress,
 ) -> Result<(), String> {
-    let _ = stream.shutdown().await;
+    io.end().await;
     let deadline = tokio::time::Instant::now() + progress.collector.idle_wait();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let got = read_reply(stream, transport, left).await;
+        let got = io.reply(transport, left).await;
         crate::security::dial_reply(&got, hints);
         let ReplyWait::Frame(frame) = got else {
             return Ok(());
@@ -1327,7 +1501,95 @@ async fn dial_session(
 /// on a fresh stream while the peer sheds load), RLB1 exchange with the
 /// identity checks, then `frames` and their replies into `progress`.
 /// `link_peer_id`: the libp2p PeerId a p2p link's stream goes to.
+///
+/// [`open_link`], then one [`run_batch`] on it (speed design step 6): the
+/// same steps in the same order.
 pub(crate) async fn dial_session_on<S, C, CFut>(
+    link: RavenLink,
+    data_dir: &Path,
+    connect: C,
+    expected: &[u8; 32],
+    frames: &[Vec<u8>],
+    link_peer_id: Option<String>,
+    progress: &mut DialProgress,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    C: FnMut() -> CFut,
+    CFut: std::future::Future<Output = Result<S, String>>,
+{
+    let mut open = open_link(
+        link,
+        data_dir,
+        connect,
+        expected,
+        frames,
+        link_peer_id,
+        progress,
+    )
+    .await?;
+    run_batch(&mut open, frames, progress).await
+}
+
+/// What a dialer holds of an authenticated link between its batches: the
+/// link's cipher, the contact's verified RLB1 offer (every batch's replies
+/// start with it) and the link's route hint and update exchange state.
+pub(crate) struct LinkState {
+    pub(crate) cipher: LinkCipher,
+    pub(crate) peer_offer: Vec<u8>,
+    pub(crate) hints: crate::hints::LinkCtl,
+    /// The link's own notes (a p2p link's PeerId proof, the contact's link
+    /// features) were taken: once per link, at its first batch.
+    noted: bool,
+}
+
+/// A dialer's authenticated link ([`open_link`]): its stream and its
+/// [`LinkState`]. Dropping it closes the link.
+pub(crate) struct OpenLink<S> {
+    pub(crate) stream: S,
+    pub(crate) state: LinkState,
+}
+
+/// One batch on an open link ([`open_link`]) over its own stream
+/// ([`run_batch_on`]).
+pub(crate) async fn run_batch<S: AsyncRead + AsyncWrite + Unpin>(
+    link: &mut OpenLink<S>,
+    frames: &[Vec<u8>],
+    progress: &mut DialProgress,
+) -> Result<(), String> {
+    let OpenLink { stream, state } = link;
+    run_batch_on(&mut DialIo::stream(stream), state, frames, progress).await
+}
+
+/// One batch on an open link ([`open_link`]), written and read through
+/// `io`: the contact's offer and `frames` go into `progress`'s collector (a
+/// dial in an outbox race claims it here, before any frame is written), the
+/// link's own notes are taken at its first batch, then `frames` and their
+/// replies. A link may carry another batch only when `io` is not
+/// [`DialIo::spent`] and every frame got its terminal reply
+/// ([`netutil::ReplyCollector::all_answered`]).
+pub(crate) async fn run_batch_on<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut DialIo<'_, S>,
+    state: &mut LinkState,
+    frames: &[Vec<u8>],
+    progress: &mut DialProgress,
+) -> Result<(), String> {
+    progress.collector.begin(state.peer_offer.clone(), frames)?;
+    if !state.noted {
+        state.noted = true;
+        state.hints.note_link().await;
+        // Its verified hello's link features: its capability floor (P6.29).
+        state.hints.note_features();
+    }
+    exchange_frames_on(io, &mut state.cipher, frames, &mut state.hints, progress).await
+}
+
+/// The dialer half of a link up to its first batch ([`dial_session_on`]):
+/// the handshake, the RLB1 exchange and its identity checks, the link's
+/// live-link notes and the outbox wake. `frames` are the first batch's:
+/// whether our hello asks for the contact's route hints and the purpose its
+/// hint log lines name depend on them.
+pub(crate) async fn open_link<S, C, CFut>(
     link: RavenLink,
     data_dir: &Path,
     mut connect: C,
@@ -1335,7 +1597,7 @@ pub(crate) async fn dial_session_on<S, C, CFut>(
     frames: &[Vec<u8>],
     link_peer_id: Option<String>,
     progress: &mut DialProgress,
-) -> Result<(), String>
+) -> Result<OpenLink<S>, String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     C: FnMut() -> CFut,
@@ -1439,8 +1701,7 @@ where
     if !progress.send_check {
         wake_outbox_for(expected);
     }
-    progress.collector.begin(peer_offer, frames)?;
-    let mut hints = crate::hints::LinkCtl::inet(
+    let hints = crate::hints::LinkCtl::inet(
         data_dir,
         link.carrier,
         crate::hints::Role::Dialer,
@@ -1460,10 +1721,15 @@ where
         offers.contains(LinkFeatures::RUP1),
         peer_caps,
     ));
-    hints.note_link().await;
-    // Its verified hello's link features: its capability floor (P6.29).
-    hints.note_features();
-    exchange_frames(&mut stream, &mut transport, frames, &mut hints, progress).await
+    Ok(OpenLink {
+        stream,
+        state: LinkState {
+            cipher: transport,
+            peer_offer,
+            hints,
+            noted: false,
+        },
+    })
 }
 
 /// A contact's authenticated link that carried no frame wakes what waits
@@ -1542,7 +1808,7 @@ thread_local! {
 }
 
 /// What waits for `contact` goes now ([`crate::outbox::peer_back`]).
-fn wake_outbox_for(contact: &[u8; 32]) {
+pub(crate) fn wake_outbox_for(contact: &[u8; 32]) {
     #[cfg(test)]
     OUTBOX_WAKES.with(|n| n.set(n.get() + 1));
     crate::outbox::peer_back(contact);
@@ -4074,6 +4340,12 @@ mod tests {
             seal(self.a.path(), &self.alice, &self.key_ab, text)
         }
 
+        /// [`Self::alice_seals`], handed to the outbox, so Alice can seal
+        /// her next message behind it ([`seal_as`]).
+        fn alice_seals_queued(&self, text: &str) -> Vec<u8> {
+            seal_as(self.a.path(), &self.alice, &self.key_ab, text, true)
+        }
+
         /// Alice's sealed ACK of a message Bob sealed to her (Bob's session
         /// takes it, and answers nothing).
         fn alice_acks_one_of_bobs(&self) -> Vec<u8> {
@@ -4159,6 +4431,19 @@ mod tests {
         key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
         text: &str,
     ) -> Vec<u8> {
+        seal_as(dir, identity, key, text, false)
+    }
+
+    /// [`seal`], and `queued`: handed to the outbox as `raven send` hands
+    /// it, so the session takes a next message behind it (one prepared
+    /// message per lane). Unqueued, the message stays prepared.
+    fn seal_as(
+        dir: &Path,
+        identity: &Identity,
+        key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
+        text: &str,
+        queued: bool,
+    ) -> Vec<u8> {
         use raven_core::indexed_session_store::{AuthorizedEndpointDevice, IndexedSessionStore};
         let now = raven_core::clock::now_ms();
         let (cert, registry) = raven_core::device_cert::ensure_local_device_certificate(
@@ -4179,9 +4464,13 @@ mod tests {
             (now + 3_600_000).min(end),
             now,
             &mut rand::rngs::OsRng,
-            &mut |_digest: &[u8; 32], bytes: &[u8]| {
+            &mut |digest: &[u8; 32], bytes: &[u8]| {
                 sealed = Some(bytes.to_vec());
-                Err(())
+                if queued {
+                    Ok(*digest)
+                } else {
+                    Err(())
+                }
             },
         );
         sealed.expect("sealed")
@@ -4230,6 +4519,98 @@ mod tests {
             3,
             "a message's link took {send:?} on a link of {one_way:?} each way"
         );
+    }
+
+    /// Speed design step 6: a link [`open_link`] opened carries a batch
+    /// through [`run_batch`] as [`dial_session_on`] carries it (the same
+    /// round trips, the contact's offer first, one ACK), and the same open
+    /// link carries a second batch in one round trip, its replies again
+    /// led by that offer and with their own ACK. Bob's listener then ends
+    /// cleanly when the link is dropped.
+    #[tokio::test(start_paused = true)]
+    async fn open_link_then_run_batch_matches_dial_session_on() {
+        let _live = crate::hints::LiveForTest::set(true);
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        let one_way = Duration::from_millis(300);
+        let bob = f.bob.public_key_bytes();
+        let (whole, replies) = f
+            .alice_dials(one_way, &[f.alice_seals_queued("in one go")])
+            .await;
+        assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+
+        let (client, server_side) = latent_link(one_way);
+        let (b_dir, bob_id) = (f.b.path().to_path_buf(), f.bob.clone());
+        let server = tokio::spawn(async move {
+            let mut slot = test_slot();
+            serve_inbound_on(
+                ONION_LINK,
+                b_dir,
+                bob_id,
+                server_side,
+                PRODUCTION_LIMITS,
+                &mut slot,
+                None,
+                None,
+                None,
+            )
+            .await
+        });
+        let frames = [f.alice_seals_queued("in two steps")];
+        let mut stream = Some(client);
+        let mut progress = DialProgress::new("ONION", TOR_WAITS);
+        let began = tokio::time::Instant::now();
+        let mut link = open_link(
+            ONION_LINK,
+            f.a.path(),
+            || {
+                let s = stream.take();
+                async move { s.ok_or_else(|| "one stream only".to_string()) }
+            },
+            &bob,
+            &frames,
+            None,
+            &mut progress,
+        )
+        .await
+        .expect("the link opens");
+        run_batch(&mut link, &frames, &mut progress)
+            .await
+            .expect("the first batch");
+        let split = began.elapsed();
+        let first = progress.collector.into_replies();
+        assert_eq!(
+            round_trips(split, one_way),
+            round_trips(whole, one_way),
+            "split {split:?}, whole {whole:?}"
+        );
+        assert_eq!(first.len(), replies.len(), "the offer and one ACK");
+        assert_eq!(raven_core::outbox::ack_frames(&first).len(), 1);
+
+        let mut progress = DialProgress::new("ONION", TOR_WAITS);
+        let began = tokio::time::Instant::now();
+        run_batch(
+            &mut link,
+            &[f.alice_seals_queued("and again")],
+            &mut progress,
+        )
+        .await
+        .expect("a second batch on the same link");
+        let again = began.elapsed();
+        let second = progress.collector.into_replies();
+        assert_eq!(round_trips(again, one_way), 1, "{again:?}");
+        assert_eq!(second.first(), first.first(), "the link's offer leads");
+        assert_eq!(raven_core::outbox::ack_frames(&second).len(), 1);
+        assert_ne!(
+            raven_core::outbox::ack_frames(&second),
+            raven_core::outbox::ack_frames(&first),
+            "its own ACK"
+        );
+        drop(link);
+        listener_result(server)
+            .await
+            .expect("Bob's listener ends cleanly");
     }
 
     /// T18: a dial whose frames get no reply (the outbox pushing owed ACKs)

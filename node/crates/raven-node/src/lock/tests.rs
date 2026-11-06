@@ -371,7 +371,11 @@ fn a_lock_drops_the_keys_and_closes_the_listener_and_an_unlock_restarts_it() {
         let mut link = tokio::net::TcpStream::connect(addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
+        use crate::onion::warm::{flushes_for_test, Flush};
+        let flushed = flushes_for_test(Flush::Lock);
         lock(&dd).await.unwrap();
+        // The Tor links kept for a send's next batch went too (W1).
+        assert!(flushes_for_test(Flush::Lock) > flushed, "kept Tor links");
         wait_until("the listener stops", || {
             !crate::lan_direct::listener_is_up()
         })

@@ -339,6 +339,8 @@ pub(crate) async fn lock(data_dir: &Path) -> Result<LockReply, Held> {
 fn drop_secrets(data_dir: &Path) {
     raven_core::local_lock::engage(data_dir);
     switch().send_replace(true);
+    // The Tor links kept for a send's next batch go too (W1).
+    crate::onion::warm::flush(crate::onion::warm::Flush::Lock);
     crate::lan_direct::forget_listener_identity();
     crate::at_rest_boot::lock(data_dir);
     raven_core::keystore_vault::forget_process_key(data_dir);

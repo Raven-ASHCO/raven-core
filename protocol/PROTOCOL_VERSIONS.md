@@ -144,6 +144,26 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, W1 kept Tor links, lab only)
+
+A behaviour change of the onion dialer behind a gate that stays false, not of
+the wire format: no frame layout, entry type, caps bit, card field or vector
+changed, and the listener is unchanged. Security and speed report 2026-11-05
+§7 (speed design M1, W1).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §1 and §10: with `onion_gate::ONION_WARM_PRODUCTION_ENABLED` open (false;
+  lab switch `RAVEN_LAB_TOR_WARM`), a program's send over Tor keeps the
+  dialer's link after a batch that got every reply it waited for, for the
+  next batch to the same contact: within 20 s of that batch, 120 s of the
+  link's dial and 56 frames, at most 4 links (2 on the embedded node), one
+  per contact. The contact's listener then reads a later batch on a link it
+  already holds, one frame after another within its own limits (§5); no link
+  is opened with nothing to send. A link whose reply wait ran out is never
+  kept, the dial's checks run again before each batch, and a block, a hold,
+  a lock, a network change, the end of a Tor helper's life or the embedded
+  node's pause closes kept links.
+
 ## Freeze record changes (2026-11-06, Tor speed Stage A gates)
 
 Five new gates, every one false, and their feature ids; no frame layout, entry

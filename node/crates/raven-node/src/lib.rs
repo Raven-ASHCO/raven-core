@@ -959,6 +959,18 @@ pub(crate) mod netutil {
             self.unanswered
         }
 
+        /// Frames that get a reply were sent, and each had its terminal
+        /// reply: nothing the batch waited for can still come (a warm link
+        /// may carry the next batch only then, `crate::onion::warm`).
+        pub(crate) fn all_answered(&self) -> bool {
+            self.expected > 0 && self.seen == self.expected
+        }
+
+        /// At least one terminal reply came.
+        pub(crate) fn answered_any(&self) -> bool {
+            self.seen > 0
+        }
+
         pub(crate) fn mark_frames_sent(&mut self) {
             self.sent_at = Some(tokio::time::Instant::now());
             self.budget.mark_frames_sent();

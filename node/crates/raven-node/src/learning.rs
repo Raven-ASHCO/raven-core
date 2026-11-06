@@ -236,6 +236,11 @@ pub(crate) struct DialMeta {
     /// at once and takes the earlier messages along (Tor messaging audit
     /// 2026-11, T13 a).
     pub send_check: bool,
+    /// A program's send over Tor (`ipc_server`): with the warm gate open
+    /// ([`raven_core::onion_gate::onion_warm_live`]) its link stays open for
+    /// the next batch to the same contact, and it rides one already open
+    /// (W1, [`crate::onion::warm`]).
+    pub warm: bool,
 }
 
 impl DialMeta {
