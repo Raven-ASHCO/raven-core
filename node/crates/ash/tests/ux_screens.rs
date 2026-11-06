@@ -1927,7 +1927,22 @@ fn contact_add_card_accepts_the_invite_line_whoami_prints() {
     let fp = raven_core::fingerprint::device_fingerprint_v1(&bob.public_key_bytes());
     assert!(!out.contains(&fp), "{out}");
     assert!(out.contains("not verified yet"), "{out}");
-    assert!(out.contains("raven contact verify Bob"), "{out}");
+    // The command to paste names this contact by its rvn1 address, never by
+    // the name typed (ASH-1), so it is plain words a shell takes as they are.
+    let at = out
+        .find("raven contact verify")
+        .unwrap_or_else(|| panic!("no verify hint in:\n{out}"));
+    let hint = out[at..].split(')').next().unwrap_or_default();
+    assert_eq!(
+        hint,
+        format!("raven contact verify --address {}", bob.address()),
+        "{out}"
+    );
+    assert!(
+        hint.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-'),
+        "{hint}"
+    );
     assert!(!text(&o.stderr).contains("YOUR OWN identity"));
 }
 
