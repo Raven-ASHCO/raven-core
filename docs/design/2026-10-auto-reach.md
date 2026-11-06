@@ -178,7 +178,11 @@ this computer at that very IP:
   decision, AR-5 (§7, §12).
 - In a loopback lab (the debug local-candidates switch) every node is at
   127.0.0.1 and every contact sees it there, so that address and its QUIC
-  endpoints count as seen; any other one (127.0.0.2, say) does not.
+  endpoints count as seen; any other one (127.0.0.2, say) does not. The
+  harness scenarios (§9) rest on this stand-in, so they never exercise a
+  sighting; the unit test
+  `a_dialled_contacts_identify_view_reaches_auto_reach` does, with two real
+  hosts over loopback and the stand-in off.
 
 ### 3.3 From which local port
 
@@ -534,7 +538,10 @@ back.
   `only_a_contact_or_own_relay_this_host_dialled_vouches_for_its_ip`,
   `a_relay_slot_named_by_dns_gives_no_sighting`,
   `dns_answers_count_for_an_hour_and_never_stop_early`,
-  `the_quic_endpoint_waits_for_a_quic_view_of_that_very_port`.
+  `the_quic_endpoint_waits_for_a_quic_view_of_that_very_port`, and end to
+  end over loopback (two real hosts; a contact's Identify view of a QUIC
+  dial reaches auto-reach, and a dial at a DNS answer reaches nothing):
+  `a_dialled_contacts_identify_view_reaches_auto_reach`.
 - Harness (`scripts/lan_fault_matrix.py`, `RAVEN_FAULT_AUTOREACH=1`; real
   `ash` and `raven-node` on loopback, two fake STUN servers on loopback,
   never the public list). The nodes meet over Internet direct links: they

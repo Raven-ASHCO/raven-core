@@ -12974,7 +12974,12 @@ def s115_pad1_mixed_builds(root: Path) -> dict:
 # RAVEN_LAB_NAT_CLASS=1 and RAVEN_LAB_SERVERLESS_PUNCH=1) and
 # RAVEN_LAB_TEST_A=1, and ask only the fake STUN servers below
 # (RAVEN_LAB_STUN_SERVERS, two sockets on 127.0.0.1): no scenario ever
-# reaches a public STUN server.
+# reaches a public STUN server. Under RAVEN_LAB_P2P_LOCAL_CANDIDATES=1
+# auto-reach takes 127.0.0.1 and its QUIC endpoints as seen from outside
+# (design §3.2's loopback stand-in), so these scenarios never exercise a
+# sighting (s146b's unseen address is 127.0.0.2). The raven-node unit test
+# p2p::tests::a_dialled_contacts_identify_view_reaches_auto_reach does: two
+# real hosts over loopback, the stand-in off.
 AUTOREACH = os.environ.get('RAVEN_FAULT_AUTOREACH') == '1'
 AUTOREACH_ENV = without_beacon(dict(
     P2P_ENV, RAVEN_LAB_ROUTE_HINTS='1', RAVEN_LAB_P2P_LOCAL_CANDIDATES='1',

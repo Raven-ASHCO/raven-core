@@ -12680,6 +12680,146 @@ mod tests {
         );
     }
 
+    /// INET-STUN-1 (design §3.2), end to end over loopback: this host dials
+    /// a contact over QUIC from its listen socket, and the contact's
+    /// Identify view of that connection reaches auto-reach as a sighting of
+    /// exactly that socket's endpoint; the address STUN would name for the
+    /// socket is told only once it arrived. The same dial at an address a
+    /// DNS answer gave reaches nothing.
+    #[tokio::test]
+    async fn a_dialled_contacts_identify_view_reaches_auto_reach() {
+        let gate = HostGate::open(true).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // B admits this host as its verified contact.
+        let b_dir = dir.path().join("b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        let host_peer = test_key(13).public().to_peer_id();
+        let row = gate_row(&"aa".repeat(32), true, host_peer.to_string(), Vec::new());
+        std::fs::write(
+            b_dir.join("contacts.json"),
+            serde_json::to_string(&vec![row]).unwrap(),
+        )
+        .unwrap();
+        let (b_seed, _b_commands) = test_seed(&gate, &b_dir, loopback_config(Vec::new()));
+        let b_seed = HostSeed {
+            keypair: test_key(22),
+            ..b_seed
+        };
+        let (mut b, _b_incoming, _b_handle) = b_seed.build(0, false).unwrap();
+        let b_peer = *b.swarm.local_peer_id();
+        let quic_of = |h: &Host| {
+            h.listen_addrs
+                .iter()
+                .find(|a| a.iter().any(|p| matches!(p, Protocol::QuicV1)))
+                .cloned()
+        };
+        let b_quic = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = b.swarm.select_next_some().await;
+                b.on_event(event);
+                if let Some(a) = quic_of(&b) {
+                    break a;
+                }
+            }
+        })
+        .await
+        .expect("B listens on QUIC");
+        // This host listens on QUIC too, so its dials leave from that socket.
+        let (seed, _commands) = test_seed(&gate, dir.path(), loopback_config(Vec::new()));
+        let (mut host, _incoming, _handle) = seed.build(0, false).unwrap();
+        let own = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = host.swarm.select_next_some().await;
+                host.on_event(event);
+                if let Some(a) = quic_of(&host) {
+                    break a;
+                }
+            }
+        })
+        .await
+        .expect("the host listens on QUIC");
+        let Some((Tr::Quic, std::net::SocketAddr::V4(mine))) = raw_endpoint(&own) else {
+            panic!("an IPv4 QUIC listen address: {own}");
+        };
+        host.gate.replace(
+            HashMap::from([(b_peer, PeerClass::CONTACT)]),
+            false,
+            std::time::Instant::now(),
+        );
+        // Dial B at its QUIC address through the dial command, `dns` being
+        // what a route name's resolution gave; run both until B's Identify
+        // reaches the host.
+        async fn identified(
+            host: &mut Host,
+            b: &mut Host,
+            b_peer: PeerId,
+            at: Multiaddr,
+            dns: Vec<IpAddr>,
+        ) {
+            let (reply, _answer) = oneshot::channel();
+            let connect = Command::Connect {
+                peer: b_peer,
+                class: PeerClass::CONTACT,
+                relays: Vec::new(),
+                addrs: vec![at],
+                dns,
+                checked_at: std::time::Instant::now(),
+                reply,
+            };
+            assert!(host.on_command(connect).is_none());
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        event = b.swarm.select_next_some() => b.on_event(event),
+                        event = host.swarm.select_next_some() => {
+                            let from_b = matches!(
+                                &event,
+                                SwarmEvent::Behaviour(EndpointBehaviourEvent::Identify(
+                                    identify::Event::Received { peer_id, .. }
+                                )) if *peer_id == b_peer
+                            );
+                            host.on_event(event);
+                            if from_b {
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("B's Identify reaches the host");
+        }
+        assert!(crate::autoreach::caught().is_empty());
+        identified(&mut host, &mut b, b_peer, b_quic.clone(), Vec::new()).await;
+        let seen = crate::autoreach::caught();
+        let socket = crate::autoreach::Sighting {
+            at: std::net::SocketAddr::V4(mine),
+            quic: true,
+        };
+        assert_eq!(seen, vec![socket], "B's view of the QUIC listen socket");
+        // STUN would name that very socket (no NAT on loopback): told only
+        // once B's view arrived.
+        let listen = host.listen_addrs.clone();
+        let endpoint = format!("/ip4/127.0.0.1/udp/{}/quic-v1", mine.port());
+        let before = crate::autoreach::told_in_strict_lab(&listen, mine, &[]);
+        assert!(before.is_empty(), "told before B saw it: {before:?}");
+        let after = crate::autoreach::told_in_strict_lab(&listen, mine, &seen);
+        assert!(after.contains(&endpoint), "{after:?}");
+        // Closed, then the same dial as a route name's answer: nothing.
+        host.swarm.disconnect_peer_id(b_peer).unwrap();
+        let by = Instant::now() + Duration::from_secs(5);
+        assert!(drive_until_closed(&mut host, &mut b, b_peer, by).await);
+        // (An Identify push before the close names the same socket.)
+        assert!(crate::autoreach::caught().iter().all(|s| *s == socket));
+        let dns = vec![Ipv4Addr::LOCALHOST.into()];
+        identified(&mut host, &mut b, b_peer, b_quic, dns).await;
+        assert_eq!(
+            crate::autoreach::caught(),
+            Vec::new(),
+            "a view over a DNS answer reached auto-reach"
+        );
+    }
+
     /// INET-STUN-1: an IP a DNS answer gave counts as one for an hour after
     /// it was last given, whatever its form; at most [`MAX_DNS_ANSWERS`]
     /// are kept, and when the oldest makes room every IP counts as an

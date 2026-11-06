@@ -577,7 +577,9 @@ fn seen_at(s: &State, ip: Ipv4Addr, lab_local: bool, now: Instant) -> bool {
 /// local-candidates switch of debug builds) every node is at 127.0.0.1 and
 /// every contact sees it there, so that one address and its endpoints
 /// count as seen; any other, 127.0.0.2 say, does not. The harness's
-/// scenarios rest on it; tests can turn it off ([`State::strict_lab`]).
+/// scenarios rest on it; tests can turn it off ([`State::strict_lab`]), as
+/// the p2p test `a_dialled_contacts_identify_view_reaches_auto_reach` does
+/// to see real sightings over loopback count.
 fn lab_seen(s: &State, ip: Ipv4Addr, lab_local: bool) -> bool {
     lab_local && !s.strict_lab && ip == Ipv4Addr::LOCALHOST
 }
@@ -625,9 +627,60 @@ pub(crate) struct Sighting {
 /// ([`usable`]). Kept whether or not STUN discovery is on ([`seen_ip`]); in
 /// memory only, never logged.
 pub(crate) fn observed(seen: Sighting, lab_local: bool) {
+    #[cfg(test)]
+    CAUGHT.with(|c| c.borrow_mut().push(seen));
     if let Some(line) = with_state(|s| observe_in(s, seen, lab_local, Instant::now())) {
         eprintln!("{line}");
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests of the p2p host: what [`observed`] got on this thread.
+    static CAUGHT: std::cell::RefCell<Vec<Sighting>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests of the p2p host: the sightings [`observed`] got on this thread
+/// since the last call.
+#[cfg(test)]
+pub(crate) fn caught() -> Vec<Sighting> {
+    CAUGHT.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Tests of the p2p host: what contacts are told for the listen addresses
+/// `listen` while the anchor names `mapped` for the QUIC listen socket on
+/// `mapped`'s port (no NAT, as on loopback), once the sightings `seen`
+/// arrived, in a loopback lab without its stand-in ([`State::strict_lab`]).
+#[cfg(test)]
+pub(crate) fn told_in_strict_lab(
+    listen: &[Multiaddr],
+    mapped: SocketAddrV4,
+    seen: &[Sighting],
+) -> Vec<String> {
+    let now = Instant::now();
+    let mut s = State {
+        enabled: true,
+        strict_lab: true,
+        anchors: vec![Anchor {
+            local: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, mapped.port()),
+            disc: Discovery {
+                public_ip: Some(*mapped.ip()),
+                mapped: Some(mapped),
+                class: StunClass::NoNat,
+                answered: 2,
+                independent: 2,
+            },
+            at: now,
+        }],
+        ..State::default()
+    };
+    for one in seen {
+        observe_in(&mut s, *one, true, now);
+    }
+    found_in(&s, listen, true, now)
+        .into_iter()
+        .map(|f| f.text)
+        .collect()
 }
 
 /// [`observed`] on `s` at `now`: the line to say, if any ([`say_seen`]).
