@@ -1215,18 +1215,12 @@ pub(crate) struct WarmHalves {
 
 /// The half of a warm link's stream its task writes on (in tests the
 /// stream may be in memory: `crate::onion::memnet`).
-#[cfg(not(test))]
-type WarmWrite = tokio::net::tcp::OwnedWriteHalf;
-#[cfg(test)]
 type WarmWrite = tokio::io::WriteHalf<crate::onion::HelperStream>;
 
 impl WarmHalves {
     /// `stream`, after a batch that read every frame it waited for (no read
     /// stopped part way).
     pub(crate) fn split(stream: crate::onion::HelperStream) -> Self {
-        #[cfg(not(test))]
-        let (mut read, write) = stream.into_split();
-        #[cfg(test)]
         let (mut read, write) = tokio::io::split(stream);
         let (tx, frames) = tokio::sync::mpsc::channel(WARM_READ_AHEAD);
         let reader = tokio::spawn(async move {

@@ -119,6 +119,12 @@ The local protocol (spec §6) is small:
 
 Only ephemeral loopback ports are bound; no Raven port, no public port.
 
+Since version 4 of the local protocol (security review 2026-11, TOR-4) both
+kinds of streams ride a socket pair the helper inherits on macOS and Linux
+(loopback ports stay on Windows only), and on each one the helper proves the
+token by challenge and response before raven-node proves it in turn; no
+stream carries the token itself (spec §6).
+
 ### 3.2 The onion service key and its binding to the Raven identity
 
 - Arti generates the onion service key on first start and keeps it in its

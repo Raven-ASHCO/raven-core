@@ -15,6 +15,11 @@
 //!   [`encode_forward`] first (the token, then an opaque number for the
 //!   rendezvous circuit the stream came on); then the stream carries the
 //!   bytes.
+//! - **Version 4** (security review 2026-11, TOR-4): the streams ride the
+//!   helper channel (`channel.rs`): a socket pair on macOS and Linux, the
+//!   loopback ports on Windows; on every stream the helper proves the token
+//!   first, by challenge and response, and a proof rides where the token
+//!   did above. The token itself never travels on a stream.
 //!
 //! Nothing here ever carries an onion address of a friend in a log or an
 //! event: the onion key travels only inside the connect request.
@@ -35,7 +40,9 @@ use serde::{Deserialize, Serialize};
 /// ([`encode_forward`]).
 /// 3: a connect request ends with a flags byte ([`encode_connect`],
 /// [`CONNECT_FLAGS`]; Tor speed Stage A, speed design M5).
-pub const PROTO_VERSION: u32 = 3;
+/// 4: the helper channel and its hellos (`channel.rs`, TOR-4); the
+/// requests are those of version 3.
+pub const PROTO_VERSION: u32 = 4;
 
 /// The shared secret of one helper's life: 32 random bytes, hex in
 /// [`Config::token`], raw on the loopback streams.
@@ -107,7 +114,9 @@ pub struct Config {
     pub state_dir: String,
     /// [`TOKEN_LEN`] bytes in lowercase hex.
     pub token: String,
-    /// raven-node's forward listener (`127.0.0.1:<port>`).
+    /// raven-node's forward listener (`127.0.0.1:<port>`); version 4 on
+    /// macOS and Linux: the helper channel instead (`fd:<n>`, or `conduit`
+    /// in raven-node's own process).
     pub forward: String,
     /// The onion service's virtual port: the only one the helper accepts
     /// streams on.
@@ -1332,7 +1341,8 @@ mod tests {
     /// and optimistic data), and 0 asks what version 2 asked.
     #[test]
     fn connect_request_v3_round_trips_flags() {
-        assert_eq!(PROTO_VERSION, 3);
+        // Version 4 (the helper channel) keeps this layout.
+        const { assert!(PROTO_VERSION >= 3) };
         assert_eq!(CONNECT_REQUEST_LEN, TOKEN_LEN + 32 + 2 + 1);
         let (token, hs) = ([3u8; TOKEN_LEN], [4u8; 32]);
         // Bit 1 is the probe (speed design M2, M3).

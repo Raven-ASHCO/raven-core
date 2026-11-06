@@ -14,6 +14,10 @@
 //! raven-node's connect requests (token checked). It never sees a Raven key
 //! or a message: the Raven link runs end to end inside the streams.
 //!
+//! Both kinds of stream ride the helper channel ([`super::channel`],
+//! version 4: a socket pair on macOS and Linux, loopback ports on
+//! Windows), and on each the helper proves the token first.
+//!
 //! It ends when its input closes (raven-node is gone) or on `stop`.
 //!
 //! Its output carries events only. Its only log subscriber
@@ -43,13 +47,14 @@ use arti_client::config::{BoolOrAuto, TorClientConfigBuilder};
 use arti_client::{HasKind as _, IsolationToken, StreamPrefs, TorClient};
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tor_rtcompat::PreferredRuntime;
 
+use super::channel;
 use super::proto::{self, Command, Config, ConnectReply, Event, ServiceState};
 
 /// How long one Tor connect may take (raven-node waits 45 s in all).
@@ -165,8 +170,9 @@ pub(crate) fn watch_too_old() -> Arc<TooOld> {
 /// The helper on `input` (raven-node's lines) and `output` (its events),
 /// until `input` closes, `stop`, or Tor gives up for good; the exit code
 /// (0 asked to stop, 2 a bad config line, 4 Tor gave up, [`EXIT_OBSOLETE`]
-/// the Tor network requires a newer Tor).
-pub(crate) async fn serve<R, W>(input: R, output: W) -> i32
+/// the Tor network requires a newer Tor). `handed`: what raven-node handed
+/// a helper in its own process besides the pipes ([`channel::Handed`]).
+pub(crate) async fn serve<R, W>(input: R, output: W, handed: channel::Handed) -> i32
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -185,28 +191,29 @@ where
     });
     let mut stdin = BufReader::new(input).lines();
     let Ok(Some(first)) = stdin.next_line().await else {
-        return 2;
+        return refused(events, writer).await;
     };
     let Ok(config) = serde_json::from_str::<Config>(&first) else {
         events.local("bad config line");
-        return 2;
+        return refused(events, writer).await;
     };
     if config.v != proto::PROTO_VERSION {
         events.local("unknown protocol version");
-        return 2;
+        return refused(events, writer).await;
     }
     let Some(token) = proto::parse_token(&config.token) else {
         events.local("bad token");
-        return 2;
+        return refused(events, writer).await;
     };
-    let Ok(forward) = config.forward.parse::<SocketAddr>() else {
-        events.local("bad forward address");
-        return 2;
+    // The helper channel (macOS, Linux) or raven-node's loopback forward
+    // listener (Windows).
+    let forward = match channel::ToNode::from_config(&config.forward, handed) {
+        Ok(to_node) => to_node,
+        Err(what) => {
+            events.local(what);
+            return refused(events, writer).await;
+        }
     };
-    if !forward.ip().is_loopback() {
-        events.local("forward address is not loopback");
-        return 2;
-    }
     let state_dir = PathBuf::from(&config.state_dir);
     if config.fresh_state {
         set_guard_state_aside(&state_dir);
@@ -255,9 +262,23 @@ where
         code = EXIT_OBSOLETE;
     }
     tor.abort();
+    said(events, writer).await;
+    code
+}
+
+/// [`said`], then 2: the config line refused.
+async fn refused(events: Events, writer: tokio::task::JoinHandle<()>) -> i32 {
+    said(events, writer).await;
+    2
+}
+
+/// `events` closed and its writer given half a second to write what is
+/// left: the helper's last words reach raven-node before [`serve`]
+/// returns (a helper process exits right after, and a line still with
+/// the writer task would be lost).
+async fn said(events: Events, writer: tokio::task::JoinHandle<()>) {
     drop(events);
     let _ = tokio::time::timeout(Duration::from_millis(500), writer).await;
-    code
 }
 
 /// The guard state (Arti's `state/` under its state directory) set aside,
@@ -274,7 +295,7 @@ fn set_guard_state_aside(state_dir: &Path) {
 async fn tor_main(
     state_dir: PathBuf,
     token: [u8; proto::TOKEN_LEN],
-    forward: SocketAddr,
+    forward: channel::ToNode,
     port: u16,
     events: Events,
     mut check_requests: mpsc::UnboundedReceiver<u64>,
@@ -336,19 +357,29 @@ async fn tor_main(
         return std::future::pending().await;
     }
 
-    // Outbound: raven-node's connect requests.
-    let listener = match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
-        Ok(l) => l,
-        Err(_) => return events.local("connect port could not be opened"),
+    // Outbound: raven-node's connect requests, on the channel (macOS,
+    // Linux) or a loopback port of this helper's own (Windows).
+    let keys = channel::Keys::new(&token);
+    let (connects, connect) = match &forward {
+        #[cfg(unix)]
+        channel::ToNode::Channel(conduit) => (
+            Connects::Channel(Arc::clone(conduit)),
+            channel::CONDUIT.to_string(),
+        ),
+        channel::ToNode::Port(_) => {
+            let listener = match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
+                Ok(l) => l,
+                Err(_) => return events.local("connect port could not be opened"),
+            };
+            let connect = match listener.local_addr() {
+                Ok(a) => a,
+                Err(_) => return events.local("connect port has no address"),
+            };
+            (Connects::Port(listener), connect.to_string())
+        }
     };
-    let connect = match listener.local_addr() {
-        Ok(a) => a,
-        Err(_) => return events.local("connect port has no address"),
-    };
-    tokio::spawn(accept_connects(listener, client.clone(), token));
-    events.say(Event::Ready {
-        connect: connect.to_string(),
-    });
+    tokio::spawn(accept_connects(connects, client.clone(), keys.clone()));
+    events.say(Event::Ready { connect });
 
     // Inbound: the onion service.
     let nickname = match "raven".parse() {
@@ -420,7 +451,7 @@ async fn tor_main(
         });
     }
     keep_rendezvous(Box::pin(requests), move |request, circuit| {
-        forward_stream(request, forward, token, port, circuit)
+        forward_stream(request, forward.clone(), keys.clone(), port, circuit)
     })
     .await;
     // The service ended (it should not): raven-node notices nothing more
@@ -701,11 +732,12 @@ fn service_state(state: tor_hsservice::status::State) -> ServiceState {
 /// One onion stream: only BEGIN on the virtual port is accepted (anything
 /// else gets END/DONE, as other onion services answer); its bytes go to
 /// raven-node's forward listener, the token and its circuit's number first
-/// ([`proto::encode_forward`]).
+/// ([`proto::encode_forward`]). Version 4: over the helper channel, this
+/// helper's hello first ([`channel::helper_forward`]).
 async fn forward_stream(
     request: tor_hsservice::StreamRequest,
-    forward: SocketAddr,
-    token: [u8; proto::TOKEN_LEN],
+    forward: channel::ToNode,
+    keys: channel::Keys,
     port: u16,
     circuit: u64,
 ) {
@@ -718,16 +750,15 @@ async fn forward_stream(
         let _ = request.reject(End::new_with_reason(EndReason::DONE)).await;
         return;
     }
-    let Ok(mut node) = TcpStream::connect(forward).await else {
+    let Ok(mut node) = forward.open(tcp_to).await else {
         let _ = request.reject(End::new_with_reason(EndReason::DONE)).await;
         return;
     };
-    let _ = node.set_nodelay(true);
-    if node
-        .write_all(&proto::encode_forward(&token, circuit))
+    if channel::helper_forward(&mut node, &keys, circuit)
         .await
         .is_err()
     {
+        let _ = request.reject(End::new_with_reason(EndReason::DONE)).await;
         return;
     }
     let Ok(mut tor) = request.accept(Connected::new_empty()).await else {
@@ -736,28 +767,68 @@ async fn forward_stream(
     let _ = tokio::io::copy_bidirectional(&mut tor, &mut node).await;
 }
 
+/// A TCP stream to raven-node's forward listener at `addr`, Nagle off.
+async fn tcp_to(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect(addr).await?;
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
+}
+
+/// Where raven-node's connect streams come from: this helper life's
+/// channel (macOS, Linux), or a loopback port of its own (Windows).
+enum Connects {
+    Port(TcpListener),
+    #[cfg(unix)]
+    Channel(Arc<channel::Conduit>),
+}
+
+impl Connects {
+    /// The next connect stream (Nagle off on TCP; one from anywhere but
+    /// loopback is dropped); `None` once the channel ended (raven-node is
+    /// gone, and this helper's stdin ends it).
+    async fn next(&self) -> Option<channel::Stream<TcpStream>> {
+        loop {
+            match self {
+                Self::Port(listener) => match listener.accept().await {
+                    Ok((stream, peer)) if peer.ip().is_loopback() => {
+                        let _ = stream.set_nodelay(true);
+                        return Some(channel::Stream::Net(stream));
+                    }
+                    Ok(_) => {}
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                },
+                #[cfg(unix)]
+                Self::Channel(conduit) => match conduit.accept().await {
+                    Ok(Some(stream)) => return Some(channel::Stream::Pair(stream)),
+                    Ok(None) => return None,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                },
+            }
+        }
+    }
+}
+
 /// raven-node's connect requests: the token, an onion key and the port;
-/// one reply byte (and a short reason); then the bytes.
+/// one reply byte (and a short reason); then the bytes. Version 4: raven-node
+/// proves the token where it was ([`channel::helper_connect`]), after this
+/// helper did; on a loopback port at most [`channel::PENDING_MAX`]
+/// connections wait for their hello at once (the oldest is closed for a
+/// newcomer).
 async fn accept_connects(
-    listener: TcpListener,
+    connects: Connects,
     client: Arc<TorClient<PreferredRuntime>>,
-    token: [u8; proto::TOKEN_LEN],
+    keys: channel::Keys,
 ) {
     // Each friend's isolation group, for this helper life (audit T6).
     let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(
         IsolationToken::new,
     )));
-    loop {
-        let Ok((mut stream, peer)) = listener.accept().await else {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
-        };
-        if !peer.ip().is_loopback() {
-            continue;
-        }
+    let pending =
+        matches!(connects, Connects::Port(_)).then(|| Arc::new(channel::Pending::default()));
+    while let Some(mut stream) = connects.next().await {
         let (client, book) = (client.clone(), book.clone());
+        let (keys, pending) = (keys.clone(), pending.clone());
         tokio::spawn(async move {
-            let _ = stream.set_nodelay(true);
             // One try with Arti: to the onion service `hs_id` on `port`, in
             // `group` (`None`: the default one).
             let open = |group: Option<IsolationToken>, hs_id: [u8; 32], port: u16| {
@@ -798,7 +869,8 @@ async fn accept_connects(
                     }
                 }
             };
-            if let Some(mut tor) = answer_connect(&mut stream, &token, &book, open, probe).await {
+            let asked = answer_connect(&mut stream, &keys, pending.as_deref(), &book, open, probe);
+            if let Some(mut tor) = asked.await {
                 let _ = tokio::io::copy_bidirectional(&mut stream, &mut tor).await;
             }
         });
@@ -812,10 +884,13 @@ async fn accept_connects(
 /// said it opened; `None` when the request was not raven-node's (closed
 /// without a word), was refused, or found no stream. A probe
 /// ([`proto::CONNECT_PROBE`]) is made by `probe(group, hs_id)` instead
-/// ([`proto::probe_in_groups`]): its reply, and never a stream.
+/// ([`proto::probe_in_groups`]): its reply, and never a stream. Version
+/// 4: the hello first ([`channel::helper_connect_in`], with the loopback
+/// port's `pending`), the token checked as raven-node's proof.
 async fn answer_connect<S, G, T, O, Fut, P, PFut>(
     stream: &mut S,
-    token: &[u8; proto::TOKEN_LEN],
+    keys: &channel::Keys,
+    pending: Option<&channel::Pending>,
     book: &std::sync::Mutex<proto::IsolationBook<G>>,
     open: O,
     probe: P,
@@ -828,13 +903,8 @@ where
     P: FnOnce(Option<G>, [u8; 32]) -> PFut,
     PFut: Future<Output = Result<(), ConnectReply>>,
 {
-    let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
-    let read = tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut req));
-    if !matches!(read.await, Ok(Ok(_))) {
-        return None;
-    }
-    // Not raven-node: closed without a word.
-    let (hs_id, port, flags) = proto::decode_connect(&req, token)?;
+    // Not raven-node: closed without a word, before its request is read.
+    let (hs_id, port, flags) = channel::helper_connect_in(stream, keys, pending).await?;
     // A flag this version does not know: refused, never served as if it
     // were clear.
     if proto::unknown_flags(flags) {
@@ -1040,6 +1110,7 @@ fn onion_text(hs_id: &tor_hscrypto::pk::HsId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     /// Audit S9: Raven opens onion streams only, so its Tor client builds
     /// no exit circuits ahead of need (Arti's defaults keep two for ports
@@ -1066,6 +1137,60 @@ mod tests {
             .and_then(|(_, rest)| rest.split_once('}'))
             .map_or("", |(timeouts, _)| timeouts);
         assert!(timeouts.contains("connect_timeout: 6s"), "{text}");
+    }
+
+    /// A config line the helper refuses gets its words to raven-node before
+    /// [`serve`] returns: a helper process exits right after (its runtime
+    /// ends, and a line still with the writer task is lost), and raven-node
+    /// says "install Raven again" for another version only when the words
+    /// came. One thread: nothing runs between `serve`'s return and the read.
+    #[tokio::test]
+    async fn the_words_for_a_refused_config_line_are_written_before_serve_returns() {
+        let good = Config {
+            v: proto::PROTO_VERSION,
+            state_dir: "/nonexistent/raven-tor".into(),
+            token: hex::encode([1u8; proto::TOKEN_LEN]),
+            forward: "127.0.0.1:9".into(),
+            port: 4242,
+            fresh_state: false,
+        };
+        let line = |config: Config| proto::line(&config);
+        let refused = [
+            (
+                line(Config {
+                    v: proto::PROTO_VERSION + 1,
+                    ..good.clone()
+                }),
+                "unknown protocol version",
+            ),
+            ("not a config\n".to_string(), "bad config line"),
+            (
+                line(Config {
+                    token: "00".into(),
+                    ..good.clone()
+                }),
+                "bad token",
+            ),
+            (
+                line(Config {
+                    forward: "192.0.2.1:9".into(),
+                    ..good.clone()
+                }),
+                "forward address is not loopback",
+            ),
+        ];
+        for (first, words) in refused {
+            let (mut to_helper, input) = tokio::io::duplex(4096);
+            let (output, mut from_helper) = tokio::io::duplex(4096);
+            to_helper.write_all(first.as_bytes()).await.unwrap();
+            assert_eq!(serve(input, output, channel::Handed::Nothing).await, 2);
+            let mut got = vec![0u8; 4096];
+            let n = futures::FutureExt::now_or_never(from_helper.read(&mut got))
+                .unwrap_or_else(|| panic!("no words yet when serve returned: {words}"))
+                .unwrap();
+            let said = String::from_utf8_lossy(&got[..n]);
+            assert!(said.contains(words), "{words}: {said}");
+        }
     }
 
     // ── The rendezvous circuits (TOR-5), with fake clients ─────────────────
@@ -1333,11 +1458,19 @@ mod tests {
         book: &Mutex<proto::IsolationBook<u32>>,
         flags: u8,
     ) -> (ConnectReply, bool, TriesMade) {
-        let token = [5u8; proto::TOKEN_LEN];
+        let keys = channel::Keys::new(&[5u8; proto::TOKEN_LEN]);
         let (mut node, mut helper) = tokio::io::duplex(1024);
-        node.write_all(&proto::encode_connect(&token, &[6u8; 32], 4242, flags))
-            .await
-            .unwrap();
+        // raven-node's side: the hello (version 4), then its request.
+        let asking = {
+            let keys = keys.clone();
+            async move {
+                let proof = channel::node_connect(&mut node, &keys).await.unwrap();
+                node.write_all(&proto::encode_connect(&proof, &[6u8; 32], 4242, flags))
+                    .await
+                    .unwrap();
+                node
+            }
+        };
         let began = Instant::now();
         let tries: Arc<Mutex<TriesMade>> = Arc::default();
         let log = Arc::clone(&tries);
@@ -1366,8 +1499,12 @@ mod tests {
                 Ok(())
             }
         };
-        let opened = answer_connect(&mut helper, &token, book, open, probe).await;
-        drop(helper);
+        let answering = async {
+            let opened = answer_connect(&mut helper, &keys, None, book, open, probe).await;
+            drop(helper);
+            opened
+        };
+        let (opened, mut node) = tokio::join!(answering, asking);
         let mut head = [0u8; 2];
         node.read_exact(&mut head).await.unwrap();
         let mut reason = vec![0u8; usize::from(head[1])];

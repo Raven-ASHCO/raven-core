@@ -121,7 +121,7 @@ is derived live for each plan from a verified binding (§3) and never stored in
   in a full listener, and so closes no link, for the rest of the helper's life; the node forgets
   these circuits at each new token (§6), and keeps at most 4096 of them, the oldest forgotten
   first. A contact holds at most 4 authenticated links: a newer one that authenticates closes
-  that contact's oldest (TOR-2). The helper's token is checked before any of these slots is
+  that contact's oldest (TOR-2). The helper's hello (§6) is checked before any of these slots is
   taken. Noise message 1 must start within 10 s of the stream; handshake deadline 30 s; lifetime
   180 s; 64 frames.
 - **What the inbound limits defend, and what they do not.** Anyone who holds the card can open
@@ -161,15 +161,20 @@ Tor runs in a helper process (`raven-tor-helper`, Arti), never in the node. The 
 and talks to it over three channels:
 
 1. **Control (stdin/stdout, one JSON object per line, at most 4096 bytes).**
-   - Node to helper, first line: `{"v":3,"state_dir":"<profile>/tor","token":"<64 hex>",
-     "forward":"127.0.0.1:<port>","port":7422,"fresh_state":false}`.
+   - Node to helper, first line: `{"v":4,"state_dir":"<profile>/tor","token":"<64 hex>",
+     "forward":"<forward>","port":7422,"fresh_state":false}`.
    - Node to helper, later: `{"cmd":"ping","n":N}`, `{"cmd":"self_check","n":N}`,
      `{"cmd":"stop"}`.
    - Helper to node: `{"ev":"progress","pct":0-100[,"blocked":"<word>"][,"stage":"<word>"]}`,
-     `{"ev":"ready","connect":"127.0.0.1:<port>"}`, `{"ev":"onion","hs_id":"<64 hex>"}` (once),
+     `{"ev":"ready","connect":"<connect>"}`, `{"ev":"onion","hs_id":"<64 hex>"}` (once),
      `{"ev":"service","state":"shutdown|bootstrapping|degraded_reachable|degraded_unreachable|
      running|recovering|broken"[,"reason":"<phrase>"]}`, `{"ev":"pong","n":N}`,
      `{"ev":"error","what":"<fixed text>"[,"local":true]}`.
+   - `<forward>` and `<connect>` say where the streams of items 2 and 3 go (the helper channel,
+     below). `<forward>` is `fd:<n>` (macOS, Linux: the end of the channel this helper process
+     inherited, descriptor n), `conduit` (a helper in the node's process, handed its end) or
+     `127.0.0.1:<port>` (Windows: the node's forward listener). `<connect>` is `conduit` on the
+     channel, else `127.0.0.1:<port>` (the helper's connect port).
    - `blocked` is one of `offline`, `filtered`, `clock_skewed`, `cant_reach_tor`, `directory`,
      `disabled`, `other` (never Arti's free text).
    - `stage` is one of `connecting`, `no_internet`, `handshaking`, `no_handshake` (no Tor relay
@@ -208,10 +213,10 @@ and talks to it over three channels:
      while they reach it, every 10 minutes while they fail, and 30 s after the state reports
      trouble (not within 10 minutes of the last).
    - The helper exits when its stdin closes.
-2. **Outbound (loopback TCP to `connect`).** The node writes `token[32] || hs_id[32] ||
+2. **Outbound (a stream to `connect`).** After the hello the node writes `proof[32] || hs_id[32] ||
    port (u16 BE) || flags u8`; the helper answers `status u8 || reason_len u8 || reason`
    (status 0 open, 1 not ready, 2 unreachable, 3 timeout, 4 failed; reason printable ASCII, at
-   most 120 bytes, never an address), then the stream carries the bytes. A wrong token is
+   most 120 bytes, never an address), then the stream carries the bytes. A wrong proof is
    closed without a byte.
    - `flags`: bit 0 *fresh first*: the first try goes in a new isolation group, not the
      contact's (the node's last link to that contact failed where the helper cannot see it,
@@ -233,18 +238,46 @@ and talks to it over three channels:
    - A node sets flags only while `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false;
      lab switch `RAVEN_LAB_TOR_HEDGE` with the Lab Test A unlock, debug builds only, hold
      `feature/onion-hedge`); otherwise 0, which asks what version 2 asked.
-3. **Inbound (loopback TCP to `forward`).** For every accepted onion stream the helper connects
-   to the node's forward listener and writes `token[32] || circuit (u64 BE)`; then the stream
+3. **Inbound (a stream to `forward`).** For every accepted onion stream the helper opens a stream
+   to the node and writes `proof[32] || circuit (u64 BE)` in its hello (below); then the stream
    carries the bytes. `circuit` is an opaque number the helper gives each rendezvous circuit of
    its service: the same for every stream on that circuit, never reused within one helper life,
    and it says nothing about who dialled. The node reads this header before it takes any
    admission slot (at most 32 connections may wait for it; one more closes the oldest), and
-   closes a connection without the token within 10 s, before any Raven byte.
-   (Version 3 of this local protocol. Version 2 had no flags byte in a connect request (item
+   closes a stream without the helper's proof within 2 s, before any Raven byte.
+   (Version 4 of this local protocol: version 3 sent the token itself, with no hello, on
+   loopback TCP everywhere. Version 2 had no flags byte in a connect request (item
    2), and version 1 sent `token[32]` alone here. Node and helper ship together and refuse
    each other's other version.)
 
-The token is 32 random bytes per helper life. Only ephemeral loopback ports are used.
+The token is 32 random bytes per helper life. Only the config line carries it; no stream does.
+
+**The helper channel (version 4; security review 2026-11, TOR-4).** On macOS and Linux the
+streams of items 2 and 3 ride one socket pair per helper life, with no port and no name: a
+helper process inherits its end (`fd:<n>`, above stderr; the node keeps it closed on exec, so no
+other program it starts holds it), and a helper in the node's process (the iOS app) is handed it
+(`conduit`). Each stream is a fresh socket pair whose one end crosses the channel (SCM_RIGHTS)
+with one kind byte: `c` for a connect stream (node to helper), `f` for a forward stream (helper
+to node); a message of the other kind or without a socket is dropped. On Windows the streams
+stay on loopback TCP (ephemeral loopback ports only: the node's forward listener and the
+helper's connect port), and each of the two holds at most 32 connections that still owe their
+hello; one more closes the oldest.
+
+**The hello, on every stream.** The node sends `challenge[32]` (random); the helper answers
+`nonce[32] || proof_h[32]`, on a forward stream with `circuit (u64 BE)` after it (item 3); the
+node checks `proof_h` and only then sends `proof_n[32]`, on a connect stream as the request's
+`proof` (item 2), which the helper checks before it reads the rest of the request or carries a
+byte. With HMAC-SHA256, `L` = `raven/onion-helper-channel/v4` and `t` = `/connect` or
+`/forward`: `k_h = HMAC(token, L || "/helper")`, `k_n = HMAC(token, L || "/node")`,
+`proof_h = HMAC(k_h, L || t || "/helper" || challenge || nonce)` and
+`proof_n = HMAC(k_n, L || t || "/node" || nonce || challenge)`, compared in constant time. A
+program in the helper's place learns a random challenge and nothing else; a copied hello fails
+against the next stream's fresh challenge, and no proof stands for the other side's or for the
+other kind of stream. Each side waits at most 2 s for each step, then closes the stream without
+a word. A helper answers a config line of another version with
+`{"ev":"error","what":"unknown protocol version","local":true}`; the node shows "the Tor helper
+is from another version of Raven; install Raven again" and starts it again with its usual
+backoff.
 
 ## §7 The card field
 

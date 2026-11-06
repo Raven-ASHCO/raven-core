@@ -8,6 +8,9 @@
 //! looks the key up there and connects to that port. Everything else is the
 //! real protocol: the config line, the events, the token on both loopback
 //! streams, the virtual port, the connect replies, ping and stop.
+//! Version 4: both kinds of stream ride the helper channel
+//! ([`super::channel`]: a socket pair on macOS and Linux, loopback ports
+//! on Windows and in tests), with the hellos first.
 //!
 //! Lab knobs (environment, read at start, for the supervisor's tests):
 //! - `RAVEN_LAB_TOR_LOOPBACK_STALL=1`: bootstrap stops at 15 % and never
@@ -58,6 +61,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use super::channel;
 use super::proto::{self, Command, Config, ConnectReply, Event};
 use super::LineReader;
 
@@ -325,18 +329,25 @@ pub(crate) async fn run_cli(registry: PathBuf) -> i32 {
 
 /// The loopback helper inside raven-node's process (feature
 /// `tor-embedded`, [`super::InProcess`]): [`serve`] on in-memory pipes, the
-/// knobs from the environment, as [`run_cli`] reads them.
+/// knobs from the environment, as [`run_cli`] reads them; `handed`, its end
+/// of the channel ([`serve_on`]).
 #[cfg(feature = "tor-embedded")]
-pub(crate) async fn serve_in_process<R, W>(input: R, output: W, registry: PathBuf) -> i32
+pub(crate) async fn serve_in_process<R, W>(
+    input: R,
+    output: W,
+    registry: PathBuf,
+    handed: channel::Handed,
+) -> i32
 where
     R: AsyncRead + Send + 'static,
     W: AsyncWrite + Send + 'static,
 {
-    match serve(
+    match serve_on(
         Box::pin(input),
         Box::pin(output),
         registry,
         Knobs::from_env(),
+        handed,
     )
     .await
     {
@@ -362,9 +373,21 @@ pub(crate) enum Ended {
 /// The helper on `input` and `output` (the config line first).
 pub(crate) async fn serve(
     input: Pin<Box<dyn AsyncRead + Send>>,
+    output: Pin<Box<dyn AsyncWrite + Send>>,
+    registry: PathBuf,
+    knobs: Knobs,
+) -> Result<Ended, String> {
+    serve_on(input, output, registry, knobs, channel::Handed::Nothing).await
+}
+
+/// [`serve`] with what raven-node `handed` a helper in its own process
+/// besides the pipes ([`channel::Handed`]).
+pub(crate) async fn serve_on(
+    input: Pin<Box<dyn AsyncRead + Send>>,
     mut output: Pin<Box<dyn AsyncWrite + Send>>,
     registry: PathBuf,
     knobs: Knobs,
+    handed: channel::Handed,
 ) -> Result<Ended, String> {
     let mut lines = LineReader::new(input);
     let first = lines.next_line().await.ok_or("no config line")?;
@@ -373,7 +396,10 @@ pub(crate) async fn serve(
         return Err("unknown protocol version".into());
     }
     let token = proto::parse_token(&config.token).ok_or("bad token")?;
-    let forward: std::net::SocketAddr = config.forward.parse().map_err(|_| "bad forward")?;
+    // The helper channel (macOS, Linux) or raven-node's loopback forward
+    // listener.
+    let forward = channel::ToNode::from_config(&config.forward, handed)?;
+    let keys = channel::Keys::new(&token);
     let state_dir = PathBuf::from(&config.state_dir);
     let hs = hs_identity(&state_dir)?;
     let hs_id = hs.public_key_bytes();
@@ -413,20 +439,32 @@ pub(crate) async fn serve(
     let entry = registry.join(hex::encode(hs_id));
     std::fs::write(&entry, service_addr.to_string()).map_err(|e| e.to_string())?;
     let _registered = Unregister(entry);
+    // raven-node's connect requests: on the channel (macOS, Linux), else
+    // on a connect port of this helper's own.
+    let (connect, connect_name) = match &forward {
+        #[cfg(unix)]
+        channel::ToNode::Channel(conduit) => (
+            Listener::Channel(Arc::clone(conduit)),
+            channel::CONDUIT.to_string(),
+        ),
+        channel::ToNode::Port(_) => {
+            let connect = listen(&knobs).await.map_err(|e| e.to_string())?;
+            let connect_addr = connect.local_addr().map_err(|e| e.to_string())?;
+            (connect, connect_addr.to_string())
+        }
+    };
     let accepting = tokio::spawn(accept_service(
         service,
         forward,
-        token,
+        keys.clone(),
         knobs.one_circuit.is_some(),
     ));
     let _accepting = AbortOnDrop(accepting);
 
     // The connect port.
-    let connect = listen(&knobs).await.map_err(|e| e.to_string())?;
-    let connect_addr = connect.local_addr().map_err(|e| e.to_string())?;
     let connecting = tokio::spawn(accept_connects(
         connect,
-        token,
+        keys,
         config.port,
         Arc::new(registry.clone()),
         knobs,
@@ -436,7 +474,7 @@ pub(crate) async fn serve(
     send(
         &mut output,
         &Event::Ready {
-            connect: connect_addr.to_string(),
+            connect: connect_name,
         },
     )
     .await?;
@@ -513,18 +551,24 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// A stream of this helper: TCP on loopback (in tests it may be in memory,
+/// A loopback stream of this helper: TCP (in tests it may be in memory,
 /// `Knobs::memory`).
 #[cfg(not(test))]
-type Stream = TcpStream;
+type Net = TcpStream;
 #[cfg(test)]
-type Stream = super::memnet::Stream;
+type Net = super::memnet::Stream;
+/// A stream of this helper: [`Net`], or a socket pair of the channel to
+/// raven-node (macOS, Linux).
+type Stream = channel::Stream<Net>;
 
 /// A listener of this helper ([`Stream`]).
 enum Listener {
     Tcp(TcpListener),
     #[cfg(test)]
     Memory(super::memnet::Listener),
+    /// raven-node's connect streams over the channel (macOS, Linux).
+    #[cfg(unix)]
+    Channel(Arc<channel::Conduit>),
 }
 
 impl Listener {
@@ -533,26 +577,53 @@ impl Listener {
             Self::Tcp(listener) => listener.local_addr(),
             #[cfg(test)]
             Self::Memory(listener) => Ok(listener.local_addr()),
+            #[cfg(unix)]
+            Self::Channel(_) => Err(std::io::ErrorKind::AddrNotAvailable.into()),
         }
     }
 
     async fn accept(&mut self) -> std::io::Result<Stream> {
         match self {
-            Self::Tcp(listener) => listener.accept().await.map(|(stream, _)| tcp(stream)),
+            Self::Tcp(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, _)| Stream::Net(tcp(stream))),
             #[cfg(test)]
-            Self::Memory(listener) => listener.accept().await,
+            Self::Memory(listener) => listener.accept().await.map(Stream::Net),
+            #[cfg(unix)]
+            Self::Channel(conduit) => match conduit.accept().await {
+                Ok(Some(stream)) => Ok(Stream::Pair(stream)),
+                // raven-node is gone: its stdin ends this helper.
+                Ok(None) => std::future::pending().await,
+                Err(e) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Err(e)
+                }
+            },
+        }
+    }
+
+    /// Any program on this computer may connect to it (the channel reaches
+    /// raven-node alone).
+    fn reaches_anyone(&self) -> bool {
+        match self {
+            Self::Tcp(_) => true,
+            #[cfg(test)]
+            Self::Memory(_) => true,
+            #[cfg(unix)]
+            Self::Channel(_) => false,
         }
     }
 }
 
-/// `stream` as a [`Stream`].
+/// `stream` as a [`Net`].
 #[cfg(not(test))]
-fn tcp(stream: TcpStream) -> Stream {
+fn tcp(stream: TcpStream) -> Net {
     stream
 }
 #[cfg(test)]
-fn tcp(stream: TcpStream) -> Stream {
-    Stream::Left(stream)
+fn tcp(stream: TcpStream) -> Net {
+    Net::Left(stream)
 }
 
 /// A new listener on a loopback port of its own (in memory with
@@ -570,24 +641,25 @@ async fn listen(knobs: &Knobs) -> std::io::Result<Listener> {
 
 /// A stream to `addr`, Nagle off (in tests: `super::memnet::connect`).
 #[cfg(not(test))]
-async fn connect(addr: std::net::SocketAddr) -> std::io::Result<Stream> {
+async fn connect(addr: std::net::SocketAddr) -> std::io::Result<Net> {
     let stream = TcpStream::connect(addr).await?;
     let _ = stream.set_nodelay(true);
     Ok(tcp(stream))
 }
 #[cfg(test)]
-async fn connect(addr: std::net::SocketAddr) -> std::io::Result<Stream> {
+async fn connect(addr: std::net::SocketAddr) -> std::io::Result<Net> {
     super::memnet::connect(addr).await
 }
 
 /// Every stream into the "onion service" goes to raven-node's forward
 /// listener, the token and a circuit number first (each stream here is its
 /// own "circuit"; with `one_circuit`, each connecting helper's streams
-/// share one, [`ONE_CIRCUIT_ENV`]).
+/// share one, [`ONE_CIRCUIT_ENV`]). Version 4: over the channel, this
+/// helper's hello first ([`channel::helper_forward`]).
 async fn accept_service(
     mut listener: Listener,
-    forward: std::net::SocketAddr,
-    token: [u8; 32],
+    forward: channel::ToNode,
+    keys: channel::Keys,
     one_circuit: bool,
 ) {
     let circuits = Arc::new(std::sync::Mutex::new((
@@ -599,6 +671,7 @@ async fn accept_service(
             continue;
         };
         let circuits = Arc::clone(&circuits);
+        let (forward, keys) = (forward.clone(), keys.clone());
         tokio::spawn(async move {
             let client = if one_circuit {
                 let mut id = [0u8; 8];
@@ -627,11 +700,10 @@ async fn accept_service(
                     }
                 }
             };
-            let Ok(mut out) = connect(forward).await else {
+            let Ok(mut out) = forward.open(connect).await else {
                 return;
             };
-            if out
-                .write_all(&proto::encode_forward(&token, circuit))
+            if channel::helper_forward(&mut out, &keys, circuit)
                 .await
                 .is_err()
             {
@@ -643,10 +715,12 @@ async fn accept_service(
 }
 
 /// raven-node's connect requests: the token, a registered key and the
-/// virtual port, then the bytes.
+/// virtual port, then the bytes. Version 4: the hello first
+/// ([`channel::helper_connect_in`]); on a listener any program may reach,
+/// at most [`channel::PENDING_MAX`] connections wait for it at once.
 async fn accept_connects(
     mut listener: Listener,
-    token: [u8; 32],
+    keys: channel::Keys,
     port: u16,
     registry: Arc<PathBuf>,
     knobs: Knobs,
@@ -657,18 +731,19 @@ async fn accept_connects(
     // helper's), and the circuits built in them.
     let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(new_group)));
     let circuits: Arc<std::sync::Mutex<Circuits>> = Arc::default();
+    let pending = listener
+        .reaches_anyone()
+        .then(|| Arc::new(channel::Pending::default()));
     loop {
         let Ok(mut stream) = listener.accept().await else {
             continue;
         };
         let (registry, counter, book) = (registry.clone(), counter.clone(), book.clone());
         let circuits = circuits.clone();
+        let (keys, pending) = (keys.clone(), pending.clone());
         tokio::spawn(async move {
-            let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
-            if stream.read_exact(&mut req).await.is_err() {
-                return;
-            }
-            let Some((hs_id, asked, flags)) = proto::decode_connect(&req, &token) else {
+            let asked = channel::helper_connect_in(&mut stream, &keys, pending.as_deref());
+            let Some((hs_id, asked, flags)) = asked.await else {
                 // Not raven-node: closed without a word.
                 return;
             };
@@ -787,6 +862,7 @@ async fn accept_connects(
                             .ok_or_else(|| ConnectReply::Unreachable("no descriptor".into()))?;
                         let mut out = connect(target)
                             .await
+                            .map(Stream::Net)
                             .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))?;
                         if let Some(client) = one_circuit {
                             out.write_all(&client.to_be_bytes()).await.map_err(|_| {
@@ -1014,8 +1090,10 @@ mod tests {
     async fn connect_took(helper: &Running) -> Duration {
         let began = tokio::time::Instant::now();
         let mut stream = memnet::connect(helper.connect).await.unwrap();
+        let keys = channel::Keys::new(&helper.token);
+        let proof = channel::node_connect(&mut stream, &keys).await.unwrap();
         let request = proto::encode_connect(
-            &helper.token,
+            &proof,
             &helper.hs_id,
             raven_core::onion::ONION_VIRTUAL_PORT,
             0,
