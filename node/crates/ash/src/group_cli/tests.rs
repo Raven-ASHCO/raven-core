@@ -327,6 +327,83 @@ fn an_author_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
     );
 }
 
+/// APP-02: the delivery list of a message of yours names members as
+/// authors are named: a member who is not your friend is marked, and a
+/// label that is, or looks like, your friend's name or "you" gives way to
+/// the start of the key.
+#[test]
+fn a_delivery_list_never_names_a_stranger_as_a_friend() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let admin = Identity::from_seed(&[0xA1; 32]);
+    let bo = Identity::from_seed(&[0xB0; 32]);
+    let (dir, me) = profile(&[("Ana", &admin), ("Bo", &bo)]);
+    let d = dir.path();
+    let strangers = [
+        (Identity::from_seed(&[0x51; 32]), "Ola"),
+        (Identity::from_seed(&[0x52; 32]), "Bo"),
+        (Identity::from_seed(&[0x53; 32]), "B\u{043E}"),
+        (Identity::from_seed(&[0x54; 32]), "You"),
+    ];
+    let salt = [0x67; 16];
+    let id = group::group_id_for(&admin.public_key_bytes(), &salt);
+    let mut members = vec![
+        group::Member {
+            key: admin.public_key_bytes(),
+            label: String::new(),
+        },
+        group::Member {
+            key: me.public_key_bytes(),
+            label: String::new(),
+        },
+    ];
+    members.extend(strangers.iter().map(|(s, label)| group::Member {
+        key: s.public_key_bytes(),
+        label: (*label).into(),
+    }));
+    let mut state = group::GroupState {
+        group: id,
+        salt,
+        epoch: 1,
+        name: "Hikers".into(),
+        admin: admin.public_key_bytes(),
+        issued_ms: now_ms(),
+        members,
+        sig: [0; 64],
+    };
+    state.sign(&admin);
+    let a = admin.public_key_bytes();
+    group::ingest(d, &a, &GroupFrame::State(state), now_ms()).unwrap();
+    group::send(d, &me, &id, "my note", now_ms()).unwrap();
+    let shown = plain(
+        &cmd_group(
+            d,
+            GroupArg::Show {
+                group: hex::encode(id),
+                all: false,
+            },
+        )
+        .unwrap(),
+    );
+    let list = shown
+        .lines()
+        .find(|l| l.contains("my note"))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(list.contains("Ana waiting"), "{list}");
+    assert!(list.contains("Ola (not your friend) waiting"), "{list}");
+    for (stranger, label) in strangers.iter().skip(1) {
+        let start = hex::encode(&stranger.public_key_bytes()[..4]);
+        let part = format!("{start} (not your friend) waiting");
+        assert!(list.contains(&part), "{part} in {list}");
+        assert!(
+            !list.contains(&format!("{label} waiting")),
+            "{label} in {list}"
+        );
+    }
+}
+
 #[test]
 fn group_commands_say_the_hold_when_the_gate_is_closed() {
     group::set_lab_groups_for_this_thread(Some(false));

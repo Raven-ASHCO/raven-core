@@ -402,7 +402,12 @@ pub(super) struct GroupMessage {
 /// One member's copy of a message of yours.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MemberLine {
+    /// As an author is named (`group_cli::author_of`): never a name of
+    /// yours for a member who is not that friend.
     pub(super) name: String,
+    /// Not your friend, its label a name of yours: `name` is the start of
+    /// its key, shown with "not your friend".
+    pub(super) marked: bool,
     /// raven-core's word: `waiting`, `sent`, `delivered` or `failed`.
     pub(super) state: String,
     /// Reached through another member (not your friend).
@@ -1495,10 +1500,14 @@ impl Controller {
                     lines: m
                         .lines
                         .iter()
-                        .map(|(key, state, via)| MemberLine {
-                            name: view.name_of(key, &names),
-                            state: state.clone(),
-                            relayed: via == group::store::VIA_RELAY,
+                        .map(|(key, state, via)| {
+                            let member = bridge::author_of(&view, key, &names);
+                            MemberLine {
+                                name: member.name,
+                                marked: member.masked,
+                                state: state.clone(),
+                                relayed: via == group::store::VIA_RELAY,
+                            }
                         })
                         .collect(),
                     delivered: m.delivered,

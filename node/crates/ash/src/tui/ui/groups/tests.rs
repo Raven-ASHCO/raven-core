@@ -157,11 +157,13 @@ fn mine(id: [u8; 16], body: &str, at_ms: u64, delivered: usize) -> GroupMessage 
         lines: vec![
             MemberLine {
                 name: "Friend 1".into(),
+                marked: false,
                 state: state(0).into(),
                 relayed: false,
             },
             MemberLine {
                 name: "Ola".into(),
+                marked: false,
                 state: state(1).into(),
                 relayed: true,
             },
@@ -1230,6 +1232,24 @@ fn a_member_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
         assert_eq!(modifier, t.secondary.add_modifier, "{column}");
         assert_ne!(modifier, t.title.add_modifier, "{column}");
     }
+    // A message of yours: its delivery list names the members the same way
+    // (the label that is Cy's name gives way to the start of the key).
+    core_group::send(d, &me, &id, "On my way", now + 1).expect("a send");
+    let cmds = testkit::reload_rows(&mut app, &[]);
+    run_jobs(&mut app, &controller, cmds);
+    let chat = app.group_chat().expect("the chat");
+    let mine = chat.messages.iter().find(|m| m.mine).expect("yours");
+    let names: Vec<&str> = mine.lines.iter().map(|l| l.name.as_str()).collect();
+    assert!(!names.contains(&"Cy"), "{names:?}");
+    assert!(names.contains(&start.as_str()), "{names:?}");
+    assert!(names.contains(&"Ola"), "{names:?}");
+    // WHO HAS IT marks the start of the key.
+    press_all(&mut app, &[KeyCode::Tab, KeyCode::Char('d')]);
+    let text = testkit::render_text(&app);
+    assert!(text.contains("Who has it"), "{text}");
+    let marked = format!("{start} - not your friend waiting");
+    assert!(text.contains(&marked), "{marked} in {text}");
+    assert!(!text.contains("Cy waiting"), "{text}");
 }
 
 #[test]

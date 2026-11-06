@@ -246,7 +246,9 @@ raven-node).
   list preview, a notification) it goes with "not your friend", in a neutral colour (never one
   derived from the address). `raven group show`, `raven inbox` and the terminal app do so too, and
   show the start of the key instead of a label that is, or only looks like, the name of one of
-  your friends or "you".
+  your friends or "you"; they name the members of a delivery list (a `receipts` entry's `name`)
+  the same way, so an app shows a `receipts` name of a member who is not your friend with "not
+  your friend" too.
 - **Receipts.** Each message of yours lists one `receipts` entry per member it was for:
   `waiting` (still on this computer, or passed on by another member and not confirmed yet), `sent`
   (left this computer, no receipt yet), `delivered` (that member's Raven confirmed it: a signed

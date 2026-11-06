@@ -211,6 +211,7 @@ fn group_chat(look: Look, size: (u16, u16)) -> App {
         };
     let line = |name: &str, state: &str, relayed: bool| MemberLine {
         name: name.into(),
+        marked: false,
         state: state.into(),
         relayed,
     };

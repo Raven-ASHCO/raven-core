@@ -560,7 +560,7 @@ fn waiting_note(look: &Look, m: &GroupMessage) -> Vec<Span<'static>> {
     match waiting[..] {
         [] => Vec::new(),
         [one] => {
-            let name = display::one_line(&one.name, home::NAME_CELLS, look.glyphs.ellipsis);
+            let name = member_name(look, one);
             let mut note = vec![Span::styled(format!("{name} waiting"), t.warn)];
             if one.relayed {
                 note.push(Span::styled(": another member passes it on", friend));
@@ -1050,7 +1050,7 @@ fn render_members(f: &mut Frame, area: Rect, app: &App, members: &MembersState) 
 /// WHO HAS IT: a message of yours, member by member.
 fn render_delivery(f: &mut Frame, area: Rect, app: &App, message: &[u8; 16]) {
     let look = app.look();
-    let (g, t) = (&look.glyphs, &look.theme);
+    let t = &look.theme;
     let width = box_inner(area);
     let found = app
         .group_chat()
@@ -1068,11 +1068,7 @@ fn render_delivery(f: &mut Frame, area: Rect, app: &App, message: &[u8; 16]) {
                 m.delivered, m.total
             )));
             lines.push(Line::default());
-            let names: Vec<String> = m
-                .lines
-                .iter()
-                .map(|line| display::one_line(&line.name, home::NAME_CELLS, g.ellipsis))
-                .collect();
+            let names: Vec<String> = m.lines.iter().map(|line| member_name(look, line)).collect();
             let column = names.iter().map(|n| cells(n)).max().unwrap_or(0) + 2;
             for (name, line) in names.iter().zip(&m.lines) {
                 let pad = " ".repeat(column.saturating_sub(cells(name)));
@@ -1087,6 +1083,19 @@ fn render_delivery(f: &mut Frame, area: Rect, app: &App, message: &[u8; 16]) {
     lines.push(Line::default());
     lines.push(overlays::keys_line(look, &[("[Esc]", " Close")]));
     draw_box(f, area, look, "Who has it", lines);
+}
+
+/// A member in a delivery list, as the controller named it (APP-02): the
+/// start of the key of a member who is not your friend and whose label is
+/// a name of yours comes with "not your friend".
+fn member_name(look: &Look, line: &MemberLine) -> String {
+    let g = &look.glyphs;
+    let name = display::one_line(&line.name, home::NAME_CELLS, g.ellipsis);
+    if line.marked {
+        format!("{name}{}{NOT_YOUR_FRIEND}", g.inline_separator)
+    } else {
+        name
+    }
 }
 
 /// One member's copy in words.

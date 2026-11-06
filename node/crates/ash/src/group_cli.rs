@@ -454,6 +454,9 @@ pub(super) struct Author {
     /// Otherwise it is the admin's label (or the start of the key), shown
     /// with [`NOT_YOUR_FRIEND`] in a neutral style.
     pub(super) friend: bool,
+    /// Not your friend, and the admin's label is, or looks like, a name of
+    /// yours: `name` is the start of the key instead.
+    pub(super) masked: bool,
 }
 
 /// The author `key` of a message in `view` (APP-02, ASH-2). You and your
@@ -476,17 +479,18 @@ pub(super) fn author_of(view: &GroupView, key: &Key, names: &HashMap<Key, String
         None => names.get(key).filter(|name| chosen(name.as_str())).cloned(),
     };
     if let Some(name) = yours {
-        return Author { name, friend: true };
+        return Author {
+            name,
+            friend: true,
+            masked: false,
+        };
     }
     let label = view.name_of(key, names);
-    let name = if passes_for_yours(&label, key, names) {
-        short(key)
-    } else {
-        label
-    };
+    let masked = passes_for_yours(&label, key, names);
     Author {
-        name,
+        name: if masked { short(key) } else { label },
         friend: false,
+        masked,
     }
 }
 
@@ -514,6 +518,18 @@ fn author_text(author: &Author) -> String {
         name
     } else {
         format!("{C_DIM}{name} ({NOT_YOUR_FRIEND}){C_RESET}")
+    }
+}
+
+/// A member as a delivery list names it (APP-02): as [`author_of`] names
+/// an author, and marked when not your friend (the list is dim already).
+fn member_text(view: &GroupView, key: &Key, names: &HashMap<Key, String>) -> String {
+    let member = author_of(view, key, names);
+    let name = sanitize_terminal_line(&member.name);
+    if member.friend {
+        name
+    } else {
+        format!("{name} ({NOT_YOUR_FRIEND})")
     }
 }
 
@@ -558,13 +574,7 @@ fn message_line(
         let parts: Vec<String> = m
             .lines
             .iter()
-            .map(|(k, state, _)| {
-                format!(
-                    "{} {}",
-                    sanitize_terminal_line(&view.name_of(k, names)),
-                    line_word(state)
-                )
-            })
+            .map(|(k, state, _)| format!("{} {}", member_text(view, k, names), line_word(state)))
             .collect();
         line.push_str(&format!(
             " {C_DIM}\u{2014} delivered to {} of {} ({}){C_RESET}",
