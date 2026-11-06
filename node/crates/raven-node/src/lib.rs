@@ -801,7 +801,7 @@ pub(crate) mod netutil {
     /// Does the responder answer this frame? A PairInit gets a PairResponse
     /// and a Message gets a sealed ACK; RLB1 offers, ACKs and PairResponses
     /// get nothing.
-    fn expects_reply(frame: &[u8]) -> bool {
+    pub(crate) fn expects_reply(frame: &[u8]) -> bool {
         // Session reset requests (RSR1 SESSION_QUERY / PREKEY_STALE).
         if raven_core::session_reset::frame_expects_reply(frame)
             || raven_core::friend_custody::frame_expects_reply(frame)
@@ -836,7 +836,7 @@ pub(crate) mod netutil {
     }
 
     /// Is this the reply a dial was waiting for (PairResponse or sealed ACK)?
-    fn is_terminal_reply(frame: &[u8]) -> bool {
+    pub(crate) fn is_terminal_reply(frame: &[u8]) -> bool {
         // Session reset replies (RSR1 SESSION_STATUS / PREKEY_STATUS).
         if raven_core::session_reset::frame_is_terminal_reply(frame)
             || raven_core::friend_custody::frame_is_terminal_reply(frame)

@@ -278,8 +278,18 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
   rides its check's link (a first send costs 4 round trips instead of 7),
   and a send within 20 s costs one, its check answered from the kept link
   with the friend's offer and no traffic. Nothing is opened with nothing to
-  send. A kept link is read by a task of its own, so no wait stops part way
-  through a frame, and a link whose wait ran out is never kept. The dial's
+  send. A kept link is written and read by a task of its own, so no wait
+  stops part way through a frame, and a link whose wait ran out is never
+  kept. Up to 3 batches ride one kept link at once (pipelining, speed design
+  M8, `PIPELINE_DEPTH`): the task writes each batch's frames behind those
+  of the batches before it and hands the replies out first in, first out
+  (the listener answers frame after frame, each reply before it reads the
+  next frame), so a burst of k messages costs about one round trip each
+  from its own write, not k round trips for the last. A batch that ends any
+  other way (its wait ran out, the link closed, its dial was cut) closes the
+  link, and the batches behind it go again on a fresh link: a reply is
+  never taken for another batch's, and an ACK is only ever counted for the
+  message it names. The dial's
   checks run again before every batch; a keeper closes the link of a friend
   blocked, removed or no longer verified within a second, and all of them
   once the gate is shut (a hold); a lock, a network change, the end of a
@@ -298,9 +308,15 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
   try then goes in a new group at once. On the loopback model (one round
   trip r, a rendezvous R, Arti's 6 s wait for CONNECTED on a dead circuit)
   a send past a dead circuit costs 2 s + R + 4r with W1 instead of
-  6 s + R + 7r, and R + 4r after a failed link. The price: one more
-  introduction (and maybe a descriptor fetch) at the friend's service when
-  a hedge fires.
+  6 s + R + 7r, and R + 4r after a failed link. With the warm gate open
+  too, a batch on a kept link with no reply within the longer of 2 s
+  (`BATCH_HEDGE_FLOOR`) and 3 times that link's last round trip (the batch
+  hedge) closes the link and goes again on a fresh one, fresh first; the
+  friend answers the copy of a message it holds as the same message, with
+  the same ACK. On the loopback model a message on a kept link whose
+  circuit died with no word then costs 3r + R + 4r (with a 1r trip) instead
+  of its whole reply wait and no ACK. The price: one more introduction (and
+  maybe a descriptor fetch) at the friend's service when a hedge fires.
 
 ### 3.7 Robustness around Arti's known gaps
 
@@ -409,7 +425,7 @@ Shown by `raven status --explain tor` and in the docs:
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. |
 | Head start | `RAVEN_LAB_TOR_HEAD_START_MS` (debug only, tests) overrides 1.5 s. |
 | Stage record | Debug builds only (speed groundwork for the D1 measurement, security and speed report 2026-11-05 §7): every onion dial's step times in memory, as durations only (`prep`, `connect` with its `circuit` and `begin` parts, `noise`, `hello`, `write`, `receipt`, `total`; never a key, an onion id, an address or a message). `RAVEN_LAB_TOR_STAGES=<absolute path>` with `RAVEN_LAB_TEST_A=1` appends one JSON line per dial for the D1 harness. Arti gets the circuit and opens the stream in one call, so `circuit` and `begin` split the helper's connect by the one round trip rule (BEGIN to CONNECTED takes as long as the Noise round trip that follows on the same circuit). Release builds keep nothing. |
-| Tor speed, Stage A | Five more gates, every one false, each open only while the onion carrier is, with its lab switch (with `RAVEN_LAB_TEST_A=1`, debug builds only) and a hold of its own in the suite registry: `ONION_WARM_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM`, `feature/onion-warm`: W1 kept links, §3.6), `ONION_HEDGE_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_HEDGE`, `feature/onion-hedge`: the connect hedge and fresh first, §3.6), `ONION_EARLY_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_EARLY`, `feature/onion-early`), `ONION_OPTIMISTIC_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_OPTIMISTIC`, `feature/onion-optimistic`) and `ONION_WARM_LINK_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM_LINK`, `feature/onion-warm-link`: W2, a wire change). Only W1 and the connect hedge with fresh first (§3.6) act yet. |
+| Tor speed, Stage A | Five more gates, every one false, each open only while the onion carrier is, with its lab switch (with `RAVEN_LAB_TEST_A=1`, debug builds only) and a hold of its own in the suite registry: `ONION_WARM_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM`, `feature/onion-warm`: W1 kept links and their pipelining, §3.6), `ONION_HEDGE_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_HEDGE`, `feature/onion-hedge`: the connect hedge, fresh first and, with the warm gate, the batch hedge, §3.6), `ONION_EARLY_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_EARLY`, `feature/onion-early`), `ONION_OPTIMISTIC_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_OPTIMISTIC`, `feature/onion-optimistic`) and `ONION_WARM_LINK_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM_LINK`, `feature/onion-warm-link`: W2, a wire change). Only W1 with its pipelining, the connect hedge with fresh first and the batch hedge (§3.6) act yet. |
 
 ## 5. Tests
 

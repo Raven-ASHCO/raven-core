@@ -144,6 +144,29 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, pipelined kept Tor links and the batch hedge, lab only)
+
+A behaviour change of the onion dialer behind gates that stay false, not of
+the wire format: no frame layout, entry type, caps bit, card field or vector
+changed, and the listener is unchanged. Security and speed report 2026-11-05
+§7 (speed design M8, and M5's batch hedge).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §10: with `onion_gate::ONION_WARM_PRODUCTION_ENABLED` open (false; lab
+  switch `RAVEN_LAB_TOR_WARM`), up to 3 batches ride one kept link at once:
+  each batch's frames are written behind those of the batches before it, and
+  the replies are taken first in, first out, as the listener answers frame
+  after frame. A batch whose wait runs out, whose link closes or whose dial
+  is cut closes the link, and the batches behind it go again on a fresh
+  link, so no reply is taken for another batch's. §9: with
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` open too (false; lab switch
+  `RAVEN_LAB_TOR_HEDGE`), a batch on a kept link with no reply within the
+  longer of 2 s and 3 times the link's last round trip closes the link and
+  goes again on a fresh one, fresh first; the contact answers the copy of a
+  message it holds as the same message, with the same ACK. §1: only W1 with
+  its pipelining, the connect hedge with fresh first and the batch hedge act
+  yet.
+
 ## Freeze record changes (2026-11-06, Tor connect hedge and fresh first, lab only)
 
 A behaviour change of the onion dialer and its own Tor helper behind a gate

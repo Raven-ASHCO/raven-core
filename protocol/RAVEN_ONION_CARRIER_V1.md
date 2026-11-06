@@ -48,8 +48,8 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
   of a build without the carrier.
 - The Tor speed Stage A gates (`onion_gate::ONION_WARM_PRODUCTION_ENABLED` and four more, all
   false; lab switches `RAVEN_LAB_TOR_WARM` and so on with the Lab Test A unlock, debug builds
-  only; a hold each) open only while this one is. Only W1 (§10) and the connect hedge with fresh
-  first (§6, §9) act yet; none changes a frame.
+  only; a hold each) open only while this one is. Only W1 with its pipelining (§10), the connect
+  hedge with fresh first and the batch hedge (§6, §9) act yet; none changes a frame.
 
 ## §2 Roles
 
@@ -268,8 +268,11 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   contact failed where the helper cannot see it (no link came up, a batch got no reply within
   its wait, or a kept link died before any reply), the next connect to that contact within
   10 minutes goes fresh first: its first try in a new isolation group, none in the contact's;
-  a link that works ends that. With the gate shut the node sends no flags and keeps no such
-  record.
+  a link that works ends that. With W1's gate open too (§10), a batch on a kept link with no
+  reply within the longer of 2 s and 3 times that link's last round trip (the batch hedge)
+  closes the link and goes again on a fresh one, fresh first: the contact answers a copy of a
+  message it holds as the same message, with the same ACK. With the gate shut the node sends
+  no flags, keeps no such record and hedges no batch.
 - **Deadlines.** An onion dial of the outbox or of friend custody ends at
   `ONION_DIAL_DEADLINE` (75 s) plus 5 s, not at a direct dial's 45 s.
 - **Friend custody** (WAN custody only, `RAVEN_FRIEND_CUSTODY_V1.md`): a mail friend's onion
@@ -293,7 +296,12 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   within 20 s of that batch, 120 s of the link's dial and 56 frames, at most 4 links (2 on the
   embedded node) and one per contact. No link is opened for it with nothing to send, and no
   frame changes: the listener reads one frame after another on a link, as before, within its
-  own limits (§5).
+  own limits (§5). Up to 3 batches ride one kept link at once (pipelining): each batch's frames
+  are written behind those of the batches before it, and the replies are taken first in, first
+  out, as the listener answers frame after frame, each reply before it reads the next frame. A
+  batch whose wait runs out, whose link closes or whose dial is cut closes the link; the batches
+  behind it see it closed and go again on a fresh link, so no reply is taken for another
+  batch's. A frame that comes with no batch on the link closes it too.
 
 ### §5.1 The onion link's Noise static
 

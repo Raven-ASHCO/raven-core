@@ -1133,28 +1133,22 @@ async fn serve_listener(
 }
 
 /// Where a dialer's batch writes and reads its frames ([`run_batch_on`]):
-/// the link's own stream, or a warm link's halves, whose frames a task of
-/// their own reads ([`WarmHalves`]; W1, `crate::onion::warm`). It counts
-/// the frames it wrote and notes when the link can carry no other batch
-/// (`spent`): a wait that ran out (on a stream, a read stopped part way
-/// through a frame), a close or an unreadable frame, a failed write, or our
-/// own end of the link.
+/// the link's own stream. It counts the frames it wrote and notes when the
+/// link can carry no other batch (`spent`): a wait that ran out (a read
+/// may have stopped part way through a frame), a close or an unreadable
+/// frame, a failed write, or our own end of the link. (A kept link's later
+/// batches go through its own task instead: `crate::onion::warm`, W1, M8.)
 pub(crate) struct DialIo<'a, S> {
-    wire: Wire<'a, S>,
+    stream: &'a mut S,
     written: u32,
     spent: bool,
-}
-
-enum Wire<'a, S> {
-    Stream(&'a mut S),
-    Warm(&'a mut WarmHalves),
 }
 
 impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
     /// The link's own stream.
     pub(crate) fn stream(stream: &'a mut S) -> Self {
         Self {
-            wire: Wire::Stream(stream),
+            stream,
             written: 0,
             spent: false,
         }
@@ -1162,10 +1156,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
 
     /// One frame of ours ([`write_inet_frame`]).
     async fn send(&mut self, cipher: &mut LinkCipher, payload: &[u8]) -> Result<(), String> {
-        let sent = match &mut self.wire {
-            Wire::Stream(stream) => write_inet_frame(&mut **stream, cipher, payload).await,
-            Wire::Warm(halves) => write_inet_frame(&mut halves.write, cipher, payload).await,
-        };
+        let sent = write_inet_frame(&mut *self.stream, cipher, payload).await;
         if sent.is_ok() {
             self.written += 1;
         } else {
@@ -1176,10 +1167,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
 
     /// The next frame within `wait` ([`read_reply`]).
     async fn reply(&mut self, cipher: &mut LinkCipher, wait: Duration) -> ReplyWait {
-        let got = match &mut self.wire {
-            Wire::Stream(stream) => read_reply(&mut **stream, cipher, wait).await,
-            Wire::Warm(halves) => halves.reply(cipher, wait).await,
-        };
+        let got = read_reply(&mut *self.stream, cipher, wait).await;
         if !matches!(got, ReplyWait::Frame(_)) {
             self.spent = true;
         }
@@ -1189,10 +1177,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
     /// Our side of the link ends (on Tor the stream's END).
     async fn end(&mut self) {
         self.spent = true;
-        let _ = match &mut self.wire {
-            Wire::Stream(stream) => stream.shutdown().await,
-            Wire::Warm(halves) => halves.write.shutdown().await,
-        };
+        let _ = self.stream.shutdown().await;
     }
 
     /// The link can carry no other batch.
@@ -1206,28 +1191,17 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
     }
 }
 
-impl<'a> DialIo<'a, tokio::net::TcpStream> {
-    /// A warm link's halves.
-    pub(crate) fn warm(halves: &'a mut WarmHalves) -> Self {
-        Self {
-            wire: Wire::Warm(halves),
-            written: 0,
-            spent: false,
-        }
-    }
-}
-
 /// How many frames a warm link's reader holds before it waits for a batch
 /// to take them: a peer that floods the link fills nothing more.
 const WARM_READ_AHEAD: usize = 4;
 
-/// A warm link's stream (W1, `crate::onion::warm`), split in two: batches
-/// write on one half, and a task of its own reads the other, whole frames
-/// only and with no deadline, into a channel. A batch's waits then run out
-/// on the channel, never part way through a frame (a read under
-/// [`read_reply`]'s deadline can stop there, and the stream is lost for
-/// good), and a frame or a close between two batches shows
-/// ([`Self::idle_clean`]). Dropping it stops the task and closes the stream.
+/// A warm link's stream (W1, `crate::onion::warm`), split in two: the
+/// link's own task writes on one half ([`Self::send`]), and a reader task
+/// reads the other, whole frames only and with no deadline, into a channel
+/// ([`Self::next_sealed`]). Waits then run out on the channel, never part
+/// way through a frame (a read under [`read_reply`]'s deadline can stop
+/// there, and the stream is lost for good). Dropping it stops the reader
+/// and closes the stream.
 pub(crate) struct WarmHalves {
     write: tokio::net::tcp::OwnedWriteHalf,
     frames: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
@@ -1256,28 +1230,19 @@ impl WarmHalves {
         }
     }
 
-    /// Nothing came on the link since its last batch, and it did not close:
-    /// it may carry the next one.
-    pub(crate) fn idle_clean(&mut self) -> bool {
-        !self.reader.is_finished()
-            && matches!(
-                self.frames.try_recv(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            )
+    /// One frame of ours ([`write_inet_frame`]).
+    pub(crate) async fn send(
+        &mut self,
+        cipher: &mut LinkCipher,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        write_inet_frame(&mut self.write, cipher, payload).await
     }
 
-    /// The next frame within `wait`: [`read_reply`]'s outcomes, with the
-    /// wait on the channel.
-    async fn reply(&mut self, cipher: &mut LinkCipher, wait: Duration) -> ReplyWait {
-        match tokio::time::timeout(wait, self.frames.recv()).await {
-            Ok(Some(Ok(ct))) => match cipher.open(&ct) {
-                Ok(frame) => ReplyWait::Frame(frame),
-                Err(why) => ReplyWait::Closed(why),
-            },
-            Ok(Some(Err(why))) => ReplyWait::Closed(why),
-            Ok(None) => ReplyWait::Closed(PEER_CLOSED.into()),
-            Err(_) => ReplyWait::Idle,
-        }
+    /// The next whole frame the reader read, still sealed (a Noise transport
+    /// message), or why the link ended; `None`: the reader is gone.
+    pub(crate) async fn next_sealed(&mut self) -> Option<Result<Vec<u8>, String>> {
+        self.frames.recv().await
     }
 }
 

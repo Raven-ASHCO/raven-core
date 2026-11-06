@@ -2281,3 +2281,186 @@ async fn a_connect_with_an_unknown_flag_is_refused() {
     );
     assert_eq!(f.counts().tries, 0, "no try made");
 }
+
+// ── M8: batches pipelined on a kept link (Tor speed Stage A, speed design M8)
+
+impl Friends {
+    /// The messages the ACKs in `replies` confirm, as Alice opens them (the
+    /// ACK check `raven send` and the outbox share).
+    fn acked(&self, replies: &[Vec<u8>]) -> Vec<[u8; 16]> {
+        let peer =
+            raven_core::lan_dispatch::parse_peer_offer(&replies[0]).expect("the offer comes first");
+        let mut store =
+            raven_core::indexed_session_store::IndexedSessionStore::open(self.a.path()).unwrap();
+        raven_core::outbox::ack_frames(replies)
+            .into_iter()
+            .map(|ack| {
+                raven_core::outbox::accept_sealed_ack(
+                    self.a.path(),
+                    &mut store,
+                    &self.key_ab,
+                    &peer.cert,
+                    ack,
+                    OutboxCarrier::Onion,
+                )
+                .unwrap_or_else(|e| panic!("an ACK Alice accepts: {e:?}"))
+            })
+            .collect()
+    }
+}
+
+/// The id of the sealed message `sealed`.
+fn message_id(sealed: &[u8]) -> [u8; 16] {
+    raven_core::envelope::Envelope::unpack(sealed)
+        .expect("an envelope")
+        .message_id
+}
+
+/// M8: three sends at once to a friend with a kept link share it, each
+/// batch written as it comes and answered about one round trip later (not
+/// one round trip after the batch before it), each with the ACK of its own
+/// message (the listener answers frame after frame, so replies go to the
+/// batches first in, first out): no other Tor stream, and Bob holds each
+/// message once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_quick_sends_share_one_warm_link_and_each_gets_its_receipt() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, _gate) = test_pool(warm::LIMITS);
+    assert_eq!(f.program_sends(pool, "before the burst").await.0, 1);
+    assert_eq!((f.connects(), pool.len()), (1, 1), "a kept link");
+    let texts = ["one", "two", "three"];
+    let sealed: Vec<Vec<u8>> = texts
+        .iter()
+        .map(|text| seal_as(f.a.path(), &f.alice, &f.key_ab, text, true))
+        .collect();
+    let (f, began) = (&f, Instant::now());
+    let send = |sealed: &Vec<u8>| {
+        let sealed = sealed.clone();
+        async move {
+            let replies = f.program_dials(pool, ONION_WAITS, &[sealed]).await;
+            (replies, began.elapsed())
+        }
+    };
+    let (a, b, c) = tokio::join!(send(&sealed[0]), send(&sealed[1]), send(&sealed[2]));
+    let took: Vec<Duration> = [&a, &b, &c].iter().map(|(_, took)| *took).collect();
+    eprintln!("a burst of three: {took:?}, r {R:?}");
+    for ((replies, took), sealed) in [a, b, c].into_iter().zip(&sealed) {
+        let replies = replies.expect("delivered");
+        assert_eq!(f.acked(&replies), [message_id(sealed)], "its own ACK");
+        assert_eq!(trips(took), 1, "took {took:?}, r {R:?}");
+    }
+    assert_eq!(f.connects(), 1, "no other Tor stream");
+    let mut held = inbox(f._b.path());
+    held.sort();
+    assert_eq!(held, ["before the burst", "one", "three", "two"]);
+    pool.flush();
+}
+
+/// M8: when the count of replies drifts (a batch on the kept link stops
+/// waiting before its ACK came, with another batch behind it), the link is
+/// closed: the batch that stopped ends with no ACK (unconfirmed: its retry
+/// gets a duplicate ACK), the one behind it goes again on a fresh link and
+/// gets its own ACK, never the other's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reply_count_drift_ends_unconfirmed_never_misattributed() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(loopback::Knobs {
+        delay: R,
+        latency: R / 2,
+        count: true,
+        ..loopback::Knobs::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (pool, _gate) = test_pool(warm::LIMITS);
+    assert_eq!(f.program_sends(pool, "before the drift").await.0, 1);
+    let first = seal_as(f.a.path(), &f.alice, &f.key_ab, "stops waiting", true);
+    let second = seal_as(f.a.path(), &f.alice, &f.key_ab, "behind it", true);
+    let short = ReplyWaits {
+        first: R / 3,
+        ..ONION_WAITS
+    };
+    let f = &f;
+    let stops = async {
+        f.program_dials(pool, short, std::slice::from_ref(&first))
+            .await
+    };
+    let behind = async {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        f.program_dials(pool, ONION_WAITS, std::slice::from_ref(&second))
+            .await
+    };
+    let (stopped, behind) = tokio::join!(stops, behind);
+    let stopped = stopped.expect("its frame was written");
+    assert!(f.acked(&stopped).is_empty(), "no ACK: unconfirmed");
+    let behind = behind.expect("delivered");
+    assert_eq!(f.acked(&behind), [message_id(&second)], "its own ACK");
+    assert_eq!(pool.len(), 1, "the fresh link is kept");
+    let mut held = inbox(f._b.path());
+    held.sort();
+    assert_eq!(held, ["before the drift", "behind it", "stops waiting"]);
+    pool.flush();
+}
+
+/// M5, the batch hedge: a batch on a kept link whose circuit died with no
+/// word gets no reply; after max(2 s, 3 x the link's last round trip) it
+/// goes again on a fresh link (fresh first: a new isolation group at once)
+/// instead of waiting out its 30 s first-reply wait, and Bob, who never got
+/// the first copy, answers the copy: one ACK, its own, and Bob holds the
+/// message once. (With the hedge gate shut a kept link's batch waits out its
+/// wait as before: `a_batch_that_timed_out_never_returns_its_link`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_pooled_link_is_hedged_and_the_copy_is_acked_once() {
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let kill: &'static std::sync::atomic::AtomicU64 =
+        Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
+    let Some(f) = Friends::with(dead_circuit_knobs(Some(kill))).await else {
+        return;
+    };
+    let (pool, _gate, hedge) = test_pool_with_hedge(warm::LIMITS);
+    hedge.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(f.program_sends(pool, "before the kill").await.0, 1);
+    assert_eq!(
+        pool.len(),
+        1,
+        "the link is kept, its last batch one round trip"
+    );
+    loopback::kill_circuits(kill);
+    let sealed = seal_as(f.a.path(), &f.alice, &f.key_ab, "after the kill", true);
+    let began = Instant::now();
+    let check = f
+        .program_dials(pool, ONION_WAITS, &[])
+        .await
+        .expect("the check answered from the kept link");
+    assert!(!check.is_empty());
+    let replies = f
+        .program_dials(pool, ONION_WAITS, std::slice::from_ref(&sealed))
+        .await
+        .expect("delivered");
+    let took = began.elapsed();
+    // The hedge after 3 x r, then a rendezvous and a link of 4 round trips.
+    let want = 3 * R + RENDEZVOUS + 4 * R;
+    eprintln!(
+        "hedged batch: {took:?} (3r + R + 4r = {want:?}), {:?}",
+        f.counts()
+    );
+    assert_eq!(f.acked(&replies), [message_id(&sealed)], "one ACK, its own");
+    assert!(
+        took + Duration::from_millis(50) >= want && took < want + 2 * R,
+        "took {took:?}, want about {want:?}"
+    );
+    assert_eq!(inbox(f._b.path()), ["before the kill", "after the kill"]);
+    pool.flush();
+}

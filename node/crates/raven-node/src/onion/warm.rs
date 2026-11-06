@@ -24,8 +24,23 @@
 //! ([`crate::internet_direct::DialIo::spent`]): on the link's own stream a
 //! read under its deadline can stop part way through a frame, and on a kept
 //! link a reply still on its way would be taken for the next batch's. A kept
-//! link reads through a task of its own ([`WarmHalves`]), so waits run out
-//! on a channel, and a frame or a close between batches closes the link.
+//! link is written and read by a task of its own ([`pipe`]; its reads go
+//! through [`WarmHalves`], whole frames only), so waits run out on a
+//! channel, and a frame with no batch on the link or a close closes it.
+//!
+//! **Pipelining** (speed design M8, under the warm gate): up to
+//! [`PIPELINE_DEPTH`] batches ride one kept link at once. Its task writes
+//! each batch's frames as the batch hands them over, behind the batches
+//! before it, and gives the replies first in, first out: the listener
+//! answers frame after frame, each reply before it reads the next frame, so
+//! the oldest batch on the link gets the replies until its last terminal
+//! one. A burst's messages are then each answered about one round trip
+//! after they were written, not one round trip after the message before. A
+//! batch that ends any other way (its wait ran out, the link closed, its
+//! dial was cut) closes the link, and a batch behind it sees it closed and
+//! goes again on a fresh link: no reply is taken for another batch's (and
+//! the ACK check of `raven send` takes an ACK only for the message it
+//! names).
 //!
 //! **Before every batch** the dial's own checks run again (the carrier is
 //! live, the contact verified and allowed on Tor), and the friend's block
@@ -40,7 +55,13 @@
 //! the pool also says which connect flags a dial asks the helper for
 //! ([`WarmPool::connect_flags`]): a hedge, or fresh first when the last
 //! link to that onion service failed a moment ago ([`WarmPool::link_failed`]).
+//! And a batch on a kept link with no reply after
+//! max([`BATCH_HEDGE_FLOOR`], 3 x the link's last round trip) closes the
+//! link and goes again on a fresh one, fresh first (the batch hedge,
+//! [`ride`]): the friend answers a copy it holds as the same message, with
+//! the same ACK.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -48,10 +69,11 @@ use std::time::Duration;
 
 use raven_core::OutboxCarrier;
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::internet_direct::{self, DialIo, LinkState, OpenLink, WarmHalves};
-use crate::netutil::DialProgress;
+use crate::internet_direct::{self, LinkState, OpenLink, WarmHalves};
+use crate::netutil::{DialProgress, ReplyWait, PEER_CLOSED};
 
 /// A kept link carries the next batch only within this of its last one:
 /// the listener ends a link after 30 s without a frame (its read deadline,
@@ -70,6 +92,12 @@ pub(crate) const WARM_FRAMES: u32 = 56;
 pub(crate) const WARM_POOL: usize = if cfg!(feature = "embedded") { 2 } else { 4 };
 /// How often the keeper looks at the kept links.
 const SWEEP: Duration = Duration::from_secs(1);
+/// Batches riding one kept link at once (speed design M8).
+pub(crate) const PIPELINE_DEPTH: usize = 3;
+/// The batch hedge's shortest wait (speed design M5): a kept link's batch
+/// with no reply after max(this, 3 x the link's last round trip) goes again
+/// on a fresh link. A healthy reply takes one onion round trip.
+pub(crate) const BATCH_HEDGE_FLOOR: Duration = Duration::from_secs(2);
 
 /// A pool's limits ([`LIMITS`]; tests scale them down).
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +107,8 @@ pub(crate) struct Limits {
     pub(crate) frames: u32,
     pub(crate) cap: usize,
     pub(crate) sweep: Duration,
+    /// Batches riding one link at once ([`PIPELINE_DEPTH`]).
+    pub(crate) depth: usize,
 }
 
 /// The process pool's limits.
@@ -88,6 +118,7 @@ pub(crate) const LIMITS: Limits = Limits {
     frames: WARM_FRAMES,
     cap: WARM_POOL,
     sweep: SWEEP,
+    depth: PIPELINE_DEPTH,
 };
 
 /// A gate a pool follows.
@@ -147,50 +178,91 @@ impl WarmKey {
     }
 }
 
-/// A kept link: its halves, its state, and what its limits count.
+/// A kept link: its own task ([`pipe`], which holds its halves and state)
+/// and what its limits count.
 pub(crate) struct WarmLink {
     id: u64,
     key: WarmKey,
-    halves: WarmHalves,
-    state: LinkState,
+    /// Batches for its task.
+    jobs: mpsc::UnboundedSender<Job>,
+    task: tokio::task::JoinHandle<()>,
+    /// The contact's verified offer (every batch's replies start with it).
+    offer: Vec<u8>,
     /// When the dial that opened it began.
     opened: Instant,
     /// When its last batch ended (a check answered from it is none).
     last_batch: Instant,
-    /// Frames it carried after the offers (the listener counts them).
+    /// Frames its batches carried after the offers (the listener counts
+    /// them; the few route hints and HAVE its task writes fit in the
+    /// listener's margin, [`WARM_FRAMES`]).
     written: u32,
+    /// Batches riding it now ([`Lease`]).
+    in_flight: usize,
+    /// Its last batch's round trip, from its frames written to its replies
+    /// (the batch hedge's wait).
+    trip: Option<Duration>,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl WarmLink {
-    /// `link` after its first batch, which wrote `written` frames; `opened`:
-    /// when its dial began.
+    /// `link` after its first batch, which wrote `written` frames and, with
+    /// frames, took `trip` from them to its reply; `opened`: when its dial
+    /// began. Its task starts now.
     pub(crate) fn new(
         key: WarmKey,
         link: OpenLink<TcpStream>,
         opened: Instant,
         written: u32,
+        trip: Option<Duration>,
     ) -> Self {
+        let (jobs, next) = mpsc::unbounded_channel();
+        let offer = link.state.peer_offer.clone();
+        let task = tokio::spawn(pipe(WarmHalves::split(link.stream), link.state, next));
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             key,
-            halves: WarmHalves::split(link.stream),
-            state: link.state,
+            jobs,
+            task,
+            offer,
             opened,
             last_batch: Instant::now(),
             written,
+            in_flight: 0,
+            trip,
         }
     }
 
-    /// May it carry a batch of `more` frames at `now`: within its limits,
-    /// and nothing came on it nor did it close since its last batch.
-    fn usable(&mut self, limits: &Limits, now: Instant, more: usize) -> bool {
+    /// Its task runs: no frame came with no batch on it, it did not close,
+    /// and no write failed.
+    fn alive(&self) -> bool {
+        !self.task.is_finished()
+    }
+
+    /// May one more batch of `more` frames ride it at `now`: within its
+    /// limits and its depth.
+    fn may_take(&self, limits: &Limits, now: Instant, more: usize) -> bool {
         let more = u32::try_from(more).unwrap_or(u32::MAX);
-        now.saturating_duration_since(self.last_batch) < limits.idle
+        self.alive()
+            && self.in_flight < limits.depth
+            && (self.in_flight > 0 || now.saturating_duration_since(self.last_batch) < limits.idle)
             && now.saturating_duration_since(self.opened) < limits.age
             && self.written.saturating_add(more) <= limits.frames
-            && self.halves.idle_clean()
+    }
+
+    /// Worth keeping at `now`: batches ride it, or another may.
+    fn worth_keeping(&self, limits: &Limits, now: Instant) -> bool {
+        self.alive()
+            && (self.in_flight > 0
+                || (self.may_take(limits, now, 0) && self.written < limits.frames))
+    }
+}
+
+impl Drop for WarmLink {
+    fn drop(&mut self) {
+        // Its task holds the halves: aborted, it closes the link, and every
+        // batch still on it sees it closed.
+        self.task.abort();
     }
 }
 
@@ -282,25 +354,73 @@ impl WarmPool {
         self.lock().failed.retain(|(id, _)| id != hs_id);
     }
 
-    /// The kept link of `key` when it may carry a batch of `more` frames
-    /// now, taken out of the pool. `None`: none (one that may not is
-    /// closed; with the gate shut, all are).
-    pub(crate) fn checkout(&self, key: &WarmKey, more: usize) -> Option<WarmLink> {
+    /// A share of `key`'s kept link for a batch of `more` frames, when one
+    /// more may ride it now ([`Lease`]; the link stays in the pool). `None`:
+    /// none is kept, or it takes no batch now: busy with
+    /// [`Limits::depth`] of them, or past its limits (then it closes once no
+    /// batch rides it). With the gate shut every link closes.
+    pub(crate) fn checkout(&'static self, key: &WarmKey, more: usize) -> Option<Lease> {
         if !self.live() {
             self.flush();
             return None;
         }
-        let mut link = {
+        let now = Instant::now();
+        let (lease, closed) = {
             let mut inner = self.lock();
             let at = inner.links.iter().position(|l| l.key == *key)?;
-            inner.links.swap_remove(at)
+            let link = &mut inner.links[at];
+            if link.may_take(&self.limits, now, more) {
+                link.in_flight += 1;
+                link.written = link
+                    .written
+                    .saturating_add(u32::try_from(more).unwrap_or(u32::MAX));
+                let lease = Lease {
+                    pool: self,
+                    id: link.id,
+                    data_dir: link.key.data_dir.clone(),
+                    jobs: link.jobs.clone(),
+                    offer: link.offer.clone(),
+                    trip: link.trip,
+                    ended: false,
+                };
+                (Some(lease), None)
+            } else if link.in_flight > 0 && link.alive() {
+                (None, None)
+            } else {
+                (None, Some(inner.links.swap_remove(at)))
+            }
         };
-        link.usable(&self.limits, Instant::now(), more)
-            .then_some(link)
+        drop(closed);
+        lease
     }
 
-    /// Keep `link` for its friend's next batch: an older link of the same
-    /// friend closes, and past the cap so does the one whose last batch is
+    /// A batch on the link `id` ended ([`Lease::end`]): a check, or one
+    /// with every reply it waited for, leaves the link for the next one
+    /// (unless it carried its frames and no batch rides it any more); any
+    /// other end closes it, and every batch still on it sees it closed. A
+    /// check put nothing on the link: its last batch stays the one before.
+    fn end(&self, id: u64, how: Ended) {
+        let closed = {
+            let mut inner = self.lock();
+            let Some(at) = inner.links.iter().position(|l| l.id == id) else {
+                return;
+            };
+            let link = &mut inner.links[at];
+            link.in_flight = link.in_flight.saturating_sub(1);
+            if let Ended::Clean { trip } = how {
+                link.last_batch = Instant::now();
+                link.trip = Some(trip);
+            }
+            let keep = !matches!(how, Ended::Broken)
+                && (link.written < self.limits.frames || link.in_flight > 0);
+            (!keep).then(|| inner.links.swap_remove(at))
+        };
+        drop(closed);
+    }
+
+    /// Keep `link` for its friend's next batches: an older link of the same
+    /// friend closes (unless batches ride it: then this one is not kept),
+    /// and past the cap so does the one no batch rides whose last batch is
     /// oldest. Nothing is kept while the gate is shut, nor a link that
     /// carried its frames.
     pub(crate) fn checkin(&'static self, link: WarmLink) {
@@ -310,24 +430,33 @@ impl WarmPool {
         let mut closed = Vec::new();
         {
             let mut inner = self.lock();
-            let mut at = 0;
-            while at < inner.links.len() {
-                if inner.links[at].key.same_friend(&link.key) {
-                    closed.push(inner.links.swap_remove(at));
-                } else {
-                    at += 1;
+            let busy = inner
+                .links
+                .iter()
+                .any(|l| l.key.same_friend(&link.key) && l.in_flight > 0 && l.alive());
+            if busy {
+                closed.push(link);
+            } else {
+                let mut at = 0;
+                while at < inner.links.len() {
+                    if inner.links[at].key.same_friend(&link.key) {
+                        closed.push(inner.links.swap_remove(at));
+                    } else {
+                        at += 1;
+                    }
                 }
+                inner.links.push(link);
+                while inner.links.len() > self.limits.cap {
+                    let Some(oldest) = (0..inner.links.len())
+                        .filter(|&i| inner.links[i].in_flight == 0)
+                        .min_by_key(|&i| inner.links[i].last_batch)
+                    else {
+                        break;
+                    };
+                    closed.push(inner.links.swap_remove(oldest));
+                }
+                self.ensure_keeper(&mut inner);
             }
-            inner.links.push(link);
-            while inner.links.len() > self.limits.cap {
-                let Some(oldest) =
-                    (0..inner.links.len()).min_by_key(|&i| inner.links[i].last_batch)
-                else {
-                    break;
-                };
-                closed.push(inner.links.swap_remove(oldest));
-            }
-            self.ensure_keeper(&mut inner);
         }
         drop(closed);
     }
@@ -365,10 +494,11 @@ impl WarmPool {
     }
 
     /// Close what may carry no batch now: every link while the gate is
-    /// shut; one idle, old or full, one that got a frame or closed since
-    /// its last batch, and one whose friend is blocked, removed or no
-    /// longer verified (an unreadable store closes it too). `false` once
-    /// no link is kept: the keeper ends.
+    /// shut; one no batch rides that is idle, old or full, one whose task
+    /// ended (a frame with no batch on it, a close), and one whose friend is
+    /// blocked, removed or no longer verified (an unreadable store closes it
+    /// too, batches on it or not). `false` once no link is kept: the keeper
+    /// ends.
     async fn sweep(&'static self) -> bool {
         if !self.live() {
             self.flush();
@@ -379,7 +509,7 @@ impl WarmPool {
             let mut stale = Vec::new();
             let mut at = 0;
             while at < inner.links.len() {
-                if inner.links[at].usable(&self.limits, now, 0) {
+                if inner.links[at].worth_keeping(&self.limits, now) {
                     at += 1;
                 } else {
                     stale.push(inner.links.swap_remove(at));
@@ -390,12 +520,7 @@ impl WarmPool {
                 .iter()
                 .map(|l| {
                     let k = &l.key;
-                    (
-                        l.id,
-                        k.data_dir.clone(),
-                        k.contact,
-                        l.state.peer_offer.clone(),
-                    )
+                    (l.id, k.data_dir.clone(), k.contact, l.offer.clone())
                 })
                 .collect();
             (stale, look)
@@ -517,30 +642,213 @@ pub(crate) fn rides_warm(frames: &[Vec<u8>]) -> bool {
 pub(crate) enum Rode {
     /// It may not go to the contact (blocked now): nothing was sent.
     Refused(String),
-    /// The link failed before any reply came: the batch goes on a fresh
-    /// link (the contact takes a copy of what it holds as the same
+    /// The link failed before any reply came, or (the batch hedge, hedge
+    /// gate only) no reply came within the hedge's wait: the batch goes on
+    /// a fresh link (the contact takes a copy of what it holds as the same
     /// message, with the same ACK).
     Dead,
 }
 
-/// A batch of `frames` on `link`, taken from `pool` for `expected`, with
-/// its replies into `progress`. A send's check (no frames) is answered with
-/// the link's offer and no traffic, and the link goes back unchanged; a
-/// batch that leaves the link clean puts it back.
-pub(crate) async fn ride(
+/// How a batch on a kept link ended ([`WarmPool::end`]).
+#[derive(Clone, Copy, Debug)]
+enum Ended {
+    /// A send's check, answered with the link's offer: nothing was sent.
+    Check,
+    /// Every reply it waited for came, `trip` after its frames were
+    /// written.
+    Clean { trip: Duration },
+    /// Any other way: a wait ran out, the link closed or failed, or the
+    /// batch's dial was cut. The link may still bring a reply of its.
+    Broken,
+}
+
+/// A batch's share of a kept link ([`WarmPool::checkout`]): the link stays
+/// in the pool, and up to [`Limits::depth`] batches ride it at once. Ended
+/// by [`Self::end`]; one dropped unended (its batch failed, or its dial was
+/// cut) closes the link, whose replies to it would go unread.
+pub(crate) struct Lease {
     pool: &'static WarmPool,
-    mut link: WarmLink,
+    id: u64,
+    data_dir: PathBuf,
+    jobs: mpsc::UnboundedSender<Job>,
+    offer: Vec<u8>,
+    trip: Option<Duration>,
+    ended: bool,
+}
+
+impl Lease {
+    /// Its batch ended ([`WarmPool::end`]).
+    fn end(mut self, how: Ended) {
+        self.ended = true;
+        self.pool.end(self.id, how);
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.pool.end(self.id, Ended::Broken);
+        }
+    }
+}
+
+/// One batch for a kept link's task ([`pipe`]).
+struct Job {
+    frames: Vec<Vec<u8>>,
+    /// The terminal replies it waits for (one per frame that gets a reply,
+    /// [`crate::netutil::expects_reply`]).
+    expected: usize,
+    /// Its frames were written, or why not.
+    written: oneshot::Sender<Result<(), String>>,
+    /// Its replies in the order they came; the channel ends after its last
+    /// terminal reply, and with the link.
+    replies: mpsc::UnboundedSender<ReplyWait>,
+}
+
+/// A batch whose frames were written, still owed terminal replies.
+struct Flight {
+    left: usize,
+    replies: mpsc::UnboundedSender<ReplyWait>,
+}
+
+/// A kept link's own task (M8): it alone writes and reads the link
+/// (`halves`, `state`). A batch's frames go out as the batch hands them
+/// over, behind those of the batches before it (our route hints and HAVE
+/// first when due, as a batch on a fresh link writes them). Replies go to
+/// the oldest batch on the link until it had its last terminal reply (the
+/// listener answers frame after frame, each reply before it reads the next
+/// frame); the friend's HAVE and route hints are taken on the way, as a
+/// batch's read takes them. A frame with no batch on the link, a close, an
+/// unreadable frame or a failed write ends it, and every batch still on it
+/// sees the link closed.
+async fn pipe(
+    mut halves: WarmHalves,
+    mut state: LinkState,
+    mut jobs: mpsc::UnboundedReceiver<Job>,
+) {
+    let mut flight: VecDeque<Flight> = VecDeque::new();
+    let why = loop {
+        tokio::select! {
+            job = jobs.recv() => {
+                let Some(job) = job else {
+                    break PEER_CLOSED.to_string();
+                };
+                let wrote = write_batch(&mut halves, &mut state, &job.frames).await;
+                let failed = wrote.as_ref().err().cloned();
+                let _ = job.written.send(wrote);
+                if let Some(why) = failed {
+                    break why;
+                }
+                if job.expected > 0 {
+                    flight.push_back(Flight {
+                        left: job.expected,
+                        replies: job.replies,
+                    });
+                }
+            }
+            sealed = halves.next_sealed() => {
+                if let Err(why) = take_frame(&mut halves, &mut state, sealed, &mut flight).await {
+                    break why;
+                }
+            }
+        }
+    };
+    for batch in flight {
+        let _ = batch.replies.send(ReplyWait::Closed(why.clone()));
+    }
+}
+
+/// A batch's frames on a kept link: our route hints and HAVE first when
+/// due, as `internet_direct`'s batch on a link's own stream writes them.
+async fn write_batch(
+    halves: &mut WarmHalves,
+    state: &mut LinkState,
+    frames: &[Vec<u8>],
+) -> Result<(), String> {
+    if let Some(ours) = state.hints.outgoing().await {
+        halves.send(&mut state.cipher, &ours).await?;
+        state.hints.written();
+    }
+    if let Some(have) = state.hints.update().outgoing().await {
+        halves.send(&mut state.cipher, &have).await?;
+    }
+    for frame in frames {
+        halves.send(&mut state.cipher, frame).await?;
+    }
+    Ok(())
+}
+
+/// What a kept link's reader read (`sealed`): opened, then the friend's
+/// HAVE or route hints taken (as `internet_direct`'s read of a batch's
+/// replies takes them), or a reply for the oldest batch on the link.
+/// `Err`: why the link ends.
+async fn take_frame(
+    halves: &mut WarmHalves,
+    state: &mut LinkState,
+    sealed: Option<Result<Vec<u8>, String>>,
+    flight: &mut VecDeque<Flight>,
+) -> Result<(), String> {
+    let got = match sealed {
+        Some(Ok(ct)) => match state.cipher.open(&ct) {
+            Ok(frame) => ReplyWait::Frame(frame),
+            Err(why) => ReplyWait::Closed(why),
+        },
+        Some(Err(why)) => ReplyWait::Closed(why),
+        None => ReplyWait::Closed(PEER_CLOSED.into()),
+    };
+    crate::security::dial_reply(&got, &state.hints);
+    let frame = match got {
+        ReplyWait::Frame(frame) => frame,
+        ReplyWait::Closed(why) => return Err(why),
+        ReplyWait::Idle => return Ok(()),
+    };
+    if let Some(answer) = state.hints.update().dialer_take(&frame).await {
+        if let Some(ours) = answer {
+            halves.send(&mut state.cipher, &ours).await?;
+        }
+        return Ok(());
+    }
+    if state.hints.take(&frame).await {
+        if state.hints.flooded() {
+            return Err("too many route hint frames".into());
+        }
+        if let Some(ours) = state.hints.outgoing().await {
+            halves.send(&mut state.cipher, &ours).await?;
+            state.hints.written();
+        }
+        return Ok(());
+    }
+    let Some(oldest) = flight.front_mut() else {
+        return Err("a frame with no batch on the link".into());
+    };
+    let terminal = crate::netutil::is_terminal_reply(&frame);
+    let _ = oldest.replies.send(ReplyWait::Frame(frame));
+    if terminal {
+        oldest.left -= 1;
+        if oldest.left == 0 {
+            flight.pop_front();
+        }
+    }
+    Ok(())
+}
+
+/// A batch of `frames` for `expected` on its share of a kept link
+/// (`lease`), with its replies into `progress`. A send's check (no frames)
+/// is answered with the link's offer and no traffic. The batch's frames go
+/// to the link's task ([`pipe`]), behind those of the batches already on
+/// it, and its replies come back from it. With every reply it waited for
+/// the link stays; any other end closes it. With the hedge gate open a
+/// batch with no reply after max([`BATCH_HEDGE_FLOOR`], 3 x the link's last
+/// round trip) closes the link and is [`Rode::Dead`] (the batch hedge, M5).
+pub(crate) async fn ride(
+    lease: Lease,
     expected: &[u8; 32],
     frames: &[Vec<u8>],
     progress: &mut DialProgress,
 ) -> Result<(), Rode> {
     // The contact's block, before anything is sent (the keeper looks too,
     // every sweep).
-    let (dd, contact, offer) = (
-        link.key.data_dir.clone(),
-        *expected,
-        link.state.peer_offer.clone(),
-    );
+    let (dd, contact, offer) = (lease.data_dir.clone(), *expected, lease.offer.clone());
     match internet_direct::blocking(move || blocked(&dd, &contact, &offer)).await {
         Ok(false) => {}
         Ok(true) => return Err(Rode::Refused("blocked peer".into())),
@@ -549,12 +857,12 @@ pub(crate) async fn ride(
     // A live link with the contact, as at its opening (the session
     // renewer).
     crate::renewal::note_live_link(expected, crate::renewal::LiveLink::Outbound);
+    progress
+        .collector
+        .begin(lease.offer.clone(), frames)
+        .map_err(Rode::Refused)?;
     if frames.is_empty() {
-        progress
-            .collector
-            .begin(link.state.peer_offer.clone(), frames)
-            .map_err(Rode::Refused)?;
-        pool.checkin(link);
+        lease.end(Ended::Check);
         return Ok(());
     }
     // It is reachable: what waits for it goes now (as a fresh link's
@@ -562,20 +870,78 @@ pub(crate) async fn ride(
     if !progress.send_check {
         internet_direct::wake_outbox_for(expected);
     }
-    let mut io = DialIo::warm(&mut link.halves);
-    let ran = internet_direct::run_batch_on(&mut io, &mut link.state, frames, progress).await;
-    let (spent, written) = (io.spent(), io.written());
-    match ran {
-        Ok(()) => {
-            if !spent && progress.collector.all_answered() {
-                link.last_batch = Instant::now();
-                link.written = link.written.saturating_add(written);
-                pool.checkin(link);
-            }
-            Ok(())
+    progress.stage = "sending frames";
+    let (written, wrote) = oneshot::channel();
+    let (replies_to, mut replies) = mpsc::unbounded_channel();
+    let job = Job {
+        frames: frames.to_vec(),
+        expected: frames
+            .iter()
+            .filter(|f| crate::netutil::expects_reply(f))
+            .count(),
+        written,
+        replies: replies_to,
+    };
+    if lease.jobs.send(job).is_err() || !matches!(wrote.await, Ok(Ok(()))) {
+        return Err(Rode::Dead);
+    }
+    progress.frames_sent = true;
+    progress.collector.mark_frames_sent();
+    progress.stage = "waiting for a reply";
+    let sent = Instant::now();
+    let first_wait = progress.collector.first_wait();
+    let hedge = lease
+        .trip
+        .filter(|_| lease.pool.hedge.open())
+        .map(|trip| (trip * 3).max(BATCH_HEDGE_FLOOR))
+        .filter(|hedge| *hedge < first_wait);
+    let got = next_reply(&mut replies, hedge.unwrap_or(first_wait)).await;
+    if hedge.is_some() && matches!(got, ReplyWait::Idle) {
+        // The batch hedge: a silent link (its circuit may have died with
+        // no word); the batch goes again on a fresh link.
+        return Err(Rode::Dead);
+    }
+    let mut clean = matches!(got, ReplyWait::Frame(_));
+    let mut more = match progress.collector.first(got) {
+        Ok(more) => more,
+        Err(e) => return Err(failed(progress, e)),
+    };
+    while more {
+        let got = next_reply(&mut replies, progress.collector.idle_wait()).await;
+        clean &= matches!(got, ReplyWait::Frame(_));
+        more = match progress.collector.next(got) {
+            Ok(more) => more,
+            Err(e) => return Err(failed(progress, e)),
+        };
+    }
+    lease.end(if clean && progress.collector.all_answered() {
+        Ended::Clean {
+            trip: sent.elapsed(),
         }
-        Err(_) if !progress.collector.answered_any() => Err(Rode::Dead),
-        Err(e) => Err(Rode::Refused(e)),
+    } else {
+        Ended::Broken
+    });
+    Ok(())
+}
+
+/// A batch on a kept link failed with `e`, as one on a link's own stream
+/// ends: before any reply it goes again on a fresh link ([`Rode::Dead`]),
+/// after one `e` is the dial's error.
+fn failed(progress: &DialProgress, e: String) -> Rode {
+    if progress.collector.answered_any() {
+        Rode::Refused(e)
+    } else {
+        Rode::Dead
+    }
+}
+
+/// A batch's next reply from its kept link's task within `wait`, as a read
+/// on a link's own stream says it: a frame, nothing in time, or closed.
+async fn next_reply(replies: &mut mpsc::UnboundedReceiver<ReplyWait>, wait: Duration) -> ReplyWait {
+    match tokio::time::timeout(wait, replies.recv()).await {
+        Ok(Some(got)) => got,
+        Ok(None) => ReplyWait::Closed(PEER_CLOSED.into()),
+        Err(_) => ReplyWait::Idle,
     }
 }
 

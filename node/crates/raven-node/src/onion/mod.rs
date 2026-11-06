@@ -1892,12 +1892,14 @@ async fn dial_on(
 }
 
 /// W1 ([`warm`]): a program's batch (`frames`; none: its send's check) for
-/// `key`'s friend, on its kept link when one may carry it, else on a fresh
-/// link through the helper (`route`: its connect address and token, and
-/// the onion service), which is kept when its batch leaves it clean. A kept
-/// link that fails before any reply gives way to a fresh link with the same
-/// frames, its progress begun again (`again`: its reply waits and meta);
-/// with the hedge gate open that link's connect goes fresh first (M5, W4).
+/// `key`'s friend, on its kept link when one more batch may ride it (up to
+/// [`warm::PIPELINE_DEPTH`] at once, M8), else on a fresh link through the
+/// helper (`route`: its connect address and token, and the onion service),
+/// which is kept when its batch leaves it clean. A kept link that fails
+/// before any reply (or, with the hedge gate open, stays silent past the
+/// batch hedge's wait, M5) gives way to a fresh link with the same frames,
+/// its progress begun again (`again`: its reply waits and meta); with the
+/// hedge gate open that link's connect goes fresh first (M5, W4).
 #[allow(clippy::too_many_arguments)]
 async fn warm_dial(
     pool: &'static warm::WarmPool,
@@ -1910,8 +1912,8 @@ async fn warm_dial(
     progress: &mut DialProgress,
 ) -> Result<(), String> {
     let began = tokio::time::Instant::now();
-    if let Some(link) = pool.checkout(key, frames.len()) {
-        match warm::ride(pool, link, expected, frames, progress).await {
+    if let Some(lease) = pool.checkout(key, frames.len()) {
+        match warm::ride(lease, expected, frames, progress).await {
             Ok(()) => return Ok(()),
             Err(warm::Rode::Refused(e)) => return Err(e),
             Err(warm::Rode::Dead) => {
@@ -1935,7 +1937,13 @@ async fn warm_dial(
     internet_direct::run_batch_on(&mut io, &mut open.state, frames, progress).await?;
     let (spent, written) = (io.spent(), io.written());
     if !spent && (frames.is_empty() || progress.collector.all_answered()) {
-        pool.checkin(warm::WarmLink::new(key.clone(), open, began, written));
+        // Its round trip, from its frames written to their first reply (the
+        // batch hedge's wait on the kept link, M5).
+        let trip = progress
+            .timing()
+            .reply_ms
+            .map(|ms| Duration::from_millis(u64::from(ms)));
+        pool.checkin(warm::WarmLink::new(key.clone(), open, began, written, trip));
     }
     Ok(())
 }
