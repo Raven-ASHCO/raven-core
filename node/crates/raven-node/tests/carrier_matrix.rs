@@ -1017,7 +1017,11 @@ impl Profile {
             "RAVEN_LAB_TOR_LOOPBACK_STALL",
             "RAVEN_LAB_TOR_LOOPBACK_OBSOLETE",
             "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS",
-            // The onion dials' stage record file (D1); no case sets it.
+            // The loopback helper's warm circuit model (a fresh rendezvous,
+            // Arti's kept circuit) and the onion dials' stage record file
+            // (D1); no case sets them.
+            "RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS",
+            "RAVEN_LAB_TOR_LOOPBACK_KEPT_MS",
             "RAVEN_LAB_TOR_STAGES",
             // Tor speed Stage A's switches (all held); no case sets them.
             "RAVEN_LAB_TOR_WARM",

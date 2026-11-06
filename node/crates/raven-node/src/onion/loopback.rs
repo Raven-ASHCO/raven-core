@@ -33,13 +33,20 @@
 //! - `RAVEN_LAB_TOR_LOOPBACK_COUNT=1`: the helper keeps its connect counts
 //!   in [`COUNT_FILE`] under its state directory ([`Counts`]).
 //!
-//! Tests only (no variable): [`Knobs::rendezvous`], the price of a fresh
-//! rendezvous, paid once per isolation group and onion key, and
-//! [`Knobs::kill`]: every circuit the helper built so far dies with no word
-//! when the test says so (`kill_circuits`), as one whose far end vanished
-//! (audit T6). With neither, a connect behaves as above. And (test builds)
-//! `Knobs::memory`: its listeners and streams are in memory
-//! (`super::memnet`), for a test on tokio's paused clock.
+//! The warm circuit model (the D1 measurement's dry runs, security and speed
+//! report 2026-11-05 §7), read only with `RAVEN_LAB_TEST_A=1`:
+//! - `RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS=<ms>` ([`Knobs::rendezvous`]): a
+//!   fresh rendezvous (R) costs this much more, paid by the first connect
+//!   try per isolation group and onion key;
+//! - `RAVEN_LAB_TOR_LOOPBACK_KEPT_MS=<ms>` ([`Knobs::kept`]): a circuit no
+//!   connect was handed for this long is gone, so the next try pays the
+//!   rendezvous again, as Arti keeps one for 10 minutes after its last use.
+//!
+//! Tests only (no variable): [`Knobs::kill`]: every circuit the helper built
+//! so far dies with no word when the test says so (`kill_circuits`), as one
+//! whose far end vanished (audit T6). Without it, a connect behaves as
+//! above. And (test builds) `Knobs::memory`: its listeners and streams are
+//! in memory (`super::memnet`), for a test on tokio's paused clock.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -61,6 +68,10 @@ const ONE_CIRCUIT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT";
 const READY_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_READY_MS";
 const STALE_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_STALE_MS";
 const COUNT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_COUNT";
+const RENDEZVOUS_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS";
+const KEPT_ENV: &str = "RAVEN_LAB_TOR_LOOPBACK_KEPT_MS";
+/// The longest [`KEPT_ENV`], in ms: an hour (Arti keeps 10 minutes).
+const KEPT_MAX_MS: u64 = 3_600_000;
 /// How long one connect may take, as the Arti helper's.
 const CONNECT_WAIT: Duration = Duration::from_secs(44);
 /// The loopback helper's onion key seed, under the state directory.
@@ -86,13 +97,20 @@ pub(crate) struct Knobs {
     pub(crate) stale: Duration,
     /// [`COUNT_ENV`].
     pub(crate) count: bool,
-    /// Tests only: what the first try in an isolation group to an onion
-    /// service pays before its connect (a fresh rendezvous: the descriptor,
-    /// the introduction and the rendezvous circuits); the tries after it in
-    /// that group ride the circuit it built and pay [`Self::delay`] alone
-    /// (Arti keeps a rendezvous circuit for 10 minutes after its last use;
-    /// a test is shorter). Zero: no rendezvous price.
+    /// [`RENDEZVOUS_ENV`] (a lab run only): what the first try in an
+    /// isolation group to an onion service pays before its connect (a fresh
+    /// rendezvous: the descriptor, the introduction and the rendezvous
+    /// circuits); the tries after it in that group ride the circuit it
+    /// built and pay [`Self::delay`] alone, for [`Self::kept`]. Zero: no
+    /// rendezvous price.
     pub(crate) rendezvous: Duration,
+    /// [`KEPT_ENV`] (a lab run only): a circuit no connect was handed for
+    /// this long is gone, and the next try in its group pays
+    /// [`Self::rendezvous`] again, as Arti keeps an onion service circuit
+    /// for 10 minutes after its last use (tor-hsclient's
+    /// `RETAIN_CIRCUIT_AFTER_LAST_USE`). Zero: a circuit lasts the helper's
+    /// life.
+    pub(crate) kept: Duration,
     /// Tests only: the test's kill count (`kill_circuits`). A circuit
     /// built before its last rise is dead: its streams carry nothing more
     /// and never close, and a try in its group waits [`Self::stale`] and
@@ -176,12 +194,29 @@ impl Counter {
 
 impl Knobs {
     fn from_env() -> Self {
-        let on = |name| std::env::var(name).is_ok_and(|v| v == "1");
-        let ms = |name| {
-            std::env::var(name)
-                .ok()
+        Self::from_vars(raven_core::pair_init::lab_test_a_enabled(), |name| {
+            std::env::var(name).ok()
+        })
+    }
+
+    /// [`Self::from_env`] from its inputs: `var` reads one variable, and
+    /// `lab` is the Lab Test A unlock (false in every release build, which
+    /// has no loopback helper anyway): the warm circuit model's two knobs
+    /// ([`RENDEZVOUS_ENV`], [`KEPT_ENV`]) are read only with it.
+    fn from_vars(lab: bool, var: impl Fn(&str) -> Option<String>) -> Self {
+        let on = |name: &str| var(name).is_some_and(|v| v == "1");
+        let ms_up_to = |name: &str, max: u64| {
+            var(name)
                 .and_then(|v| v.trim().parse::<u64>().ok())
-                .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(60_000)))
+                .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(max)))
+        };
+        let ms = |name: &str| ms_up_to(name, 60_000);
+        let lab_ms = |name: &str, max: u64| {
+            if lab {
+                ms_up_to(name, max)
+            } else {
+                Duration::ZERO
+            }
         };
         Self {
             stall: on(STALL_ENV),
@@ -192,7 +227,8 @@ impl Knobs {
             ready: ms(READY_ENV),
             stale: ms(STALE_ENV),
             count: on(COUNT_ENV),
-            rendezvous: Duration::ZERO,
+            rendezvous: lab_ms(RENDEZVOUS_ENV, 60_000),
+            kept: lab_ms(KEPT_ENV, KEPT_MAX_MS),
             kill: None,
             #[cfg(test)]
             memory: false,
@@ -209,8 +245,26 @@ pub(crate) fn kill_circuits(kill: &AtomicU64) {
 }
 
 /// The circuits one helper life built: per isolation group and onion key,
-/// the kill count when it was built ([`Life`]).
-type Circuits = std::collections::HashMap<(Option<u64>, [u8; 32]), u64>;
+/// the kill count when it was built ([`Life`]) and when a connect was last
+/// handed it ([`Knobs::kept`]).
+type Circuits = std::collections::HashMap<(Option<u64>, [u8; 32]), (u64, tokio::time::Instant)>;
+
+/// The kill count of the circuit `key` names while it is still built at
+/// `now`: one no connect was handed for `kept` (when not zero) is dropped
+/// first, as Arti drops it.
+fn kept_circuit(
+    circuits: &mut Circuits,
+    key: (Option<u64>, [u8; 32]),
+    kept: Duration,
+    now: tokio::time::Instant,
+) -> Option<u64> {
+    let (built, used) = *circuits.get(&key)?;
+    if !kept.is_zero() && now.saturating_duration_since(used) >= kept {
+        circuits.remove(&key);
+        return None;
+    }
+    Some(built)
+}
 
 /// When a circuit was built, against its helper's kill count
 /// ([`Knobs::kill`]).
@@ -633,7 +687,13 @@ async fn accept_connects(
                 proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, flags, |group, _within| {
                     let (registry, counter) = (registry.clone(), counter.clone());
                     let circuits = circuits.clone();
-                    let built = lock(&circuits).get(&(group, hs_id)).map(|&built| Life {
+                    let built = kept_circuit(
+                        &mut lock(&circuits),
+                        (group, hs_id),
+                        knobs.kept,
+                        tokio::time::Instant::now(),
+                    )
+                    .map(|built| Life {
                         kill: knobs.kill,
                         built,
                     });
@@ -653,8 +713,10 @@ async fn accept_connects(
                             None => {
                                 tokio::time::sleep(knobs.rendezvous).await;
                                 let life = Life::new(knobs.kill);
-                                let built =
-                                    *lock(&circuits).entry((group, hs_id)).or_insert(life.built);
+                                let built = lock(&circuits)
+                                    .entry((group, hs_id))
+                                    .or_insert((life.built, tokio::time::Instant::now()))
+                                    .0;
                                 Life { built, ..life }
                             }
                         };
@@ -670,6 +732,11 @@ async fn accept_connects(
                             out.write_all(&client.to_be_bytes()).await.map_err(|_| {
                                 ConnectReply::Unreachable("rendezvous failed".into())
                             })?;
+                        }
+                        // Handed a connect: the circuit's last use, for
+                        // [`Knobs::kept`].
+                        if let Some(entry) = lock(&circuits).get_mut(&(group, hs_id)) {
+                            entry.1 = tokio::time::Instant::now();
                         }
                         Ok((out, built))
                     }
@@ -761,4 +828,191 @@ async fn delayed_copy(
         let _ = to.shutdown().await;
     };
     tokio::join!(read, write);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::onion::memnet;
+
+    /// One round trip of the model in these tests (a connect's delay).
+    const TRIP: Duration = Duration::from_secs(1);
+    /// A fresh rendezvous in these tests.
+    const RENDEZVOUS: Duration = Duration::from_secs(5);
+    /// How long these tests' circuits stay built without a connect.
+    const KEPT: Duration = Duration::from_secs(60);
+
+    /// The warm circuit model's two knobs ([`RENDEZVOUS_ENV`], the D1
+    /// harness's R, and [`KEPT_ENV`], Arti's circuit retention) are read
+    /// only in a lab run (the Lab Test A unlock), within their bounds; the
+    /// other knobs as before.
+    #[test]
+    fn the_warm_circuit_knobs_are_read_only_in_a_lab_run() {
+        let set = |name: &str| -> Option<String> {
+            match name {
+                RENDEZVOUS_ENV => Some("4000".into()),
+                KEPT_ENV => Some("90000".into()),
+                DELAY_ENV => Some("400".into()),
+                _ => None,
+            }
+        };
+        let lab = Knobs::from_vars(true, set);
+        assert_eq!(
+            (lab.rendezvous, lab.kept, lab.delay),
+            (
+                Duration::from_secs(4),
+                Duration::from_secs(90),
+                Duration::from_millis(400)
+            )
+        );
+        let plain = Knobs::from_vars(false, set);
+        assert_eq!(
+            (plain.rendezvous, plain.kept, plain.delay),
+            (Duration::ZERO, Duration::ZERO, Duration::from_millis(400)),
+            "outside a lab run neither is read"
+        );
+        let huge = |name: &str| -> Option<String> {
+            matches!(name, RENDEZVOUS_ENV | KEPT_ENV).then(|| "99999999".into())
+        };
+        let capped = Knobs::from_vars(true, huge);
+        assert_eq!(
+            (capped.rendezvous, capped.kept),
+            (Duration::from_secs(60), Duration::from_secs(3600))
+        );
+    }
+
+    /// One helper life on the paused clock, its listeners and streams in
+    /// memory; its own "onion service" forwards into a listener of the test
+    /// that holds every stream.
+    struct Running {
+        connect: std::net::SocketAddr,
+        hs_id: [u8; 32],
+        token: [u8; proto::TOKEN_LEN],
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+        _tasks: Vec<AbortOnDrop>,
+        _stdin: Pin<Box<dyn AsyncWrite + Send>>,
+    }
+
+    async fn running(knobs: Knobs) -> Running {
+        let (state, registry) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut forward = memnet::Listener::bind();
+        let forward_addr = forward.local_addr();
+        let holding = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok(stream) = forward.accept().await {
+                held.push(stream);
+            }
+        });
+        let token: [u8; proto::TOKEN_LEN] = rand::random();
+        let (to_helper, helper_in) = tokio::io::duplex(64 * 1024);
+        let (helper_out, from_helper) = tokio::io::duplex(64 * 1024);
+        let dir = registry.path().to_path_buf();
+        let helper = tokio::spawn(async move {
+            let _ = serve(Box::pin(helper_in), Box::pin(helper_out), dir, knobs).await;
+        });
+        let mut stdin: Pin<Box<dyn AsyncWrite + Send>> = Box::pin(to_helper);
+        let config = Config {
+            v: proto::PROTO_VERSION,
+            state_dir: state.path().to_string_lossy().into_owned(),
+            token: hex::encode(token),
+            forward: forward_addr.to_string(),
+            port: raven_core::onion::ONION_VIRTUAL_PORT,
+            fresh_state: false,
+        };
+        stdin
+            .write_all(proto::line(&config).as_bytes())
+            .await
+            .unwrap();
+        let mut events = LineReader::new(Box::pin(from_helper));
+        let (mut connect, mut hs_id) = (None, None);
+        while connect.is_none() || hs_id.is_none() {
+            let line = events.next_line().await.expect("a helper event");
+            match serde_json::from_str::<Event>(&line).unwrap() {
+                Event::Ready { connect: c } => connect = Some(c.parse().unwrap()),
+                Event::Onion { hs_id: h } => hs_id = proto::parse_hs_id(&h),
+                _ => {}
+            }
+        }
+        let draining = tokio::spawn(async move { while events.next_line().await.is_some() {} });
+        Running {
+            connect: connect.unwrap(),
+            hs_id: hs_id.unwrap(),
+            token,
+            _dirs: (state, registry),
+            _tasks: vec![
+                AbortOnDrop(holding),
+                AbortOnDrop(helper),
+                AbortOnDrop(draining),
+            ],
+            _stdin: stdin,
+        }
+    }
+
+    /// How long one connect through `helper` to its own onion service took
+    /// until its stream opened (the paused clock's time: the model's timers
+    /// alone).
+    async fn connect_took(helper: &Running) -> Duration {
+        let began = tokio::time::Instant::now();
+        let mut stream = memnet::connect(helper.connect).await.unwrap();
+        let request = proto::encode_connect(
+            &helper.token,
+            &helper.hs_id,
+            raven_core::onion::ONION_VIRTUAL_PORT,
+            0,
+        );
+        stream.write_all(&request).await.unwrap();
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).await.unwrap();
+        assert_eq!(head, [0, 0], "the stream opened");
+        began.elapsed()
+    }
+
+    /// `took` is `want` on the paused clock (a few ms of slack, never less).
+    fn about(took: Duration, want: Duration) -> bool {
+        took >= want && took < want + Duration::from_millis(5)
+    }
+
+    fn warm_model(kept: Duration) -> Knobs {
+        Knobs {
+            delay: TRIP,
+            rendezvous: RENDEZVOUS,
+            kept,
+            memory: true,
+            ..Knobs::default()
+        }
+    }
+
+    /// The warm circuit model (the D1 harness's dry mode): the first connect
+    /// to an onion service pays a fresh rendezvous before its own round
+    /// trip; one within [`Knobs::kept`] of the last rides the circuit it
+    /// built and pays the round trip alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_dial_within_kept_reuses_the_rendezvous() {
+        let _memory = memnet::MemoryOnly::new();
+        let helper = running(warm_model(KEPT)).await;
+        let first = connect_took(&helper).await;
+        assert!(about(first, RENDEZVOUS + TRIP), "first {first:?}");
+        tokio::time::sleep(KEPT - TRIP).await;
+        let second = connect_took(&helper).await;
+        assert!(about(second, TRIP), "within kept {second:?}");
+    }
+
+    /// ... and a connect after [`Knobs::kept`] without one pays the
+    /// rendezvous again (Arti dropped the circuit); with no `kept` a circuit
+    /// lasts the helper's life, as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_dial_after_kept_pays_the_rendezvous_again() {
+        let _memory = memnet::MemoryOnly::new();
+        for (kept, want) in [(KEPT, RENDEZVOUS + TRIP), (Duration::ZERO, TRIP)] {
+            let helper = running(warm_model(kept)).await;
+            let first = connect_took(&helper).await;
+            assert!(about(first, RENDEZVOUS + TRIP), "first {first:?}");
+            tokio::time::sleep(KEPT + TRIP).await;
+            let later = connect_took(&helper).await;
+            assert!(
+                about(later, want),
+                "kept {kept:?}: took {later:?}, want {want:?}"
+            );
+        }
+    }
 }
