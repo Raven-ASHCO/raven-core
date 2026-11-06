@@ -192,7 +192,7 @@
   "add.step3": "Check words",
   "add.share.body": "Send this to your friend (in a message, an email, or show them):",
   "add.share.public": "It holds only public information. Your private key never leaves this computer.",
-  "add.share.includeAddress": "Include my network address ({addr}). Anyone you send this to can see it.",
+  "add.share.encryptedLink": "Friends you verified learn where to reach you inside your encrypted link.",
   "add.share.copy": "Copy",
   "add.share.copied": "Copied",
   "add.paste.body": "Paste your friend's invite or card:",
