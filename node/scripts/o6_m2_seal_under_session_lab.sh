@@ -186,6 +186,10 @@ wait_sock() {
   return 1
 }
 
+# SealUnderSession is a lab op (ADR 0004 D4): raven-node answers it only with
+# the lab unlock (a debug build); without it the answer is NOT_AVAILABLE.
+export RAVEN_LAB_TEST_A=1
+
 # ── RED: no persisted ATSAM session ───────────────────────────────────────
 echo "=== RED no-session: raven-node up, identity present, no ATSAM session ==="
 RED="$WORKDIR/red/data"
@@ -232,7 +236,6 @@ A_PID=""
 
 # ── GREEN: lab indexed session via existing LAN send path ─────────────────
 echo "=== GREEN: RAVEN_LAB_TEST_A=1 + pair_init_lab / ash send (session-ensure is Raven, not RDAP) ==="
-export RAVEN_LAB_TEST_A=1
 A="$WORKDIR/green/a"
 B="$WORKDIR/green/b"
 A_PORT="${A_PORT:-$((18000 + $$ % 500))}"

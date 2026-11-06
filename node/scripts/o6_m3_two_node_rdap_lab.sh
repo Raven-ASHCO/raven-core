@@ -270,6 +270,10 @@ assert_no_rdap_task_success() {
   echo "${label}_RDAP_TASK_SUCCESS=none"
 }
 
+# SealUnderSession is a lab op (ADR 0004 D4): raven-node answers it only with
+# the lab unlock (a debug build); without it the answer is NOT_AVAILABLE.
+export RAVEN_LAB_TEST_A=1
+
 # ── RED: no persisted ATSAM session ───────────────────────────────────────
 echo "=== RED no-session: raven-node up, identity present, no ATSAM session ==="
 RED="$WORKDIR/red/data"
@@ -312,7 +316,6 @@ A_PID=""
 
 # ── GREEN: two logical devices / two raven-node processes ─────────────────
 echo "=== GREEN: two-process localhost (Alice + Bob) ==="
-export RAVEN_LAB_TEST_A=1
 A="$WORKDIR/green/a"
 B="$WORKDIR/green/b"
 A_PORT="${A_PORT:-$((18000 + $$ % 500))}"

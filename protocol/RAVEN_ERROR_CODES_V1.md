@@ -19,6 +19,7 @@
 | `IPC_AUTH` | ipc | peer-cred / socket auth failed |
 | `IPC_FRAME` | ipc | malformed / oversized IPC frame |
 | `IPC_FORBIDDEN_FIELD` | ipc | request contained prohibited secret field name |
+| `NOT_AVAILABLE` | ipc | local: a lab op this build does not serve: `SealUnderSession` outside a debug build's lab unlock (`RAVEN_LAB_TEST_A=1`); a release build never serves it (ADR 0004 D4; apps use `AppSubmit`) |
 | `POLICY_DENIED` | policy | local policy forbids bridge/store/relay action |
 | `ENVELOPE_MALFORMED` | parse | not a valid RavenEnvelopeV1 |
 | `ENVELOPE_BAD_SIG` | crypto | sender_authentication failed |

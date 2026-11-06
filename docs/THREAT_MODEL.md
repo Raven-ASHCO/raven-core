@@ -938,6 +938,12 @@ signs for it). Ordinary Raven messages and chat history are not exposed
 through it, and it reaches only verified contacts. A stronger check of the
 calling process (its code-signing identity, daemon-owned-secrets §4.4) is
 future work. Accepted as a documented residual, not independently reviewed.
+`SealUnderSession`, the lab op that seals any text under a session past
+these checks (ADR 0004 D4), is served only with a debug build's lab unlock:
+a release build answers it `NOT_AVAILABLE` (security review 2026-11, IPC-1),
+so such a process cannot have the node seal text through it: no chat or
+group text, and no app payload for a contact who is not verified or no
+longer a contact.
 
 **What the app channel takes from the network.** A node takes an app payload
 only from a verified, unblocked contact, only of a registered type

@@ -104,6 +104,8 @@ Each program only asks for items it touches (ash rarely opens the prekey item), 
 
 Two consequences. Any new IPC operation that returns message content or uses identity keys must check more than the UID on macOS, or it is weaker than today. And the existing UID-only seal and dial operations already fall short of ADR 0004, which says unsigned or unattributed local callers must not reach them (`docs/adr/0004-raven-rdap-atsam-transport.md:61`, `:105`).
 
+Since the 2026-11 security review (IPC-1), a release build answers `SealUnderSession` with `NOT_AVAILABLE`: it is a lab op (ADR 0004 D4), served only with a debug build's lab unlock. `LanDial`, `InternetDial` and `EnqueueSealed` still check only the UID; they seal nothing and carry the frames their caller brings.
+
 ### 3.1 (a) The daemon owns all secrets; the CLI is a thin IPC client
 
 - **Mechanism.** raven-node is the only process that opens `identity_store`, `chat_history`, `IndexedSessionStore` and `PrekeyLifecycleActor`. ash keeps contacts, rendering and its plain-words outcomes (`ash/ext.rs:1696-1840`). ADR 0003 already says ash and raven are clients and raven-node is the daemon (`docs/adr/0003-wire-crypto-identity-bridge-ipc.md:29`), but today the CLI does the send crypto itself: it opens the session store, confirms the PairResponse, stages the body, writes history, seals, and uses the daemon only to carry already-sealed frames (`ash/pair_init_lab.rs:290-419`, `:695-811`; `core/ipc.rs:45-59`).

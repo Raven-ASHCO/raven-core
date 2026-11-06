@@ -522,7 +522,8 @@ jobs:
       # return early in a debug build). The gates switched on in October 2026
       # (onion, Internet direct, friend custody, the app channel) stay on with
       # every switch set, the generic lab unlock opens nothing in release
-      # (pair_init), and a card carries and takes no unsigned route
+      # (pair_init; raven-node answers no SealUnderSession, IPC-1), and a
+      # card carries and takes no unsigned route
       # (route_hints::tests::card_routes_lab_switch_is_inert_in_release).
       - name: lab switches inert in release (every switch set)
         shell: bash
@@ -716,6 +717,7 @@ jobs:
             update_exchange::tests::the_newer_claim_is_inert_without_debug_assertions
             security::tests::nothing_is_noted_or_reported_while_the_gate_is_shut
             security::tests::status_is_reported_only_while_the_gate_is_live
+            ipc_server::tests::seal_under_session_refused_without_lab_unlock
           )
           cargo test --locked --release -p raven-node --lib -- "${node_inert[@]}"
           cargo test --locked --release -p raven-node --features nearby-radio --lib -- \
