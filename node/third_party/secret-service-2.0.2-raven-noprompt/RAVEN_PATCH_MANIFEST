@@ -2,7 +2,6 @@
 # Paths are relative to this directory and sorted bytewise.
 
 [modified]
-Cargo.lock
 Cargo.toml
 src/collection.rs
 src/error.rs
@@ -18,3 +17,6 @@ RAVEN_DELTA.md
 RAVEN_PATCH_DIGEST
 RAVEN_PATCH_MANIFEST
 tests/raven_r0_hard_stop.rs
+
+[removed]
+Cargo.lock

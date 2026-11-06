@@ -248,8 +248,14 @@ jobs:
   # pins to the checksummed crates.io libsqlite3-sys 0.38.2 archive. It is merge-blocking
   # only once this check is added to branch protection (the required-check pin is OFF).
   # curl is retried: a provenance MISMATCH fails the same way every attempt.
+  # The other [patch.crates-io] forks (arti-client, saturating-time,
+  # secret-service) are path dependencies too, with no Cargo.lock checksum:
+  # verify_vendored_forks.py ties every file of each to its pinned crates.io
+  # archive plus exactly the delta node/third_party/forks.json records
+  # (security review 2026-11, DEP-5), and fails when a patched fork or a
+  # node/third_party folder has no record.
   supply-chain-provenance:
-    name: Vendored SQLite provenance vs crates.io
+    name: Vendored fork provenance vs crates.io
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -265,6 +271,22 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
+      - name: Every vendored fork vs its crates.io archive plus its recorded delta (verify_vendored_forks.py)
+        if: ${{ !cancelled() }}
+        run: python3 -I node/scripts/verify_vendored_forks.py --download "$RUNNER_TEMP/crates" --self-test
+      - name: secret-service fork digest pin and its negatives (verify_secret_service_2_0_2_raven_noprompt.sh)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # The archive the step above fetched; both scripts check its SHA-256 again.
+          archive="$RUNNER_TEMP/crates/secret-service-2.0.2.crate"
+          if [[ ! -f "$archive" ]]; then
+            mkdir -p "$RUNNER_TEMP/crates"
+            curl -A 'cargo/1.97' -fsSL --retry 3 --retry-delay 5 \
+              https://static.crates.io/crates/secret-service/secret-service-2.0.2.crate -o "$archive"
+          fi
+          RAVEN_SS_CRATE_ARCHIVE="$archive" bash node/scripts/verify_secret_service_2_0_2_raven_noprompt.sh
+          RAVEN_SS_CRATE_ARCHIVE="$archive" bash node/scripts/secret_service_r0_provenance_selftest.sh
 
   # The §59 harness cited by README.md. Lab build (unsafe-demo-crypto); exits 1
   # unless every step is green. Artifacts hold public keys only.

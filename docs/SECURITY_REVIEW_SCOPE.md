@@ -170,8 +170,12 @@ in a debug build with `RAVEN_LAB_TEST_A=1` plus the feature's own switch (for ex
 
 Exact dependency versions are in `node/Cargo.lock` (among them `ml-kem` 0.3.2, `snow` 0.9.6,
 `libp2p` 0.57.0 and, for the Tor helper, `arti-client` 0.47.0). Vendored and patched upstream code
-(SQLite and SQLCipher bindings, a Secret Service client, a time library) is under
-`node/third_party/`, with notes (`RAVEN.md`, `RAVEN_DELTA.md`) on what was changed.
+(SQLite and SQLCipher bindings, `arti-client`, a Secret Service client, a time library) is under
+`node/third_party/`, with notes (`RAVEN.md`, `RAVEN_DELTA.md`) on what was changed. These forks are
+path dependencies, so `Cargo.lock` holds no checksum for them: `node/third_party/forks.json`
+records each one's crates.io archive (its SHA-256) and its exact delta (every modified and added
+file pinned by SHA-256, the files left out), and CI checks every tracked file of each fork against
+it (`node/scripts/verify_vendored_forks.py`, the "Vendored fork provenance vs crates.io" job).
 
 ## 5. Out of scope
 

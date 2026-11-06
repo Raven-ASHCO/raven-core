@@ -73,6 +73,11 @@ cp -R "$SOURCE" "$WORK/missing"
 mv "$WORK/missing/src/lib.rs" "$WORK/missing/src/lib.rs.removed"
 expect_reject missing_file "$WORK/missing"
 
+# An upstream file the fork declares left out (REMOVED), put back.
+cp -R "$SOURCE" "$WORK/left-out-back"
+printf '# planted\n' >"$WORK/left-out-back/Cargo.lock"
+expect_reject left_out_put_back "$WORK/left-out-back"
+
 cp -R "$SOURCE" "$WORK/stale-digest"
 printf '\n# stale digest negative\n' >>"$WORK/stale-digest/src/item.rs"
 expect_reject stale_digest "$WORK/stale-digest"

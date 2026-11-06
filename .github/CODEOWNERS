@@ -65,6 +65,7 @@
 /node/scripts/verify_secret_service*.sh                   @Raven-ASHCO/crypto @Raven-ASHCO/assurance @Raven-ASHCO/release
 /node/scripts/secret_service_r0_provenance_selftest.sh    @Raven-ASHCO/crypto @Raven-ASHCO/assurance @Raven-ASHCO/release
 /node/scripts/verify_sqlcipher*.sh                        @Raven-ASHCO/crypto @Raven-ASHCO/assurance @Raven-ASHCO/release
+/node/scripts/verify_vendored_forks.py                    @Raven-ASHCO/crypto @Raven-ASHCO/assurance @Raven-ASHCO/release
 /node/scripts/regenerate_sqlcipher*.sh                    @Raven-ASHCO/crypto @Raven-ASHCO/assurance @Raven-ASHCO/release
 /node/scripts/sqlcipher_*.sh                              @Raven-ASHCO/crypto @Raven-ASHCO/assurance @Raven-ASHCO/release
 /node/fuzz/                                               @Raven-ASHCO/core @Raven-ASHCO/assurance
