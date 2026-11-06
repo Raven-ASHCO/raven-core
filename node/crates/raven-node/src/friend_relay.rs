@@ -596,7 +596,9 @@ fn relay_ports(listen: &[Multiaddr], also_443: bool) -> (Option<u16>, Option<u16
 ///    auto-reach, `found`: the public IP STUN discovery found where the NAT
 ///    keeps ports, [`crate::autoreach::forward_ip`], then its listen
 ///    addresses) with the relay's ports: TCP and QUIC, and TCP 443 while that
-///    listener is open;
+///    listener is open. A public IPv4 address from STUN or the router is in
+///    `host` and `found` only once a contact or relay saw this computer at
+///    that IP (INET-STUN-1);
 /// 4. and with 2 or 3, the relay's own global listen addresses (IPv6, in
 ///    practice).
 ///
@@ -666,8 +668,10 @@ fn confirmed(relay: &RelayStatusFile, now_ms: u64) -> bool {
 /// An address worth offering (RAVEN_ROUTE_HINTS_V1 §11.4): it names one, and
 /// the profile's reach class is public or mapped, the relay is confirmed, the
 /// operator declared its addresses, or (auto-reach) STUN discovery `found`
-/// this computer's public address, which the relay names with its own ports
-/// (unconfirmed until a member reserves from outside).
+/// this computer's public address and a contact or relay saw this computer
+/// there ([`crate::autoreach::forward_ip`], INET-STUN-1), which the relay
+/// names with its own ports (unconfirmed until a member reserves from
+/// outside).
 fn worth_offering(
     names: &[Multiaddr],
     declared: bool,

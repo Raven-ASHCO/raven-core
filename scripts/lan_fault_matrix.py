@@ -313,7 +313,11 @@ same-LAN address, so a p2p address is learned only from STUN discovery. s146
 p2p port itself (anchored), and his friend relay, turned on with no
 --external, is offered within 30 s naming it with the relay's ports; Carol's
 (no STUN switch) never is; Alice learns Bob's offer and discovered DIRECT
-addresses (none from Carol) and reserves on his relay. s147
+addresses (none from Carol) and reserves on his relay. s146b
+(unseen_address_never_told, INET-STUN-1): both fake servers name 127.0.0.2
+for Bob, an address of someone else's that no contact sees him at; his node
+finds it but never tells it: no relay offer, no DIRECT or INET_DIRECT
+address at it in Alice's learned routes. s147
 (reached_after_moving): Alice keeps no route to Bob and Carol but their
 PeerIds ("moved"); her p2p message to Bob reaches the address his hints told
 her (`direct`), her automatic one goes to his INET_DIRECT address, Bob's node
@@ -12965,11 +12969,12 @@ def s115_pad1_mixed_builds(root: Path) -> dict:
 
 # ── Auto-reach (docs/design/2026-10-auto-reach.md) ─────────────────────────
 #
-# RAVEN_FAULT_AUTOREACH=1 selects s146-s148. Their nodes run with the debug
-# switches RAVEN_LAB_STUN_DISCOVERY=1 (and for s148 RAVEN_LAB_NAT_CLASS=1 and
-# RAVEN_LAB_SERVERLESS_PUNCH=1) and RAVEN_LAB_TEST_A=1, and ask only the fake
-# STUN servers below (RAVEN_LAB_STUN_SERVERS, two sockets on 127.0.0.1): no
-# scenario ever reaches a public STUN server.
+# RAVEN_FAULT_AUTOREACH=1 selects s146, s146b, s147 and s148. Their nodes run
+# with the debug switches RAVEN_LAB_STUN_DISCOVERY=1 (and for s148
+# RAVEN_LAB_NAT_CLASS=1 and RAVEN_LAB_SERVERLESS_PUNCH=1) and
+# RAVEN_LAB_TEST_A=1, and ask only the fake STUN servers below
+# (RAVEN_LAB_STUN_SERVERS, two sockets on 127.0.0.1): no scenario ever
+# reaches a public STUN server.
 AUTOREACH = os.environ.get('RAVEN_FAULT_AUTOREACH') == '1'
 AUTOREACH_ENV = without_beacon(dict(
     P2P_ENV, RAVEN_LAB_ROUTE_HINTS='1', RAVEN_LAB_P2P_LOCAL_CANDIDATES='1',
@@ -13236,6 +13241,62 @@ def s146_discovered_address_offered(root: Path) -> dict:
         stun.stop()
 
 
+def s146b_unseen_address_never_told(root: Path) -> dict:
+    """Auto-reach, INET-STUN-1 (RAVEN_FAULT_AUTOREACH=1, design §3.2): both
+    fake STUN servers agree that Bob's public address is 127.0.0.2, as a LAN
+    or DNS attacker would make them agree on an address of its own. No
+    contact or relay ever sees Bob there (they reach him at 127.0.0.1), so
+    his node finds the address but never tells it: his friend relay, turned
+    on with no `--external`, is not offered within 30 s, and Alice, after an
+    Internet direct message each way, holds his route hints (his PeerId)
+    with no DIRECT or INET_DIRECT address at 127.0.0.2 and no relay offer.
+    No log names an address, and Bob's node never says the address was seen
+    from outside. s146 is the same setup with the address his contacts do
+    see him at."""
+    stun = FakeStun(lambda port: ('127.0.0.2', port))
+    ports = {k: free_tcp_udp_port() for k in 'ab'}
+    relay_port = free_tcp_udp_port()
+    base = dict(AUTOREACH_ENV, RAVEN_LAB_STUN_SERVERS=stun.servers,
+                RAVEN_LAB_FRIEND_RELAY='1')
+    specs = {
+        'a': (dict(base, RAVEN_LAB_P2P_RELAY_ONLY='1'), ports['a']),
+        'b': (dict(base, RAVEN_LAB_FRIEND_RELAY_LISTEN=f'127.0.0.1:{relay_port}'), ports['b']),
+    }
+    try:
+        nodes, ready = reach_nodes(root, specs)
+        a, b = nodes['a'], nodes['b']
+        found = wait_until(lambda: b.status_json().get('public_addr') == 'found', 30)
+        facts_b = b.status_json()
+        b.relay_offer(True)
+        offered = wait_until(lambda: offered_to(b) >= 1, 30)
+        b_status = b.ash('relay', 'status').stdout
+        asks = [inet_send(a, 'bob', 's146b-a2b'), inet_send(b, 'alice', 's146b-b2a')]
+        learned = wait_until(lambda: bool(learned_raw(a, b).get('peer_id')), 30)
+        # A later generation (one with an offer, say) would come within this.
+        time.sleep(5)
+        row = learned_raw(a, b)
+        told = [d for d in row.get('direct', []) if '/ip4/127.0.0.2/' in d]
+        logs = ''.join(n.log_path.read_text(errors='replace') for n in nodes.values())
+        stun_lines = [l for l in logs.splitlines() if 'raven-node autoreach:' in l]
+        return dict(
+            ok=ready and found is not None and offered is None
+            and asks == ['DELIVERED', 'DELIVERED'] and learned is not None
+            and told == [] and not row.get('inet') and offers_from(a, b) == 0
+            and bool(stun_lines) and not any('127.0.0' in l for l in stun_lines)
+            and not any('seen from outside' in l for l in stun_lines)
+            and stun.asked.get(ports['b'], 0) > 0,
+            ready=ready, found_s=took(found), auto_reach_b={
+                k: facts_b.get(k) for k in ('stun', 'public_addr', 'stun_class', 'anchored',
+                                             'stun_answered')},
+            offered_s=took(offered),
+            bob_says_no_address='no public address' in b_status or 'not offered' in b_status,
+            asks=asks, learned_s=took(learned), told_unseen=told,
+            alice_learned_bob_inet=row.get('inet'), offers_from_bob=offers_from(a, b),
+            stun_asked_from_p2p_port=stun.asked.get(ports['b'], 0), stun_lines=stun_lines[:4])
+    finally:
+        stun.stop()
+
+
 def s147_reached_after_moving(root: Path) -> dict:
     """Auto-reach (RAVEN_FAULT_AUTOREACH=1, design §4.1): Alice, Bob and
     Carol talk over Internet direct ("together"; route hints ride those
@@ -13462,7 +13523,8 @@ SCENARIOS = [
     [s115_pad1_mixed_builds] if PADDING or KNOCK else []) + (
     [s04r_random_port_learned] if RANDOM_PORT else []) + (
     [s116_lock_v2_with_queued_messages] if LOCK_V2 else []) + (
-    [s146_discovered_address_offered, s147_reached_after_moving, s148_serverless_punch]
+    [s146_discovered_address_offered, s146b_unseen_address_never_told,
+     s147_reached_after_moving, s148_serverless_punch]
     if AUTOREACH else []) + (
     [s118_mesh_advisory_a_b_c, s119_mesh_release_resumed_from_a_second_friend]
     if UPDATES else [])

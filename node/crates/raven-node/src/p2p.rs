@@ -1063,10 +1063,13 @@ pub(crate) fn reach_confirmed() -> bool {
 /// This node's own p2p routes, as its route hints tell verified contacts
 /// (`crate::hints`, RAVEN_ROUTE_HINTS_V1 §6): the host's PeerId, the relays
 /// it holds an active reservation on (each active relay slot's `via=`
-/// text), its confirmed (UPnP mapped or AutoNAT confirmed) addresses and its
-/// listen addresses, both without `/p2p`, no circuit, sorted; and (Phase 4)
-/// its NAT mapping classes while the NAT_CLASS gate is live; and (auto-reach)
-/// the public addresses STUN discovery found.
+/// text), its confirmed (router mapped or AutoNAT confirmed) addresses and
+/// its listen addresses, both without `/p2p`, no circuit, sorted; and
+/// (Phase 4) its NAT mapping classes while the NAT_CLASS gate is live; and
+/// (auto-reach) the public addresses STUN discovery found. A public IPv4
+/// address from STUN or the router is here only once a contact or one of
+/// this node's relays saw it at that IP, on a connection this node dialled
+/// directly (INET-STUN-1, [`crate::autoreach::observed`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OwnP2p {
     pub peer_id: String,
@@ -1074,13 +1077,14 @@ pub(crate) struct OwnP2p {
     pub confirmed: Vec<String>,
     pub listen: Vec<String>,
     pub nat: Option<raven_core::route_hints::NatClass>,
-    /// Auto-reach (gated): the public addresses STUN discovery found for the
-    /// listeners that no contact has reached from outside yet (a reached one
-    /// is among `confirmed`), QUIC first; without `/p2p`.
+    /// Auto-reach (gated): the public addresses STUN discovery found, and a
+    /// contact or relay saw this node at, for the listeners that no contact
+    /// has reached from outside yet (a reached one is among `confirmed`),
+    /// QUIC first; without `/p2p`.
     pub discovered: Vec<String>,
     /// Auto-reach (gated): the Internet direct listener's public address
-    /// (`ip:port`) and whether a contact reached it from outside (RRH1
-    /// INET_DIRECT).
+    /// (`ip:port`, its IP seen as for `discovered`) and whether a contact
+    /// reached it from outside (RRH1 INET_DIRECT).
     pub inet: Vec<(String, bool)>,
 }
 
@@ -1109,6 +1113,25 @@ fn replace_own(held: &mut Option<OwnP2p>, own: Option<OwnP2p>) -> bool {
     let changed = *held != own;
     *held = own;
     changed
+}
+
+/// Auto-reach (INET-STUN-1): may this confirmed external address of the
+/// swarm go into route hints? The swarm confirms one when the router maps a
+/// port (NAT-PMP, PCP or UPnP) or an AutoNAT server (a relay this host holds
+/// a slot on) reached it. A router's answer is not authenticated: someone
+/// else on this network who forges the router's replies can name an
+/// external IP of theirs, and contacts would dial it. So an IPv4 one is told
+/// only once a contact or one of this host's relays saw this host at that
+/// IP, on a connection this host dialled directly (`seen`,
+/// [`crate::autoreach::seen_ip`]). An address an AutoNAT server reached is
+/// normally at the IP that very relay sees this host at, so it passes once
+/// that relay's view came in. IPv6 ones (this host's own address, which a
+/// PCP pinhole answer matched by its nonce names) are told as before.
+fn admitted_external(addr: &Multiaddr, seen: &dyn Fn(Ipv4Addr) -> bool) -> bool {
+    match addr.iter().next() {
+        Some(Protocol::Ip4(ip)) => seen(ip),
+        _ => true,
+    }
 }
 
 /// Ask a running host to shut down cleanly (close its connections, so a
@@ -5442,10 +5465,18 @@ impl Host {
     /// ([`OwnP2p`]): its PeerId, every address each active relay slot's
     /// relay is named by (its fallback too, at most
     /// [`raven_core::route_hints::MAX_ADDRS_PER_RELAY`] per relay), the
-    /// external addresses the swarm holds as confirmed (UPnP mapped,
-    /// AutoNAT confirmed; never a circuit) and its listen addresses. Sorted
-    /// and without `/p2p`, so it changes only when its content does.
+    /// external addresses the swarm holds as confirmed (router mapped,
+    /// AutoNAT confirmed; never a circuit; an IPv4 one only once seen from
+    /// outside, [`admitted_external`]) and its listen addresses. Sorted and
+    /// without `/p2p`, so it changes only when its content does.
     fn own_p2p(&self) -> OwnP2p {
+        let lab_local = raven_core::p2p_local_candidates_enabled();
+        self.own_p2p_with(&|ip| crate::autoreach::seen_ip(ip, lab_local))
+    }
+
+    /// [`Self::own_p2p`], with `seen` saying whether a contact or relay saw
+    /// this host at an IPv4 address ([`crate::autoreach::seen_ip`]).
+    fn own_p2p_with(&self, seen: &dyn Fn(Ipv4Addr) -> bool) -> OwnP2p {
         let texts = |addrs: &mut dyn Iterator<Item = &Multiaddr>| {
             let mut out: Vec<String> = addrs
                 .filter(|a| !is_circuit(a))
@@ -5460,13 +5491,19 @@ impl Host {
             out.dedup();
             out
         };
-        // Auto-reach (gated): what STUN discovery found; a port a contact
-        // reached from outside counts as confirmed.
+        // Auto-reach (gated): what STUN discovery found and a contact or
+        // relay saw this node at; a port a contact reached from outside under
+        // that IP counts as confirmed.
         let found = crate::autoreach::discovered_p2p(
             &self.listen_addrs,
             raven_core::p2p_local_candidates_enabled(),
         );
-        let mut confirmed = texts(&mut self.swarm.external_addresses());
+        let mut confirmed = texts(
+            &mut self
+                .swarm
+                .external_addresses()
+                .filter(|a| admitted_external(a, seen)),
+        );
         for f in found.iter().filter(|f| f.confirmed) {
             if !confirmed.contains(&f.text) {
                 confirmed.push(f.text.clone());
@@ -5798,6 +5835,38 @@ impl Host {
         };
         if let Some(ip) = addr_ip(send_back_addr) {
             crate::autoreach::confirm(what, ip, raven_core::p2p_local_candidates_enabled());
+        }
+    }
+
+    /// Auto-reach (design §3.2, INET-STUN-1): the IP `peer` saw this host at
+    /// on `conn` (Identify's raw observed address), when that view may vouch
+    /// for the public address STUN or the router named: a connection this
+    /// host dialled directly ([`ConnOrigin::Dialled`]: not through a relay,
+    /// not a hole punch, not a circuit address) to a contact the peer gate
+    /// admits or to a relay this host holds a slot on. Both are
+    /// authenticated, so nobody on the path can change what they say, and
+    /// on a connection this host dialled they report where its packets come
+    /// from: from outside, its public IP. On a connection the peer dialled,
+    /// Identify reports the address the peer dialled instead (libp2p-identify
+    /// 0.48, `handle_established_outbound_connection`), which may be the
+    /// very address in question, so that view never counts; nor does a
+    /// stranger's ([`crate::autoreach::observed`] keeps the IP).
+    fn outside_view(
+        &self,
+        conn: ConnectionId,
+        peer: &PeerId,
+        observed: &Multiaddr,
+    ) -> Option<IpAddr> {
+        if is_circuit(observed) {
+            return None;
+        }
+        let dialled = lock(&self.handle.conns).origin(conn) == Some(ConnOrigin::Dialled);
+        let vouches = self.slots.iter().any(|s| s.peer == *peer)
+            || self.gate.class_of(peer).intersects(PeerClass::CONTACT);
+        if dialled && vouches {
+            addr_ip(observed)
+        } else {
+            None
         }
     }
 
@@ -6889,6 +6958,12 @@ impl Host {
                         by_relay,
                         std::time::Instant::now(),
                     );
+                }
+                // Auto-reach (design §3.2): a contact's or relay's view on a
+                // connection we dialled directly vouches for the public IP
+                // STUN or the router named before contacts are told it.
+                if let Some(ip) = self.outside_view(connection_id, &peer_id, &info.observed_addr) {
+                    crate::autoreach::observed(ip, raven_core::p2p_local_candidates_enabled());
                 }
                 // Phase 4: the same raw view classifies our NAT's mapping.
                 self.nat_observed(connection_id, &peer_id, &info.observed_addr);
@@ -12153,7 +12228,11 @@ mod tests {
             "/ip4/192.168.7.5/tcp/7423".parse().unwrap(),
             "/ip4/10.0.0.5/tcp/7423".parse().unwrap(),
         ];
-        let own = host.own_p2p();
+        // The IPv4 one only once a contact or relay saw this host there
+        // (INET-STUN-1, [`admitted_external`]).
+        assert_eq!(host.own_p2p().confirmed, vec![v6.to_string()]);
+        let seen = |ip: Ipv4Addr| ip == Ipv4Addr::new(198, 51, 100, 7);
+        let own = host.own_p2p_with(&seen);
         assert_eq!(own.confirmed, vec![v4.to_string(), v6.to_string()]);
         assert_eq!(
             own.listen,
@@ -12164,20 +12243,119 @@ mod tests {
         host.swarm.add_external_address(v4.clone());
         host.listen_addrs.reverse();
         assert!(
-            !replace_own(&mut held, Some(host.own_p2p())),
+            !replace_own(&mut held, Some(host.own_p2p_with(&seen))),
             "the same addresses in another order"
         );
 
         // A reservation accepted on the second slot, then lost.
         host.slots[1].active = true;
-        let own = host.own_p2p();
+        let own = host.own_p2p_with(&seen);
         assert_eq!(own.relays, vec![relays[1].text.clone()]);
         assert!(replace_own(&mut held, Some(own)));
         host.slots[1].active = false;
-        assert!(replace_own(&mut held, Some(host.own_p2p())));
+        assert!(replace_own(&mut held, Some(host.own_p2p_with(&seen))));
         // The host stopped.
         assert!(replace_own(&mut held, None));
         assert!(!replace_own(&mut held, None));
+    }
+
+    /// INET-STUN-1: a router's answer (NAT-PMP, PCP or UPnP) is not
+    /// authenticated, so someone else on this network can name an external
+    /// IPv4 address of theirs. Such an address, or one an AutoNAT server
+    /// reached, goes into route hints only once a contact or relay saw this
+    /// host at that IP; an IPv6 one as before.
+    #[tokio::test]
+    async fn a_router_mapped_ipv4_address_is_told_only_once_seen_from_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = HostGate::open(true).unwrap();
+        let (seed, _commands) = test_seed(&gate, dir.path(), loopback_config(Vec::new()));
+        let (mut host, _incoming, _handle) = seed.build(0, false).unwrap();
+        let mapped: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
+        let v6: Multiaddr = "/ip6/2001:db8::9/udp/40123/quic-v1".parse().unwrap();
+        host.swarm.add_external_address(mapped.clone());
+        host.swarm.add_external_address(v6.clone());
+        // Nobody saw this host at 203.0.113.9: only the IPv6 one is told.
+        assert_eq!(
+            host.own_p2p().confirmed,
+            vec![v6.to_string()],
+            "told before anyone saw it"
+        );
+        // Seen there: both, in order.
+        let at = |ip: [u8; 4]| move |seen: Ipv4Addr| seen == Ipv4Addr::from(ip);
+        assert_eq!(
+            host.own_p2p_with(&at([203, 0, 113, 9])).confirmed,
+            vec![mapped.to_string(), v6.to_string()]
+        );
+        // Seen at another IP: the mapped one still waits.
+        assert_eq!(
+            host.own_p2p_with(&at([203, 0, 113, 8])).confirmed,
+            vec![v6.to_string()]
+        );
+    }
+
+    /// INET-STUN-1 (design §3.2): whose view of this host vouches for its
+    /// public IP. A contact the peer gate admits, or a relay this host holds
+    /// a slot on, on a connection this host dialled directly: yes. On a
+    /// connection the peer dialled (its Identify then names the address it
+    /// dialled), a hole punch, a relayed connection or a circuit address:
+    /// never. A stranger or a hidden contact: never.
+    #[tokio::test]
+    async fn only_a_contact_or_own_relay_this_host_dialled_vouches_for_its_ip() {
+        let dir = tempfile::tempdir().unwrap();
+        let relays = vec![p2p_route::parse_via(&gate_via(5, "192.0.2.1")).unwrap()];
+        let gate = HostGate::open(true).unwrap();
+        let (seed, _commands) = test_seed(&gate, dir.path(), loopback_config(relays));
+        let (host, _incoming, handle) = seed.build(0, false).unwrap();
+        let (contact, hidden, stranger, relay) =
+            (peer_id(31), peer_id(32), peer_id(33), peer_id(5));
+        assert!(host.slots.iter().any(|s| s.peer == relay));
+        host.gate.replace(
+            HashMap::from([
+                (contact, PeerClass::CONTACT),
+                (hidden, PeerClass::CONTACT_HIDDEN),
+            ]),
+            false,
+            std::time::Instant::now(),
+        );
+        let observed: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let mut n = 0;
+        let mut conn = |peer: PeerId, relayed: bool, dialer: bool| {
+            n += 1;
+            let id = ConnectionId::new_unchecked(n);
+            lock(&handle.conns).established(id, peer, relayed, dialer);
+            id
+        };
+        // A contact or this host's relay, dialled directly: their view counts.
+        let to_contact = conn(contact, false, true);
+        assert_eq!(host.outside_view(to_contact, &contact, &observed), Some(ip));
+        let to_relay = conn(relay, false, true);
+        assert_eq!(host.outside_view(to_relay, &relay, &observed), Some(ip));
+        // Never a circuit address.
+        let circuit: Multiaddr = format!("{}/p2p-circuit", gate_via(5, "192.0.2.1"))
+            .parse()
+            .unwrap();
+        assert_eq!(host.outside_view(to_contact, &contact, &circuit), None);
+        // The contact dialled us: it names the address it dialled.
+        let from_contact = conn(contact, false, false);
+        assert_eq!(host.outside_view(from_contact, &contact, &observed), None);
+        // Through a relay, either way.
+        for dialer in [true, false] {
+            let relayed = conn(contact, true, dialer);
+            assert_eq!(host.outside_view(relayed, &contact, &observed), None);
+        }
+        // A hole punch (DCUtR reported it as its upgrade).
+        let punched = conn(contact, false, true);
+        lock(&handle.conns).upgraded(punched, contact, Instant::now());
+        assert_eq!(host.outside_view(punched, &contact, &observed), None);
+        // A stranger or a hidden contact, even dialled directly.
+        for peer in [stranger, hidden] {
+            let id = conn(peer, false, true);
+            assert_eq!(host.outside_view(id, &peer, &observed), None);
+        }
+        // A connection the table does not know.
+        let unknown = ConnectionId::new_unchecked(99);
+        assert_eq!(host.outside_view(unknown, &contact, &observed), None);
     }
 
     /// A relay's main address and its TCP 443 fallback (`raven relay card`).

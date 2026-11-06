@@ -18,15 +18,30 @@
 //!   for the public IP and the class; a public IP that moved away from the
 //!   anchor's re-homes the p2p host ([`crate::p2p::Rehome::PublicAddress`]),
 //!   at most once per [`REHOME_EVERY`]. Failures back off from [`RETRY_MIN`].
+//! - **Seen from outside** ([`observed`], design §3.2): a STUN answer is not
+//!   authenticated. Whoever answers this computer's DNS for the servers'
+//!   names, or forges both servers' replies on its network, can make them
+//!   agree on an address of their own, and contacts would dial it. So the
+//!   public IP is told to contacts (route hints, the friend relay's
+//!   addresses) only once a contact or one of this node's relays saw this
+//!   computer at that very IP, on a connection this computer dialled
+//!   directly (Identify's observed address, which the p2p host feeds in),
+//!   within [`SEEN_FOR`] and since the last network change
+//!   ([`shared_ip`]). An address a router mapped
+//!   (NAT-PMP, PCP, UPnP) waits for the same sighting ([`seen_ip`]). The
+//!   class, and this node's own punch decisions, still follow every answer.
 //! - **What it gives** ([`discovered_p2p`], [`public_ip`], [`own_class`],
-//!   [`inet_direct`]): addresses fresh for [`FRESH_FOR`], nothing after a
-//!   network change until the next probe ([`network_changed`]).
+//!   [`inet_direct`], [`forward_ip`]): addresses fresh for [`FRESH_FOR`] and
+//!   seen from outside, nothing after a network change until the next probe
+//!   and the next sighting ([`network_changed`]).
 //! - **Confirmation** ([`confirm`]): a contact that came in from outside on
 //!   a port (not right after this node dialled it: that may be a punch)
-//!   confirms that transport for [`CONFIRM_FOR`].
+//!   confirms that transport for [`CONFIRM_FOR`], for the public IP of that
+//!   moment only.
 //!
 //! Kept in memory only (no address is ever written to disk). Lines say the
-//! class and whether the address changed, never an address or a port.
+//! class and whether the address changed or was seen, never an address or
+//! a port.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -60,6 +75,15 @@ const RETRY_MIN: Duration = Duration::from_secs(30);
 pub(crate) const FRESH_FOR: Duration = Duration::from_secs(45 * 60);
 /// How long a contact's inbound connection confirms a port.
 pub(crate) const CONFIRM_FOR: Duration = Duration::from_secs(24 * 3600);
+/// How long a contact's or relay's sighting of this computer's public IP
+/// stands without a newer one ([`observed`]): a day, as a confirmation does.
+/// A network change drops it at once, and it vouches for its own IP only, so
+/// an answer that later names another IP is not covered by it. Identify asks
+/// again every minute on every open connection, so a relay or a contact that
+/// stays connected keeps it fresh.
+pub(crate) const SEEN_FOR: Duration = CONFIRM_FOR;
+/// The most IPs kept as seen; a new one replaces the oldest sighting.
+const MAX_SEEN: usize = 8;
 /// The fewest minutes between two re-homes for a moved public IP.
 const REHOME_EVERY: Duration = Duration::from_secs(10 * 60);
 /// How long a server name may take to resolve.
@@ -125,7 +149,16 @@ struct State {
     /// Servers asked by the last anchor probe.
     anchor_asked: u32,
     refresh: Option<Seen>,
-    confirmed: HashMap<Reached, Instant>,
+    /// Which of this node's ports a contact reached from outside, when, and
+    /// the public IP STUN named then: a confirmation counts for that IP only
+    /// ([`confirmed_for`]).
+    confirmed: HashMap<Reached, (Instant, Option<Ipv4Addr>)>,
+    /// Public IPv4 addresses a contact or one of this node's relays saw this
+    /// computer at, on a connection it dialled directly ([`observed`]), and
+    /// when last; at most [`MAX_SEEN`].
+    seen: HashMap<Ipv4Addr, Instant>,
+    /// The IP the last "seen" line was about ([`say_seen`]).
+    seen_said: Option<Ipv4Addr>,
     /// The Internet direct listener's address, while it listens.
     inet_listen: Option<SocketAddr>,
     last_rehome: Option<Instant>,
@@ -175,12 +208,20 @@ fn set_enabled(on: bool, word: &'static str) {
         s.enabled = on;
         s.setting = word;
         if !on {
-            s.anchors.clear();
-            s.refresh = None;
-            s.confirmed.clear();
+            forget_network(s);
             s.logged = None;
         }
     });
+}
+
+/// Forget what belongs to the network this computer was on: the probes'
+/// answers, the confirmations and who saw it where.
+fn forget_network(s: &mut State) {
+    s.anchors.clear();
+    s.refresh = None;
+    s.confirmed.clear();
+    s.seen.clear();
+    s.seen_said = None;
 }
 
 /// Is STUN discovery live now (as [`run`] or [`anchor`] last read it)?
@@ -192,11 +233,7 @@ pub(crate) fn enabled() -> bool {
 /// old one. The re-homed endpoint's anchor finds the new one, and the
 /// refresh runs soon after.
 pub(crate) fn network_changed() {
-    with_state(|s| {
-        s.anchors.clear();
-        s.refresh = None;
-        s.confirmed.clear();
-    });
+    with_state(forget_network);
     wake().notify_one();
 }
 
@@ -422,7 +459,8 @@ async fn refresh() -> bool {
 }
 
 /// The newest fresh public IPv4 address both probes agree on (the anchor's
-/// first, then the refresh's), `None` while discovery is off.
+/// first, then the refresh's), `None` while discovery is off. What STUN
+/// says, for status: contacts are told it only once seen ([`shared_ip`]).
 pub(crate) fn public_ip() -> Option<Ipv4Addr> {
     if !enabled() {
         return None;
@@ -502,17 +540,98 @@ fn keeps_ports(s: &State, now: Instant) -> bool {
 }
 
 /// The public IPv4 address a forward of a listener's own port would be
-/// reached at: [`public_ip`] where the NAT keeps ports ([`keeps_ports`]),
-/// else `None`. The friend relay and Internet direct name it with their
-/// ports.
+/// reached at: the public IP once seen from outside ([`shared_ip`]) where
+/// the NAT keeps ports ([`keeps_ports`]), else `None`. The friend relay
+/// names it with its ports, and offers it only then.
 pub(crate) fn forward_ip() -> Option<Ipv4Addr> {
     if !enabled() {
         return None;
     }
-    with_state(|s| {
-        let now = Instant::now();
-        best_ip(s, now).filter(|_| keeps_ports(s, now))
-    })
+    let lab_local = raven_core::p2p_local_candidates_enabled();
+    with_state(|s| forward_in(s, lab_local, Instant::now()))
+}
+
+fn forward_in(s: &State, lab_local: bool, now: Instant) -> Option<Ipv4Addr> {
+    shared_ip(s, lab_local, now).filter(|_| keeps_ports(s, now))
+}
+
+/// Did a contact or one of this node's relays see this computer at `ip`
+/// within [`SEEN_FOR`], since the last network change? In a loopback lab
+/// (`lab_local`, the local-candidates switch of debug builds) every node is
+/// at 127.0.0.1 and every contact sees it there, so that one address counts
+/// as seen; any other, 127.0.0.2 say, does not.
+fn seen_at(s: &State, ip: Ipv4Addr, lab_local: bool, now: Instant) -> bool {
+    s.seen
+        .get(&ip)
+        .is_some_and(|at| now.saturating_duration_since(*at) < SEEN_FOR)
+        || (lab_local && ip == Ipv4Addr::LOCALHOST)
+}
+
+/// The public IP contacts may be told: STUN's ([`best_ip`]) once a contact
+/// or one of this node's relays saw this computer there ([`seen_at`]).
+fn shared_ip(s: &State, lab_local: bool, now: Instant) -> Option<Ipv4Addr> {
+    best_ip(s, now).filter(|ip| seen_at(s, *ip, lab_local, now))
+}
+
+/// Did a contact or one of this node's relays see this computer at `ip`
+/// lately ([`observed`])? Whether STUN discovery is on or not: an address a
+/// router mapped (NAT-PMP, PCP or UPnP, answers anyone on this network can
+/// forge) is told to contacts only then (the p2p host's route hints).
+pub(crate) fn seen_ip(ip: Ipv4Addr, lab_local: bool) -> bool {
+    with_state(|s| seen_at(s, ip, lab_local, Instant::now()))
+}
+
+/// A contact or one of this node's relays saw this computer at `ip`:
+/// Identify's observed address on a connection this computer dialled
+/// directly (no relay circuit, no hole punch), which the p2p host passes on
+/// only from a contact the peer gate admits or from a relay it holds a slot
+/// on. That peer reports where this computer's packets came from, and from
+/// the other side of every NAT that is the public IP; nobody between can
+/// change what the authenticated link says. (On a connection the peer
+/// dialled, Identify reports the address the peer dialled, which proves
+/// nothing, so the host never passes that on.) IPv4 only (STUN's address is
+/// IPv4), and only an address that may be told ([`usable`]). Kept whether
+/// or not STUN discovery is on ([`seen_ip`]); in memory only, never
+/// logged.
+pub(crate) fn observed(ip: IpAddr, lab_local: bool) {
+    if let Some(line) = with_state(|s| observe_in(s, ip, lab_local, Instant::now())) {
+        eprintln!("{line}");
+    }
+}
+
+/// [`observed`] on `s` at `now`: the line to say, if any ([`say_seen`]).
+fn observe_in(s: &mut State, ip: IpAddr, lab_local: bool, now: Instant) -> Option<String> {
+    let IpAddr::V4(ip) = ip else {
+        return None;
+    };
+    if !usable(ip, lab_local) {
+        return None;
+    }
+    note_seen(s, ip, now);
+    say_seen(s, lab_local, now)
+}
+
+/// A contact or one of this node's relays saw this computer at `ip` at
+/// `now`; with [`MAX_SEEN`] IPs kept, the oldest sighting gives way.
+fn note_seen(s: &mut State, ip: Ipv4Addr, now: Instant) {
+    if !s.seen.contains_key(&ip) && s.seen.len() >= MAX_SEEN {
+        if let Some(oldest) = s.seen.iter().min_by_key(|(_, at)| **at).map(|(ip, _)| *ip) {
+            s.seen.remove(&oldest);
+        }
+    }
+    s.seen.insert(ip, now);
+}
+
+/// The line to say when the address STUN found is now seen from outside
+/// (once per address; never the address): from then on contacts are told
+/// it.
+fn say_seen(s: &mut State, lab_local: bool, now: Instant) -> Option<String> {
+    let shared = shared_ip(s, lab_local, now);
+    if shared == s.seen_said {
+        return None;
+    }
+    s.seen_said = shared;
+    shared.map(|_| format!("{LABEL}: public address seen from outside; contacts are told it"))
 }
 
 /// A p2p address found for this node: host and transport, no `/p2p`.
@@ -527,8 +646,10 @@ pub(crate) struct Found {
 /// listen addresses `listen`: the QUIC endpoint of each IPv4 QUIC listen
 /// port (the anchor's, or the public IP with the listen port when the NAT
 /// keeps ports), then the public IP with each IPv4 TCP listen port. Only a
-/// globally routable public IP (any unicast one under `lab_local`, the
-/// local-candidates switch), and nothing while discovery is off.
+/// public IP a contact or one of this node's relays saw this computer at
+/// ([`shared_ip`]) and that is globally routable (any unicast one under
+/// `lab_local`, the local-candidates switch), and nothing while discovery
+/// is off.
 pub(crate) fn discovered_p2p(listen: &[Multiaddr], lab_local: bool) -> Vec<Found> {
     if !enabled() {
         return Vec::new();
@@ -551,15 +672,27 @@ fn confirms_from(remote: IpAddr, lab_local: bool) -> bool {
     }
 }
 
+/// A contact reached `r` from outside within [`CONFIRM_FOR`] (whatever the
+/// public IP was then): the reach class and status.
 fn confirmed_now(s: &State, r: Reached, now: Instant) -> bool {
     s.confirmed
         .get(&r)
-        .is_some_and(|at| now.saturating_duration_since(*at) < CONFIRM_FOR)
+        .is_some_and(|(at, _)| now.saturating_duration_since(*at) < CONFIRM_FOR)
+}
+
+/// [`confirmed_now`] while STUN named `ip`: what the CONFIRMED marks of the
+/// addresses at `ip` say. A confirmation made under another public IP says
+/// nothing about this one.
+fn confirmed_for(s: &State, r: Reached, ip: Ipv4Addr, now: Instant) -> bool {
+    confirmed_now(s, r, now)
+        && s.confirmed
+            .get(&r)
+            .is_some_and(|(_, at_ip)| *at_ip == Some(ip))
 }
 
 fn found_in(s: &State, listen: &[Multiaddr], lab_local: bool, now: Instant) -> Vec<Found> {
     let fresh = |at: Instant| now.saturating_duration_since(at) < FRESH_FOR;
-    let Some(ip) = best_ip(s, now).filter(|ip| usable(*ip, lab_local)) else {
+    let Some(ip) = shared_ip(s, lab_local, now).filter(|ip| usable(*ip, lab_local)) else {
         return Vec::new();
     };
     let kept = keeps_ports(s, now);
@@ -598,8 +731,8 @@ fn found_in(s: &State, listen: &[Multiaddr], lab_local: bool, now: Instant) -> V
         }
     }
     let (q, t) = (
-        confirmed_now(s, Reached::Quic, now),
-        confirmed_now(s, Reached::Tcp, now),
+        confirmed_for(s, Reached::Quic, ip, now),
+        confirmed_for(s, Reached::Tcp, ip, now),
     );
     quic.into_iter()
         .map(|text| Found { text, confirmed: q })
@@ -618,18 +751,7 @@ pub(crate) fn confirm(what: Reached, remote: IpAddr, lab_local: bool) -> bool {
     if !enabled() {
         return false;
     }
-    if !confirms_from(remote, lab_local) {
-        return false;
-    }
-    let first = with_state(|s| {
-        let now = Instant::now();
-        if !lab_local && best_ip(s, now).is_some_and(|ip| IpAddr::V4(ip) == remote) {
-            return None;
-        }
-        let first = !confirmed_now(s, what, now);
-        s.confirmed.insert(what, now);
-        Some(first)
-    });
+    let first = with_state(|s| confirm_in(s, what, remote, lab_local, Instant::now()));
     match first {
         Some(true) => {
             eprintln!(
@@ -645,6 +767,28 @@ pub(crate) fn confirm(what: Reached, remote: IpAddr, lab_local: bool) -> bool {
         Some(false) => true,
         None => false,
     }
+}
+
+/// [`confirm`] on `s` at `now`: `Some(first)` when it confirmed, `None`
+/// when the connection proves nothing. The confirmation keeps the public IP
+/// STUN names now, and marks addresses at that IP only ([`confirmed_for`]).
+fn confirm_in(
+    s: &mut State,
+    what: Reached,
+    remote: IpAddr,
+    lab_local: bool,
+    now: Instant,
+) -> Option<bool> {
+    if !confirms_from(remote, lab_local) {
+        return None;
+    }
+    let ip = best_ip(s, now);
+    if !lab_local && ip.is_some_and(|ip| IpAddr::V4(ip) == remote) {
+        return None;
+    }
+    let first = !confirmed_now(s, what, now);
+    s.confirmed.insert(what, (now, ip));
+    Some(first)
 }
 
 /// Did a contact reach one of the p2p listeners from outside within
@@ -663,31 +807,32 @@ pub(crate) fn set_inet_listen(addr: Option<SocketAddr>) {
 }
 
 /// The Internet direct listener's public address (`ip:port`) and whether a
-/// contact reached it from outside: the public IP with the listen port of an
-/// IPv4 (or wildcard) listener. `None` while discovery is off or nothing is
-/// known.
+/// contact reached it from outside under that IP: the public IP, once seen
+/// from outside ([`shared_ip`]), with the listen port of an IPv4 (or
+/// wildcard) listener. `None` while discovery is off or nothing is known.
 pub(crate) fn inet_direct(lab_local: bool) -> Option<(SocketAddrV4, bool)> {
     if !enabled() {
         return None;
     }
-    with_state(|s| {
-        let now = Instant::now();
-        let listen = s.inet_listen?;
-        let v4_ok = match listen.ip() {
-            IpAddr::V4(_) => true,
-            IpAddr::V6(v6) => v6.is_unspecified() && !cfg!(windows),
-        };
-        if !v4_ok || listen.port() == 0 {
-            return None;
-        }
-        let ip = best_ip(s, now)
-            .filter(|ip| usable(*ip, lab_local))
-            .filter(|_| keeps_ports(s, now))?;
-        Some((
-            SocketAddrV4::new(ip, listen.port()),
-            confirmed_now(s, Reached::Inet, now),
-        ))
-    })
+    with_state(|s| inet_in(s, lab_local, Instant::now()))
+}
+
+fn inet_in(s: &State, lab_local: bool, now: Instant) -> Option<(SocketAddrV4, bool)> {
+    let listen = s.inet_listen?;
+    let v4_ok = match listen.ip() {
+        IpAddr::V4(_) => true,
+        IpAddr::V6(v6) => v6.is_unspecified() && !cfg!(windows),
+    };
+    if !v4_ok || listen.port() == 0 {
+        return None;
+    }
+    let ip = shared_ip(s, lab_local, now)
+        .filter(|ip| usable(*ip, lab_local))
+        .filter(|_| keeps_ports(s, now))?;
+    Some((
+        SocketAddrV4::new(ip, listen.port()),
+        confirmed_for(s, Reached::Inet, ip, now),
+    ))
 }
 
 /// Did the public IP move away from the newest anchor's (a later refresh
@@ -735,6 +880,11 @@ fn say_found() {
         ))
     });
     if let Some(line) = line {
+        eprintln!("{line}");
+    }
+    // A sighting may have come before the answer that names its IP.
+    let lab_local = raven_core::p2p_local_candidates_enabled();
+    if let Some(line) = with_state(|s| say_seen(s, lab_local, Instant::now())) {
         eprintln!("{line}");
     }
 }
@@ -1001,6 +1151,12 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// A contact saw this computer at the public IP STUN names now.
+    fn seen_from_outside(s: &mut State, now: Instant) {
+        let ip = best_ip(s, now).expect("a public IP");
+        note_seen(s, ip, now);
+    }
+
     #[test]
     fn found_addresses_follow_the_anchor_or_port_preservation() {
         let now = Instant::now();
@@ -1024,6 +1180,9 @@ mod tests {
                 .map(|f| f.text)
                 .collect()
         };
+        // Nothing until a contact or relay saw this computer at that IP.
+        assert!(texts(&s).is_empty());
+        seen_from_outside(&mut s, now);
         // The anchor's exact QUIC endpoint; no TCP guess where the NAT
         // shifts ports.
         assert_eq!(texts(&s), vec!["/ip4/11.0.3.7/udp/40001/quic-v1"]);
@@ -1062,6 +1221,8 @@ mod tests {
             at: now,
         });
         assert!(texts(&s).is_empty());
+        seen_from_outside(&mut s, now);
+        assert!(texts(&s).is_empty());
         assert_eq!(found_in(&s, &listen, true, now).len(), 2);
         // Stale after FRESH_FOR.
         let later = now + FRESH_FOR + Duration::from_secs(1);
@@ -1084,7 +1245,8 @@ mod tests {
             }),
             ..State::default()
         };
-        s.confirmed.insert(Reached::Tcp, now);
+        seen_from_outside(&mut s, now);
+        s.confirmed.insert(Reached::Tcp, (now, best_ip(&s, now)));
         let f = found_in(&s, &listen, false, now);
         assert_eq!(
             f.iter().map(|f| f.confirmed).collect::<Vec<_>>(),
@@ -1093,6 +1255,176 @@ mod tests {
         );
         let later = now + CONFIRM_FOR + Duration::from_secs(1);
         assert!(!confirmed_now(&s, Reached::Tcp, later));
+    }
+
+    /// INET-STUN-1: a STUN answer is not authenticated. Whoever answers this
+    /// computer's DNS for the servers' names, or forges both servers'
+    /// replies on its network, chooses the address, and contacts would dial
+    /// it (showing that host their IPs, the times and their PeerIds). So
+    /// what STUN names is told (route hints DIRECT and INET_DIRECT, the
+    /// friend relay's addresses) only once a contact or one of this node's
+    /// relays saw this computer at that very IP, on a connection this
+    /// computer dialled directly; a network change forgets every sighting,
+    /// and a confirmation counts for the IP it was made under only.
+    #[test]
+    fn a_stun_address_is_advertised_only_once_a_contact_saw_it() {
+        let t0 = Instant::now();
+        // Documentation addresses stand in for public ones (`lab` lets them
+        // count as addresses; none of them is the loopback lab's own).
+        let lab = true;
+        let listen = [
+            ma("/ip4/0.0.0.0/tcp/17423"),
+            ma("/ip4/0.0.0.0/udp/17423/quic-v1"),
+        ];
+        let stun = |s: &mut State, ip: &str, at: Instant| {
+            s.refresh = Some(Seen {
+                disc: disc(ip, Some(&format!("{ip}:17423")), StunClass::StableKept),
+                asked: 2,
+                at,
+            });
+        };
+        let told = |s: &State, now: Instant| {
+            (
+                found_in(s, &listen, lab, now)
+                    .into_iter()
+                    .map(|f| f.text)
+                    .collect::<Vec<_>>(),
+                inet_in(s, lab, now).map(|(a, _)| a.to_string()),
+                forward_in(s, lab, now).map(|ip| ip.to_string()),
+            )
+        };
+        let nothing = (Vec::<String>::new(), None, None);
+        let at_7 = (
+            vec![
+                "/ip4/203.0.113.7/udp/17423/quic-v1".to_string(),
+                "/ip4/203.0.113.7/tcp/17423".to_string(),
+            ],
+            Some("203.0.113.7:7422".to_string()),
+            Some("203.0.113.7".to_string()),
+        );
+        let mut s = State {
+            enabled: true,
+            inet_listen: Some("0.0.0.0:7422".parse().unwrap()),
+            ..State::default()
+        };
+        // Both servers agree, nobody saw this computer there: nothing told.
+        stun(&mut s, "203.0.113.7", t0);
+        assert_eq!(told(&s, t0), nothing, "told before anyone saw it");
+        // A contact saw it at another IP: still nothing.
+        note_seen(&mut s, "203.0.113.8".parse().unwrap(), t0);
+        assert_eq!(told(&s, t0), nothing, "another IP was seen");
+        // A contact saw it at the IP STUN named: the QUIC endpoint, the TCP
+        // forward guess, Internet direct and the relay's IP, at that IP.
+        note_seen(&mut s, "203.0.113.7".parse().unwrap(), t0);
+        assert_eq!(told(&s, t0), at_7);
+        // The sighting stands while STUN keeps naming that IP, for a day.
+        let t1 = t0 + Duration::from_secs(3600);
+        stun(&mut s, "203.0.113.7", t1);
+        assert_eq!(told(&s, t1), at_7);
+        let t2 = t0 + SEEN_FOR + Duration::from_secs(1);
+        stun(&mut s, "203.0.113.7", t2);
+        assert_eq!(told(&s, t2), nothing, "a sighting older than a day");
+        note_seen(&mut s, "203.0.113.7".parse().unwrap(), t2);
+        assert_eq!(told(&s, t2), at_7);
+        // A contact reached the QUIC port from outside under that IP: it is
+        // confirmed there...
+        assert_eq!(
+            confirm_in(
+                &mut s,
+                Reached::Quic,
+                "192.0.2.50".parse().unwrap(),
+                lab,
+                t2
+            ),
+            Some(true)
+        );
+        assert!(found_in(&s, &listen, lab, t2)[0].confirmed);
+        // ...and STUN then names another IP (someone took over the answers,
+        // or the line moved): not told until seen there, and the old
+        // confirmation does not carry over once it is.
+        stun(&mut s, "198.51.100.9", t2);
+        assert_eq!(told(&s, t2), nothing, "an IP nobody saw");
+        note_seen(&mut s, "198.51.100.9".parse().unwrap(), t2);
+        let f = found_in(&s, &listen, lab, t2);
+        assert_eq!(f[0].text, "/ip4/198.51.100.9/udp/17423/quic-v1");
+        assert!(!f[0].confirmed, "confirmed under another IP");
+        assert_eq!(inet_in(&s, lab, t2).map(|(_, c)| c), Some(false));
+        // A network change forgets every sighting: the same answer on the
+        // new network is told only once someone sees it there.
+        forget_network(&mut s);
+        stun(&mut s, "198.51.100.9", t2);
+        assert_eq!(told(&s, t2), nothing, "a sighting from the old network");
+        note_seen(&mut s, "198.51.100.9".parse().unwrap(), t2);
+        assert_eq!(
+            told(&s, t2).2,
+            Some("198.51.100.9".to_string()),
+            "seen on the new network"
+        );
+        // Turned off, nothing is kept.
+        s.enabled = false;
+        forget_network(&mut s);
+        assert!(s.seen.is_empty() && s.confirmed.is_empty());
+    }
+
+    /// What counts as a sighting: an IPv4 address that may be told (never a
+    /// private or documentation one outside the loopback lab, never IPv6),
+    /// kept for at most MAX_SEEN IPs (the oldest gives way). It is said once
+    /// when it covers the address STUN names, never naming the address. In
+    /// the loopback lab 127.0.0.1 counts as seen and 127.0.0.2 does not.
+    #[test]
+    fn sightings_are_bounded_and_only_what_may_be_told() {
+        let t0 = Instant::now();
+        let mut s = State {
+            enabled: true,
+            ..State::default()
+        };
+        let v4 = |text: &str| -> Ipv4Addr { text.parse().unwrap() };
+        for ip in [
+            "192.168.1.9",
+            "10.0.0.7",
+            "203.0.113.7",
+            "2001:db8::7",
+            "::1",
+        ] {
+            assert_eq!(observe_in(&mut s, ip.parse().unwrap(), false, t0), None);
+        }
+        assert!(s.seen.is_empty(), "{:?}", s.seen);
+        // In the lab any unicast IPv4 counts; IPv6 never.
+        assert_eq!(
+            observe_in(&mut s, "2001:db8::7".parse().unwrap(), true, t0),
+            None
+        );
+        assert!(s.seen.is_empty());
+        // STUN names 203.0.113.7: a sighting there is said once, with no
+        // address in the line.
+        s.refresh = Some(Seen {
+            disc: disc("203.0.113.7", None, StunClass::StableKept),
+            asked: 2,
+            at: t0,
+        });
+        let line = observe_in(&mut s, "203.0.113.7".parse().unwrap(), true, t0).unwrap();
+        assert_eq!(
+            line,
+            "raven-node autoreach: public address seen from outside; contacts are told it"
+        );
+        assert!(!line.contains("203.0"), "{line}");
+        assert_eq!(
+            observe_in(&mut s, "203.0.113.7".parse().unwrap(), true, t0),
+            None
+        );
+        // At most MAX_SEEN IPs: newer sightings push out the oldest.
+        for i in 1..=MAX_SEEN {
+            let at = t0 + Duration::from_secs(i as u64);
+            let ip = Ipv4Addr::new(198, 51, 100, i as u8);
+            assert_eq!(observe_in(&mut s, IpAddr::V4(ip), true, at), None);
+        }
+        assert_eq!(s.seen.len(), MAX_SEEN);
+        assert!(!seen_at(&s, v4("203.0.113.7"), true, t0), "the oldest went");
+        assert!(seen_at(&s, v4("198.51.100.1"), true, t0));
+        // The loopback lab's own address counts as seen, only in the lab.
+        assert!(seen_at(&s, Ipv4Addr::LOCALHOST, true, t0));
+        assert!(!seen_at(&s, Ipv4Addr::LOCALHOST, false, t0));
+        assert!(!seen_at(&s, v4("127.0.0.2"), true, t0));
     }
 
     #[test]

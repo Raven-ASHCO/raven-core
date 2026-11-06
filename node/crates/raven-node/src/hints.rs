@@ -1423,7 +1423,9 @@ struct OwnPart {
     relays: Vec<String>,
     /// Confirmed global addresses (any, under `lab_local`), then the ones
     /// STUN discovery found (auto-reach): QUIC first, then IPv6 before IPv4
-    /// within each, at most [`MAX_GLOBAL_DIRECT`] in all.
+    /// within each, at most [`MAX_GLOBAL_DIRECT`] in all. A public IPv4
+    /// address from STUN or the router comes only once a contact or relay
+    /// saw this node at that IP ([`OwnP2p`], INET-STUN-1).
     direct: Vec<String>,
     /// The host's NAT mapping classes (NAT_CLASS, Phase 4), while the
     /// NAT_CLASS gate is live.
@@ -1461,8 +1463,8 @@ impl OwnPart {
             }
         }
         // Confirmed addresses first, then (auto-reach, spec §6) what STUN
-        // discovery found that nobody confirmed yet; QUIC first and IPv6
-        // before IPv4 within each.
+        // discovery found, and a contact or relay saw this node at, that
+        // nobody confirmed yet; QUIC first and IPv6 before IPv4 within each.
         let mut direct: Vec<(bool, String, IpAddr)> = Vec::new();
         let found = own
             .confirmed
