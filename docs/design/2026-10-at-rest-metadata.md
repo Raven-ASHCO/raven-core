@@ -1092,7 +1092,11 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   C-deletion-erase-1). The result: "Erased: identity, friends, chats, waiting
   messages and {n} keys. Not erased: your shell history and terminal scrollback; Time Machine
   backups and disk snapshots, if any; the passphrase file you made ({path}) [a vault profile
-  whose file exists]; files copied elsewhere."
+  whose file exists]; files copied elsewhere." Off macOS the second item is "backups and disk
+  snapshots, if any", and on Linux "the system journal (lines from an older Raven service
+  unit)" comes before the passphrase file: a systemd user unit from an older installer sent the
+  service's lines there, and they stay until the journal rotates them out (security review
+  2026-11, PRIV-3).
 - **Tests**: raven-core `erase::tests` (the plan names every item of profile A and none of B; the
   key root goes before any file; unknown files and the folder stay; the refusals; the debug
   guard; the marker blocks every lock, store, K_hist and the key file; no process mints K_hist

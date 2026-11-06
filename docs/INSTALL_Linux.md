@@ -128,7 +128,8 @@ the `adm` and `systemd-journal` groups (security review 2026-11, PRIV-3). This
 needs systemd 240 or later; with an older one (RHEL 8 ships 239) the unit gets no
 service log at all (`StandardOutput=null`), and the installer says so. Lines a
 unit from an older installer sent to the journal stay there until the journal
-rotates them out; re-running the installer changes the unit.
+rotates them out, and `raven erase` names the journal among what it does not
+erase; re-running the installer changes the unit.
 
 **IPC socket location.** The daemon listens on `<data-dir>/raven-node.sock`. When
 that path would be too long for a Unix socket (about 107 bytes on Linux) it serves

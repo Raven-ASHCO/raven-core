@@ -627,15 +627,29 @@ fn plan_folder(plan: &mut ErasePlan, taken: &[PathBuf], folder: PathBuf, name: &
 /// The UX copy's list of what no erase reaches (without the passphrase
 /// file, which ash adds).
 fn not_erasable() -> Vec<String> {
-    vec![
+    not_erasable_on(cfg!(target_os = "macos"), cfg!(target_os = "linux"))
+}
+
+/// [`not_erasable`] on macOS or on Linux (both `false`: another system), so
+/// a test reads each list on any system.
+fn not_erasable_on(macos: bool, linux: bool) -> Vec<String> {
+    let mut items = vec![
         "your shell history and terminal scrollback".to_owned(),
-        if cfg!(target_os = "macos") {
+        if macos {
             "Time Machine backups and disk snapshots, if any".to_owned()
         } else {
             "backups and disk snapshots, if any".to_owned()
         },
-        "files copied elsewhere".to_owned(),
-    ]
+    ];
+    // Security review 2026-11, PRIV-3: a systemd user unit from an older
+    // installer sent the service's lines to the journal, which keeps them
+    // until it rotates them out (linux_systemd_user.sh now appends them to
+    // the profile's capped log, which erase removes).
+    if linux {
+        items.push("the system journal (lines from an older Raven service unit)".to_owned());
+    }
+    items.push("files copied elsewhere".to_owned());
+    items
 }
 
 /// A name the registry gives `raven erase` (its declared patterns too), a

@@ -4891,11 +4891,14 @@ fn abort_handler(handle: &JoinHandle<Result<(), String>>) {
 }
 
 /// Opt-in cap on the service's own log. `ash` sets it (to its 1 MiB cap) when
-/// it redirected the daemon's stdout/stderr into `raven-node-service.log`, and
+/// it redirected the daemon's stdout/stderr into `raven-node-service.log`,
 /// the macOS installers' launchd plists set it for the files launchd opens
-/// (`macos_launchd.sh`, the relay kit's `macos_relay.sh`). A service run by
-/// hand, under systemd (the journal), or redirected by the user is never
-/// touched, and only a regular file opened with `O_APPEND` is ever truncated
+/// (`macos_launchd.sh`, the relay kit's `macos_relay.sh`), and the Linux user
+/// unit sets it for the `raven-node-service.log` it appends to
+/// (`linux_systemd_user.sh`, `StandardOutput=append:`; security review
+/// 2026-11, PRIV-3). A service run by hand, under a unit that sends its
+/// output to the journal, or redirected by the user is never touched, and
+/// only a regular file opened with `O_APPEND` is ever truncated
 /// ([`truncate_log_fd_if_over`]): whether launchd opens StandardOutPath that
 /// way decides whether the plist's cap takes effect, never whether it is safe.
 #[cfg(unix)]

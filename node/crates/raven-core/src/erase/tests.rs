@@ -1256,3 +1256,43 @@ fn the_zero_overwrite_never_follows_a_link() {
     overwrite_with_zeros(&key, 64);
     assert_eq!(std::fs::read(&key).unwrap(), [0u8; 64]);
 }
+
+/// Security review 2026-11, PRIV-3: on Linux the list names the system
+/// journal, where a systemd user unit from an older installer sent the
+/// service's lines (one per message that arrived); erase never reaches it.
+/// Other systems had no such unit. Plain words, and "files copied
+/// elsewhere" stays last (ash puts the passphrase file before it).
+#[test]
+fn not_erasable_names_the_system_journal_on_linux() {
+    let journal = "the system journal (lines from an older Raven service unit)";
+    let linux = not_erasable_on(false, true);
+    assert!(linux.iter().any(|item| item == journal), "{linux:?}");
+    let macos = not_erasable_on(true, false);
+    let other = not_erasable_on(false, false);
+    for list in [&macos, &other] {
+        assert!(
+            list.iter().all(|item| !item.contains("journal")),
+            "{list:?}"
+        );
+    }
+    assert_eq!(
+        macos,
+        [
+            "your shell history and terminal scrollback",
+            "Time Machine backups and disk snapshots, if any",
+            "files copied elsewhere"
+        ]
+    );
+    for list in [&linux, &macos, &other] {
+        assert_eq!(
+            list.last().map(String::as_str),
+            Some("files copied elsewhere")
+        );
+        for item in list {
+            assert!(
+                !item.contains(['-', '\'', '\u{2013}', '\u{2014}', '\u{2019}']),
+                "plain words: {item}"
+            );
+        }
+    }
+}
