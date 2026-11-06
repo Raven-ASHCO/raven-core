@@ -70,8 +70,8 @@ use libp2p::swarm::{
     THandlerOutEvent, ToSwarm,
 };
 use libp2p::{
-    autonat, identify, noise, ping, relay, tcp, upnp, yamux, Multiaddr, PeerId, StreamProtocol,
-    Swarm, SwarmBuilder,
+    autonat, identify, noise, ping, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
+    SwarmBuilder,
 };
 
 use crate::gate::{
@@ -1583,7 +1583,7 @@ pub fn build_relay_swarm(
                     .with_timeout(Duration::from_secs(5)),
             ),
             upnp: Toggle::from(upnp.map(|check| {
-                crate::portmap::VettedUpnp::new(upnp::tokio::Behaviour::default(), Some(check))
+                crate::portmap::VettedUpnp::new(crate::portmap::new_upnp(), Some(check))
             })),
         })?
         .with_swarm_config(|c| {

@@ -76,7 +76,7 @@ use raven_core::ipc::RelayCounts;
 use raven_core::p2p_route::{relay_listen_multiaddrs, ExtraTcp, P2pListen};
 use raven_core::relay_allow::{
     load_relay_allow, relay_is_running, write_relay_status, RelayStatusFile, RELAY_ALLOW_FILE,
-    RELAY_KEY_FILE, RELAY_LOCK_FILE, RELAY_STATUS_HEARTBEAT,
+    RELAY_KEY_FILE, RELAY_LOCK_FILE, RELAY_STATUS_HEARTBEAT, RELAY_STATUS_VERSION,
 };
 use raven_swarm::host::{
     addr_ip, build_relay_swarm, is_circuit, is_global_ip, listen_port_label, probe_listen_addr,
@@ -630,6 +630,15 @@ fn plan_listeners(
     Ok((usable, lines))
 }
 
+/// The check a UPnP-IGD mapping of the relay's own ports must pass before
+/// it is used (raven-swarm `VettedUpnp`, STRANGER-UPNP-2). With UPnP on it
+/// is the one the endpoint uses: the IP must be one a contact or relay saw
+/// this computer at ([`crate::autoreach::upnp_check`]). With UPnP off there
+/// is none, and no libp2p-upnp is made.
+fn relay_upnp_check(upnp: bool) -> Option<raven_swarm::portmap::PublicIpCheck> {
+    upnp.then(crate::autoreach::upnp_check)
+}
+
 /// A stamp further in the future than this is from a clock that went back:
 /// [`earlier_confirmed_at`] does not keep it.
 const CONFIRMED_CLOCK_SLACK_MS: u64 = 5 * 60 * 1000;
@@ -640,11 +649,14 @@ const CONFIRMED_CLOCK_SLACK_MS: u64 = 5 * 60 * 1000;
 /// (`peer`). A new run (a wake or a network change restarts the friend
 /// relay, so does a new port) keeps it, so the confirmation, and the friend
 /// relay's offer that rests on it, outlives the restart; its age still
-/// counts from then. 0 when there is none, or it is from the future.
+/// counts from then. 0 when there is none, it is from the future, or the
+/// file is older than [`RELAY_STATUS_VERSION`] (written before a UPnP
+/// mapping alone stopped stamping it, so it may be such a stamp).
 fn earlier_confirmed_at(dir: &Path, peer: &PeerId, now_ms: u64) -> u64 {
     raven_core::relay_allow::load_relay_status(dir)
         .ok()
         .flatten()
+        .filter(|st| st.version >= RELAY_STATUS_VERSION)
         .filter(|st| st.peer_id == peer.to_string())
         .map(|st| st.confirmed_at_ms)
         .filter(|at| *at <= now_ms.saturating_add(CONFIRMED_CLOCK_SLACK_MS))
@@ -782,6 +794,19 @@ fn store(sink: &Option<Arc<Mutex<Option<RelayStatusFile>>>>, status: Option<Rela
     }
 }
 
+/// The line for a folder whose relay lock is refused, the same from
+/// `--check` and from a start (round 2): a leftover journal beside the lock
+/// (WINLIN-1) as found, with what to do, else the relay that runs there.
+fn lock_refused(dir: &Path, leftover: Option<&str>) -> String {
+    match leftover {
+        Some(leftover) => format!("{}: {leftover}", dir.display()),
+        None => format!(
+            "a raven-node relay already runs in {} (one relay per folder): stop it first",
+            dir.display()
+        ),
+    }
+}
+
 /// `raven-node relay --check`: would this relay start? The gate, the folder
 /// and every listen port (probed as a start probes them), then the relay
 /// key and the allow-list, looked at only: nothing is created or changed,
@@ -801,15 +826,10 @@ pub(crate) fn check(cmd: &RelayCmd) -> (Vec<String>, i32) {
     }
     match relay_is_running(&cmd.data_dir) {
         Ok(false) => {}
-        Ok(true) => {
-            return folder(format!(
-                "a raven-node relay already runs in {} (one relay per folder): stop it first",
-                cmd.data_dir.display()
-            ))
-        }
+        Ok(true) => return folder(lock_refused(&cmd.data_dir, None)),
         // A leftover journal beside the lock (WINLIN-1): what was found and
         // what to do, not a relay to stop.
-        Err(leftover) => return folder(format!("{}: {leftover}", cmd.data_dir.display())),
+        Err(leftover) => return folder(lock_refused(&cmd.data_dir, Some(&leftover))),
     }
     let addrs = match listen_plan(cmd) {
         Ok(plan) => plan.addrs,
@@ -907,17 +927,16 @@ pub(crate) async fn run_relay(
     raven_core::paths::ensure_private_dir(&cmd.data_dir).map_err(RelayExit::Folder)?;
     refuse_profile_dir(&cmd.data_dir).map_err(RelayExit::Folder)?;
     // One relay per folder, for its whole life (`raven relay status` probes
-    // this lock to tell a stopped relay from a running one).
+    // this lock to tell a stopped relay from a running one). Refused, it
+    // says what `--check` says.
     let _instance = raven_core::paths::DataDirLock::acquire_within(
         &cmd.data_dir,
         RELAY_LOCK_FILE,
         Duration::from_secs(2),
     )
     .map_err(|_| {
-        RelayExit::Folder(format!(
-            "another raven-node relay already runs in {} (one relay per folder)",
-            cmd.data_dir.display()
-        ))
+        let leftover = relay_is_running(&cmd.data_dir).err();
+        RelayExit::Folder(lock_refused(&cmd.data_dir, leftover.as_deref()))
     })?;
     let key = load_or_create_relay_key(&cmd.data_dir).map_err(RelayExit::Other)?;
     let file = matches!(cmd.policy, PolicySource::File);
@@ -929,7 +948,7 @@ pub(crate) async fn run_relay(
         cmd.limits,
         &guard,
         cmd.autonat_server,
-        cmd.upnp.then(crate::autoreach::upnp_check),
+        relay_upnp_check(cmd.upnp),
         wss,
     )
     .map_err(|e| RelayExit::Other(format!("relay: {e}")))?;
@@ -1118,7 +1137,7 @@ pub(crate) async fn run_relay(
                     last_log = Some(tokio::time::Instant::now());
                 }
                 let status = RelayStatusFile {
-                    version: 1,
+                    version: RELAY_STATUS_VERSION,
                     peer_id: peer_id.to_string(),
                     listen_addrs: listen_addrs.iter().map(|a| a.to_string()).collect(),
                     counts: now,
@@ -1219,6 +1238,25 @@ pub(crate) mod tests {
         }
     }
 
+    /// The relay asks the router only with UPnP on, and then uses a mapping
+    /// only at an IP a contact or relay saw this computer at, as the endpoint
+    /// does (STRANGER-UPNP-2); never at an IPv6 address.
+    #[test]
+    fn the_relay_uses_a_upnp_mapping_only_at_an_ip_seen_from_outside() {
+        assert!(relay_upnp_check(false).is_none(), "UPnP off made a check");
+        let check = relay_upnp_check(true).expect("UPnP on has a check");
+        let at = |text: &str| -> Multiaddr { text.parse().unwrap() };
+        assert!(!check.vouches_for(&at("/ip4/203.0.113.64/tcp/4001")));
+        assert!(
+            crate::autoreach::vouched_after_a_sighting(
+                std::net::Ipv4Addr::new(203, 0, 113, 63),
+                || { check.vouches_for(&at("/ip4/203.0.113.63/tcp/4001")) }
+            ),
+            "a sighting at the IP did not vouch for its mapping"
+        );
+        assert!(!check.vouches_for(&at("/ip6/2001:db8::63/tcp/4001")));
+    }
+
     /// A new run of a relay keeps the confirmation its last run recorded
     /// with the same key (a wake or a network change restarts the friend
     /// relay); another key's, or one from the future, is not kept.
@@ -1232,7 +1270,7 @@ pub(crate) mod tests {
         let now = 20_000 * 86_400_000u64;
         assert_eq!(earlier_confirmed_at(dir.path(), &me, now), 0, "no status");
         let status = |peer: &PeerId, at: u64| RelayStatusFile {
-            version: 1,
+            version: RELAY_STATUS_VERSION,
             peer_id: peer.to_string(),
             confirmed_at_ms: at,
             ..RelayStatusFile::default()
@@ -1243,6 +1281,34 @@ pub(crate) mod tests {
         assert_eq!(earlier_confirmed_at(dir.path(), &other, now), 0);
         write_relay_status(dir.path(), &status(&me, now + 3_600_000)).unwrap();
         assert_eq!(earlier_confirmed_at(dir.path(), &me, now), 0, "future");
+    }
+
+    /// A status written before the UPnP check (version 1, before
+    /// 2026-11-06) may hold a stamp that a UPnP mapping alone set: a new run
+    /// does not keep it. The stamp of a status of this version is kept.
+    #[test]
+    fn a_stamp_from_a_status_before_the_upnp_check_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = load_or_create_relay_key(dir.path())
+            .unwrap()
+            .public()
+            .to_peer_id();
+        let now = 20_000 * 86_400_000u64;
+        let stamped = |version: u32| RelayStatusFile {
+            version,
+            peer_id: me.to_string(),
+            upnp: "mapped 4001".into(),
+            confirmed_at_ms: now - 3_600_000,
+            ..RelayStatusFile::default()
+        };
+        write_relay_status(dir.path(), &stamped(1)).unwrap();
+        assert_eq!(
+            earlier_confirmed_at(dir.path(), &me, now),
+            0,
+            "the stamp of a version 1 status was kept"
+        );
+        write_relay_status(dir.path(), &stamped(RELAY_STATUS_VERSION)).unwrap();
+        assert_eq!(earlier_confirmed_at(dir.path(), &me, now), now - 3_600_000);
     }
 
     /// The same through a real restart: the new run reports the earlier
@@ -1259,6 +1325,10 @@ pub(crate) mod tests {
         let mut st = raven_core::relay_allow::load_relay_status(dir.path())
             .unwrap()
             .unwrap();
+        assert_eq!(
+            st.version, RELAY_STATUS_VERSION,
+            "the relay wrote an old version"
+        );
         let at = now_ms() - 3_600_000;
         st.confirmed_at_ms = at;
         st.updated_at_ms = 1;
@@ -1547,6 +1617,59 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&lock).unwrap(), [1u8; 512]);
         assert_eq!(std::fs::read(&journal).unwrap(), b"X");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// Round 2 (the refused relay lock texts change the same way in the
+    /// other places): a start that its folder's lock refuses says what
+    /// `--check` says, exit 5 as before. A leftover journal beside the lock
+    /// (WINLIN-1) is named as found, with what to do, not as a relay to
+    /// stop; both files stay as they were.
+    #[tokio::test]
+    async fn a_start_names_a_leftover_journal_as_check_does() {
+        if !raven_core::p2p_live_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(RELAY_LOCK_FILE);
+        let journal = dir.path().join(format!("{RELAY_LOCK_FILE}-journal"));
+        std::fs::write(&lock, [1u8; 512]).unwrap();
+        std::fs::write(&journal, b"X").unwrap();
+        let (lines, code) = check(&dedicated(dir.path(), "127.0.0.1:0"));
+        assert_eq!(code, 5, "{lines:?}");
+        let err = run_relay(dedicated(dir.path(), "127.0.0.1:0"), std::future::pending())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), 5, "{err}");
+        assert_eq!(lines, [err.to_string()], "a start says what --check says");
+        assert!(!err.to_string().contains("already runs"), "{err}");
+        assert_eq!(std::fs::read(&lock).unwrap(), [1u8; 512]);
+        assert_eq!(std::fs::read(&journal).unwrap(), b"X");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// A second start in a folder whose relay runs says what `--check` says
+    /// there (exit 5): stop the one that runs first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_start_names_the_running_relay_as_check_does() {
+        if !raven_core::p2p_live_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, _, stop, task) = start(dedicated(dir.path(), "127.0.0.1:0")).await;
+        let (lines, code) = check(&dedicated(dir.path(), "127.0.0.1:0"));
+        assert_eq!(code, 5, "{lines:?}");
+        let err = run_relay(dedicated(dir.path(), "127.0.0.1:0"), std::future::pending())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), 5, "{err}");
+        assert_eq!(lines, [err.to_string()], "a start says what --check says");
+        assert!(err.to_string().ends_with("stop it first"), "{err}");
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("stopped within 5 s")
+            .unwrap();
+        assert_eq!(ended, Ok(()));
     }
 
     #[test]

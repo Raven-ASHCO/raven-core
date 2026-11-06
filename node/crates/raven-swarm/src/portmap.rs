@@ -28,8 +28,10 @@
 //!   ([`PortMapConfig::upnp_fallback`] false): libp2p-upnp searches the
 //!   real network, never the lab's fake router, so it is never created.
 //! - **UPnP-IGD is not authenticated** (STRANGER-UPNP-2): whoever answers
-//!   the SSDP search first, anyone on the network, names the external
-//!   address. [`VettedUpnp`] holds each mapping until
+//!   the SSDP search first names the external address. The search takes
+//!   the default router's answer only (`new_upnp`, STRANGER-UPNP-1), but
+//!   a host on the network can forge that source. [`VettedUpnp`] holds
+//!   each mapping until
 //!   [`PortMapConfig::public_ip`] vouches for its IPv4 address (raven-node:
 //!   a contact or relay saw this computer there); without a check nothing
 //!   is used. NAT-PMP and PCP answers are taken from the default router's
@@ -405,8 +407,27 @@ impl PortMap {
     /// once (it starts its gateway search now, as before); with it open,
     /// the drivers (each starts its probe now).
     pub fn new(cfg: PortMapConfig) -> Self {
-        Self::with_upnp(cfg, Box::new(upnp::tokio::Behaviour::default))
+        Self::with_upnp(cfg, Box::new(new_upnp))
     }
+}
+
+/// A new libp2p-upnp behaviour, whose gateway search takes the answer of
+/// the default router only (STRANGER-UPNP-1, the igd-next patch in
+/// `node/third_party`): an SSDP answer from another address, or whose
+/// LOCATION names another host, is ignored, and with no router known no
+/// search is sent. Every libp2p-upnp this crate makes comes from here.
+pub(crate) fn new_upnp() -> upnp::tokio::Behaviour {
+    install_gateway_lookup();
+    upnp::tokio::Behaviour::default()
+}
+
+/// Tells igd-next, once per process, which router that is: the IPv4
+/// default router unless it is a global address
+/// (`raven_core::gateway::default_gateways().v4_to_map()`, the router
+/// NAT-PMP and PCP ask; a harness router in the lab), looked up again for
+/// every search (a network change makes a new libp2p-upnp).
+pub(crate) fn install_gateway_lookup() {
+    igd_next::set_gateway_lookup(|| raven_core::gateway::default_gateways().v4_to_map());
 }
 
 impl<U> PortMap<U>
@@ -806,8 +827,9 @@ where
 /// libp2p-upnp, with each mapping held back until something else vouches
 /// for its IP ([`PublicIpCheck`], STRANGER-UPNP-2).
 ///
-/// libp2p-upnp takes the first answer to its SSDP search, from anyone on
-/// the network, asks that "router" for its external IP once, and confirms
+/// libp2p-upnp takes the first answer to its SSDP search from the default
+/// router's address (`new_upnp`; a host on the network can forge it),
+/// asks that "router" for its external IP once, and confirms
 /// every mapping at that IP if only it is global. Here a mapping is used
 /// (its `ExternalAddrConfirmed`, which DCUtR candidates, Identify and relay
 /// reservations name, then its `NewExternalAddr` event, status `mapped`)
@@ -819,7 +841,9 @@ where
 /// vouched for: nothing is used (fail closed). A mapping once used stays
 /// used until libp2p-upnp ends it: its external IP is fixed when the
 /// gateway is found, and a network change makes a new behaviour. Events
-/// about no mapping (`GatewayNotFound`, `NonRoutableGateway`) pass at once.
+/// about no mapping (`GatewayNotFound`, `NonRoutableGateway`) pass at once;
+/// any other output is dropped (libp2p-upnp 0.7 has none; a debug build
+/// stops on one).
 pub struct VettedUpnp<U = upnp::tokio::Behaviour> {
     inner: U,
     check: Option<PublicIpCheck>,
@@ -926,7 +950,16 @@ where
                     external_addr,
                 }))
             }
-            other => Some(other),
+            ToSwarm::GenerateEvent(
+                event @ (upnp::Event::GatewayNotFound | upnp::Event::NonRoutableGateway),
+            ) => Some(ToSwarm::GenerateEvent(event)),
+            // libp2p-upnp 0.7 emits nothing else. A later release that adds
+            // an output (an external address candidate, a dial) is not
+            // vetted here, so what it adds is dropped until it is.
+            _ => {
+                debug_assert!(false, "an unexpected libp2p-upnp output was dropped");
+                None
+            }
         }
     }
 
@@ -1400,8 +1433,60 @@ mod tests {
         ]
     }
 
-    /// STRANGER-UPNP-2: libp2p-upnp takes the first SSDP answer from anyone
-    /// on the network and confirms the external address that answer's
+    /// STRANGER-UPNP-1: every libp2p-upnp this crate makes ([`new_upnp`])
+    /// takes the answer of the router the port mapping asks only, looked up
+    /// for each search: the igd-next patch ignores any other answer, and
+    /// sends no search with no router known. No search is started here, and
+    /// no address is printed.
+    #[test]
+    fn upnp_searches_take_only_the_default_routers_answer() {
+        install_gateway_lookup();
+        let router = || raven_core::gateway::default_gateways().v4_to_map();
+        let (before, asked, after) = (
+            router(),
+            igd_next::SearchOptions::default().gateway,
+            router(),
+        );
+        assert!(
+            asked == before || asked == after,
+            "the search takes another router"
+        );
+    }
+
+    /// libp2p-upnp 0.7 emits mappings, their ends and the two events about
+    /// no mapping, nothing else (behaviour.rs). The two events pass at once;
+    /// any other output a later release may add (an external address
+    /// candidate, say, here at an IP the check vouches for) has not been
+    /// vetted, so it is dropped, and a debug build stops on it.
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "an unexpected libp2p-upnp output was dropped")
+    )]
+    async fn an_unknown_upnp_output_is_dropped() {
+        let (mut map, log) = stub_map(PortMapConfig {
+            public_ip: Some(PublicIpCheck::new(|_| true)),
+            ..PortMapConfig::upnp_only()
+        });
+        log.script.lock().unwrap().extend([
+            ToSwarm::GenerateEvent(upnp::Event::GatewayNotFound),
+            ToSwarm::GenerateEvent(upnp::Event::NonRoutableGateway),
+        ]);
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(got, ["Upnp(GatewayNotFound)", "Upnp(NonRoutableGateway)"]);
+        log.script
+            .lock()
+            .unwrap()
+            .push_back(ToSwarm::NewExternalAddrCandidate(ma(
+                "/ip4/203.0.113.9/tcp/7423",
+            )));
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert!(got.is_empty(), "passed: {got:?}");
+    }
+
+    /// STRANGER-UPNP-2: libp2p-upnp takes the first SSDP answer from the
+    /// router's address, which anyone on the network can forge
+    /// (STRANGER-UPNP-1), and confirms the external address that answer's
     /// "router" names (it checks only that the address is global). A mapping
     /// comes out (the confirmed external address: DCUtR candidates,
     /// Identify, relay reservations; and its `NewExternalAddr` event: status

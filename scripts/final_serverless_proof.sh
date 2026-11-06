@@ -243,7 +243,7 @@ fi
 
 # Keep this short anyway: raven-node binds <data-dir>/raven-node.sock, and AF_UNIX
 # paths are limited to ~104 bytes on macOS (long $TMPDIR under /var/folders). A
-# longer data dir still works (the daemon falls back to /tmp/raven-<uid>/...), but
+# longer data dir still works (the daemon falls back to a short per user socket), but
 # the steps below probe readiness with `ash ipc-ping` (raven_ipc_up), never by
 # looking for the socket file.
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rs59.XXXXXX")"

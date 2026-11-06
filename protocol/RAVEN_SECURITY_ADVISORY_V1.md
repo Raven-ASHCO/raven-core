@@ -335,8 +335,10 @@ applied. `negative/rad1_decode_rules_001.json` has a case for each.
 
 1. Decode (§5).
 2. The advisory names the current key set (`key_set_digest`), and its
-   signature block passes §2.3 against it.
-3. Succession (§7) against the newest advisory known.
+   signature block passes §2.3 against it. A `KEY_SET` entry that names
+   another set names one that keeps the bar (§6.2).
+3. Succession (§7) against the newest advisory known. An `EQUIVOCATION`
+   freezes only when the log of step 4 checks and lists the advisory (§7).
 4. The log snapshot it came with: it decodes and checks against the current
    key set (RTL1 §6.1; a refusal makes the advisory forged), it lists the
    advisory (`SEC_UPDATE_UNLOGGED` otherwise), and it is consistent with the
@@ -373,6 +375,19 @@ advisory #4 is signed by the new set). Losing one key: rotate with the other
 two. Losing or exposing two: there is no in-band recovery; a new key set
 ships in a release that people check by hand (design D §9).
 
+The next set keeps the bar of the set that signs the rotation (security
+review 2026-11, UPD-1). A node refuses a `KEY_SET` entry that names a set
+other than the current one when, checked in this order, the next set's
+threshold is below 2 (`WEAK_THRESHOLD`), or below the current set's
+(`LOWERED_THRESHOLD`), or the next set holds a published test key (§2.4,
+`TEST_KEY`); a debug build whose current set holds a test key itself (a lab
+key file) may rotate to another set that holds one. The refusal is part of
+step 2 of §6.1: the advisory is forged (`SEC_ADVISORY_FORGED`), nothing
+rotates, nothing is stored and nothing freezes, also when the advisory would
+be `EQUIVOCATION` (`negative/rad1_weak_rotation_001.json`). A higher
+threshold is a valid rotation; a lower one ships only as a new key set in a
+release.
+
 A node keeps the last 4 rotations it applied, each with the log snapshot it
 was accepted with (both under the set it rotated away from), and passes
 them on: a friend that missed a rotation finds everything newer under a key
@@ -397,7 +412,7 @@ How a verified advisory relates to the stored one (`stored serial`,
 | serial = stored + 1 and `prev_digest` = stored digest | `NEXT` | applied |
 | serial > stored + 1 | `GAP` | applied (the chain across the gap is not checked) |
 | serial < stored | `ROLLBACK` | ignored, the stored one kept; offered back to that friend (`SEC_ADVISORY_ROLLBACK`) |
-| same serial, other digest | `EQUIVOCATION` | both kept as evidence; update state frozen: no new advisory applied, no install (`SEC_ADVISORY_EQUIVOCATION`) |
+| same serial, other digest | `EQUIVOCATION` | once its log lists it (below): both kept as evidence; update state frozen: no new advisory applied, no install (`SEC_ADVISORY_EQUIVOCATION`) |
 | serial = stored + 1 and `prev_digest` names another advisory | `EQUIVOCATION` | as above |
 
 A build's compiled floor (the newest advisory known when it was built,
@@ -418,6 +433,15 @@ its serial is `EQUIVOCATION` only when the log snapshot it came with checks
 and lists it (otherwise `SEC_UPDATE_UNLOGGED`). The release tool combines
 exactly `threshold` signatures, so every copy of what it signs has the same
 bytes.
+
+The same holds for every `EQUIVOCATION` (security review 2026-11, UPD-3):
+another body under the newest serial, or the next serial naming another
+advisory, freezes only when the log snapshot it came with checks under the
+current key set and lists it. Otherwise it is `SEC_UPDATE_UNLOGGED` (kept in
+quarantine, nothing frozen), or forged when that log does not check. A body
+the signers signed but never published (an abandoned draft, or signatures a
+signer kept) therefore freezes nothing; the signers never sign another body
+under a serial already used (the ceremony uses the next serial instead).
 
 ## 8. Applying (summary)
 
@@ -488,7 +512,9 @@ signatures are deterministic). Under `shared-vectors/rvn1/update/`:
   (`WRONG_KEY_SET`), `rad1_rollback_pair_001` (`ROLLBACK`),
   `rad1_equivocation_pair_001` and `rad1_broken_chain_pair_001`
   (`EQUIVOCATION`), `rad1_decode_rules_001` (every rule of §5),
-  `keyset_rules_001` (every rule of §2.1).
+  `keyset_rules_001` (every rule of §2.1), `rad1_weak_rotation_001` (the
+  rotation rule of §6.2: `WEAK_THRESHOLD`, `LOWERED_THRESHOLD`, `TEST_KEY`,
+  and rotations that keep the bar).
 
 ## 11. Implementation status
 
@@ -503,8 +529,9 @@ signatures are deterministic). Under `shared-vectors/rvn1/update/`:
   (`RELEASE_KEY_SET_V1`, `None` until the key ceremony; a compile-time check
   refuses a set with a test key or a threshold below 2), the debug lab key
   file, the build serial and compiled floor, `accept_advisory` in the order
-  of §6.1, `accept_log`, rotation, the freeze and its evidence; the state
-  file `updates/state`, sealed at rest.
+  of §6.1, `accept_log`, rotation and its rule (`check_rotation`, §6.2),
+  the freeze and its evidence; the state file `updates/state`, sealed at
+  rest.
 - raven-core `suite_policy.rs` (P6.45): the policy of the stored
   advisory (§8) and its consult points: every gate's live check
   (`hold_allows`, after its own gate), PairInit made and taken

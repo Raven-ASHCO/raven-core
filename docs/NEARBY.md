@@ -201,7 +201,7 @@ RAVEN_INSTALL_NEARBY_HELPER=1 bash scripts/install/macos_launchd.sh
 ```
 
 This builds raven-node with Bluetooth support (feature `nearby-radio`),
-builds RavenNearby.app, signs it ad hoc and copies it to
+builds RavenNearby.app, signs it ad hoc with the hardened runtime and copies it to
 `~/Library/Application Support/Raven/RavenNearby.app`. It does not turn
 nearby on. Variants:
 
@@ -226,6 +226,11 @@ When none is there, or the one found belongs to another release or stops,
 the `bluetooth` row says the RavenNearby helper is missing, outdated or did
 not run: install it as above, then restart raven-node.
 
+raven-node starts the helper it finds only when its code signature is intact
+and names `org.raven.nearby` (`codesign --verify`), and starts it with no
+environment variables and nothing else of its own open. A helper signed
+otherwise counts as missing: install it again as above.
+
 **Allow Bluetooth.** The first time the radio starts (after `raven nearby
 enable`), macOS asks whether RavenNearby may use Bluetooth: allow it. If
 you said no, or the row says `not allowed`: System Settings > Privacy &
@@ -239,6 +244,11 @@ entry and note it for the row.
 When macOS refuses, it stops the helper (SIGABRT) and nothing else:
 raven-node reports `not allowed` and tries again after 1 minute, then
 2, 4 and so on up to 1 hour, so you get no crash report every few seconds.
+
+raven-node also stops the helper itself, and waits the same way before it
+starts it again, when the helper says more devices are connected to it
+than it may hold (16 at once) or stops reading what raven-node sends it.
+The `bluetooth` row then says the RavenNearby helper did not run.
 
 macOS advertises from a random private address that changes on its own
 (row N7 confirms this on hardware).

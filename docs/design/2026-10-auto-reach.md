@@ -626,6 +626,13 @@ p2p lab switches, from an unpublished test checklist.
   packets still go wherever STUN pointed, so a liar there sees their IPs
   and timing; (c) go back to telling the STUN address unseen, as before
   2026-11-06.
+  The same holds for UPnP since STRANGER-UPNP-2 (2026-11-06): a friend
+  relay reached through a UPnP mapping alone is named, CONFIRMED and
+  offered only once a contact or relay saw this computer at the mapped IP,
+  so it no longer gives a group where nobody has been seen yet its first
+  relay slot (before, the mapping alone made it CONFIRMED and offered it).
+  `--external` still does; of the options above only (c) would let STUN
+  do it again.
 - **AR-6** [OWNER] Open, asked 2026-11-06 (INET-STUN-1 review): the QUIC
   endpoint waits for a sighting of its very port (§3.2), but the TCP
   forward guess, INET_DIRECT and the friend relay's ports still take this

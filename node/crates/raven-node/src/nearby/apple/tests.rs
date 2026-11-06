@@ -821,3 +821,245 @@ fn the_real_helper_outside_its_bundle_is_no_radio() {
         other => panic!("{:?}", other),
     }
 }
+
+// ── What the helper may claim (security review 2026-11, BT-04) ──────────────
+
+fn peripheral(wire: u64) -> FromHelper {
+    FromHelper::Connected {
+        conn: wire,
+        role: Side::Peripheral,
+        service: proto::uuid_hex(&T),
+        max_tx: 100,
+        max_rx: 100,
+    }
+}
+
+/// The helper holds at most MAX_PERIPHERALS connections from centrals at
+/// once (its machine's own cap), and that many work. One more while they
+/// all run is a protocol break: raven-node sends the helper nothing more
+/// and stops it, every connection ends, the radio says why (a helper
+/// reason) and its queue closes, and the back-off grows.
+#[test]
+fn a_helper_past_its_connection_cap_is_stopped_and_backed_off() {
+    let (mut helper, radio, mut rx, backoff) = pipes(Some(&hello()), EVENT_QUEUE);
+    let mut radio = radio.unwrap();
+    let mut conns = std::collections::BTreeSet::new();
+    for i in 1..=MAX_PERIPHERALS as u64 {
+        helper.say(&peripheral(2 * i));
+        match next(&mut rx) {
+            RadioEvent::Connected {
+                conn,
+                role: Role::Peripheral,
+                ..
+            } => assert!(conns.insert(conn)),
+            other => panic!("{other:?}"),
+        }
+    }
+    helper.say(&peripheral(2 * (MAX_PERIPHERALS as u64 + 1)));
+    let mut ended = std::collections::BTreeSet::new();
+    for _ in 0..MAX_PERIPHERALS {
+        match next(&mut rx) {
+            RadioEvent::Disconnected { conn } => assert!(ended.insert(conn)),
+            other => panic!("the connection past the cap was taken: {other:?}"),
+        }
+    }
+    assert_eq!(ended, conns);
+    let why = RadioState::Unsupported(BROKE_PROTOCOL.into());
+    assert_eq!(next(&mut rx), RadioEvent::State(why.clone()));
+    assert!(closed(&mut rx));
+    assert_eq!(lock(&backoff).check(Instant::now()), Err(why));
+    assert!(radio.set_scanning(true).is_err(), "nothing more goes to it");
+    assert!(helper.input_closed());
+}
+
+/// A helper that stops reading its stdin is dead: once OUT_QUEUE lines
+/// wait for it (its pipe is full), the next command fails, raven-node kills
+/// it, every connection ends, the radio says why and its queue closes, and
+/// the back-off grows. The queue never grows past its bound.
+#[cfg(unix)]
+#[test]
+fn a_helper_that_stops_reading_is_dead() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let deaf = script(
+        dir.path(),
+        "deaf",
+        &format!(
+            "printf '%s\\n' '{}' '{}'\nexec /bin/sleep 30",
+            hello().trim_end(),
+            proto::line(&peripheral(2)).trim_end()
+        ),
+    );
+    let (tx, mut rx) = mpsc::channel(EVENT_QUEUE);
+    let backoff = Arc::new(Mutex::new(Backoff::default()));
+    let mut radio = open_at(&deaf, tx, Some(Arc::clone(&backoff)), WAIT).unwrap();
+    let c2 = match next(&mut rx) {
+        RadioEvent::Connected { conn, .. } => conn,
+        other => panic!("{other:?}"),
+    };
+    let mut taken = 0usize;
+    let refused = loop {
+        match radio.set_scanning(true) {
+            Ok(()) => taken += 1,
+            Err(e) => break e,
+        }
+        assert!(
+            taken < 100_000,
+            "{taken} lines wait for a helper that reads none"
+        );
+    };
+    assert_eq!(refused, HELPER_GONE);
+    assert!(taken >= OUT_QUEUE, "{taken}");
+    assert_eq!(next(&mut rx), RadioEvent::Disconnected { conn: c2 });
+    let why = RadioState::Unsupported(STOPPED_READING.into());
+    assert_eq!(next(&mut rx), RadioEvent::State(why.clone()));
+    assert!(closed(&mut rx));
+    assert_eq!(lock(&backoff).check(Instant::now()), Err(why));
+    assert!(radio.set_scanning(true).is_err());
+    let status = lock(&radio.link.child)
+        .as_mut()
+        .and_then(|c| c.try_wait().ok().flatten());
+    assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGKILL));
+}
+
+/// A connection raven-node told the helper to end, which the helper does
+/// not confirm within UNCONFIRMED_WAIT, ends here: its one Disconnected
+/// goes to the engine, and a late `disconnected` or frame of it is
+/// dropped. On the model's clock (each line carries its time).
+#[test]
+fn an_end_the_helper_does_not_confirm_expires() {
+    let (helper, radio, _rx, _) = pipes(Some(&hello()), EVENT_QUEUE);
+    let radio = radio.unwrap();
+    let link = &radio.link;
+    let (tx, mut rx) = mpsc::channel(EVENT_QUEUE);
+    let events = EventTx::new(tx);
+    let line = |m: FromHelper, at: Instant| on_line_at(link, &events, m, None, at);
+    let t0 = Instant::now();
+    line(peripheral(2), t0);
+    let c2 = match rx.try_recv().unwrap() {
+        RadioEvent::Connected { conn, .. } => conn,
+        other => panic!("{other:?}"),
+    };
+    link.lose_at(c2, t0);
+    assert_eq!(helper.heard(), ToHelper::Disconnect { conn: 2 });
+    // Any later line reads the clock; the helper says nothing of conn 2.
+    let other = FromHelper::Sent { conn: 99 };
+    line(
+        other.clone(),
+        t0 + UNCONFIRMED_WAIT - Duration::from_millis(1),
+    );
+    assert!(rx.try_recv().is_err(), "still the helper's to confirm");
+    line(other, t0 + UNCONFIRMED_WAIT);
+    assert_eq!(
+        rx.try_recv().ok(),
+        Some(RadioEvent::Disconnected { conn: c2 }),
+        "an unconfirmed end was kept"
+    );
+    let late = t0 + UNCONFIRMED_WAIT * 2;
+    line(FromHelper::Disconnected { conn: 2 }, late);
+    line(
+        FromHelper::Frame {
+            conn: 2,
+            b64: proto::b64_of(&[1]),
+        },
+        late,
+    );
+    assert!(rx.try_recv().is_err(), "one Disconnected only");
+    assert!(lock(&link.table).conns.is_empty());
+}
+
+// ── How the helper is started (security review 2026-11, BT-03) ──────────────
+
+/// The helper starts with an empty environment (no DYLD_* variable, nothing
+/// raven-node has) and with only its stdin, stdout and stderr open: a
+/// descriptor raven-node holds without close-on-exec stays out.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_helper_starts_with_no_inherited_variable_or_descriptor() {
+    use std::os::fd::AsRawFd as _;
+    if std::env::var_os("RAVEN_NEARBY_HELPER_INHERIT").is_some() {
+        eprintln!("RAVEN_NEARBY_HELPER_INHERIT is set (a plain child): skipped");
+        return;
+    }
+    let shells_own = |k: &str| matches!(k, "PWD" | "OLDPWD" | "SHLVL" | "_");
+    assert!(
+        std::env::vars_os().any(|(k, _)| !shells_own(&k.to_string_lossy())),
+        "this test has variables to leave out"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let held = std::fs::File::create(dir.path().join("held")).unwrap();
+    // SAFETY: fcntl on a descriptor this test owns; F_DUPFD leaves
+    // close-on-exec off on the copy.
+    let leak = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_DUPFD, 100) };
+    assert!(leak >= 100, "{leak}");
+    let seen = dir.path().join("seen");
+    let body = format!(
+        "/usr/bin/env > '{s}.env'\n\
+         for n in 0 1 2 {leak}; do if [ -e /dev/fd/$n ]; then echo $n >> '{s}.fd'; fi; done\n\
+         printf '%s\\n' '{hello}'\n\
+         read line",
+        s = seen.display(),
+        hello = hello().trim_end(),
+    );
+    let probe = script(dir.path(), "probe", &body);
+    let (tx, _rx) = mpsc::channel(EVENT_QUEUE);
+    let radio = open_at(&probe, tx, None, WAIT);
+    // SAFETY: closes the copy this test made.
+    unsafe {
+        libc::close(leak);
+    }
+    let radio = radio.unwrap();
+    let env = std::fs::read_to_string(seen.with_extension("env")).unwrap();
+    let names: Vec<&str> = env
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+        .collect();
+    assert!(names.iter().all(|k| shells_own(k)), "inherited: {names:?}");
+    let fds = std::fs::read_to_string(seen.with_extension("fd")).unwrap();
+    assert_eq!(fds.lines().collect::<Vec<_>>(), ["0", "1", "2"]);
+    drop(radio);
+}
+
+/// Before each start the helper's signature must be intact and name
+/// org.raven.nearby (`codesign --verify`): a bundle that is not signed,
+/// is signed as anything else, or changed after signing is not started.
+/// Ad hoc signatures of a scratch copy only.
+#[cfg(target_os = "macos")]
+#[test]
+fn only_a_helper_signed_as_ravennearby_may_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join(BUNDLE);
+    let exe = executable_in(&app);
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    let plist = app.join("Contents").join("Info.plist");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("macos/RavenNearby.app/Contents/Info.plist"),
+        &plist,
+    )
+    .unwrap();
+    std::fs::copy("/usr/bin/true", &exe).unwrap();
+    let sign = |id: &str| {
+        let signed = Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-", "--options", "runtime"])
+            .args(["--identifier", id])
+            .arg(&app)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(signed.success(), "ad hoc as {id}");
+    };
+    assert!(!signed_as_helper(&exe), "a bundle that is not signed");
+    sign(IDENTIFIER);
+    assert!(signed_as_helper(&exe), "signed as RavenNearby");
+    sign("org.example.other");
+    assert!(!signed_as_helper(&exe), "signed as something else");
+    sign(IDENTIFIER);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&plist)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    assert!(!signed_as_helper(&exe), "changed after signing");
+}

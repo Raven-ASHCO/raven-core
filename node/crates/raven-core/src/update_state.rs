@@ -354,6 +354,9 @@ pub enum Forgery {
     LogFormat(Rtl1Error),
     /// The log snapshot does not check (§6.1).
     Log(LogCheckError),
+    /// The advisory's `KEY_SET` entry lowers the bar
+    /// (RAVEN_SECURITY_ADVISORY_V1 §6.2, [`check_rotation`]).
+    Rotation(RotationError),
 }
 
 impl Forgery {
@@ -364,8 +367,59 @@ impl Forgery {
             Self::Signature(e) => e.code(),
             Self::LogFormat(e) => e.code(),
             Self::Log(e) => e.code(),
+            Self::Rotation(e) => e.code(),
         }
     }
+}
+
+/// Why the next key set a `KEY_SET` entry names is refused
+/// (RAVEN_SECURITY_ADVISORY_V1 §6.2), in the order checked: the next set
+/// keeps the bar of the set that signs it (security review 2026-11,
+/// UPD-1). Each one makes the advisory forged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum RotationError {
+    /// Its threshold is below 2: one key would sign alone.
+    #[error("ROTATION WEAK_THRESHOLD")]
+    WeakThreshold,
+    /// Its threshold is below the current set's.
+    #[error("ROTATION LOWERED_THRESHOLD")]
+    LoweredThreshold,
+    /// It holds a published test key ([`TEST_PUBLIC_KEYS`]), outside a debug
+    /// build whose current set holds one itself (a lab key file).
+    #[error("ROTATION TEST_KEY")]
+    TestKey,
+}
+
+impl RotationError {
+    /// The name the spec and the vectors use.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::WeakThreshold => "WEAK_THRESHOLD",
+            Self::LoweredThreshold => "LOWERED_THRESHOLD",
+            Self::TestKey => "TEST_KEY",
+        }
+    }
+}
+
+/// May the current key set rotate to `next` (RAVEN_SECURITY_ADVISORY_V1
+/// §6.2)? The next set needs a threshold of at least 2 and at least the
+/// current one's, and holds no published test key. `debug`: a debug build
+/// ([`accept_advisory`](UpdateState::accept_advisory) passes
+/// `cfg!(debug_assertions)`), where a current set that holds a test key
+/// (a lab key file, or a test) may rotate to another such set. A release
+/// build never takes a test key, whatever its current set.
+pub fn check_rotation(current: &KeySet, next: &KeySet, debug: bool) -> Result<(), RotationError> {
+    let test_key = |set: &KeySet| set.keys().iter().any(|k| TEST_PUBLIC_KEYS.contains(k));
+    if next.threshold() < 2 {
+        return Err(RotationError::WeakThreshold);
+    }
+    if next.threshold() < current.threshold() {
+        return Err(RotationError::LoweredThreshold);
+    }
+    if test_key(next) && !(debug && test_key(current)) {
+        return Err(RotationError::TestKey);
+    }
+    Ok(())
 }
 
 /// Why the update state took nothing (the state is unchanged unless the
@@ -782,12 +836,14 @@ impl UpdateState {
 
     /// Accept an advisory and the log snapshot it came with, in the
     /// normative order (RAVEN_SECURITY_ADVISORY_V1 §6.1, wire spec W-D1):
-    /// decode, the current key set and its threshold signatures, the
-    /// serial against [`Self::newest`] (rollback, equivocation), the log
-    /// (checked, listing the advisory, consistent with the stored one),
-    /// then store it, rotating to the key set its `KEY_SET` entry names.
-    /// While frozen nothing is taken (a forged advisory is still refused as
-    /// forged); only a release installed by hand clears a freeze.
+    /// decode, the current key set and its threshold signatures, the next
+    /// key set a `KEY_SET` entry names ([`check_rotation`]), the serial
+    /// against [`Self::newest`] (rollback, equivocation: frozen only when a
+    /// checked log lists the other advisory), the log (checked, listing
+    /// the advisory, consistent with the stored one), then store it,
+    /// rotating to the key set its `KEY_SET` entry names. While frozen
+    /// nothing is taken (a forged advisory is still refused as forged);
+    /// only a release installed by hand clears a freeze.
     pub fn accept_advisory(
         &mut self,
         bytes: &[u8],
@@ -800,6 +856,18 @@ impl UpdateState {
         advisory
             .verify(&key_set)
             .map_err(|e| self.sig_refused(e, &advisory.key_set_digest, Forgery::Signature))?;
+        // The next key set keeps the bar (security review 2026-11, UPD-1):
+        // forged otherwise, before succession, so nothing rotates and
+        // nothing freezes.
+        let next = advisory
+            .entries
+            .iter()
+            .find_map(Entry::key_set)
+            .filter(|next| next.digest() != key_set.digest());
+        if let Some(next) = &next {
+            check_rotation(&key_set, next, cfg!(debug_assertions))
+                .map_err(|e| Refused::Forged(Forgery::Rotation(e)))?;
+        }
         // Frozen: nothing new is applied. No advisory lifts a freeze (Phase 6
         // review updates-protocol-2): the key set that froze signed two
         // histories, so nothing it signs (a rotation included) can be
@@ -818,40 +886,24 @@ impl UpdateState {
             Succession::Equivocation => {
                 let (serial, digest) = newest.expect("equivocation needs a newest advisory");
                 let stored = self.advisory.as_ref().filter(|a| a.serial == serial);
-                if advisory.serial == serial {
-                    match stored {
-                        // The same signed body with another signature block
-                        // (a signature dropped from a block above the
-                        // threshold, which needs no key): one advisory, not
-                        // two histories (Phase 6 review updates-protocol-1).
-                        // Nothing changes; a copy its log does not list is
-                        // unlogged.
-                        Some(stored) if same_body(stored, &advisory) => {
-                            let log = self.check_log(&key_set, snapshot)?;
-                            if !crate::tlog::contains(
-                                log.entries(),
-                                EntryType::Advisory,
-                                &advisory.digest(),
-                            ) {
-                                return Err(Refused::Unlogged);
-                            }
-                            return Ok(Applied::Unchanged);
-                        }
-                        Some(_) => {}
-                        // The compiled floor (no bytes to compare the body
-                        // with): only a copy a checked log lists is the
-                        // second history.
-                        None => {
-                            let log = self.check_log(&key_set, snapshot)?;
-                            if !crate::tlog::contains(
-                                log.entries(),
-                                EntryType::Advisory,
-                                &advisory.digest(),
-                            ) {
-                                return Err(Refused::Unlogged);
-                            }
-                        }
-                    }
+                // Only an advisory a log that checks under the current set
+                // lists is a second history: another body for the newest
+                // serial (the compiled floor's included, whose bytes are
+                // not held), or the next serial naming another advisory.
+                // A body signed and never published (an abandoned draft,
+                // signatures a signer kept) is unlogged, which raven-node
+                // quarantines, and freezes nothing (security review
+                // 2026-11, UPD-3).
+                let log = self.check_log(&key_set, snapshot)?;
+                if !crate::tlog::contains(log.entries(), EntryType::Advisory, &advisory.digest()) {
+                    return Err(Refused::Unlogged);
+                }
+                // The same signed body with another signature block (a
+                // signature dropped from a block above the threshold, which
+                // needs no key): one advisory, not two histories (Phase 6
+                // review updates-protocol-1). Nothing changes.
+                if advisory.serial == serial && stored.is_some_and(|s| same_body(s, &advisory)) {
+                    return Ok(Applied::Unchanged);
                 }
                 let ours = stored.map(|a| a.bytes().to_vec()).unwrap_or_default();
                 self.freeze(Evidence {
@@ -880,11 +932,6 @@ impl UpdateState {
         if !crate::tlog::contains(log.entries(), EntryType::Advisory, &advisory.digest()) {
             return Err(Refused::Unlogged);
         }
-        let next = advisory
-            .entries
-            .iter()
-            .find_map(Entry::key_set)
-            .filter(|next| next.digest() != key_set.digest());
         let rotation_log = next.is_some().then(|| log.clone());
         let consistency = self.take_log(&key_set, log, now_ms)?;
         let rotated_to = next.map(|next| self.rotate(next));

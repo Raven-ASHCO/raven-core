@@ -1831,9 +1831,49 @@ pub(crate) mod netutil {
         std::eprintln!("{}", stamped(line));
     }
 
+    /// The UTC time, a space, then `line` with every character that could
+    /// start a line or steer the terminal showing the log written as an
+    /// escape ([`LogSafe`]): a field from a peer, a helper or a file cannot
+    /// pass for a line of its own.
     fn stamped(line: std::fmt::Arguments<'_>) -> String {
         let ms = raven_core::clock::now_ms();
-        format!("{} {line}", raven_core::local_time::utc_stamp(ms))
+        let mut out = raven_core::local_time::utc_stamp(ms);
+        out.push(' ');
+        let _ = std::fmt::Write::write_fmt(&mut LogSafe(&mut out), line);
+        out
+    }
+
+    /// Writes text into a log line: C0 and C1 controls, DEL, the bidi
+    /// controls and the line and paragraph separators become `\n`, `\r`,
+    /// `\t` or `\u{..}`; everything else is kept as it is.
+    struct LogSafe<'a>(&'a mut String);
+
+    impl std::fmt::Write for LogSafe<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                match c {
+                    '\n' => self.0.push_str("\\n"),
+                    '\r' => self.0.push_str("\\r"),
+                    '\t' => self.0.push_str("\\t"),
+                    c if c.is_control()
+                        || matches!(
+                            c,
+                            '\u{61c}'
+                                | '\u{200e}'
+                                | '\u{200f}'
+                                | '\u{202a}'..='\u{202e}'
+                                | '\u{2066}'..='\u{2069}'
+                                | '\u{2028}'
+                                | '\u{2029}'
+                        ) =>
+                    {
+                        write!(self.0, "\\u{{{:x}}}", c as u32)?
+                    }
+                    c => self.0.push(c),
+                }
+            }
+            Ok(())
+        }
     }
 
     /// The other side of a link in a log line: a short tag, the same for the
@@ -2079,6 +2119,54 @@ pub(crate) mod netutil {
                 line.ends_with("Z raven-node: BRIDGE lan listen 127.0.0.1:1"),
                 "{line}"
             );
+        }
+
+        /// A field of a log line can come from a peer, a helper or a file
+        /// (an error text, a folder name). It must not start a line of its
+        /// own, which would read as a line raven-node wrote, nor move the
+        /// cursor, clear, recolour or retitle the terminal that shows the
+        /// log, nor turn the order of its text around. Every such character
+        /// is written as an escape ([`stamped`], which every log write
+        /// uses): the line stays one line and still says what came.
+        #[test]
+        fn a_logged_field_cannot_start_a_line_or_steer_a_terminal() {
+            let forged = "2026-11-06T10:00:00Z lan_direct inbound: DELIVERED bytes=1";
+            let field = format!(
+                "x\n{forged}\r\u{1b}[2J\u{1b}]0;t\u{7}\u{9b}31m\u{85}\u{2028}\u{2029}\
+                 \u{202a}\u{202e}\u{2066}\u{2069}\u{200e}\u{200f}\u{61c}\u{7f}\u{0}\t\u{b}\u{c}end"
+            );
+            let line = stamped(format_args!("peer said: {field}"));
+            let steers = |c: char| {
+                c.is_control()
+                    || matches!(
+                        c,
+                        '\u{61c}'
+                            | '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{2028}'
+                            | '\u{2029}'
+                    )
+            };
+            let left: Vec<char> = line.chars().filter(|&c| steers(c)).collect();
+            assert!(left.is_empty(), "{left:?} in {line:?}");
+            assert_eq!(line.lines().count(), 1, "{line:?}");
+            let (stamp, rest) = line.split_once(' ').unwrap();
+            assert!(stamp.ends_with('Z'), "{line:?}");
+            assert_eq!(
+                rest,
+                format!(
+                    "peer said: x\\n{forged}\\r\\u{{1b}}[2J\\u{{1b}}]0;t\\u{{7}}\\u{{9b}}31m\
+                     \\u{{85}}\\u{{2028}}\\u{{2029}}\\u{{202a}}\\u{{202e}}\\u{{2066}}\\u{{2069}}\
+                     \\u{{200e}}\\u{{200f}}\\u{{61c}}\\u{{7f}}\\u{{0}}\\t\\u{{b}}\\u{{c}}end"
+                )
+            );
+            // Text in any script, joiners and emoji included, is kept as it
+            // is, and so is a backslash already in a field (a Windows path).
+            let words = "سلام\u{200c}ها 👋🏽 Grüße C:\\Raven\\data";
+            let line = stamped(format_args!("{words}"));
+            assert_eq!(line.split_once(' ').unwrap().1, words);
         }
 
         #[test]
@@ -4295,7 +4383,10 @@ impl NodeState {
                             let peer_fp = crate::fingerprint_of(&peer_pub);
                             let body = String::from_utf8_lossy(&plaintext);
                             let body = body.trim_end_matches(['\r', '\n']);
-                            eprintln!("\n── INCOMING from {} ──", peer_fp);
+                            // A log line is one line: a field's line break
+                            // is written as an escape (netutil::stamped).
+                            eprintln!();
+                            eprintln!("── INCOMING from {} ──", peer_fp);
                             for line in body.lines() {
                                 eprintln!("│ {}", line);
                             }
@@ -8338,6 +8429,47 @@ mod lifecycle_tests {
             }
         }
         assert!(paired >= 4, "{paired}");
+    }
+
+    /// Round 2: the kit's exit 5 summary names each folder refusal that
+    /// `raven-node relay --check` names, the leftover SQLite journal beside
+    /// the relay lock included (WINLIN-1: not a relay to stop), in plain
+    /// words. The code stays 5.
+    #[test]
+    fn relay_kit_exit_5_names_a_leftover_journal() {
+        let root = repo_root();
+        let read = |rel: &str| std::fs::read_to_string(root.join(rel)).expect(rel);
+        let common = read("node/scripts/install/relay_common.sh");
+        let check_failed = common
+            .split("\nrelay_check_failed() {\n")
+            .nth(1)
+            .and_then(|b| b.split("\n}\n").next())
+            .expect("relay_check_failed");
+        let ps = read("node/scripts/install/windows_relay.ps1");
+        let line = |text: &str, start: &str| {
+            let found = text.lines().filter(|l| l.trim_start().starts_with(start));
+            let [one] = found.collect::<Vec<_>>()[..] else {
+                panic!("one {start:?} line");
+            };
+            one.to_string()
+        };
+        for five in [line(check_failed, "5) echo "), line(&ps, "5 { Write-Host ")] {
+            for words in [
+                "a Raven profile",
+                "a relay already runs in it",
+                "a leftover SQLite journal",
+                "move both files out of the folder",
+            ] {
+                assert!(five.contains(words), "{words:?} in {five}");
+            }
+            let said = five.split('"').nth(1).expect("a quoted text");
+            assert!(
+                !said
+                    .replace("--wss", "")
+                    .contains(['-', '\'', '\u{2013}', '\u{2014}', '\u{2019}']),
+                "plain words: {said}"
+            );
+        }
     }
 
     /// The installers' firewall advice in `RAVEN_RELAY_TCP443=7443` mode:

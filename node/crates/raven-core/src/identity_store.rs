@@ -367,7 +367,8 @@ fn sqlite_database_has_no_rows(path: &Path) -> bool {
 
 /// The IPC server's own artifacts, which `raven-node ipc` (and an auto-started
 /// `service` whose preflight failed) leave in a profile that has no identity
-/// yet: the endpoint socket, its instance lock and the service log. `None` for
+/// yet: the endpoint socket, its instance lock and the service log (and the
+/// pipe token, review IPC-2, which a Windows client makes). `None` for
 /// every other name. Each is judged by what it really is (`symlink_metadata`,
 /// so a symlink or a directory under the name is never accepted).
 fn ipc_leftover_is_inert(data_dir: &Path, name: &str) -> Option<bool> {
@@ -392,6 +393,27 @@ fn ipc_leftover_is_inert(data_dir: &Path, name: &str) -> Option<bool> {
         // Daemon stdout/stderr: diagnostics, no identity-bound state (a daemon
         // cannot get past its identity preflight on a profile without one).
         return Some(meta().is_some_and(|m| m.file_type().is_file()));
+    }
+    // The random part of the Windows pipe name (review IPC-2), which a client
+    // makes before it starts the node, and the temp file a crash may leave
+    // while it is made: no identity in either.
+    let token = crate::ipc::PIPE_TOKEN_FILE_NAME;
+    let short = |m: &std::fs::Metadata| {
+        m.file_type().is_file() && m.len() <= crate::ipc::PIPE_TOKEN_LEN as u64
+    };
+    if name == token {
+        return Some(meta().is_some_and(|m| {
+            short(&m)
+                && std::fs::read_to_string(&path).is_ok_and(|text| crate::ipc::is_pipe_token(&text))
+        }));
+    }
+    if let Some(hex) = name
+        .strip_prefix('.')
+        .and_then(|n| n.strip_prefix(token))
+        .and_then(|n| n.strip_prefix(".tmp."))
+    {
+        let named = hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit());
+        return Some(named && meta().is_some_and(|m| short(&m)));
     }
     None
 }
@@ -2772,6 +2794,47 @@ mod tests {
             dir,
             Some(IdentityStoreBackend::LockedFile)
         )));
+    }
+
+    /// Review IPC-2: on Windows `raven-node ipc` or the first client writes
+    /// the profile's pipe token before any identity exists; it must not stop
+    /// the first `raven init`. Only a real token file (or the temp copy of
+    /// an interrupted first write) passes.
+    #[test]
+    fn first_install_tolerates_the_pipe_token_only() {
+        let case = |setup: &dyn Fn(&Path)| {
+            let tmp = TempDir::new().unwrap();
+            setup(tmp.path());
+            require_proven_first_install(tmp.path(), None)
+        };
+        let token = "0123456789abcdef0123456789abcdef";
+        case(&|d| std::fs::write(d.join("raven-node.pipe-token"), token).unwrap()).unwrap();
+        case(&|d| {
+            std::fs::write(
+                d.join(".raven-node.pipe-token.tmp.0123456789abcdef"),
+                &token[..9],
+            )
+            .unwrap()
+        })
+        .unwrap();
+        for stray in [
+            "raven-node.pipe-token.bak",
+            ".raven-node.pipe-token.tmp.0123",
+        ] {
+            assert!(
+                is_continuity(case(&|d| std::fs::write(d.join(stray), token).unwrap())),
+                "{stray}"
+            );
+        }
+        assert!(is_continuity(case(&|d| std::fs::write(
+            d.join("raven-node.pipe-token"),
+            "0123456789abcdef0123456789abcdeX"
+        )
+        .unwrap())));
+        assert!(is_continuity(case(&|d| std::fs::create_dir(
+            d.join("raven-node.pipe-token")
+        )
+        .unwrap())));
     }
 
     #[cfg(unix)]

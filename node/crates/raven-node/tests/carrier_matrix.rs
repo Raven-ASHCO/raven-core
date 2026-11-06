@@ -10195,14 +10195,10 @@ fn ipc_endpoint_of(p: &Profile) -> PathBuf {
 
 #[cfg(windows)]
 fn ipc_endpoint_of(p: &Profile) -> PathBuf {
-    let user = raven_core::ipc::windows_user_pipe_name().expect("a per-user pipe name");
-    // A lab suffix of this test process is not the profile's.
-    let user = match std::env::var(raven_core::ipc::LAB_IPC_PIPE_SUFFIX_ENV) {
-        Ok(own) if !own.is_empty() => user.strip_suffix(&format!("-{own}")).unwrap_or(user),
-        _ => user,
-    };
-    let name = raven_core::ipc::with_lab_pipe_suffix(user.to_string(), Some(&p.pipe_suffix), true)
-        .expect("a pipe suffix the daemon accepts");
+    // The profile's own pipe: its token (review IPC-2) and its lab suffix,
+    // never a lab suffix of this test process.
+    let name = raven_core::ipc::windows_pipe_name_with_suffix(&p.dir, Some(&p.pipe_suffix))
+        .expect("a pipe name the daemon accepts");
     PathBuf::from(name)
 }
 

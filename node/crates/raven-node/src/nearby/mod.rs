@@ -1230,6 +1230,9 @@ mod tests {
             "the nearby helper speaks protocol 2, this raven-node 1: install the RavenNearby.app \
              of this release"
                 .into(),
+            apple::BROKE_PROTOCOL.into(),
+            apple::STOPPED_READING.into(),
+            apple::NOT_SIGNED.into(),
         ] {
             assert_eq!(
                 name(Unsupported(why.clone())),

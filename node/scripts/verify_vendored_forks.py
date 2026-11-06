@@ -396,7 +396,8 @@ def self_test(repo: Path, directory: Path, document: Dict[str, Any]) -> List[str
 
             case("an undeclared change to an upstream file", lambda root: _append(root / plain[0]))
             case("an undeclared new file", lambda root: (root / "planted.rs").write_bytes(b"// planted\n"))
-            case("a changed modification", lambda root: _append(root / sorted(delta["modified"])[0]))
+            if delta["modified"]:
+                case("a changed modification", lambda root: _append(root / sorted(delta["modified"])[0]))
             if delta["added"]:
                 case("a changed added file", lambda root: _append(root / sorted(delta["added"])[0]))
             case("a missing upstream file", lambda root: (root / plain[0]).unlink())

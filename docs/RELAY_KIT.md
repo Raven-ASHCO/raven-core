@@ -371,10 +371,12 @@ over a line.
   relay again (`raven-node relay --check` names it). Exit 5 also comes from a
   lock file in the folder that is not empty and has a SQLite journal or WAL
   file beside it: Raven never leaves that pair, so it is refused instead of
-  played back, and `--check` says it found a leftover SQLite journal beside
+  played back. `--check`, the relay itself, `raven relay status` and the
+  installers' exit 5 line then say that a leftover SQLite journal lies beside
   the relay lock file, not that a relay runs (none starts there: move both
-  files out of the folder), and on Linux from a `/var/lib/raven-relay` that
-  exists without the `raven-relay` account (section 11).
+  files out of the folder). On Linux exit 5 also comes from a
+  `/var/lib/raven-relay` that exists without the `raven-relay` account
+  (section 11).
 - **443 needs a privilege** (exit 4 on Linux without the unit, or on an old
   macOS): use the kit's unit (Linux), or `RAVEN_RELAY_TCP443=7443` with the
   router's 443 mapped to 7443.

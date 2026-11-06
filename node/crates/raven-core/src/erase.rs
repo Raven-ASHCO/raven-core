@@ -40,7 +40,8 @@
 //!    and interrupted writes' temp files (`.<file>.tmp.<16 hex>`) beside
 //!    them, Raven's own folders, then this profile's IPC socket and its lock
 //!    (in the long-path fallback only `/tmp/raven-<euid>/raven-<hash>.sock`
-//!    and its `.lock`: the folder is shared by every profile of the user). A
+//!    and its `.lock`: the folder is shared by every profile of the user;
+//!    since review IPC-2 first the per user folder of `ipc::default_socket_path`). A
 //!    pass that finds a file written meanwhile (a process already inside a
 //!    write when the marker went down) deletes it too. The marker goes last,
 //!    and the folder only when it is empty then. Unknown files are left and

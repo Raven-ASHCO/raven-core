@@ -221,9 +221,10 @@ gone.
 
 ### 9.1 UPnP-IGD mappings (STRANGER-UPNP-2)
 
-UPnP-IGD answers are not authenticated: libp2p-upnp takes the first answer to its SSDP search,
-from anyone on the network, and the external IPv4 address that "router" names (it checks only
-that the address is global). So a UPnP mapping, the endpoint's and the friend relay's alike, is
+UPnP-IGD answers are not authenticated: libp2p-upnp takes the first answer to its SSDP search
+from the address of the default router (below), which a host on the network can forge, and the
+external IPv4 address that "router" names (it checks only that the address is global). So a
+UPnP mapping, the endpoint's and the friend relay's alike, is
 held until its IPv4 address is one a verified contact or a relay the node holds a slot on saw
 the node at, on a connection the node dialled directly at an IP no DNS answer gave, within 24
 hours and since the last network change (the auto-reach sighting, `autoreach::seen_ip`;
@@ -237,13 +238,22 @@ is. A mapping once used stays used until libp2p-upnp ends it: its external addre
 the gateway is found, and a network change builds a new endpoint. The friend relay names its
 UPnP addresses, and sets CONFIRMED from them, only while the sighting stands
 (RAVEN_ROUTE_HINTS_V1 §11.1), and a mapping alone never stamps its `confirmed_at_ms`.
+A new run of the relay carries the stamp of its last run with the same key on, but only from
+`relay_status.json` version 2, which relays write since 2026-11-06: a version 1 file was written
+before this rule and may hold a stamp that a mapping alone set.
 
-Still open (STRANGER-UPNP-1): the SSDP answer's source and its LOCATION host are not checked
-against the default router, and the device description is read whole and parsed before Raven
-sees anything (igd-next, through libp2p-upnp, offers no hook for either). A stranger who names
-the node's real public IP can still claim a mapping the router never made: contacts then dial a
-port that reaches nothing or, where the stranger had the router forward that port to a host of
-its own, that host.
+The gateway search (STRANGER-UPNP-1, since 2026-11-06: the Raven patch of igd-next 0.17.1, the
+client of libp2p-upnp, `node/third_party/igd-next-0.17.1-raven`) takes an SSDP answer only when
+its source is the IPv4 default router, the router NAT-PMP and PCP ask (none when that is a
+global address), and its LOCATION names that same address; any other answer is ignored and the
+search keeps waiting, and with no such router no search is sent. An SSDP answer over 1500
+bytes, a device or service description over 64 KiB and a SOAP response over 16 KiB are refused
+before they are parsed, and so is any document nested deeper than 32 elements or with a
+DOCTYPE: before, a stranger on the network could make the node fetch a description from a host
+of its choosing, and a deeply nested one overflowed the stack and ended the node. Still open: a
+host that forges the address of the router as the source of its answer still answers the
+search, though the description and every SOAP request then go to the address of the router;
+and the external address the router names counts only as the sighting above vouches for it.
 
 ## 10. IPv6 pinholes
 

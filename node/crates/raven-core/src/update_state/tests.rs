@@ -759,6 +759,248 @@ fn forged_and_unlogged_advisories_are_refused() {
     assert!(state.accept_advisory(&one, &snap1, T0).is_ok());
 }
 
+/// A build trusting `key_set`.
+fn build_of(key_set: &KeySet) -> Build {
+    Build {
+        key_set: Some(key_set.clone()),
+        serial: 0,
+        floor: (0, [0; 32]),
+    }
+}
+
+/// An advisory under `current` (the seed bytes of its keys: `seeds`)
+/// signed by all its keys, serial `serial` after `prev`, whose `KEY_SET`
+/// entry names `next`, and the snapshot of `log` with it, its tree head
+/// signed the same way.
+fn rotating_to(
+    current: &KeySet,
+    seeds: &[u8; 3],
+    serial: u64,
+    prev: [u8; 32],
+    next: &KeySet,
+    log: &[LogEntry],
+) -> (Vec<u8>, Vec<u8>) {
+    let ids = [signer(seeds[0]), signer(seeds[1]), signer(seeds[2])];
+    let all: Vec<(u8, &Identity)> = (0u8..).zip(&ids).collect();
+    let a = AdvisoryDraft {
+        serial,
+        issued_at_ms: T0 + serial * DAY_MS,
+        key_set_digest: current.digest(),
+        prev_digest: prev,
+        entries: vec![
+            notice("new keys"),
+            Entry {
+                kind: EntryKind::KeySet,
+                severity: Severity::Info,
+                target: "keys".to_owned(),
+                arg: next.encode(),
+                text_id: 0,
+            },
+        ],
+    }
+    .sign(&all)
+    .unwrap();
+    let mut log = log.to_vec();
+    log.push(entry(EntryType::Advisory, a.digest(), log.len()));
+    let sth = SthDraft::of_entries(&log, T0 + log.len() as u64, current.digest())
+        .sign(&all)
+        .unwrap();
+    (
+        a.bytes().to_vec(),
+        Snapshot::new(log, sth).unwrap().encode(),
+    )
+}
+
+/// `(advisory, snapshot)` refused with nothing frozen and nothing changed:
+/// the refusal's text.
+fn refused_unchanged(state: &mut UpdateState, (bytes, snap): (Vec<u8>, Vec<u8>)) -> String {
+    state.changed = false;
+    let before = state.to_stored();
+    let got = state.accept_advisory(&bytes, &snap, T0);
+    assert_eq!(state.frozen(), None, "nothing frozen: {got:?}");
+    assert_eq!(state.to_stored(), before, "nothing changed: {got:?}");
+    assert!(!state.changed, "{got:?}");
+    got.expect_err("refused").to_string()
+}
+
+/// Security review 2026-11 (UPD-1): a `KEY_SET` entry keeps the bar of the
+/// set that signs it (RAVEN_SECURITY_ADVISORY_V1 §6.2). A next set of one
+/// signature, a lower threshold, or a published test key outside a debug
+/// lab build is forged: nothing rotates, nothing is stored, nothing
+/// freezes.
+#[test]
+fn a_rotation_that_lowers_the_bar_is_forged() {
+    let key_log = |set: &KeySet| vec![entry(EntryType::KeySet, set.digest(), 0)];
+    // The 2-of-3 test set (this debug build holds test keys as a lab key
+    // file would) to one key of three.
+    let cur = set(&CURRENT);
+    let one_key = key_set_of(1, &NEXT);
+    let mut state = UpdateState::empty(build(&CURRENT));
+    let weak = rotating_to(&cur, &CURRENT, 1, [0; 32], &one_key, &key_log(&cur));
+    assert_eq!(
+        refused_unchanged(&mut state, weak),
+        "UPDATE FORGED WEAK_THRESHOLD"
+    );
+    assert_eq!(state.key_set(), Some(&cur), "not rotated");
+    // 3 of 3 to 2 of 3.
+    let three = key_set_of(3, &CURRENT);
+    let mut state = UpdateState::empty(build_of(&three));
+    let lowered = rotating_to(&three, &CURRENT, 1, [0; 32], &set(&NEXT), &key_log(&three));
+    assert_eq!(
+        refused_unchanged(&mut state, lowered),
+        "UPDATE FORGED LOWERED_THRESHOLD"
+    );
+    // A set of no test key to one holding the test key 0x22.
+    let clean = set(&[0x44, 0x55, 0x66]);
+    let mut state = UpdateState::empty(build_of(&clean));
+    let tested = set(&[0x22, 0x55, 0x66]);
+    let to_test = rotating_to(
+        &clean,
+        &[0x44, 0x55, 0x66],
+        1,
+        [0; 32],
+        &tested,
+        &key_log(&clean),
+    );
+    assert_eq!(
+        refused_unchanged(&mut state, to_test),
+        "UPDATE FORGED TEST_KEY"
+    );
+    // Another body under a used serial that also lowers the bar: forged
+    // before its succession counts, so nothing freezes.
+    let mut project = Project::new();
+    let (one, snap1) = project.publish(vec![notice("one")]);
+    let mut state = UpdateState::empty(build(&CURRENT));
+    state.accept_advisory(&one, &snap1, T0).unwrap();
+    let forked = rotating_to(&cur, &CURRENT, 1, [0; 32], &one_key, &project.log);
+    assert_eq!(
+        refused_unchanged(&mut state, forked),
+        "UPDATE FORGED WEAK_THRESHOLD"
+    );
+    // What keeps the bar still rotates: to a set of no test key, and to a
+    // higher threshold.
+    let mut state = UpdateState::empty(build_of(&clean));
+    let fresh = set(&[0x55, 0x66, 0x77]);
+    let (bytes, snap) = rotating_to(
+        &clean,
+        &[0x44, 0x55, 0x66],
+        1,
+        [0; 32],
+        &fresh,
+        &key_log(&clean),
+    );
+    assert!(matches!(
+        state.accept_advisory(&bytes, &snap, T0),
+        Ok(Applied::Stored { rotated_to: Some(d), .. }) if d == fresh.digest()
+    ));
+    let mut state = UpdateState::empty(build_of(&clean));
+    let higher = key_set_of(3, &[0x55, 0x66, 0x77]);
+    let (bytes, snap) = rotating_to(
+        &clean,
+        &[0x44, 0x55, 0x66],
+        1,
+        [0; 32],
+        &higher,
+        &key_log(&clean),
+    );
+    assert!(matches!(
+        state.accept_advisory(&bytes, &snap, T0),
+        Ok(Applied::Stored { rotated_to: Some(d), .. }) if d == higher.digest()
+    ));
+}
+
+/// The rule itself (UPD-1), with the build passed in: a release build
+/// never takes a test key, even from the test set; a debug build takes one
+/// only from a set that holds one (a lab key file).
+#[test]
+fn the_rotation_rule_keeps_the_bar_in_both_builds() {
+    let cur = set(&CURRENT);
+    let clean = set(&[0x44, 0x55, 0x66]);
+    for debug in [false, true] {
+        assert_eq!(
+            check_rotation(&cur, &key_set_of(1, &NEXT), debug),
+            Err(RotationError::WeakThreshold)
+        );
+        assert_eq!(
+            check_rotation(&key_set_of(3, &CURRENT), &set(&NEXT), debug),
+            Err(RotationError::LoweredThreshold)
+        );
+        assert_eq!(
+            check_rotation(&clean, &set(&[0x22, 0x55, 0x66]), debug),
+            Err(RotationError::TestKey)
+        );
+        assert_eq!(
+            check_rotation(&clean, &set(&[0x55, 0x66, 0x77]), debug),
+            Ok(())
+        );
+        let lab = if debug {
+            Ok(())
+        } else {
+            Err(RotationError::TestKey)
+        };
+        assert_eq!(check_rotation(&cur, &key_set_of(3, &NEXT), debug), lab);
+    }
+    assert_eq!(
+        check_rotation(&cur, &set(&NEXT), false),
+        Err(RotationError::TestKey)
+    );
+    assert_eq!(check_rotation(&cur, &set(&NEXT), true), Ok(()));
+    let forged = Refused::Forged(Forgery::Rotation(RotationError::TestKey));
+    assert_eq!(forged.to_string(), "UPDATE FORGED TEST_KEY");
+    assert_eq!(forged.sec_kind(), Some(SecKind::AdvisoryForged));
+}
+
+/// Security review 2026-11 (UPD-3): another signed body for a used serial,
+/// or the next serial naming another advisory, is a second history only
+/// when a log that checks under the current key set lists it, as for the
+/// compiled floor. A body signed and never published (an abandoned draft,
+/// signatures a signer kept) is unlogged, which raven-node quarantines, or
+/// forged with a log that does not check: nothing freezes.
+#[test]
+fn a_competing_body_no_checked_log_lists_freezes_nothing() {
+    let mut project = Project::new();
+    let (one, snap1) = project.publish(vec![notice("one")]);
+    let mut state = UpdateState::empty(build(&CURRENT));
+    state.accept_advisory(&one, &snap1, T0).unwrap();
+    // Another #1, passed on with the real log, which does not list it.
+    let draft = advisory(&CURRENT, 1, [0; 32], vec![notice("an abandoned draft")]);
+    assert_eq!(
+        refused_unchanged(&mut state, (draft.bytes().to_vec(), snap1.clone())),
+        "UPDATE UNLOGGED"
+    );
+    // With a log that does not decode.
+    assert!(
+        refused_unchanged(&mut state, (draft.bytes().to_vec(), b"RTL1".to_vec()))
+            .starts_with("UPDATE FORGED")
+    );
+    // #2 naming another #1.
+    let bad_two = advisory(
+        &CURRENT,
+        2,
+        [0x77; 32],
+        vec![notice("two after another one")],
+    );
+    assert_eq!(
+        refused_unchanged(&mut state, (bad_two.bytes().to_vec(), snap1.clone())),
+        "UPDATE UNLOGGED"
+    );
+    // The published history goes on.
+    let (two, snap2) = project.publish(vec![notice("two")]);
+    assert!(matches!(
+        state.accept_advisory(&two, &snap2, T0),
+        Ok(Applied::Stored { serial: 2, .. })
+    ));
+    // A competing body that a checked log lists is still the second
+    // history.
+    let (other_two, other_snap) =
+        project.fork(2, Advisory::decode(&one).unwrap().digest(), "another two");
+    assert_eq!(
+        state.accept_advisory(&other_two, &other_snap, T0),
+        Err(Refused::Equivocation)
+    );
+    assert!(state.frozen().is_some());
+}
+
 #[test]
 fn logs_extend_and_a_split_view_freezes_with_both_tree_heads() {
     let mut project = Project::new();

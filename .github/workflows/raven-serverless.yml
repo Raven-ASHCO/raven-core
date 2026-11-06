@@ -266,7 +266,7 @@ jobs:
   # pins to the checksummed crates.io libsqlite3-sys 0.38.2 archive. It is merge-blocking
   # only once this check is added to branch protection (the required-check pin is OFF).
   # curl is retried: a provenance MISMATCH fails the same way every attempt.
-  # The other [patch.crates-io] forks (arti-client, saturating-time,
+  # The other [patch.crates-io] forks (arti-client, igd-next, saturating-time,
   # secret-service) are path dependencies too, with no Cargo.lock checksum:
   # verify_vendored_forks.py ties every file of each to its pinned crates.io
   # archive plus exactly the delta node/third_party/forks.json records
@@ -652,6 +652,9 @@ jobs:
             rm -f "$log"
           }
           cargo test --locked -p raven-swarm --all-features --all-targets
+          # STRANGER-UPNP-1: the vendored igd-next takes the default router's
+          # answer only and bounds every response (a loopback router and stranger).
+          cargo test --locked -p igd-next --lib
           cargo build --locked --release -p raven-swarm \
             --features experimental-offline-mailbox \
             --bin raven-swarm-mailbox-experimental
@@ -1026,6 +1029,8 @@ jobs:
           cargo test --locked -p raven-core -p ash -p raven-node
           cargo test --locked -p raven-core --lib lan_
           cargo test --locked -p raven-swarm --features p2p-host,wss --lib
+          # STRANGER-UPNP-1: the vendored igd-next (a loopback router and stranger).
+          cargo test --locked -p igd-next --lib
           cargo build --locked -p raven-swarm -p raven-node
           cargo build --locked --release -p raven-core -p raven-node -p ash
       # The app channel tests (submit, probe, pairing budget, the guard). The

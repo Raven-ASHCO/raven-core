@@ -727,6 +727,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -1394,11 +1395,36 @@ def privacy_self_test(caller: dict) -> bool:
 UNIX_SOCKET_PATH_MAX = 103 if sys.platform == 'darwin' or 'bsd' in sys.platform else 107
 
 
+def per_user_socket_dir() -> Path | None:
+    """The folder raven_core::ipc's `per_user_socket_dir` picks for a short
+    socket (security review 2026-11, IPC-2): the per user temporary folder on
+    macOS (confstr _CS_DARWIN_USER_TEMP_DIR, 65537), elsewhere
+    $XDG_RUNTIME_DIR, each only when it is an absolute, real folder of this
+    user that no one else may enter. None otherwise."""
+    if sys.platform == 'darwin':
+        try:
+            raw = os.confstr(65537)
+        except (OSError, ValueError):
+            raw = None
+    else:
+        raw = os.environ.get('XDG_RUNTIME_DIR')
+    if not raw or not os.path.isabs(raw):
+        return None
+    folder = Path(raw)
+    try:
+        st = os.lstat(folder)
+    except OSError:
+        return None
+    mine = stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and st.st_mode & 0o077 == 0
+    return folder if mine else None
+
+
 def node_socket_path(data_dir: Path) -> Path:
     """Where the raven-node of `data_dir` listens, as raven_core::ipc's
     `default_socket_path` decides it: `<data dir>/raven-node.sock` (the data
     dir with symlinks resolved), or, when that does not fit `sun_path`, the
-    short per-user `/tmp/raven-<euid>/raven-<hash>.sock`. A long run root
+    short per-user `raven-<hash>.sock` in `per_user_socket_dir()`, else in
+    `/tmp/raven-<euid>` (security review 2026-11, IPC-2). A long run root
     used to send every IPC request of a long scenario name (s60's
     `s60_offline_three_days_sender_online`, s105) to a socket nobody
     listens on, so its helpers (`waiting_deadlines`, `carry_rows`, ...) read
@@ -1409,8 +1435,11 @@ def node_socket_path(data_dir: Path) -> Path:
     if len(os.fsencode(str(direct))) <= UNIX_SOCKET_PATH_MAX:
         return direct
     digest = hashlib.sha256(b'raven/ipc-socket/v1\0' + os.fsencode(base)).hexdigest()[:16]
-    short = Path(f'/tmp/raven-{os.geteuid()}') / f'raven-{digest}.sock'
-    return short if len(os.fsencode(str(short))) <= UNIX_SOCKET_PATH_MAX else direct
+    for folder in (per_user_socket_dir(), Path(f'/tmp/raven-{os.geteuid()}')):
+        short = folder / f'raven-{digest}.sock' if folder else None
+        if short and len(os.fsencode(str(short))) <= UNIX_SOCKET_PATH_MAX:
+            return short
+    return direct
 
 
 def socket_path_self_test() -> bool:
@@ -1428,8 +1457,9 @@ def socket_path_self_test() -> bool:
         got_short, got_long, got_link = (node_socket_path(d) for d in (short, long_dir, link))
         fits = all(len(os.fsencode(str(p))) <= UNIX_SOCKET_PATH_MAX
                    for p in (got_short, got_long))
+        own = per_user_socket_dir() or Path(f'/tmp/raven-{os.geteuid()}')
         ok = (got_short == Path(os.path.realpath(short)) / 'raven-node.sock'
-              and got_long.parent == Path(f'/tmp/raven-{os.geteuid()}')
+              and got_long.parent == own
               and re.fullmatch(r'raven-[0-9a-f]{16}\.sock', got_long.name) is not None
               and got_link == got_long and fits)
     print(f"{'PASS' if ok else 'FAIL'}  socket_path  short={got_short.name} long={got_long}")

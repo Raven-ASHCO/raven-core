@@ -743,9 +743,28 @@ fn a_copy_of_the_sealed_data_dir_taken_before_erase_cannot_be_opened_after() {
     assert!(!key_path(&dd).exists());
 }
 
+/// Review IPC-2: the random part of the Windows pipe name, and the temp copy
+/// of an interrupted first write of it, are Raven's and go with the profile.
+#[test]
+fn the_pipe_token_goes_with_the_profile() {
+    let _windows = ForTests::on();
+    let dir = sealed_profile();
+    let dd = canonical(&dir);
+    for name in [
+        "raven-node.pipe-token",
+        ".raven-node.pipe-token.tmp.0123456789abcdef",
+    ] {
+        std::fs::write(dd.join(name), b"0123456789abcdef0123456789abcdef").unwrap();
+    }
+    let report = erase(&dd);
+    assert!(report.finished, "{:?}", report.failures);
+    assert!(report.left_unknown.is_empty(), "{:?}", report.left_unknown);
+    assert!(report.folder_removed && !dd.exists());
+}
+
 /// The long-path fallback: only this profile's `/tmp/raven-<euid>/raven-
 /// <hash>.sock` and its lock go; another profile's stay, and so does the
-/// shared folder.
+/// shared folder (since review IPC-2 the per user one on macOS).
 #[cfg(unix)]
 #[test]
 fn only_this_profiles_socket_files_go() {

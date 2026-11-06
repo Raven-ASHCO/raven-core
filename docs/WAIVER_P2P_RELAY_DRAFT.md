@@ -229,10 +229,12 @@ Internet direct draft, now for p2p. In addition:
    (confirmed as an external address, so Identify, hole punching and relay
    reservations name it, and shown as `mapped`) only at an IPv4 address a
    verified contact or one of the node's relays saw it at (the auto-reach
-   sighting, RAVEN_PORT_MAPPING_V1 §9.1); without one nothing is used. The
-   answer's source, its LOCATION host and the size of the description it
-   points to are still unchecked (STRANGER-UPNP-1, open: igd-next offers no
-   hook).
+   sighting, RAVEN_PORT_MAPPING_V1 §9.1); without one nothing is used. Since
+   2026-11-06 (STRANGER-UPNP-1) the search takes an answer only from the
+   IPv4 default router with its LOCATION on that address, and every response
+   is bounded in size and nesting before it is parsed (the Raven patch of
+   igd-next in `node/third_party`); a host that forges the address of the
+   router still answers it.
 7. **DCUtR limits.** Hole punching fails on symmetric NAT and CGNAT-to-CGNAT
    pairs (the published libp2p success rate of roughly 70 % is unverified,
    design §3.6). Such pairs stay relay-only, so the relay sees the metadata of

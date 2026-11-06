@@ -268,6 +268,7 @@ fn begin<O: Backend>(
         table: Mutex::new(Table::default()),
         child: Mutex::new(None),
         stopped: AtomicBool::new(false),
+        broken: Mutex::new(None),
         overflows: AtomicU64::new(0),
         generation: id,
     });

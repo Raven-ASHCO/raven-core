@@ -231,6 +231,18 @@ notices. No notice lifts a freeze (section 7): a release does. Advisories
 travel on their own too: a person imports `advisories/<n>.rad1` with the log
 snapshot, and friends pass them on.
 
+**Never sign a second body for a serial.** Once any key has signed an
+advisory for serial `n`, a correction is serial `n + 1` (the whole list
+again), never another draft for `n`: two signed bodies for one serial, or
+an `n + 1` that names another `n`, are the equivocation that freezes every
+node a log listing both reaches (RAVEN_SECURITY_ADVISORY_V1 §7). Raven
+freezes only on a body a checked log lists, so a draft nobody logged is
+refused as unlogged (security review 2026-11, UPD-3), but destroy every
+draft and every detached signature you did not publish all the same: a
+log entry made by mistake cannot be taken back. The release tool does not
+yet refuse a second draft for a serial that already has signatures, so
+check the serial against `release-log/advisories/` before signing.
+
 ## 7. Rotation and loss
 
 - **Planned rotation** (a new key holder, an old medium): make the new key
@@ -240,6 +252,13 @@ snapshot, and friends pass them on.
   (`log append ... advisory-8.rad1 --next-key-set new-keys.keyset`). Raven
   accepts artifacts under the new set from then on; the next release also
   compiles it in (section 4).
+- **The new set keeps the bar.** Its threshold is at least 2 and not below
+  the current set's, and it holds no published test key. Raven refuses any
+  other rotation as forged and stays on the current set
+  (RAVEN_SECURITY_ADVISORY_V1 §6.2; security review 2026-11, UPD-1),
+  whatever the tool let through: a debug build of `raven-release` takes a
+  set with a test key, and no build of it refuses a threshold of 1 yet, so
+  use a release build and check the set by hand before anyone signs.
 - **One key lost, stolen or exposed:** rotate at once with the other two to
   a new set (the two that remain and a new third key, or three new keys).
   An exposed key counts as stolen.

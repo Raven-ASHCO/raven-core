@@ -28,6 +28,7 @@ NEGATIVE = (
     "rad1_equivocation_pair_001.json",
     "rad1_one_sig_001.json",
     "rad1_rollback_pair_001.json",
+    "rad1_weak_rotation_001.json",
     "rad1_wrong_keyset_001.json",
 )
 
@@ -203,6 +204,30 @@ def test_pairs(name, result):
     assert new.serial == v["expected"]["new_serial"]
     assert new.digest().hex() == v["expected"]["new_digest_hex"]
     assert ad.succession((stored.serial, stored.digest()), new) == v["expected"]["succession"] == result
+
+
+def test_weak_rotation():
+    # §6.2: the next key set keeps the bar of the set that signs it.
+    v = load("negative/rad1_weak_rotation_001.json")
+    assert list(ad.TEST_PUBLIC_KEYS) == [ad.public_key(bytes([b] * 32)) for b in (0x11, 0x22, 0x33)]
+    cases, results = v["inputs"]["cases"], v["expected"]["results"]
+    assert [c["name"] for c in cases] == [r["name"] for r in results]
+    seen = set()
+    for c, r in zip(cases, results):
+        ks = key_set(c["key_set"])
+        a = ad.decode(bytes.fromhex(c["advisory_hex"]))
+        a.verify(ks)
+        assert r["verify"] == "OK"
+        named = [ad.KeySet.decode(e.arg) for e in a.entries if e.kind == ad.KEY_SET]
+        assert [n.encode().hex() for n in named] == [r["next_key_set_hex"]]
+        try:
+            ad.check_rotation(ks, named[0], c["debug_build"])
+            got = "OK"
+        except ad.RotationError as e:
+            got = e.code
+        assert got == r["rotation"], c["name"]
+        seen.add(got)
+    assert seen == {"OK", "WEAK_THRESHOLD", "LOWERED_THRESHOLD", "TEST_KEY"}
 
 
 def test_succession_cases():

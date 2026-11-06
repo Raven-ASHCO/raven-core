@@ -128,6 +128,8 @@ while `available` is false.
   privacy prompt appears on first listen; the setup screen explains it before it appears.
 - **Windows:** WinUI 3 (Windows App SDK) app in C#, Fluent controls, notification-area icon, MSIX or
   installer. raven-node runs as the user's background process; the named pipe is per user.
+  Since security review 2026-11 (IPC-2) it is per profile too: its name ends in a random token the
+  profile keeps in `raven-node.pipe-token`.
 - **Linux:** GTK 4 app in Rust (gtk4-rs), follows the system light/dark scheme, packaged as
   AppImage/deb/Flatpak. Tray support varies by desktop; when missing, Raven keeps running in the
   background and says so on quit.

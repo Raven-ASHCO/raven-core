@@ -1,6 +1,7 @@
 """RAVEN Security Advisory V1 (RAVEN_SECURITY_ADVISORY_V1.md, draft): release
 key sets and signature blocks (§2), RAD1 advisories (§3, §5), their
-verification (§6) and succession (§7).
+verification (§6, the next key set's rule of §6.2 included) and succession
+(§7).
 
 An independent reference for the Rust code (``raven_core::release_keys`` and
 ``raven_core::advisory``) and the vectors in ``shared-vectors/rvn1/update``
@@ -79,6 +80,14 @@ class Rad1Error(ValueError):
 
     def __init__(self, code: str):
         super().__init__(f"RAD1 {code}")
+        self.code = code
+
+
+class RotationError(ValueError):
+    """A refused next key set of a ``KEY_SET`` entry (§6.2)."""
+
+    def __init__(self, code: str):
+        super().__init__(f"ROTATION {code}")
         self.code = code
 
 
@@ -369,3 +378,30 @@ def succession(stored: Optional[Tuple[int, bytes]], new: Advisory) -> str:
     if new.serial == serial + 1:
         return "NEXT" if new.prev_digest == digest else "EQUIVOCATION"
     return "GAP"
+
+
+# §2.4: the published test keys (the Ed25519 keys of the seeds 0x11, 0x22 and
+# 0x33 x 32), which §6.2 refuses in a next key set.
+TEST_PUBLIC_KEYS = (
+    bytes.fromhex("d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"),
+    bytes.fromhex("a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0"),
+    bytes.fromhex("17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce"),
+)
+
+
+def check_rotation(current: KeySet, nxt: KeySet, debug_build: bool) -> None:
+    """§6.2: the next key set a ``KEY_SET`` entry names keeps the bar of the
+    set that signs it, in this order: a threshold of at least 2, not below
+    the current set's, and no published test key unless ``debug_build`` and
+    the current set holds one itself (a lab key file). Raises
+    :class:`RotationError`."""
+
+    def holds_test_key(ks: KeySet) -> bool:
+        return any(k in TEST_PUBLIC_KEYS for k in ks.keys)
+
+    if nxt.threshold < 2:
+        raise RotationError("WEAK_THRESHOLD")
+    if nxt.threshold < current.threshold:
+        raise RotationError("LOWERED_THRESHOLD")
+    if holds_test_key(nxt) and not (debug_build and holds_test_key(current)):
+        raise RotationError("TEST_KEY")

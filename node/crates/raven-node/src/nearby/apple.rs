@@ -25,7 +25,10 @@
 //! (an absolute path to the helper or to its .app; nothing else is tried),
 //! else `RavenNearby.app` next to the raven-node executable, else
 //! `~/Library/Application Support/Raven/RavenNearby.app`, where the macOS
-//! installer puts it. Tests never look anywhere.
+//! installer puts it. Tests never look anywhere. It is started only when
+//! `codesign --verify` finds its signature intact and naming
+//! `org.raven.nearby` ([`signed_as_helper`]), with an empty environment and
+//! only its stdin, stdout and stderr open (security review 2026-11, BT-03).
 //!
 //! **Start.** The helper's first line is `hello` with [`proto::VERSION`]
 //! within [`HELLO_WAIT`], or why it cannot run (`unauthorized` without the
@@ -59,6 +62,15 @@
 //! fails or a helper that ends that way doubles the wait before the next
 //! start ([`BACKOFF_FIRST`] up to [`BACKOFF_MAX`]: no crash report every
 //! poll); a radio that came up resets it.
+//!
+//! **What the helper may claim** (security review 2026-11, BT-04): at most
+//! [`MAX_PERIPHERALS`] connections from centrals at once, its own cap; one
+//! more is a protocol break. Lines to it wait in a queue of [`OUT_QUEUE`];
+//! a full queue is a helper that stopped reading. Either way raven-node
+//! sends it nothing more, kills it and ends the radio as when it ends on
+//! its own, with the back-off. A connection raven-node told it to end, which
+//! it does not confirm within [`UNCONFIRMED_WAIT`], ends here with its next
+//! line.
 
 // Only the macOS build with `nearby-radio` uses all of this; the tests
 // build it on every platform.
@@ -137,6 +149,40 @@ pub(crate) const NO_HELPER: &str =
     "the nearby helper (RavenNearby.app) is not installed: run the macOS installer";
 const HELPER_GONE: &str = "the nearby helper is gone";
 const WIRE_MASK: u64 = proto::CONN_LIMIT - 1;
+/// Connections centrals may hold open to this side at once: the helper's
+/// own cap (its machine's `MAX_CONNS`). One more is a protocol break
+/// (security review 2026-11, BT-04).
+pub(crate) const MAX_PERIPHERALS: usize = 16;
+/// Lines to the helper that may wait for its stdin: more than raven-node
+/// ever has on their way (a full send window on as many connections as
+/// both roles allow, and their commands). A full queue is a helper that
+/// stopped reading (BT-04).
+pub(crate) const OUT_QUEUE: usize = 1024;
+/// How long a connection raven-node told the helper to end may stay
+/// unconfirmed before it ends here (BT-04).
+pub(crate) const UNCONFIRMED_WAIT: Duration = Duration::from_secs(5);
+/// Why the radio stopped: the helper said a central connected past
+/// [`MAX_PERIPHERALS`].
+pub(crate) const BROKE_PROTOCOL: &str =
+    "the nearby helper broke the protocol: more connections than it may hold";
+/// Why the radio stopped: [`OUT_QUEUE`] lines waited for the helper.
+pub(crate) const STOPPED_READING: &str = "the nearby helper stopped reading its commands";
+/// The code signing identifier the installers sign [`BUNDLE`] with.
+pub(crate) const IDENTIFIER: &str = "org.raven.nearby";
+/// Why the radio did not start: the helper found is not signed as
+/// [`IDENTIFIER`], or its signature does not verify.
+pub(crate) const NOT_SIGNED: &str =
+    "the nearby helper is not signed as RavenNearby (org.raven.nearby): install it again";
+
+// The helper's own cap is the one raven-node holds it to.
+#[cfg(all(
+    feature = "nearby-radio",
+    any(target_os = "ios", all(test, target_os = "macos"))
+))]
+const _: () = assert!(machine::MAX_CONNS == MAX_PERIPHERALS);
+// No burst of raven-node's fills the queue: a full send window and two
+// commands on as many connections as both roles allow.
+const _: () = assert!(OUT_QUEUE >= 2 * MAX_PERIPHERALS * (SEND_WINDOW + 2));
 
 /// The radio's capabilities (see the module doc).
 pub(crate) fn caps() -> RadioCaps {
@@ -204,6 +250,32 @@ pub(crate) fn find_helper(
     .find(|exe| exists(exe))
 }
 
+/// Whether the helper at `exe` may be started: `codesign --verify --strict`
+/// finds the signature of its bundle (of `exe` itself outside one) intact
+/// and naming [`IDENTIFIER`] (security review 2026-11, BT-03). Never on a
+/// system without codesign.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn signed_as_helper(exe: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let inside = exe
+        .parent()
+        .filter(|d| d.ends_with("Contents/MacOS"))
+        .and_then(|d| d.parent()?.parent())
+        .filter(|app| app.extension().is_some_and(|e| e == "app"));
+    Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R"])
+        .arg(format!("=identifier \"{IDENTIFIER}\""))
+        .arg(inside.unwrap_or(exe))
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 // ── Back-off ────────────────────────────────────────────────────────────────
 
 /// The wait between helper starts after failures (see the module doc).
@@ -258,7 +330,13 @@ pub(crate) fn open(tx: mpsc::Sender<RadioEvent>) -> Result<HelperRadio, RadioSta
         note(&state);
         return Err(state);
     };
-    let opened = open_at(&exe, tx, Some(Arc::clone(&backoff)), HELLO_WAIT);
+    // Its signature before each start (BT-03); a refusal waits as a failed
+    // start does.
+    let opened = if signed_as_helper(&exe) {
+        open_at(&exe, tx, Some(Arc::clone(&backoff)), HELLO_WAIT)
+    } else {
+        Err(RadioState::Unsupported(NOT_SIGNED.into()))
+    };
     if let Err(state) = &opened {
         note(state);
         lock(&backoff).failed(Instant::now(), state.clone());
@@ -312,6 +390,7 @@ pub(crate) fn open_at(
     }
     let mut child = Command::new(exe)
         .current_dir("/")
+        .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -416,7 +495,9 @@ impl Proc {
 
 /// Starting the helper as its own responsible process on macOS
 /// (`responsibility_spawnattrs_setdisclaim`, in libSystem since macOS 10.14),
-/// with its stdin and stdout on pipes and stderr shared with raven-node.
+/// with its stdin and stdout on pipes and stderr shared with raven-node, an
+/// empty environment and no other descriptor (security review 2026-11,
+/// BT-03).
 #[cfg(target_os = "macos")]
 mod disclaim {
     use std::ffi::CString;
@@ -434,6 +515,11 @@ mod disclaim {
         fn posix_spawn_file_actions_addchdir_np(
             actions: *mut libc::posix_spawn_file_actions_t,
             path: *const libc::c_char,
+        ) -> libc::c_int;
+        // macOS 10.7 and later: keep `fd` open under POSIX_SPAWN_CLOEXEC_DEFAULT.
+        fn posix_spawn_file_actions_addinherit_np(
+            actions: *mut libc::posix_spawn_file_actions_t,
+            fd: libc::c_int,
         ) -> libc::c_int;
     }
 
@@ -475,6 +561,9 @@ mod disclaim {
         };
         let argv: [*mut libc::c_char; 2] =
             [path.as_ptr() as *mut libc::c_char, std::ptr::null_mut()];
+        // No variable of raven-node's (no DYLD_*): the helper reads none,
+        // and the system finds the home and temporary folders without one.
+        let envp: [*mut libc::c_char; 1] = [std::ptr::null_mut()];
         let mut pid: libc::pid_t = 0;
         // SAFETY: the file actions and attributes are initialised before use and
         // destroyed after posix_spawn; every pointer passed lives across the call.
@@ -485,16 +574,28 @@ mod disclaim {
             libc::posix_spawnattr_init(&mut attrs);
             libc::posix_spawn_file_actions_adddup2(&mut actions, input[0], 0);
             libc::posix_spawn_file_actions_adddup2(&mut actions, output[1], 1);
+            // Every other descriptor of raven-node's is closed in the
+            // helper, whatever its close-on-exec; its stderr stays
+            // raven-node's.
+            let mut rc = posix_spawn_file_actions_addinherit_np(&mut actions, 2);
+            if rc == 0 {
+                rc = libc::posix_spawnattr_setflags(
+                    &mut attrs,
+                    libc::POSIX_SPAWN_CLOEXEC_DEFAULT as libc::c_short,
+                );
+            }
             posix_spawn_file_actions_addchdir_np(&mut actions, root.as_ptr());
             responsibility_spawnattrs_setdisclaim(&mut attrs, 1);
-            let rc = libc::posix_spawn(
-                &mut pid,
-                path.as_ptr(),
-                &actions,
-                &attrs,
-                argv.as_ptr(),
-                *libc::_NSGetEnviron(),
-            );
+            if rc == 0 {
+                rc = libc::posix_spawn(
+                    &mut pid,
+                    path.as_ptr(),
+                    &actions,
+                    &attrs,
+                    argv.as_ptr(),
+                    envp.as_ptr(),
+                );
+            }
             libc::posix_spawn_file_actions_destroy(&mut actions);
             libc::posix_spawnattr_destroy(&mut attrs);
             rc
@@ -528,12 +629,13 @@ pub(crate) fn start(
     hello_wait: Duration,
 ) -> Result<HelperRadio, RadioState> {
     let generation = next_generation();
-    let (out, out_rx) = std_mpsc::channel::<String>();
+    let (out, out_rx) = std_mpsc::sync_channel::<String>(OUT_QUEUE);
     let link = Arc::new(Link {
         out: Mutex::new(Some(Outlet::Lines(out))),
         table: Mutex::new(Table::default()),
         child: Mutex::new(child),
         stopped: AtomicBool::new(false),
+        broken: Mutex::new(None),
         overflows: AtomicU64::new(0),
         generation,
     });
@@ -588,8 +690,9 @@ pub(crate) struct HelperRadio {
 
 /// Where the radio's commands go.
 enum Outlet {
-    /// Lines to the writer thread, and so to the helper's stdin (macOS).
-    Lines(std_mpsc::Sender<String>),
+    /// Lines to the writer thread, and so to the helper's stdin (macOS); at
+    /// most [`OUT_QUEUE`] wait.
+    Lines(std_mpsc::SyncSender<String>),
     /// The same values, posted to the in-process radio's queue (iOS).
     #[cfg(all(
         feature = "nearby-radio",
@@ -608,6 +711,9 @@ struct Link {
     child: Mutex<Option<Proc>>,
     /// raven-node stopped the helper: its end is not news.
     stopped: AtomicBool,
+    /// Why raven-node broke off with the helper ([`Link::break_off`]): its
+    /// end then says this.
+    broken: Mutex<Option<&'static str>>,
     overflows: AtomicU64,
     generation: u64,
 }
@@ -619,30 +725,83 @@ struct Table {
     conns: HashMap<ConnId, Window>,
 }
 
+impl Table {
+    /// The live connections centrals opened to this side (even numbers).
+    fn peripherals(&self) -> usize {
+        self.conns
+            .keys()
+            .filter(|c| (**c & WIRE_MASK).is_multiple_of(2))
+            .count()
+    }
+
+    /// The connections whose end the helper did not confirm within
+    /// [`UNCONFIRMED_WAIT`] before `now`, out of the table: each is owed
+    /// its `Disconnected`.
+    fn expire(&mut self, now: Instant) -> Vec<ConnId> {
+        let gone: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, w)| {
+                w.ending
+                    .is_some_and(|at| now.saturating_duration_since(at) >= UNCONFIRMED_WAIT)
+            })
+            .map(|(&c, _)| c)
+            .collect();
+        for c in &gone {
+            self.conns.remove(c);
+        }
+        gone
+    }
+}
+
 #[derive(Default)]
 struct Window {
     /// 0 until `connected`.
     max_tx: usize,
     in_flight: usize,
     want: bool,
+    /// When raven-node told the helper to end it: its `disconnected` is due.
+    ending: Option<Instant>,
 }
 
 impl Link {
     fn put(&self, m: &ToHelper) -> Result<(), String> {
-        match &*lock(&self.out) {
-            Some(Outlet::Lines(out)) => out
-                .send(proto::line(m))
-                .map_err(|_| HELPER_GONE.to_string()),
+        let full = match &*lock(&self.out) {
+            Some(Outlet::Lines(out)) => match out.try_send(proto::line(m)) {
+                Ok(()) => return Ok(()),
+                Err(std_mpsc::TrySendError::Full(_)) => true,
+                Err(std_mpsc::TrySendError::Disconnected(_)) => false,
+            },
             #[cfg(all(
                 feature = "nearby-radio",
                 any(target_os = "ios", all(test, target_os = "macos"))
             ))]
             Some(Outlet::Queue(inlet)) => {
                 inlet.put(m.clone());
-                Ok(())
+                return Ok(());
             }
-            None => Err(HELPER_GONE.into()),
+            None => false,
+        };
+        if full {
+            self.break_off(STOPPED_READING);
         }
+        Err(HELPER_GONE.into())
+    }
+
+    /// Break off with the helper (it broke the protocol, or stopped reading
+    /// its commands): nothing more goes to it, and it is killed now. Its
+    /// reader then ends the radio as when the helper ends on its own,
+    /// saying `why`, and the back-off grows.
+    fn break_off(&self, why: &'static str) {
+        lock(&self.broken).get_or_insert(why);
+        lock(&self.out).take();
+        if let Some(c) = lock(&self.child).as_mut() {
+            c.kill();
+        }
+    }
+
+    fn broken(&self) -> Option<&'static str> {
+        *lock(&self.broken)
     }
 
     /// The in-process radio is behind this link (its commands are values
@@ -671,7 +830,16 @@ impl Link {
     /// Tell the helper to end `conn` (it lost an event, or broke the
     /// protocol); its `disconnected` follows.
     fn lose(&self, conn: ConnId) {
+        self.lose_at(conn, Instant::now());
+    }
+
+    /// [`Link::lose`] at `now`: the helper is to confirm by
+    /// [`UNCONFIRMED_WAIT`] later.
+    fn lose_at(&self, conn: ConnId, now: Instant) {
         if let Some(wire) = self.wire_of(conn) {
+            if let Some(w) = lock(&self.table).conns.get_mut(&conn) {
+                w.ending.get_or_insert(now);
+            }
             let _ = self.put(&ToHelper::Disconnect { conn: wire });
         }
     }
@@ -817,14 +985,22 @@ fn read_helper(
             on_line(link, events, m, backoff.as_deref());
             link.overflows.store(events.dropped(), Ordering::Relaxed);
         }
+        if link.broken().is_some() {
+            break;
+        }
     }
-    if link.stopped.load(Ordering::SeqCst) {
+    let broken = link.broken();
+    if link.stopped.load(Ordering::SeqCst) && broken.is_none() {
         return;
     }
-    // The helper ended on its own: every connection ends, the radio says
-    // why, and `events` (the queue's only sender) goes, which ends the
-    // engine.
-    let why = ended_state(link.reap(REAP_WAIT));
+    // The helper ended on its own, or raven-node broke off with it: every
+    // connection ends, the radio says why, and `events` (the queue's only
+    // sender) goes, which ends the engine.
+    let status = link.reap(REAP_WAIT);
+    let why = match broken {
+        Some(why) => RadioState::Unsupported(why.into()),
+        None => ended_state(status),
+    };
     lock(&link.out).take();
     let conns: Vec<ConnId> = lock(&link.table).conns.drain().map(|(c, _)| c).collect();
     for conn in conns {
@@ -839,9 +1015,25 @@ fn read_helper(
 
 /// One line of the running helper.
 fn on_line(link: &Link, events: &EventTx, m: FromHelper, backoff: Option<&Mutex<Backoff>>) {
+    on_line_at(link, events, m, backoff, Instant::now());
+}
+
+/// [`on_line`] at `now`.
+fn on_line_at(
+    link: &Link,
+    events: &EventTx,
+    m: FromHelper,
+    backoff: Option<&Mutex<Backoff>>,
+    now: Instant,
+) {
+    // Ends raven-node asked for that the helper did not confirm in time.
+    let expired = lock(&link.table).expire(now);
+    for conn in expired {
+        let _ = events.emit(RadioEvent::Disconnected { conn });
+    }
     let lost = |r: Result<(), Option<ConnId>>| {
         if let Err(Some(c)) = r {
-            link.lose(c);
+            link.lose_at(c, now);
         }
     };
     match m {
@@ -884,10 +1076,16 @@ fn on_line(link: &Link, events: &EventTx, m: FromHelper, backoff: Option<&Mutex<
             };
             let sizes = proto::MIN_TX..=proto::MAX_FRAME;
             let service = proto::uuid_from(&service);
-            let fits = {
+            let (fits, over) = {
                 let mut t = lock(&link.table);
                 let known = t.conns.get(&conn).map(|w| w.max_tx);
-                let fits = service.is_some()
+                // A central past the helper's own cap.
+                let over = role == Side::Peripheral
+                    && wire.is_multiple_of(2)
+                    && known.is_none()
+                    && t.peripherals() >= MAX_PERIPHERALS;
+                let fits = !over
+                    && service.is_some()
                     && sizes.contains(&max_tx)
                     && sizes.contains(&max_rx)
                     && match role {
@@ -898,10 +1096,16 @@ fn on_line(link: &Link, events: &EventTx, m: FromHelper, backoff: Option<&Mutex<
                 if fits {
                     t.conns.entry(conn).or_default().max_tx = max_tx;
                 }
-                fits
+                (fits, over)
             };
+            // In process the machine is this program's own: its line is
+            // refused like any other that does not fit.
+            if over && !link.in_process() {
+                link.break_off(BROKE_PROTOCOL);
+                return;
+            }
             let Some(service) = service.filter(|_| fits) else {
-                link.lose(conn);
+                link.lose_at(conn, now);
                 return;
             };
             let role = match role {
@@ -929,7 +1133,7 @@ fn on_line(link: &Link, events: &EventTx, m: FromHelper, backoff: Option<&Mutex<
             }
             match proto::frame_from(&b64) {
                 Some(bytes) => lost(events.emit(RadioEvent::Frame { conn, bytes })),
-                None => link.lose(conn),
+                None => link.lose_at(conn, now),
             }
         }
         FromHelper::Sent { conn: wire } => {

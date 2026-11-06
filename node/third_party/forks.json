@@ -29,6 +29,33 @@
       }
     },
     {
+      "path": "node/third_party/igd-next-0.17.1-raven",
+      "lock_name": "igd-next",
+      "lock_version": "0.17.1",
+      "upstream": {
+        "name": "igd-next",
+        "version": "0.17.1",
+        "crate_sha256": "de7238d487a9aff61f81b5ab41c0a841532a115a398b5fa92a2fadd0885e2581"
+      },
+      "why": "STRANGER-UPNP-1: the UPnP-IGD gateway search takes the answer of the default router only, and every response is bounded in size and nesting (RAVEN_DELTA.md)",
+      "delta": {
+        "modified": {
+          "Cargo.toml": "3f1d2ff7a5e01c7cf58428a72373b0e4ef80f6e513d94b2828c2b4fdc002f2eb",
+          "src/aio/tokio.rs": "ed1d6d41a7687c4d14f423bb2b8c8a1beb4c52094c754b4bd1483a648b80b766",
+          "src/common/options.rs": "f1ffb25b531ff6a311d0af6f8530fa8fa9f539b4b3190b817c07427d2a79f42a",
+          "src/common/parsing.rs": "8240796aa48c35b2a104c37849e83542f0521eb4937cd0e41fffe19a1ea811b1",
+          "src/lib.rs": "724421838a27e4702f907b29c9dc17717a43a73f4d8e6b45203844ae7a8ff9fd"
+        },
+        "added": {
+          "RAVEN_DELTA.md": "169048bfa8294918de4510447252480a8fd21a4682ca8174b6ae832aa99b5f4f",
+          "src/raven_delta.rs": "03496e6e056d5a90dc46dd1b03ff7acf2fd42c0250879e4534fbb3e91ac857cc"
+        },
+        "removed": [
+          "Cargo.lock"
+        ]
+      }
+    },
+    {
       "path": "node/third_party/saturating-time-0.5.0-raven",
       "lock_name": "saturating-time",
       "lock_version": "0.5.0",

@@ -101,8 +101,12 @@ What the app shows about friends who carry mail comes from API.md's fields:
 a message of yours a friend holds has `path_kind` `friend` (or `handoff`)
 and `via_name`, that friend's name ("Held by Max"; the same on its `receipt`
 and `state` events; the message's state is `sent` while the friend holds
-it); a group message of yours has `held_by` on the receipt of a member who
-is away; a member's group message has `path_kind`; `NetworkStatus.carry.
+it), with `via_friend`, false unless that friend is one you verified and
+have not blocked (the app then marks the name "not your friend", and reads
+a missing `via_friend` as false; the same pair on a group message names the
+member that passed it on); a group message of yours has `held_by` on the
+receipt of a member who is away; a member's group message has `path_kind`;
+`NetworkStatus.carry.
 friends_carry_mine.names` names the friends a mail check asks ("Asking Max
 and Neighbour"); and `NetworkStatus.tor.percent` is Tor's start percentage
 (release builds too).

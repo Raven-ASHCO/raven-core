@@ -6,13 +6,16 @@
 //! world-writable). Clients verify the server process owner before sending.
 //! Framing and request handling are shared with the Unix UDS server
 //! (including `SealUnderSession`; unsigned callers never reach handle_req).
+//!
+//! Since review IPC-2 the name also carries the profile's random token
+//! (`raven-node.pipe-token`, owner only, held open while the node serves),
+//! so another account cannot know the name to take it first.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(test)]
-use raven_core::ipc::WINDOWS_NAMED_PIPE;
-use raven_core::ipc::{default_pipe_name, windows_user_pipe_name};
+use raven_core::ipc::{default_pipe_name, WINDOWS_NAMED_PIPE};
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::Semaphore;
 
@@ -294,14 +297,18 @@ fn bind_pipe_instance(name: &str, first: bool) -> Result<NamedPipeServer, String
     Ok(server)
 }
 
-/// Per-user pipe name for this process (fail closed if the SID is unreadable).
-fn user_pipe_name() -> Result<&'static str, String> {
-    windows_user_pipe_name().ok_or_else(|| {
-        format!(
-            "cannot derive per-user pipe name under {}; fail closed — not binding pipe",
-            default_pipe_name()
-        )
-    })
+/// This profile's pipe name, with its token held for as long as the node
+/// serves (review IPC-2): made on a first start, then read again under the
+/// hold, so nobody can replace it while this node runs. Fail closed without
+/// one (no SID, or no token).
+fn profile_pipe_name(data_dir: &std::path::Path) -> Result<(String, std::fs::File), String> {
+    let fail = |e: String| {
+        format!("cannot name the pipe of this profile ({e}); fail closed, not binding pipe")
+    };
+    raven_core::ipc::windows_pipe_name(data_dir).map_err(fail)?;
+    let held = raven_core::ipc::hold_pipe_token(data_dir).map_err(fail)?;
+    let name = raven_core::ipc::windows_pipe_name(data_dir).map_err(fail)?;
+    Ok((name, held))
 }
 
 /// Next listening instance. Transient failures (handle/memory pressure) are
@@ -326,13 +333,13 @@ pub(crate) async fn run_named_pipe_server(
     forward_path: Option<PathBuf>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-    let name = user_pipe_name()?;
+    let (name, _token) = profile_pipe_name(&data_dir)?;
     // Before the pipe is published: a queue that cannot open must not leave an
     // endpoint that answers and then loses envelopes.
     let forward = open_forward_queue(forward_path)?;
     // First instance: FILE_FLAG_FIRST_PIPE_INSTANCE — a squatted (or already
     // served) name is a hard, fail-closed error.
-    let mut server = bind_pipe_instance(name, true)?;
+    let mut server = bind_pipe_instance(&name, true)?;
     eprintln!("raven-node ipc: listening {name}");
 
     let data_dir = Arc::new(data_dir);
@@ -349,7 +356,7 @@ pub(crate) async fn run_named_pipe_server(
         match server.connect().await {
             Ok(()) => {
                 let connected = server;
-                server = bind_next_instance(name).await;
+                server = bind_next_instance(&name).await;
                 let dd = data_dir.clone();
                 let fq = forward.clone();
                 tokio::spawn(async move {
@@ -361,7 +368,7 @@ pub(crate) async fn run_named_pipe_server(
                 // A client that vanished before ConnectNamedPipe completed must
                 // not take the daemon down.
                 eprintln!("raven-node ipc: named pipe connect: {e}");
-                let replacement = bind_next_instance(name).await;
+                let replacement = bind_next_instance(&name).await;
                 server = replacement;
                 drop(permit);
             }
@@ -377,13 +384,17 @@ mod tests {
     fn pipe_name_is_per_user() {
         assert_eq!(WINDOWS_NAMED_PIPE, r"\\.\pipe\raven-node");
         assert_eq!(default_pipe_name(), WINDOWS_NAMED_PIPE);
-        let name = user_pipe_name().expect("per-user pipe name");
+        let dir = tempfile::tempdir().unwrap();
+        let (name, _held) = profile_pipe_name(dir.path()).expect("per-user pipe name");
         assert!(name.starts_with(r"\\.\pipe\raven-node-S-1-"), "{name}");
         let sids = UserOnlyPipeSecurity::new()
             .expect("current-user DACL")
             .allowed_sids()
             .expect("walk DACL");
-        assert_eq!(name, format!("{WINDOWS_NAMED_PIPE}-{}", sids[0]));
+        // The profile's token follows the SID (review IPC-2).
+        let token = std::fs::read_to_string(dir.path().join(raven_core::ipc::PIPE_TOKEN_FILE_NAME))
+            .expect("the token the name was made with");
+        assert_eq!(name, format!("{WINDOWS_NAMED_PIPE}-{}-{token}", sids[0]));
     }
 
     #[test]
@@ -405,9 +416,10 @@ mod tests {
         // bind_pipe_instance drops the SD before return — same Send boundary as
         // the accept loop (security descriptor must not live across .await).
         // Test-only unique name so a running daemon does not collide.
+        let dir = tempfile::tempdir().unwrap();
         let name = format!(
             "{}-test-{}",
-            user_pipe_name().expect("per-user pipe name"),
+            raven_core::ipc::windows_pipe_name(dir.path()).expect("per-user pipe name"),
             std::process::id()
         );
         let pipe = bind_pipe_instance(&name, true).expect("CreateNamedPipeW with user DACL");

@@ -319,6 +319,80 @@ Security and speed report 2026-11-05 §7 (speed design M2 and M10).
   still going on at once (not within 6 minutes of a circuit's last use). Tor
   on Wi-Fi only holds. §1 and §12 say so.
 
+## Freeze record changes (2026-11-06, security review 2026-11: rotations that keep the bar, unlogged second bodies, offers per friend)
+
+Behaviour changes of the update state and the download rows, not of the
+wire format: no RAD1, RTL1, RRB1 or RUP1 layout, entry kind, version byte or
+caps bit changed, no existing vector changed (one negative vector is new),
+and every gate stays as it was (the update gates stay off). Security and
+speed report 2026-11-05 §2 and §6 (UPD-1, UPD-2, UPD-3).
+
+- **Security Advisory V1 (draft).** [`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md)
+  §6.1, §6.2, §10 and §11: a `KEY_SET` entry that names another key set is
+  forged (`SEC_ADVISORY_FORGED`: nothing rotates, nothing freezes) when the
+  next set's threshold is below 2 (`WEAK_THRESHOLD`) or below the current
+  set's (`LOWERED_THRESHOLD`), or the next set holds a published test key
+  (`TEST_KEY`) outside a debug build whose current set holds one itself.
+  Before, any set that decodes was taken, so two keys could rotate a node to
+  a 1-of-n set or to the published test keys for good. New vector
+  `update/negative/rad1_weak_rotation_001.json`, checked by the Python
+  reference (`advisory.check_rotation`).
+- **Security Advisory V1 (draft).** §6.1 and §7: every `EQUIVOCATION`
+  (another body under the newest serial, or the next serial naming another
+  advisory) freezes only when the log snapshot it came with checks under the
+  current key set and lists it; otherwise it is `SEC_UPDATE_UNLOGGED` (kept
+  in quarantine) or forged. Before, only the compiled floor needed the log,
+  so a signed body that was never published froze updates until a release
+  was installed by hand.
+- **Update Exchange V1 (draft).** [`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md)
+  §7 (Releases) and §7.1 (Notices): one friend names at most 2 download
+  rows not approved yet, its own oldest going first (a row only it offered
+  goes; it leaves a row other friends offered too), and past 16 rows the
+  offer the fewest friends made goes first. Before, one friend's made up
+  offers pushed every other friend's offer out of the table. §7.1 says that
+  an equivocating notice no checked log lists is unlogged.
+
+## Freeze record changes (2026-11-06, security review 2026-11: a relay confirmation from before the UPnP rule not carried on)
+
+A behaviour change of the local status file of the relay, not of the wire
+format: no frame layout, entry type, flag bit, caps bit, card field or
+vector changed, no NAT-PMP, PCP or UPnP-IGD message changed, the RRH1
+version byte stays 1, and every gate stays as it was. Review of the round 2
+fixes (STRANGER-UPNP-2).
+
+- **Port Mapping Profile V1 (draft).** [`RAVEN_PORT_MAPPING_V1.md`](RAVEN_PORT_MAPPING_V1.md)
+  §9.1: a relay writes `relay_status.json` version 2, and a new run carries
+  the `confirmed_at_ms` of its last run on only from a file of version 2 or
+  later. A version 1 file was written before the rule that a UPnP mapping
+  alone never stamps it, and may hold such a stamp: after an upgrade it made
+  the friend relay CONFIRMED for up to a day more. Now it is dropped, and the
+  relay is CONFIRMED again once a member reserves from a globally routable
+  IP. Readers of the file take any version.
+
+## Freeze record changes (2026-11-06, security review 2026-11: the UPnP search answered by the default router only)
+
+A behaviour change of the port mapping client, not of the wire format: no
+frame layout, entry type, flag bit, caps bit, card field or vector changed,
+no NAT-PMP, PCP or UPnP-IGD message changed, the RRH1 version byte stays 1,
+and every gate stays as it was. Security and speed report 2026-11-05 §2 and
+§6 (STRANGER-UPNP-1; owner decision 1 of 2026-11-06).
+
+- **Port Mapping Profile V1 (draft).** [`RAVEN_PORT_MAPPING_V1.md`](RAVEN_PORT_MAPPING_V1.md)
+  §9.1: the UPnP-IGD gateway search (the Raven patch of igd-next 0.17.1, the
+  client of libp2p-upnp, vendored in `node/third_party` and recorded in
+  `node/third_party/forks.json`) takes an SSDP answer only when its source
+  is the IPv4 default router, the router NAT-PMP and PCP ask, and its
+  LOCATION names that same address; any other answer is ignored and the
+  search keeps waiting, and with no such router no search is sent. An SSDP
+  answer over 1500 bytes, a device or service description over 64 KiB, a
+  SOAP response over 16 KiB, and any of them nested deeper than 32 elements
+  or with a DOCTYPE, are refused before they are parsed. Before, a stranger
+  on the LAN could answer first, make the node fetch a description from a
+  host of its choosing, and end the node with a deeply nested one (a stack
+  overflow aborts the process). Still open: a host that forges the address
+  of the router as the source of its answer; the requests then go to the
+  address of the router, and what it names still waits for the sighting.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: a UPnP mapping used only once seen from outside)
 
 A behaviour change of the port mapping client and of the friend relay's
@@ -470,7 +544,10 @@ every gate stays as it was. Security and speed report 2026-11-05 §2 and §6
   and when they dial. IPv6 addresses are told as before. Open owner
   decisions (design §12): AR-5, a node that no contact or relay has seen
   tells no public address, so two friends behind NATs with no relay slot
-  and no direct path never punch to each other; AR-6, the TCP forward
+  and no direct path never punch to each other, and since STRANGER-UPNP-2
+  a friend relay reached through a UPnP mapping alone no longer gives a
+  group where nobody has been seen its first relay slot (`--external`
+  still does); AR-6, the TCP forward
   guess, INET_DIRECT and the friend relay's ports still take STUN's word
   that the NAT keeps ports.
 

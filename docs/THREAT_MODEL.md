@@ -459,6 +459,17 @@ key, and a wrong key ends the link). Two ways to be that listener:
   made: contacts then try a port that reaches nothing, or, where the
   stranger had the router forward that port to a host of its own, that host
   (the port is not checked, as above).
+  Control (2026-11-06, STRANGER-UPNP-1): the Raven patch of igd-next
+  (`node/third_party/igd-next-0.17.1-raven`) takes an SSDP answer only from
+  the IPv4 default router with its LOCATION on that address, sends no search
+  when no such router is known, and refuses an answer over 1500 bytes, a
+  description over 64 KiB, a SOAP response over 16 KiB and any document
+  nested deeper than 32 elements or with a DOCTYPE before parsing, so a
+  stranger can no longer point the node at a host of its own or end it with
+  a deeply nested description (RAVEN_PORT_MAPPING_V1 §9.1). What is left: a
+  host that forges the address of the router as the source of its answer;
+  the requests then go to that address, and the sighting still vouches for
+  what it names.
 
 **Phase 6b (built, gated off; not in this version):**
 

@@ -27,8 +27,10 @@
 //! written under its own lock ([`DOWNLOADS_LOCK`]) by raven-node (offers,
 //! progress) and ash (approvals, staging). An advisory file: one this
 //! process cannot read reads as empty and is never written over. At most
-//! [`MAX_ROWS`] rows and [`MAX_FROM`] friends a row are kept. Nothing reads
-//! or writes it while [`SecGate::MeshUpdate`] is shut.
+//! [`MAX_ROWS`] rows and [`MAX_FROM`] friends a row are kept, and one friend
+//! names at most [`MAX_OFFERED_PER_FRIEND`] rows not approved yet (offers
+//! are unsigned claims). Nothing reads or writes it while
+//! [`SecGate::MeshUpdate`] is shut.
 //!
 //! [`LAB_UPDATE_AUTO_APPROVE`] (debug builds with the Lab Test A unlock
 //! only) approves every offer as it arrives and lets `raven update install`
@@ -73,10 +75,16 @@ pub const INCOMING_IDLE_MS: u64 = 7 * DAY_MS;
 pub const MAX_QUARANTINE_BYTES: u64 = 64 * 1024 * 1024;
 /// What [`QUARANTINE_DIR`] holds goes after this (design D §6: 7 days).
 pub const QUARANTINE_AGE_MS: u64 = 7 * DAY_MS;
-/// Rows kept at most: past it, the oldest offer not approved goes first.
+/// Rows kept at most: past it, the offer not approved that the fewest
+/// friends made goes first, the oldest of those first.
 pub const MAX_ROWS: usize = 16;
 /// Friends kept per row at most (the latest first).
 pub const MAX_FROM: usize = 8;
+/// Rows not approved yet that name one friend at most (security review
+/// 2026-11, UPD-2): offers are unsigned claims, so past it that friend's
+/// own oldest goes first. A row only it offered goes; it leaves a row
+/// other friends offered too, which stays for them.
+pub const MAX_OFFERED_PER_FRIEND: usize = 2;
 /// The format of [`DOWNLOADS_FILE`] this build writes.
 pub const DOWNLOADS_VERSION: u32 = 1;
 /// A row's `failed` code when [`INCOMING_DIR`] had no room for it
@@ -251,9 +259,19 @@ pub fn for_this_computer(offer: &Offer, installed: u64) -> bool {
 
 impl Downloads {
     /// Note `peer`'s offer (one for this computer: [`for_this_computer`]) at
-    /// `now_ms`: a new row, or the friend added to its row. `true`: the rows
+    /// `now_ms`: a new row, or the friend added to its row; past
+    /// [`MAX_OFFERED_PER_FRIEND`] that friend's own oldest offer goes, and
+    /// past [`MAX_ROWS`] the one the fewest friends made. `true`: the rows
     /// changed. The lab auto-approval approves a new row at once.
     pub fn note_offer(&mut self, peer: &[u8; 32], offer: &Offer, now_ms: u64) -> bool {
+        let before = self.rows.clone();
+        self.take_offer(peer, offer, now_ms);
+        self.share(peer, &offer.manifest_digest);
+        self.bound();
+        self.rows != before
+    }
+
+    fn take_offer(&mut self, peer: &[u8; 32], offer: &Offer, now_ms: u64) {
         if let Some(row) = self
             .rows
             .iter_mut()
@@ -271,7 +289,7 @@ impl Downloads {
             if changed || day_changed {
                 row.last_seen_ms = row.last_seen_ms.max(now_ms);
             }
-            return changed || day_changed;
+            return;
         }
         let auto = lab_auto_approve();
         self.rows.push(Row {
@@ -293,8 +311,36 @@ impl Downloads {
             chunks_total: 0,
             failed: None,
         });
-        self.bound();
-        true
+    }
+
+    /// Keep `peer` in at most [`MAX_OFFERED_PER_FRIEND`] rows not approved,
+    /// `kept` (what it offered just now) among them: past it, its own
+    /// oldest first, the rows only it offered before the rows other
+    /// friends offered too. A row only it offered goes; it leaves a row
+    /// others offered, which stays for them. Rows only others offered are
+    /// never touched.
+    fn share(&mut self, peer: &[u8; 32], kept: &[u8; 32]) {
+        loop {
+            let theirs = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.state == RowState::Offered && r.from.contains(peer));
+            if theirs.clone().count() <= MAX_OFFERED_PER_FRIEND {
+                return;
+            }
+            let Some((at, _)) = theirs
+                .filter(|(_, r)| r.digest != *kept)
+                .min_by_key(|(_, r)| (r.from.len() > 1, r.last_seen_ms))
+            else {
+                return;
+            };
+            if self.rows[at].from.len() > 1 {
+                self.rows[at].from.retain(|f| f != peer);
+            } else {
+                self.rows.remove(at);
+            }
+        }
     }
 
     /// Approve the row whose digest starts with `prefix` (lowercase hex,
@@ -342,8 +388,9 @@ impl Downloads {
         self.rows.len() != before
     }
 
-    /// Keep at most [`MAX_ROWS`]: the oldest offers not approved go first,
-    /// then the oldest of the rest.
+    /// Keep at most [`MAX_ROWS`]: the offers not approved that the fewest
+    /// friends made go first (the oldest of those first), then the oldest
+    /// of the rest.
     fn bound(&mut self) {
         while self.rows.len() > MAX_ROWS {
             let at = self
@@ -351,7 +398,7 @@ impl Downloads {
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.state == RowState::Offered)
-                .min_by_key(|(_, r)| r.last_seen_ms)
+                .min_by_key(|(_, r)| (r.from.len(), r.last_seen_ms))
                 .or_else(|| {
                     self.rows
                         .iter()

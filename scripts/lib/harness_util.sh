@@ -125,8 +125,10 @@ raven_listen_addr() {
 # raven_ipc_up ASH DATA_DIR
 # True when the daemon for DATA_DIR answers a Ping on its REAL IPC endpoint
 # (`ash ipc-ping`). Use this, never `[[ -S "$dir/raven-node.sock" ]]`: a long data
-# dir (deep checkout, sandbox TMPDIR) is served on the /tmp/raven-<uid>/ fallback
-# socket, which that test can never see, so a healthy daemon looks dead.
+# dir (deep checkout, sandbox TMPDIR) is served on a short per user fallback
+# socket (the per user temporary folder on macOS, $XDG_RUNTIME_DIR or
+# /tmp/raven-<uid>/ elsewhere), which that test can never see, so a healthy
+# daemon looks dead.
 raven_ipc_up() {
   "$1" --data-dir "$2" ipc-ping >/dev/null 2>&1
 }

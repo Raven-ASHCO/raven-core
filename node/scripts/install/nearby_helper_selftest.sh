@@ -105,6 +105,9 @@ installed() {
   checks=$((checks + 1))
   [[ "$info" == *"Identifier=org.raven.nearby"* && "$info" == *"Signature=adhoc"* ]] \
     || fail "$what: not signed ad hoc as org.raven.nearby: $(printf '%s' "$info" | tr '\n' ' ')"
+  checks=$((checks + 1))
+  [[ "$info" == *"(adhoc,runtime)"* ]] \
+    || fail "$what: not signed with the hardened runtime: $(printf '%s' "$info" | tr '\n' ' ')"
   answer="$("$DEST/Contents/MacOS/raven-nearby-helper" --check </dev/null 2>/dev/null || true)"
   checks=$((checks + 1))
   [[ "$answer" == '{"ev":"hello","v":1}' ]] || fail "$what: --check answered '$answer'"

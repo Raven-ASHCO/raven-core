@@ -557,6 +557,11 @@ pub const FILES: &[FileRule] = &[
     plain("raven-node.sock", "the IPC endpoint"),
     plain("raven-node.sock.lock", "the IPC endpoint's instance lock"),
     plain(
+        crate::ipc::PIPE_TOKEN_FILE_NAME,
+        "the random part of this profile's Windows pipe name (owner only; review IPC-2): \
+         another account cannot guess the name and take it first; names no friend",
+    ),
+    plain(
         "raven-node-service.log",
         "capped log: counts and fixed codes only (cutoff pack M3, CP.8)",
     ),
