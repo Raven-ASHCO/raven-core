@@ -236,6 +236,11 @@ When macOS refuses, it stops the helper (SIGABRT) and nothing else:
 raven-node reports `not allowed` and tries again after 1 minute, then
 2, 4 and so on up to 1 hour, so you get no crash report every few seconds.
 
+raven-node also stops the helper itself, and waits the same way before it
+starts it again, when the helper says more devices are connected to it
+than it may hold (16 at once) or stops reading what raven-node sends it.
+The `bluetooth` row then says the RavenNearby helper did not run.
+
 macOS advertises from a random private address that changes on its own
 (row N7 confirms this on hardware).
 
