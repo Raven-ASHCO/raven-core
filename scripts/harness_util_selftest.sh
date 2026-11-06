@@ -61,7 +61,8 @@ raven_wait_log "$D/node.log" 'never-appears' "$dead" 30 2>/dev/null || rc=$?
 
 # raven_ipc_up / raven_wait_ipc probe the daemon through `ash ipc-ping` (its real
 # endpoint), never through a socket file at <data-dir>/raven-node.sock: a long data
-# dir is served on the /tmp/raven-<uid>/ fallback, which that test cannot see.
+# dir is served on a short per user fallback (the per user temporary folder on
+# macOS, $XDG_RUNTIME_DIR or /tmp/raven-<uid>/ elsewhere), which that test cannot see.
 # A fake `ash` answers ipc-ping only while the marker file exists.
 cat >"$D/fake-ash" <<'FAKE'
 #!/usr/bin/env bash

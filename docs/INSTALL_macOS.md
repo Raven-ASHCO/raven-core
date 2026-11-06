@@ -58,10 +58,14 @@ it with the working directory `/`, so a relative `RAVEN_DATA_DIR` /
 
 **IPC socket location.** The daemon listens on `<data-dir>/raven-node.sock`. When
 that path would be too long for a Unix socket (about 100 bytes on macOS, e.g. a
-deep checkout or sandbox temp dir) it serves `/tmp/raven-<uid>/raven-<hash>.sock`
-instead (a private, owner-only directory). The choice depends on the resolved
-data dir, never on how the path was spelled. Do not hard-code the socket path:
-`raven doctor` (and the installer's last lines) print the real `ipc_endpoint=`.
+deep checkout or sandbox temp dir) it serves `raven-<hash>.sock` in your per user
+temporary folder instead (`getconf DARWIN_USER_TEMP_DIR`, under `/var/folders`:
+a folder only your account may enter, which no other account can make first;
+security review 2026-11, IPC-2). Only if that folder cannot be used does it fall
+back to `/tmp/raven-<uid>/raven-<hash>.sock` (a private, owner-only directory).
+The choice depends on the resolved data dir, never on how the path was spelled.
+Do not hard-code the socket path: `raven doctor` (and the installer's last
+lines) print the real `ipc_endpoint=`.
 
 **LAN exposure follows the build (same rule on every OS installer):**
 `scripts/install/macos_launchd.sh` asks the installed binary where to listen

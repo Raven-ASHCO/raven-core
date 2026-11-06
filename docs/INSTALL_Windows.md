@@ -40,9 +40,12 @@ Task Scheduler / service helper: `scripts/install/windows_service.ps1`
 `ash.exe` use without `--data-dir` (`RAVEN_DATA_DIR`, then `ASH_DATA_DIR`, then
 `%USERPROFILE%\.raven`); binaries go to `%LOCALAPPDATA%\RavenNode` (`-BinDir`),
 which the helper makes private to you (see the ACL paragraph under Identity seed).
-The named pipe is per user, not per profile, so a daemon installed with any other
-`-DataDir` must be addressed with `--data-dir <that dir>` on every CLI command, or
-the CLI would ping a daemon that serves a different profile.
+The named pipe is per user and per profile: its name carries your SID and a
+random token the profile keeps in `raven-node.pipe-token` (owner only, held open
+while the daemon runs), so no other account can know the name and take it first
+(security review 2026-11, IPC-2). A daemon installed with any other `-DataDir`
+must be addressed with `--data-dir <that dir>` on every CLI command: without it
+the CLI looks for the pipe of the default profile instead.
 
 **LAN exposure follows the build (same rule on every OS installer):** the
 helper asks the installed binary where to listen (`raven-node.exe

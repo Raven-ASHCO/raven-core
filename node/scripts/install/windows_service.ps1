@@ -508,4 +508,6 @@ if ($NoTor) {
 Write-Host "bluetooth-nearby=not in release builds on Windows (macOS only so far)"
 Write-Host "bin-dir=$BinDir (raven.exe / ash.exe)"
 $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-Write-Host "Named-pipe IPC: \\.\pipe\raven-node-$userSid (per-user pipe, current-user DACL; ash refuses a pipe served by another user) - see WINDOWS_SERVICE.md"
+# The name also carries the profile's random token (raven-node.pipe-token in
+# the data dir, security review 2026-11, IPC-2): not printed here.
+Write-Host "Named-pipe IPC: \\.\pipe\raven-node-${userSid}-<profile token> (per-user, per-profile pipe, current-user DACL; ash refuses a pipe served by another user) - see WINDOWS_SERVICE.md"

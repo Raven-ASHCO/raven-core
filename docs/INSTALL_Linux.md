@@ -133,7 +133,12 @@ erase; re-running the installer changes the unit.
 
 **IPC socket location.** The daemon listens on `<data-dir>/raven-node.sock`. When
 that path would be too long for a Unix socket (about 107 bytes on Linux) it serves
-`/tmp/raven-<uid>/raven-<hash>.sock` instead (a private, owner-only directory).
+`$XDG_RUNTIME_DIR/raven-<hash>.sock` instead when `XDG_RUNTIME_DIR` is set and
+owner only (a folder no other account can make first; security review 2026-11,
+IPC-2), else `/tmp/raven-<uid>/raven-<hash>.sock` (a private, owner-only
+directory). The daemon and the CLI must then see the same `XDG_RUNTIME_DIR`:
+a systemd user unit and a desktop or SSH login do; a cron job or `sudo -u` may
+not.
 The choice depends on the resolved data dir, never on how the path was spelled.
 Do not hard-code the socket path: `raven doctor` (and the installer's last lines)
 print the real `ipc_endpoint=`.

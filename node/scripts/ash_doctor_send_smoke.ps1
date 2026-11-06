@@ -11,7 +11,7 @@
 #   Never require daemon_ready: ready (do not greenwash ready from presence / Ping).
 #   Named-pipe client is on this tree — do NOT require ipc_transport_missing.
 #   Try-phase (Windows): start raven-node ipc --data-dir, assert daemon_presence: present
-#     (Ping→Pong over the per-user pipe \\.\pipe\raven-node-<user SID>), then kill and assert presence down
+#     (Ping→Pong over the per-user pipe \\.\pipe\raven-node-<user SID>-<profile token>), then kill and assert presence down
 #     (fail-closed connect — not a soft skip / blocked transport).
 #
 # Operator (from node/, Windows / pwsh host):

@@ -1081,6 +1081,9 @@ raven-node's `main` (the refusal at start), and the marker checks below.
 - **Step 5.** This profile's `raven-node.sock` and `raven-node.sock.lock`, or in the long-path
   fallback only `/tmp/raven-<euid>/raven-<hash>.sock` and its `.lock` (the folder is shared by every
   profile of the user and stays). Then the marker, last, and the folder when it is empty.
+  Since security review 2026-11 (IPC-2) that fallback is first the per user temporary folder on
+  macOS, or `$XDG_RUNTIME_DIR` elsewhere when it is owner only, with the same file names; erase
+  asks `ipc::default_socket_path`, so it finds them there.
   Unknown files stay: "Left in this folder because Raven didn't create them: {n} files ({folder})."
 - **Failures** do not stop the run: each is reported ("Erase stopped: {what failed}. Still on
   this computer: {list}. Run `raven erase` again to finish."), the marker stays, and the next run
@@ -1782,6 +1785,7 @@ the lab backend), and Windows' K_hist `chat_history_key.dpapi` (DPAPI-wrapped, P
 | `desktop_settings.json` (the desktop apps' engine) | the apps' settings that name nobody (receive, motion, what quitting does, lock on sleep); the user's name is in `desktop_private.rms` (section 6.1) and the chat-keeping time in `privacy.json` (`chat_keep`, PP.9); erase removes it |
 | `*.lock.sqlite` (and `-wal`, `-shm`, `-journal`) | empty lock databases; the per-friend send lock is named by a keyed hash in a sealed profile (PP.6, section 4.4), and an older build's, named by the friend's key, is deleted there (section 4.22) |
 | `raven-node.sock`, `raven-node.sock.lock` | the IPC endpoint |
+| `raven-node.pipe-token` (Windows) | the random part of the IPC pipe name (security review 2026-11, IPC-2): owner only, names no friend; erase removes it |
 | `raven-node-service.log`, `raven-node.log`, `raven-node.err` | capped logs, counts and fixed codes only (cutoff pack M3 / CP.8); the legacy `raven-node run` prints received text to stderr and is out of scope |
 | `contact_request_<id>.bin`, `contact_request_<id>.wire`, `contact_accept_<id>.wire` | **confirmed by this scan:** exports `raven contact request` / `accept` write for the user to hand over; the `.bin` is ciphertext only and the `.wire` is the request as it travels; erase removes them |
 | `mailbox_store.json`, raven-swarm `offline_mailbox_v1.json` | lab / experimental |

@@ -2087,6 +2087,12 @@ const UNIX_SOCKET_PATH_MAX: usize = if cfg!(any(
 /// owner-only directory. If no such directory can be made safely the direct
 /// path is returned unchanged and bind fails loudly as before.
 ///
+/// That short path's folder is first one no other account can make or fill
+/// (review IPC-2: another account could make `/tmp/raven-<euid>` first, and
+/// the node then had no socket): the per user temporary folder on macOS,
+/// `$XDG_RUNTIME_DIR` elsewhere when it is set and owner only. Only without
+/// one is it `/tmp/raven-<euid>`.
+///
 /// Every decision (direct or fallback, the direct path itself, the hash) is a
 /// function of one normalized spelling of the data dir ([`normalized_data_dir`]:
 /// absolute, symlinks resolved), never of how the caller happened to write it.
@@ -2192,13 +2198,76 @@ fn private_short_socket_dir() -> Option<std::path::PathBuf> {
 fn short_socket_path(base: &std::path::Path) -> Option<std::path::PathBuf> {
     use sha2::{Digest, Sha256};
     use std::os::unix::ffi::OsStrExt;
-    let dir = private_short_socket_dir()?;
     let mut hasher = Sha256::new();
     hasher.update(b"raven/ipc-socket/v1\0");
     hasher.update(base.as_os_str().as_bytes());
     let digest = hasher.finalize();
-    let path = dir.join(format!("raven-{}.sock", hex::encode(&digest[..8])));
-    (path.as_os_str().len() <= UNIX_SOCKET_PATH_MAX).then_some(path)
+    let name = format!("raven-{}.sock", hex::encode(&digest[..8]));
+    let fits = |dir: std::path::PathBuf| {
+        let path = dir.join(&name);
+        (path.as_os_str().len() <= UNIX_SOCKET_PATH_MAX).then_some(path)
+    };
+    // Review IPC-2: a folder no other account can make or fill comes first;
+    // the shared `/tmp` one is made only when there is none.
+    per_user_socket_dir(current_euid())
+        .and_then(fits)
+        .or_else(|| private_short_socket_dir().and_then(fits))
+}
+
+/// The folder this OS keeps for one user alone, when it is owner only
+/// (review IPC-2): on macOS the per user temporary folder
+/// (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, under `/var/folders`: launchd, a
+/// terminal and the apps get the same one, whatever `TMPDIR` says),
+/// elsewhere `$XDG_RUNTIME_DIR`. None on iOS, whose app serves its node in
+/// process (docs/IOS.md).
+#[cfg(unix)]
+fn per_user_socket_dir(uid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    let dir = darwin_user_temp_dir();
+    #[cfg(target_os = "ios")]
+    let dir: Option<std::path::PathBuf> = None;
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let dir = xdg_runtime_dir(std::env::var_os("XDG_RUNTIME_DIR"));
+    dir.filter(|dir| is_owner_only_dir(dir, uid))
+}
+
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` without its trailing `/`.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `buf` is writable for the whole length passed, and confstr
+    // writes at most that many bytes, the NUL included.
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if n == 0 || n > buf.len() {
+        return None;
+    }
+    buf.truncate(n - 1);
+    let dir = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf));
+    dir.is_absolute().then(|| dir.components().collect())
+}
+
+/// `$XDG_RUNTIME_DIR` as the socket's folder: an absolute path only (a
+/// relative one would follow each process's working directory).
+#[cfg(all(unix, any(test, not(any(target_os = "macos", target_os = "ios")))))]
+fn xdg_runtime_dir(value: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(value?);
+    dir.is_absolute().then(|| dir.components().collect())
+}
+
+/// A real folder (not a symlink) that `uid` owns and no one else may enter.
+#[cfg(unix)]
+fn is_owner_only_dir(dir: &std::path::Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    dir.is_absolute()
+        && std::fs::symlink_metadata(dir)
+            .is_ok_and(|meta| meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0)
 }
 
 /// Prefix of the Windows named pipe. The pipe namespace is machine-wide, so the
@@ -2206,6 +2275,11 @@ fn short_socket_path(base: &std::path::Path) -> Option<std::path::PathBuf> {
 /// `{WINDOWS_NAMED_PIPE}-{user SID}` ([`windows_pipe_name_for_sid`]) with a
 /// current-user DACL. Clients must also verify the server process owner
 /// (`verify_named_pipe_server_is_current_user`) — the name alone is not auth.
+///
+/// Since review IPC-2 the name ends in the profile's random token too
+/// ([`windows_pipe_name_for`], [`PIPE_TOKEN_FILE_NAME`]): any account can read
+/// a SID, and one that took the SID-only name first kept the node from its
+/// pipe.
 pub const WINDOWS_NAMED_PIPE: &str = r"\\.\pipe\raven-node";
 
 /// Alias for [`WINDOWS_NAMED_PIPE`] (per-user pipe name prefix).
@@ -2236,6 +2310,9 @@ pub fn windows_pipe_name_for_sid(sid: &str) -> Option<String> {
 /// carrier harness on a CI runner) would share one pipe. Release builds ignore
 /// it; a malformed value yields no name at all (fail closed, never the shared
 /// default).
+///
+/// Since review IPC-2 the profile's token already tells two profiles' pipes
+/// apart; the suffix stays for the harnesses that set it.
 pub const LAB_IPC_PIPE_SUFFIX_ENV: &str = "RAVEN_LAB_IPC_PIPE_SUFFIX";
 
 /// Apply [`LAB_IPC_PIPE_SUFFIX_ENV`] to a per-user pipe name (pure, testable
@@ -2256,19 +2333,156 @@ pub fn with_lab_pipe_suffix(
     }
 }
 
-/// Per-user pipe name for the current process token user (cached).
-/// `None` if the SID cannot be read — callers fail closed.
+/// The file in the data dir that holds the random part of this profile's
+/// Windows pipe name (review IPC-2): 32 lowercase hex digits, 128 bits from
+/// the OS random source, owner only. Any account can read a user's SID, so
+/// it could take a name made of the SID alone first and keep the node from
+/// its pipe; the token is readable by this user only.
+pub const PIPE_TOKEN_FILE_NAME: &str = "raven-node.pipe-token";
+
+/// Hex digits of a pipe token.
+pub(crate) const PIPE_TOKEN_LEN: usize = 32;
+
+/// The longest pipe name Windows takes, `\\.\pipe\` included.
+#[cfg(any(windows, test))]
+const WINDOWS_PIPE_NAME_MAX: usize = 256;
+
+/// Exactly a token as `pipe_token` writes it: 32 lowercase hex digits.
+pub(crate) fn is_pipe_token(token: &str) -> bool {
+    token.len() == PIPE_TOKEN_LEN
+        && token
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Per-user, per-profile pipe name `{WINDOWS_NAMED_PIPE}-{SID}-{token}`.
+/// `None` unless `sid` is a plain SID string and `token` a pipe token.
+pub fn windows_pipe_name_for(sid: &str, token: &str) -> Option<String> {
+    let user = windows_pipe_name_for_sid(sid)?;
+    is_pipe_token(token).then(|| format!("{user}-{token}"))
+}
+
+/// [`windows_pipe_name_for`] with a debug build's lab suffix
+/// ([`with_lab_pipe_suffix`]), and never a name Windows refuses.
+#[cfg(any(windows, test))]
+fn windows_pipe_name_from(
+    sid: &str,
+    token: &str,
+    suffix: Option<&str>,
+    lab_build: bool,
+) -> Option<String> {
+    windows_pipe_name_for(sid, token)
+        .and_then(|name| with_lab_pipe_suffix(name, suffix, lab_build))
+        .filter(|name| name.len() <= WINDOWS_PIPE_NAME_MAX)
+}
+
+/// This profile's pipe token, made on first use by whichever process asks
+/// first (the node, or a client before it starts the node). It is written
+/// owner only (0600, or the owner only DACL on Windows) to a synced temp
+/// file and then linked into place, and a link never replaces a file: a
+/// reader finds no token or all of it, and two first starts agree on one.
+/// A file under the name that is no token, a link, or (Unix) a file others
+/// may read is an error and is never replaced: a name nobody else can guess,
+/// or no name.
+#[cfg(any(windows, test))]
+pub(crate) fn pipe_token(data_dir: &std::path::Path) -> Result<String, String> {
+    use rand::RngCore;
+    let path = data_dir.join(PIPE_TOKEN_FILE_NAME);
+    // Twice at most: a second pass reads the token another first start
+    // linked in between.
+    for _ in 0..2 {
+        if let Some(token) = read_pipe_token(&path)? {
+            return Ok(token);
+        }
+        let mut raw = [0u8; PIPE_TOKEN_LEN / 2];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        // The temp name `paths::atomic_write_private` uses, so erase and
+        // the first install check know one a crash left behind.
+        let temp = data_dir.join(format!(
+            ".{PIPE_TOKEN_FILE_NAME}.tmp.{:016x}",
+            rand::random::<u64>()
+        ));
+        crate::paths::create_new_private(&temp, hex::encode(raw).as_bytes())
+            .map_err(|e| format!("cannot keep {}: {e}", path.display()))?;
+        let linked = std::fs::hard_link(&temp, &path);
+        let _ = std::fs::remove_file(&temp);
+        match linked {
+            Ok(()) => crate::paths::sync_dir_best_effort(data_dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("cannot keep {}: {e}", path.display())),
+        }
+    }
+    Err(format!("{} keeps changing", path.display()))
+}
+
+/// The token in `path`, `None` when there is no file. Anything else under
+/// the name is an error (never replaced).
+#[cfg(any(windows, test))]
+fn read_pipe_token(path: &std::path::Path) -> Result<Option<String>, String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    #[cfg(unix)]
+    let owner_only = {
+        use std::os::unix::fs::MetadataExt;
+        meta.uid() == current_euid() && meta.mode() & 0o077 == 0
+    };
+    #[cfg(not(unix))]
+    let owner_only = true;
+    let token = (meta.file_type().is_file() && meta.len() == PIPE_TOKEN_LEN as u64 && owner_only)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
+        .filter(|token| is_pipe_token(token));
+    match token {
+        Some(token) => Ok(Some(token)),
+        None => Err(format!(
+            "{} does not hold a pipe token of this profile: remove it, then start Raven again",
+            path.display()
+        )),
+    }
+}
+
+/// The pipe of the raven-node that serves `data_dir`, as the node binds it
+/// and every client opens it ([`ipc_endpoint`]): this user's SID, the
+/// profile's token ([`pipe_token`], made here on first use) and, in a debug
+/// build, this process's [`LAB_IPC_PIPE_SUFFIX_ENV`].
 #[cfg(windows)]
-pub fn windows_user_pipe_name() -> Option<&'static str> {
-    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| {
-        let suffix = std::env::var(LAB_IPC_PIPE_SUFFIX_ENV).ok();
-        win_pipe::current_user_sid()
-            .ok()
-            .and_then(|sid| windows_pipe_name_for_sid(&sid))
-            .and_then(|name| with_lab_pipe_suffix(name, suffix.as_deref(), cfg!(debug_assertions)))
-    })
-    .as_deref()
+pub fn windows_pipe_name(data_dir: &std::path::Path) -> Result<String, String> {
+    let suffix = std::env::var(LAB_IPC_PIPE_SUFFIX_ENV).ok();
+    windows_pipe_name_with_suffix(data_dir, suffix.as_deref())
+}
+
+/// [`windows_pipe_name`] with the lab suffix given instead of this
+/// process's (the carrier harness names each profile's pipe).
+#[cfg(windows)]
+pub fn windows_pipe_name_with_suffix(
+    data_dir: &std::path::Path,
+    suffix: Option<&str>,
+) -> Result<String, String> {
+    static SID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let sid = SID
+        .get_or_init(|| win_pipe::current_user_sid().ok())
+        .as_deref()
+        .ok_or("cannot read the SID of this user")?;
+    let token = pipe_token(data_dir)?;
+    windows_pipe_name_from(sid, &token, suffix, cfg!(debug_assertions))
+        .ok_or_else(|| "no pipe name for this user and profile".to_string())
+}
+
+/// Keeps `data_dir`'s pipe token from being removed or replaced while the
+/// node serves its pipe (open, sharing reads only): every client then finds
+/// the name the node bound, and a second node of the profile finds it taken.
+#[cfg(windows)]
+pub fn hold_pipe_token(data_dir: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let path = data_dir.join(PIPE_TOKEN_FILE_NAME);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+        .open(&path)
+        .map_err(|e| format!("cannot hold {}: {e}", path.display()))
 }
 
 /// Refuse a connected pipe whose server process runs as a different user
@@ -2389,8 +2603,9 @@ pub enum IpcEndpoint {
     /// Unix domain socket (`<data_dir>/raven-node.sock`, or the short
     /// per-user fallback of [`default_socket_path`] for long data dirs).
     UnixSocket(std::path::PathBuf),
-    /// Per-user Windows named pipe (`{WINDOWS_NAMED_PIPE}-{user SID}`).
-    NamedPipe(&'static str),
+    /// Per-user Windows named pipe (`{WINDOWS_NAMED_PIPE}-{user SID}`), with
+    /// the profile's token since review IPC-2 (`windows_pipe_name`).
+    NamedPipe(String),
     /// No local IPC transport on this OS. Clients/doctor must fail closed
     /// (`ipc_transport_missing`) — never treat as a pass.
     Unsupported,
@@ -2423,11 +2638,11 @@ pub fn ipc_endpoint(data_dir: &std::path::Path) -> IpcEndpoint {
     }
     #[cfg(windows)]
     {
-        let _ = data_dir;
-        match windows_user_pipe_name() {
-            Some(name) => IpcEndpoint::NamedPipe(name),
-            // No user SID → no safe per-user name. Fail closed.
-            None => IpcEndpoint::Unsupported,
+        match windows_pipe_name(data_dir) {
+            Ok(name) => IpcEndpoint::NamedPipe(name),
+            // No user SID or no pipe token → no name another account cannot
+            // guess. Fail closed.
+            Err(_) => IpcEndpoint::Unsupported,
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -4875,6 +5090,182 @@ mod tests {
         std::fs::remove_file(&sock_a).unwrap();
     }
 
+    /// The short socket of a long data dir lives in the temporary folder
+    /// macOS keeps for this user alone (review IPC-2): another account can
+    /// make `/tmp/raven-<uid>` first, and then the node had no socket at all.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_long_data_dir_is_served_from_the_per_user_temporary_folder() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut buf = vec![0u8; 1024];
+        // SAFETY: `buf` is writable for the whole length passed.
+        let n = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        assert!(n > 1 && n <= buf.len(), "confstr gave {n}");
+        buf.truncate(n - 1);
+        let own: std::path::PathBuf = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf))
+            .components()
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let long = std::fs::canonicalize(tmp.path())
+            .unwrap()
+            .join("a".repeat(120));
+        let sock = default_socket_path(&long);
+        assert_eq!(
+            sock.parent(),
+            Some(own.as_path()),
+            "not in the per user folder: {}",
+            sock.display()
+        );
+        assert!(sock.as_os_str().len() <= UNIX_SOCKET_PATH_MAX);
+        assert_eq!(ipc_endpoint(&long), IpcEndpoint::UnixSocket(sock));
+    }
+
+    /// Only a real folder of this user that no one else may enter holds the
+    /// short socket (review IPC-2); `$XDG_RUNTIME_DIR` counts only absolute.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_folder_must_be_this_users_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let uid = current_euid();
+        let own = root.join("own");
+        std::fs::create_dir(&own).unwrap();
+        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(is_owner_only_dir(&own, uid));
+        assert!(
+            !is_owner_only_dir(&own, uid.wrapping_add(1)),
+            "another owner"
+        );
+        let open = root.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(!is_owner_only_dir(&open, uid), "group may enter");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&own, &link).unwrap();
+        assert!(!is_owner_only_dir(&link, uid), "a link");
+        let file = root.join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(!is_owner_only_dir(&file, uid), "a file");
+        assert!(!is_owner_only_dir(&root.join("none"), uid), "missing");
+        assert!(
+            !is_owner_only_dir(std::path::Path::new("own"), uid),
+            "relative"
+        );
+
+        assert_eq!(xdg_runtime_dir(None), None);
+        assert_eq!(xdg_runtime_dir(Some("run/user/1000".into())), None);
+        assert_eq!(
+            xdg_runtime_dir(Some("/run/user/1000/".into())),
+            Some(std::path::PathBuf::from("/run/user/1000"))
+        );
+    }
+
+    /// Review IPC-2: the pipe name carries 128 random bits kept owner only in
+    /// the profile, so another account cannot name the pipe first. Every
+    /// caller reads the same token, and two profiles get two names.
+    #[test]
+    fn the_pipe_token_is_random_owner_only_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let token = pipe_token(&a).unwrap();
+        assert!(is_pipe_token(&token), "{token:?}");
+        assert_eq!(pipe_token(&a).unwrap(), token, "one token per profile");
+        assert_ne!(pipe_token(&b).unwrap(), token, "a token of its own");
+        let file = a.join(PIPE_TOKEN_FILE_NAME);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), token);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+        // Nothing else is left in the profile (no temp copy).
+        let names: Vec<std::ffi::OsString> = std::fs::read_dir(&a)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(PIPE_TOKEN_FILE_NAME)]);
+    }
+
+    /// A file under the token's name that is no token (cut short, a link,
+    /// open to others) is refused and never replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_token_file_that_is_not_one_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let good = "0123456789abcdef0123456789abcdef";
+        let case = |setup: &dyn Fn(&std::path::Path)| {
+            let tmp = tempfile::tempdir().unwrap();
+            setup(tmp.path());
+            let got = pipe_token(tmp.path());
+            let kept = std::fs::read(tmp.path().join(PIPE_TOKEN_FILE_NAME)).ok();
+            (got, kept)
+        };
+        let write = |d: &std::path::Path, text: &str, mode: u32| {
+            let f = d.join(PIPE_TOKEN_FILE_NAME);
+            std::fs::write(&f, text).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for (what, text, mode) in [
+            ("short", &good[..31], 0o600),
+            ("upper case", "0123456789ABCDEF0123456789ABCDEF", 0o600),
+            ("not hex", "0123456789abcdef0123456789abcdeg", 0o600),
+            ("others may read", good, 0o644),
+        ] {
+            let (got, kept) = case(&|d| write(d, text, mode));
+            assert!(got.is_err(), "{what}: {got:?}");
+            assert_eq!(kept.as_deref(), Some(text.as_bytes()), "{what}: replaced");
+        }
+        let (got, _) = case(&|d| {
+            std::fs::write(d.join("elsewhere"), good).unwrap();
+            std::os::unix::fs::symlink(d.join("elsewhere"), d.join(PIPE_TOKEN_FILE_NAME)).unwrap();
+        });
+        assert!(got.is_err(), "a link: {got:?}");
+        let (got, _) = case(&|d| write(d, good, 0o600));
+        assert_eq!(got.as_deref(), Ok(good));
+    }
+
+    /// The name another account can compute from the SID alone is not the
+    /// pipe's, and nothing but a SID and a token makes a name.
+    #[test]
+    fn the_pipe_name_needs_the_profile_token() {
+        let sid = "S-1-5-21-1004336348-1177238915-682003330-1001";
+        let token = "0123456789abcdef0123456789abcdef";
+        let name = windows_pipe_name_for(sid, token);
+        assert_eq!(name, Some(format!(r"\\.\pipe\raven-node-{sid}-{token}")));
+        assert_ne!(name, windows_pipe_name_for_sid(sid));
+        for bad in [
+            "",
+            "0123",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdef0",
+            r"0123456789abcdef0123456789abc\..",
+        ] {
+            assert_eq!(windows_pipe_name_for(sid, bad), None, "{bad:?}");
+        }
+        assert_eq!(windows_pipe_name_for(r"S-1-5\..", token), None);
+        // The longest SID with a lab suffix would pass 256 characters.
+        let long_sid = format!("S-1-5{}", "-4294967295".repeat(16));
+        assert!(windows_pipe_name_from(&long_sid, token, None, true).is_some());
+        assert_eq!(
+            windows_pipe_name_from(&long_sid, token, Some(&"x".repeat(32)), true),
+            None
+        );
+        assert_eq!(
+            windows_pipe_name_from(sid, token, Some("cm-1-2-a"), true).as_deref(),
+            name.map(|n| format!("{n}-cm-1-2-a")).as_deref()
+        );
+    }
+
     /// One data dir, several spellings (symlink, `..`, not yet created): the
     /// daemon and a client must reach the same socket, and therefore the same
     /// `<sock>.lock`, even when the spellings fall on different sides of the
@@ -4982,11 +5373,17 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ipc_endpoint_selects_windows_named_pipe() {
-        let dir = std::path::Path::new(r"C:\raven-data");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let ep = ipc_endpoint(dir);
         assert_eq!(default_ipc_endpoint(dir), ep);
-        let name = windows_user_pipe_name().expect("current user SID");
-        assert_eq!(ep, IpcEndpoint::NamedPipe(name));
+        let name = windows_pipe_name(dir).expect("current user SID and a token");
+        assert_eq!(ep, IpcEndpoint::NamedPipe(name.clone()));
+        // The SID and the token this profile now keeps (review IPC-2).
+        let sid = win_pipe::current_user_sid().expect("current user SID");
+        let token = std::fs::read_to_string(dir.join(PIPE_TOKEN_FILE_NAME)).unwrap();
+        let own = windows_pipe_name_for(&sid, &token).expect("a SID and a token");
+        assert!(name.starts_with(&own), "{name}");
         assert!(ep.to_string().starts_with(r"\\.\pipe\raven-node-S-1-"));
         assert_eq!(default_pipe_name(), r"\\.\pipe\raven-node");
         assert!(ep.transport_available());

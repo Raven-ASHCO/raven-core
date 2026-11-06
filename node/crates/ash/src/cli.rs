@@ -19332,9 +19332,12 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                 reason: "ipc_transport_blocked".into()
             }
         );
-        let ep = ipc_endpoint(std::path::Path::new("/tmp/raven-data"));
+        // A folder of its own: on Windows the endpoint keeps the profile's
+        // pipe token there (review IPC-2).
+        let dd = tempfile::tempdir().unwrap();
+        let ep = ipc_endpoint(dd.path());
         if cfg!(windows) {
-            // Per-user pipe: `{WINDOWS_NAMED_PIPE}-{user SID}`.
+            // Per-user pipe: `{WINDOWS_NAMED_PIPE}-{user SID}-{profile token}`.
             assert!(matches!(ep, IpcEndpoint::NamedPipe(_)));
             assert!(ep
                 .to_string()
