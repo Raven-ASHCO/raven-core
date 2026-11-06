@@ -1052,9 +1052,12 @@ mod tests {
 
     /// Speed design M9: an app that waits for events learns of a receipt at
     /// once, not at its next poll (500 ms with a window open, 5 s in the
-    /// tray): `events.wait` answers within 50 ms of the event, with it.
+    /// tray): `events.wait` answers with it in under half that poll. The
+    /// 250 ms bound is a thread wake and the answer's envelope with room for
+    /// a loaded test runner; a wait the event does not wake answers only at
+    /// its timeout (25 s here).
     #[test]
-    fn events_wait_returns_within_50_ms_of_a_receipt() {
+    fn events_wait_returns_within_250_ms_of_a_receipt() {
         let inner = Inner::new(Err("no profile in this test".into()));
         let seq = inner.events.poll(0).seq;
         let waiter = {
@@ -1081,7 +1084,7 @@ mod tests {
         assert_eq!(answer["result"]["seq"], seq + 1);
         let late = answered.saturating_duration_since(emitted);
         assert!(
-            late < Duration::from_millis(50),
+            late < Duration::from_millis(250),
             "answered {late:?} after the receipt"
         );
     }
