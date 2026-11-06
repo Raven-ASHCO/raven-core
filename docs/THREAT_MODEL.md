@@ -409,12 +409,18 @@ key, and a wrong key ends the link). Two ways to be that listener:
   PeerIds; on Internet direct their identity binds, the first item above).
   Control: such an address is told only once a verified contact or a relay
   this node holds a slot on saw this node at that very IP, on a connection
-  this node dialled directly (libp2p Identify's observed address; the
-  auto-reach design §3.2); a network change forgets every sighting. A
-  malicious verified contact alone cannot steer it either: STUN or the
-  router must name the same IP. What is left: the NAT that really carries
-  this computer's traffic (a hotel, a carrier) is where contacts' dials go
-  anyway, as for any public address.
+  this node dialled directly at an IP no DNS answer gave (libp2p Identify's
+  observed address; the auto-reach design §3.2); a network change forgets
+  every sighting. A connection to a DNS answer never counts: whoever
+  answered could pass it on from a host of its own, which the peer would
+  then see. A malicious verified contact alone cannot steer it either: STUN
+  or the router must name the same IP. What is left: the NAT that really
+  carries this computer's traffic (a hotel, a carrier), and anyone who
+  routes its packets on the way out (its own uplink, a VPN), is where a
+  peer sees it and so where contacts' dials go, as for any public address.
+  And a limit, not an exposure: a node whose relay slots and contacts are
+  all named by DNS is never seen by them, so it tells no public address
+  until a relay or contact reached at an IP literal sees it.
 
 **Phase 6b (built, gated off; not in this version):**
 

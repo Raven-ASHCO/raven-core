@@ -464,8 +464,10 @@ therefore MUST NOT send RRH1 without the §3 signal.
     mapping, and an AutoNAT-confirmed one), goes only once a verified
     contact or a relay the sender holds a slot on saw the sender at that
     very IP: libp2p Identify's observed address on a connection the sender
-    dialled directly (not relayed, not a hole punch), within 24 hours and
-    since the sender's last network change. Neither STUN nor router answers
+    dialled directly (not relayed, not a hole punch, not over a WebSocket)
+    at an IP no DNS answer gave it (whoever answered could pass such a
+    connection on from a host of its own), within 24 hours and since the
+    sender's last network change. Neither STUN nor router answers
     are authenticated: without this, whoever answers the sender's DNS for
     the STUN servers' names, or forges their replies or the router's on its
     network, could name an address of its own and have every contact dial

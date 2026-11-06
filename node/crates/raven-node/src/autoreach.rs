@@ -25,9 +25,9 @@
 //!   public IP is told to contacts (route hints, the friend relay's
 //!   addresses) only once a contact or one of this node's relays saw this
 //!   computer at that very IP, on a connection this computer dialled
-//!   directly (Identify's observed address, which the p2p host feeds in),
-//!   within [`SEEN_FOR`] and since the last network change
-//!   ([`shared_ip`]). An address a router mapped
+//!   directly at an IP no DNS answer gave (Identify's observed address,
+//!   which the p2p host feeds in), within [`SEEN_FOR`] and since the last
+//!   network change ([`shared_ip`]). An address a router mapped
 //!   (NAT-PMP, PCP, UPnP) waits for the same sighting ([`seen_ip`]). The
 //!   class, and this node's own punch decisions, still follow every answer.
 //! - **What it gives** ([`discovered_p2p`], [`public_ip`], [`own_class`],
@@ -583,16 +583,18 @@ pub(crate) fn seen_ip(ip: Ipv4Addr, lab_local: bool) -> bool {
 
 /// A contact or one of this node's relays saw this computer at `ip`:
 /// Identify's observed address on a connection this computer dialled
-/// directly (no relay circuit, no hole punch), which the p2p host passes on
-/// only from a contact the peer gate admits or from a relay it holds a slot
-/// on. That peer reports where this computer's packets came from, and from
-/// the other side of every NAT that is the public IP; nobody between can
-/// change what the authenticated link says. (On a connection the peer
-/// dialled, Identify reports the address the peer dialled, which proves
-/// nothing, so the host never passes that on.) IPv4 only (STUN's address is
-/// IPv4), and only an address that may be told ([`usable`]). Kept whether
-/// or not STUN discovery is on ([`seen_ip`]); in memory only, never
-/// logged.
+/// directly (no relay circuit, no hole punch, no WebSocket) at an IP no DNS
+/// answer gave, which the p2p host passes on only from a contact the peer
+/// gate admits or from a relay it holds a slot on. That peer reports where
+/// this computer's packets came from, and from the other side of every NAT
+/// that is the public IP; nobody between can change what the authenticated
+/// link says. (On a connection the peer dialled, Identify reports the
+/// address the peer dialled, which proves nothing; at an IP a DNS answer
+/// gave, whoever answered may pass the connection on from a host of its
+/// own, which the peer then sees: the host passes on neither.) IPv4 only
+/// (STUN's address is IPv4), and only an address that may be told
+/// ([`usable`]). Kept whether or not STUN discovery is on ([`seen_ip`]); in
+/// memory only, never logged.
 pub(crate) fn observed(ip: IpAddr, lab_local: bool) {
     if let Some(line) = with_state(|s| observe_in(s, ip, lab_local, Instant::now())) {
         eprintln!("{line}");
