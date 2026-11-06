@@ -89,8 +89,8 @@ if args == ["--self-test"]:
     ]
     bad = [n for n, t in caught if not findings(n, t)] + [n for n, t in clean if findings(n, t)]
     if bad:
-        sys.exit(f"FAIL: self-test: the --locked check is wrong for {bad}")
-    print(f"PASS: self-test: {len(caught)} planted builds without --locked caught, {len(clean)} lines left alone")
+        sys.exit(f"FAIL: self test: the --locked check is wrong for {bad}")
+    print(f"PASS: self test: {len(caught)} planted builds without --locked caught, {len(clean)} lines left alone")
     sys.exit(0)
 
 problems = []

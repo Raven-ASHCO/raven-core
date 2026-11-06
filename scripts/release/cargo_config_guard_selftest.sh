@@ -141,7 +141,7 @@ rc=0
 raven_claim_outer_cargo_dir "$D/outer" 2>/dev/null || rc=$?
 [[ "$rc" -eq 0 ]] || check "an outer .cargo of the builder must pass again (rc=$rc)"
 [[ -z "${raven_outer_cargo_made:-}" ]] \
-  || check "an outer .cargo that was there already is not the build's to remove"
+  || check "an outer .cargo that was there already is not for the build to remove"
 rm -rf "$D/outer/.cargo"
 
 # 3. A rustup toolchain file above the build folder: rustup takes the
@@ -210,7 +210,7 @@ rc=0
   unset RUSTUP_TOOLCHAIN
   PATH="$fake5:$PATH" bash "$HERE/reproduce_check.sh" "$D/small.rrb" --work "$D/work" >/dev/null 2>"$D/err"
 ) || rc=$?
-[[ "$rc" -eq 2 && ! -e "$D/work" ]] || check "reproduce_check.sh must stop at the stand-in host (rc=$rc)"
+[[ "$rc" -eq 2 && ! -e "$D/work" ]] || check "reproduce_check.sh must stop at the host check (rc=$rc)"
 [[ "$(cat "$seen" 2>/dev/null)" == 1.98.0 ]] \
   || check "reproduce_check.sh must pin the manifest toolchain before rustc runs (rustc saw: $(tr '\n' ' ' <"$seen" 2>/dev/null))"
 : >"$seen"
