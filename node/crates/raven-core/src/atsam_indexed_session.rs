@@ -5,7 +5,9 @@
 //! slice, which raven-node's listener and `ash` run in default builds
 //! (`lan_gate::LAN_DIRECT_PRODUCTION_ENABLED` is `true`). The internet-direct
 //! slice uses the same path behind its own gate
-//! (`internet_gate::INTERNET_DIRECT_PRODUCTION_ENABLED`, `false`). The generic
+//! (`internet_gate::INTERNET_DIRECT_PRODUCTION_ENABLED`, `true` in release
+//! builds since 2026-10-29), and so do the p2p, onion, nearby and custody
+//! carriers behind theirs. The generic
 //! [`PRODUCTION_ENABLED`] tripwire below stays `false`, and the shipping
 //! RVNA1 classifier (`seal::classify_sealed_body`) still does not treat proto
 //! `0x03` as a known class. A future signed, versioned PairInit must negotiate

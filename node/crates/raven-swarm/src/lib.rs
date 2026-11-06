@@ -979,8 +979,8 @@ pub mod candidates;
 
 /// The NAT mapping classifier (relay- and contact-observed addresses on
 /// direct outbound connections) and the hole-punch skip rule built on it
-/// (Phase 4; held by `raven_core::nat_class_live_enabled`,
-/// NAT_CLASS_PRODUCTION_ENABLED=false).
+/// (Phase 4; gated by `raven_core::nat_class_live_enabled`,
+/// NAT_CLASS_PRODUCTION_ENABLED, true since 2026-10-29).
 #[cfg(feature = "p2p-host")]
 pub mod natclass;
 

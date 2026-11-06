@@ -88,7 +88,7 @@
 //!   its `what to do` and the doctor's next step say the relay is not
 //!   answering (W1), and the doctor says `reach_class: unreachable`; no new
 //!   row, line or log names a PeerId or an address. Runs under the debug lab
-//!   unlock while `P2P_PRODUCTION_ENABLED` is false.
+//!   unlock, which opens p2p whatever its const (true since 2026-10-29).
 //!
 //! - **C12 network switch, p2p (Phase 0b):** relay R behind a recording proxy;
 //!   A listens on a loopback port and its netwatch reads a lab event file; B
@@ -152,8 +152,8 @@
 //!
 //! Route hints (RRH1, `protocol/RAVEN_ROUTE_HINTS_V1.md`) run under their
 //! debug switch `RAVEN_LAB_ROUTE_HINTS=1` ([`Profile::with_route_hints`])
-//! while `ROUTE_HINTS_PRODUCTION_ENABLED` is false; every other profile
-//! runs without it. On loopback nothing confirms a global address, so the
+//! (release builds have them on since 2026-10-29); every other profile
+//! runs without them (the switch's `0`). On loopback nothing confirms a global address, so the
 //! direct addresses in these tests are the same-network ones a node tells
 //! a contact over a LAN link.
 //!
@@ -1182,8 +1182,8 @@ impl Profile {
     }
 
     /// Friend relays on for every later process of this profile: the debug
-    /// switch `RAVEN_LAB_FRIEND_RELAY=1` while
-    /// `FRIEND_RELAY_PRODUCTION_ENABLED` is false, route hints (offers ride
+    /// switch `RAVEN_LAB_FRIEND_RELAY=1` (other profiles close the relay with
+    /// `0`; release builds have it on since 2026-10-29), route hints (offers ride
     /// RRH1), the friend relay on loopback
     /// (`RAVEN_LAB_FRIEND_RELAY_LISTEN=127.0.0.1:0`, which a daemon's own
     /// environment may change) and loopback addresses as candidates and
@@ -2266,8 +2266,8 @@ fn the_probe_walk_check_reads_the_log_line() {
 /// connection), the payload is delivered on `p2p_dial` and served by B.
 /// B's answer rides A's connection (`reversed`) with no probe of B's, which
 /// holds the session (RN-6). Neither body reaches chat, and no log names a
-/// PeerId. Lab unlock on both sides (the app channel needs it while
-/// `APP_CHANNEL_PRODUCTION_ENABLED` is false, whatever the p2p flag).
+/// PeerId. Lab unlock on both sides (`APP_CHANNEL_PRODUCTION_ENABLED` is true
+/// since 2026-10; a debug build's `RAVEN_LAB_TEST_A=0` would close it).
 #[test]
 #[ignore = "multi-process harness: cargo build -p ash first, then run with --ignored"]
 fn c7f_app_channel_pairs_past_two_dead_routes_and_answers_by_reversal() {
@@ -5835,8 +5835,8 @@ fn c17_exchange(a: &Profile, b: &Profile, label: &str) {
 }
 
 /// C17: route hints (RRH1, protocol/RAVEN_ROUTE_HINTS_V1.md) on LAN, and
-/// old-peer safety. The switch is the debug `RAVEN_LAB_ROUTE_HINTS=1` while
-/// `ROUTE_HINTS_PRODUCTION_ENABLED` is false. (1) Both sides on: B comes
+/// old-peer safety. The switch is the debug `RAVEN_LAB_ROUTE_HINTS` (`1` on,
+/// `0` off; release builds have route hints on). (1) Both sides on: B comes
 /// back on another port and sends to A; that link tells A the new port
 /// (LAN_PORT), and the message A queued while B was away reaches B there
 /// within 15 s, with no `set-addr`. (2) The switch on one side only, then
@@ -13982,8 +13982,9 @@ fn c55_handoff_refusals() {
 
 // ── Phase 5: Bluetooth nearby over the fake ether (P5.28) ───────────────────
 
-/// The nearby carrier's lab switches: Lab Test A and nearby's own
-/// (`NEARBY_PRODUCTION_ENABLED` is false).
+/// The nearby carrier's lab switches: Lab Test A and nearby's own, which
+/// open it off macOS (`NEARBY_PRODUCTION_ENABLED` is true on macOS only) and
+/// undo the harness's `0` on macOS.
 fn nearby_lab_env(cmd: &mut Command) {
     cmd.env("RAVEN_LAB_TEST_A", "1")
         .env("RAVEN_LAB_NEARBY", "1");

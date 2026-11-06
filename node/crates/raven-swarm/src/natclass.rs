@@ -41,8 +41,8 @@
 //! global IPv6 address, or after two failed punches with that contact on
 //! this network (held [`FAIL_HOLD`]). The endpoint builds a fresh policy
 //! for every network (Phase 0b re-home), so a network change resets it.
-//! Disabled (the NAT_CLASS gate shut: `NAT_CLASS_PRODUCTION_ENABLED=false`)
-//! it never skips, which is Phase 1's behaviour.
+//! Disabled (the NAT_CLASS gate shut: a debug build's `RAVEN_LAB_NAT_CLASS=0`,
+//! p2p closed, or a security notice) it never skips, which is Phase 1's behaviour.
 //!
 //! **Lab.** `RAVEN_LAB_NAT_CLASS_FORCE` ([`raven_core::portmap_gate::lab_nat_class_force`])
 //! overrides the policy's own class in debug builds with the lab unlock

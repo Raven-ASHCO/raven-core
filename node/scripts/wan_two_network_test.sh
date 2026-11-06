@@ -28,9 +28,9 @@
 #       before sharing it.
 #   node/scripts/wan_two_network_test.sh stop
 #
-# Friend custody over the internet (Phase 3 item 3, owner rows R10/R10b; held
-# by FRIEND_CUSTODY_PRODUCTION_ENABLED=false and FRIEND_CUSTODY_WAN_ENABLED=
-# false: every two-node command here runs with the debug switches
+# Friend custody over the internet (Phase 3 item 3, owner rows R10/R10b; on
+# in release builds since 2026-10-29, FRIEND_CUSTODY_PRODUCTION_ENABLED and
+# FRIEND_CUSTODY_WAN_ENABLED true: every two-node command here runs with the debug switches
 # RAVEN_LAB_CUSTODY_WAN=1 and RAVEN_LAB_ROUTE_HINTS=1, custodians ride route
 # hints):
 #   node/scripts/wan_two_network_test.sh custodian on|off
@@ -49,7 +49,7 @@
 #       counts only: mailbox choice, mail friends, offers, what this machine
 #       holds for others, items held by friends.
 #
-# Friend relays (Phase 2, held by FRIEND_RELAY_PRODUCTION_ENABLED=false: these
+# Friend relays (Phase 2, on in release builds since 2026-10-29: these
 # commands turn on the debug switches RAVEN_LAB_FRIEND_RELAY=1 and
 # RAVEN_LAB_ROUTE_HINTS=1 for this test home, and every later command here
 # keeps them):

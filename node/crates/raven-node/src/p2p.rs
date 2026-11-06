@@ -185,8 +185,8 @@
 //!   Status also names where the proxy setting came from (`proxy_source`)
 //!   and the proxy's last 407 as a fixed word (`proxy_auth`:
 //!   [`proxy_auth_word`]), for `raven status` and `raven node proxy`.
-//! - **NAT mapping classes** (Phase 4 P4.24; lab-only while
-//!   `NAT_CLASS_PRODUCTION_ENABLED=false`): each endpoint generation builds a
+//! - **NAT mapping classes** (Phase 4 P4.24; gated by
+//!   `NAT_CLASS_PRODUCTION_ENABLED`, true since 2026-10-29): each endpoint generation builds a
 //!   classifier (`raven_swarm::natclass`) fed by what our relays and
 //!   contacts see of us on connections we dialled from the listen port
 //!   ([`nat_feed`]: the listener was reported when the dial began; the
@@ -212,8 +212,9 @@
 //!   and the state; logs say only that the ID changed. Gate closed: the
 //!   fixed key, as in Phase 1.
 //!
-//! Held by `raven_core::p2p_live_enabled` (P2P_PRODUCTION_ENABLED=false or the
-//! debug lab unlock): with it closed nothing is built, so nothing listens,
+//! Held by `raven_core::p2p_live_enabled` (P2P_PRODUCTION_ENABLED, true since
+//! 2026-10-29; a debug build closes it with `RAVEN_LAB_TEST_A=0`): with it
+//! closed nothing is built, so nothing listens,
 //! dials, reserves or advertises. Logs carry categories and counts only (NAT
 //! spec §5): no PeerId, address or key; this node's own PeerId and listen
 //! addresses are shown by IPC `Status` (`raven status`).

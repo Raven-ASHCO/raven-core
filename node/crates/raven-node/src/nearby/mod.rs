@@ -1,7 +1,8 @@
 //! The Bluetooth LE nearby carrier in raven-node (RNL1,
 //! `protocol/RAVEN_NEARBY_LINK_V1.md`; Nearby design steps 5.5 and 5.6).
-//! Held by [`raven_core::nearby_live_enabled`]
-//! (`NEARBY_PRODUCTION_ENABLED=false`).
+//! Gated by [`raven_core::nearby_live_enabled`]
+//! (`NEARBY_PRODUCTION_ENABLED`: true on macOS since 2026-10-29, false on
+//! Windows and Linux).
 //!
 //! - [`radio`]: the seam every Bluetooth LE backend implements (BlueZ on
 //!   linux-gnu, WinRT on Windows and CoreBluetooth on macOS and iOS, feature
