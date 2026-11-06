@@ -105,6 +105,7 @@ fn book_club(now_ms: u64, unread: usize) -> GroupChat {
                 id: [0x11; 16],
                 mine: false,
                 author: "Friend 1".into(),
+                from_friend: true,
                 via: None,
                 body: "Hello club!".into(),
                 at_ms: minutes(30),
@@ -118,6 +119,7 @@ fn book_club(now_ms: u64, unread: usize) -> GroupChat {
                 id: [0x12; 16],
                 mine: false,
                 author: "Ola".into(),
+                from_friend: false,
                 via: Some("Friend 1".into()),
                 body: "Count me in.".into(),
                 at_ms: minutes(20),
@@ -146,6 +148,7 @@ fn mine(id: [u8; 16], body: &str, at_ms: u64, delivered: usize) -> GroupMessage 
         id,
         mine: true,
         author: "you".into(),
+        from_friend: true,
         via: None,
         body: body.into(),
         at_ms,
@@ -348,7 +351,8 @@ fn a_group_chat_says_how_and_when_each_message_came() {
     let plain = testkit::render_text(&app);
     assert!(plain.contains("Friend 1 - 30 min ago - via Tor"), "{plain}");
     assert!(
-        plain.contains("Ola - 20 min ago - from a keeper - passed on by Friend 1"),
+        plain
+            .contains("Ola - not your friend - 20 min ago - from a keeper - passed on by Friend 1"),
         "{plain}"
     );
     assert!(
@@ -397,10 +401,10 @@ fn a_group_chat_says_who_wrote_who_passed_it_on_and_how_many_have_it() {
             "│                    ││                                                        │",
             "│                    ││                                                        │",
             "│                    ││                                                        │",
-            "│                    ││                                                        │",
             "│                    ││ Friend 1 - 30 min ago                                  │",
             "│                    ││   Hello club!                                          │",
-            "│                    ││ Ola - 20 min ago - passed on by Friend 1               │",
+            "│                    ││ Ola - not your friend - 20 min ago                     │",
+            "│                    ││   passed on by Friend 1                                │",
             "│                    ││   Count me in.                                         │",
             "│                    ││ You - 5 min ago  v Delivered to 1 of 2                 │",
             "│                    ││   Ola waiting: another member passes it on             │",
@@ -1097,6 +1101,142 @@ fn a_group_made_and_written_to_on_a_profile_shows_delivered_to_1_of_2() {
     assert!(text.contains("Cy waiting"), "{text}");
 }
 
+/// APP-02, ASH-2: a member who is not your friend goes by the name its
+/// admin gave them, which can be any text. The chat marks such an author
+/// 'not your friend', in the neutral style of the line (a friend's name is
+/// a name's), and never under a name of yours: a label that is your friend
+/// Cy's name gives way to the start of its key. Built with raven-core's
+/// API on a profile and read through the controller.
+#[test]
+fn a_member_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
+    let Some(_lab) = Lab::set(true) else {
+        return;
+    };
+    let (dir, controller, [bea, _cy]) = profile();
+    let d = dir.path();
+    // Bea, as profile() made her; and this profile's key, with the device
+    // certificate a profile that took a message has.
+    let admin = Identity::from_seed(&[0xBE; 32]);
+    let me = raven_core::load_identity(d)
+        .expect("the identity reads")
+        .expect("an identity");
+    raven_core::device_cert::ensure_local_device_certificate(
+        d,
+        &me,
+        raven_core::paths::PRIMARY_DEVICE_ID,
+    )
+    .expect("a device certificate");
+    let ola = Identity::from_seed(&[0x51; 32]);
+    let not_cy = Identity::from_seed(&[0x52; 32]);
+    let salt = [0x77; 16];
+    let id = core_group::group_id_for(&bea, &salt);
+    let member = |key: Key, label: &str| core_group::Member {
+        key,
+        label: label.into(),
+    };
+    let mut state = core_group::GroupState {
+        group: id,
+        salt,
+        epoch: 1,
+        name: "Book club".into(),
+        admin: bea,
+        issued_ms: bridge::now_ms(),
+        members: vec![
+            member(bea, ""),
+            member(me.public_key_bytes(), ""),
+            member(ola.public_key_bytes(), "Ola"),
+            member(not_cy.public_key_bytes(), "Cy"),
+        ],
+        sig: [0; 64],
+    };
+    state.sign(&admin);
+    core_group::ingest(
+        d,
+        &bea,
+        &core_group::GroupFrame::State(state),
+        bridge::now_ms(),
+    )
+    .expect("the roster");
+    for (n, (author, body)) in [
+        (&admin, "Hello club!"),
+        (&ola, "Count me in."),
+        (&not_cy, "It is me, your friend."),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut m = core_group::GroupMsg {
+            group: id,
+            id: [n as u8 + 1; 16],
+            epoch: 1,
+            from: [0; 32],
+            sent_ms: bridge::now_ms(),
+            body: body.into(),
+            sig: [0; 64],
+            relay: Vec::new(),
+        };
+        m.sign(author);
+        let taken = core_group::ingest(d, &bea, &core_group::GroupFrame::Msg(m), bridge::now_ms());
+        assert_eq!(taken, Ok(true), "{body}");
+    }
+    // The app opens Book club, under Bea and Cy on the list.
+    let mut app = testkit::app((80, 24));
+    let cmds = app.start(testkit::session(state_file::Receive::Off));
+    run_jobs(&mut app, &controller, cmds);
+    let cmds = press_all(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+    run_jobs(&mut app, &controller, cmds);
+    assert_eq!(app.open_group(), Some(id));
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("a terminal");
+    terminal
+        .draw(|f| render_frame(f, &app, app.now()))
+        .expect("a draw");
+    let buf = terminal.backend().buffer().clone();
+    let rows = testkit::buffer_lines(&buf);
+    // The chat pane: right of the list's 22 cells.
+    let pane: Vec<String> = rows.iter().map(|r| r.chars().skip(22).collect()).collect();
+    let text = testkit::screen_text(&pane);
+    assert!(text.contains("Hello club!"), "{text}");
+    // Who wrote what, each header row the start of its message.
+    let head = |name: &str| {
+        let y = pane
+            .iter()
+            .position(|row| row.starts_with(&format!("│ {name} ")))
+            .unwrap_or_else(|| panic!("no header for {name}: {pane:#?}"));
+        (y, pane[y].clone())
+    };
+    let (_, bea_head) = head("Bea");
+    assert!(!bea_head.contains("not your friend"), "{pane:#?}");
+    let (ola_y, ola_head) = head("Ola");
+    assert!(ola_head.contains("Ola - not your friend"), "{pane:#?}");
+    let start = hex::encode(&not_cy.public_key_bytes()[..4]);
+    let (_, not_cy_head) = head(&start);
+    assert!(
+        not_cy_head.contains(&format!("{start} - not your friend")),
+        "{pane:#?}"
+    );
+    // Never under your friend's name.
+    assert!(
+        !pane.iter().any(|row| row.starts_with("│ Cy ")),
+        "{pane:#?}"
+    );
+    // A friend's name in the style of names (bold here); Ola's name and
+    // mark in the neutral style of times and hints.
+    let t = &app.look().theme;
+    let modifier_at = |y: usize, column: usize| {
+        let x = u16::try_from(22 + column).expect("a column");
+        buf[(x, u16::try_from(y).expect("a row"))].modifier
+    };
+    let (bea_y, _) = head("Bea");
+    assert_eq!(modifier_at(bea_y, 2), t.title.add_modifier);
+    // 'O' of Ola, 'n' of its mark.
+    for column in [2, 8] {
+        let modifier = modifier_at(ola_y, column);
+        assert_eq!(modifier, t.secondary.add_modifier, "{column}");
+        assert_ne!(modifier, t.title.add_modifier, "{column}");
+    }
+}
+
 #[test]
 fn help_lists_the_group_keys_while_groups_are_live() {
     let Some(_lab) = Lab::set(true) else {
@@ -1190,7 +1330,9 @@ fn a_run_of_group_messages_from_one_member_has_one_sender_line() {
     read(&mut app, three_groups(0), Some(chat));
     let text = testkit::render_text(&app);
     assert!(
-        text.contains("Friend 1 - 30 min ago Hello club! Bring snacks. Ola - 20 min ago"),
+        text.contains(
+            "Friend 1 - 30 min ago Hello club! Bring snacks. Ola - not your friend - 20 min ago"
+        ),
         "{text}"
     );
     assert_eq!(text.matches("Friend 1 - ").count(), 1, "{text}");

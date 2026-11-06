@@ -10,6 +10,9 @@ mod app;
 mod background;
 mod bridge;
 mod controller;
+// Look-alike letters folded as the friend names are compared: `raven group`
+// compares a group label with your friends' names by it (APP-02, ASH-2).
+pub(super) use controller::fold_confusables;
 mod delivery;
 mod display;
 #[cfg(all(test, unix))]

@@ -11,8 +11,11 @@
 //!   the outbox, starting raven-node as `raven send` does when none runs.
 //! - **Names.** A member who is a friend is shown by this contact book's
 //!   name, any other by the admin's label; keys only as their first 8 hex
-//!   characters.
+//!   characters. An author who is not your friend is marked so, in the dim
+//!   style, and never named by a label that is (or only looks like) the
+//!   name of one of your friends or "you" ([`author_of`]; APP-02, ASH-2).
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 
@@ -439,6 +442,81 @@ fn list_lines(data_dir: &Path) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// What follows the name of an author who is not your friend, here and in
+/// the terminal app.
+pub(super) const NOT_YOUR_FRIEND: &str = "not your friend";
+
+/// A message's author as `show`, the inbox and the terminal app name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Author {
+    pub(super) name: String,
+    /// The name is one this profile chose: you, or your name for a friend.
+    /// Otherwise it is the admin's label (or the start of the key), shown
+    /// with [`NOT_YOUR_FRIEND`] in a neutral style.
+    pub(super) friend: bool,
+}
+
+/// The author `key` of a message in `view` (APP-02, ASH-2). You and your
+/// friends go by the names this profile gave them (`names`: the contact
+/// book's, [`group::friend_names`]). Anyone else goes by the label the
+/// admin gave them, which can be any text, so it is never shown as a name
+/// of yours: a label that is, or only looks like, the name of one of your
+/// friends or "you" gives way to the start of the key.
+pub(super) fn author_of(view: &GroupView, key: &Key, names: &HashMap<Key, String>) -> Author {
+    let chosen = |name: &str| !name.trim().is_empty();
+    let yours = match view.member(key) {
+        Some(m) if m.me => Some(m.display()),
+        Some(m) => match m.friend_name.as_deref() {
+            Some(name) if chosen(name) => Some(name.to_owned()),
+            // A friend with no name here: by the start of the key, never by
+            // the admin's label.
+            Some(_) => Some(short(key)),
+            None => None,
+        },
+        None => names.get(key).filter(|name| chosen(name.as_str())).cloned(),
+    };
+    if let Some(name) = yours {
+        return Author { name, friend: true };
+    }
+    let label = view.name_of(key, names);
+    let name = if passes_for_yours(&label, key, names) {
+        short(key)
+    } else {
+        label
+    };
+    Author {
+        name,
+        friend: false,
+    }
+}
+
+/// Whether `label` is, or only looks like, a name this profile shows for
+/// someone other than `key`: one of its friends' names, or "you" (compared
+/// as the terminal app compares names: sanitized, ignoring case and
+/// look-alike letters).
+fn passes_for_yours(label: &str, key: &Key, names: &HashMap<Key, String>) -> bool {
+    let fold = |name: &str| {
+        super::tui::fold_confusables(&sanitize_terminal_line(name.trim()).to_lowercase())
+    };
+    let want = fold(label);
+    !want.is_empty()
+        && (want == "you"
+            || names
+                .iter()
+                .any(|(other, name)| other != key && fold(name) == want))
+}
+
+/// An author as a line prints it: a name you chose as it is; any other in
+/// the dim style, marked.
+fn author_text(author: &Author) -> String {
+    let name = sanitize_terminal_line(&author.name);
+    if author.friend {
+        name
+    } else {
+        format!("{C_DIM}{name} ({NOT_YOUR_FRIEND}){C_RESET}")
+    }
+}
+
 /// How a member reads in a delivery list.
 fn line_word(state: &str) -> &'static str {
     match state {
@@ -453,18 +531,18 @@ fn line_word(state: &str) -> &'static str {
 fn message_line(
     view: &GroupView,
     m: &MessageView,
-    names: &std::collections::HashMap<Key, String>,
+    names: &HashMap<Key, String>,
     now: u64,
 ) -> String {
     let who = if m.mine {
         "you".to_owned()
     } else {
-        view.name_of(&m.from, names)
+        author_text(&author_of(view, &m.from, names))
     };
     let mut line = format!(
         "  {C_DIM}{}{C_RESET} {}: {}",
         super::short_age(now, m.received_ms),
-        sanitize_terminal_line(&who),
+        who,
         sanitize_terminal_line(&m.body)
     );
     line.push_str(&format!(
@@ -623,7 +701,7 @@ pub(super) fn inbox_lines(data_dir: &Path) -> Vec<String> {
                     "  {C_DIM}{}{C_RESET} [{}] {}: {}",
                     super::short_age(now, m.received_ms),
                     sanitize_terminal_line(&g.name),
-                    sanitize_terminal_line(&view.name_of(&m.from, &names)),
+                    author_text(&author_of(&view, &m.from, &names)),
                     sanitize_terminal_line(&m.body)
                 ),
             ));

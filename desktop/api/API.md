@@ -237,6 +237,15 @@ raven-node).
 - **Names.** `GroupMember.name` is your name for a member who is your friend, else the name the
   admin gave them (`label`); `friend: false` members are shown as "not your friend" and are never
   added to your friends by the group. You are `me: true` (name: your display name, else "You").
+- **Authors.** A message's `from_name` is named the same way. A label is any text its admin chose,
+  the name of one of your friends too, so `GroupMessage.from_friend` says whether `from_name` is a
+  name you chose: true for yours and for a friend's, false for anyone else (the admin's label, or
+  "a former member (1a2b3c4d)"); `Group.last_from_friend` says the same of `last_from`. An author
+  with `from_friend: false` is never shown as a friend: wherever its name is shown (the message, a
+  list preview, a notification) it goes with "not your friend", in a neutral colour (never one
+  derived from the address). `raven group show`, `raven inbox` and the terminal app do so too, and
+  show the start of the key instead of a label that is, or only looks like, the name of one of
+  your friends or "you".
 - **Receipts.** Each message of yours lists one `receipts` entry per member it was for:
   `waiting` (still on this computer, or passed on by another member and not confirmed yet), `sent`
   (left this computer, no receipt yet), `delivered` (that member's Raven confirmed it: a signed
@@ -725,16 +734,21 @@ PassphraseState { available (this build has Lock v2), lab,
 UpdatesStatus { available, bundles, from_friends, lab, lines: [..], summary?, offer?: [..],
             install: "cli_only", install_text }
 Group     { id, name, short_id, status: "active" | "left" | "removed", admin: bool (you are the admin),
-            admin_address, admin_name, members: n, unread, last_ms?, last_text?, last_from? }
-            last_from: the newest message's author (a name; "You" for yours); last_text its text.
+            admin_address, admin_name, members: n, unread, last_ms?, last_text?, last_from?,
+            last_from_friend? }
+            last_from: the newest message's author (a name; "You" for yours); last_text its text;
+            last_from_friend: whether last_from is a name you chose (yours, a friend's); false: the
+            admin's label, shown with "not your friend" (see Groups, Authors).
 GroupMember { address, short_address, name, label, friend: bool, admin: bool, me: bool }
-GroupMessage { id, group, from_address, from_name, mine: bool, text, at_ms,
+GroupMessage { id, group, from_address, from_name, from_friend: bool, mine: bool, text, at_ms,
             via_name? (the member that passed it on, when it was not its author),
             path_kind?, path? (a member's message: how the copy that brought it came, the kinds and
                                words of Message.path_kind; friend when a friend held it),
             delivered: n, total: n,
             receipts: [{ address, name, state: "waiting" | "sent" | "delivered" | "failed",
                          via: "direct" | "relay", held_by? }] }   (receipts only on yours)
+            from_friend: true for yours and a friend's; false: from_name is the admin's label (or
+            "a former member (1a2b3c4d)"), shown with "not your friend" (see Groups, Authors).
             held_by: the friend that holds the copy for that member while the member is away, by
             your name for them, until it is delivered or given up (its state is then `waiting` or
             `sent`, as raven-node's outbox lists it).

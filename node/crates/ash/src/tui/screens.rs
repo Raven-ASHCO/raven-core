@@ -191,19 +191,24 @@ fn group_chat(look: Look, size: (u16, u16)) -> App {
     };
     let now = app.now_ms();
     let minutes = |n: u64| now - n * 60_000;
-    let message = |id: u8, author: &str, via: Option<&str>, body: &str, at: u64| GroupMessage {
-        id: [id; 16],
-        mine: false,
-        author: author.into(),
-        via: via.map(str::to_owned),
-        body: body.into(),
-        at_ms: at,
-        sent_ms: at,
-        path: None,
-        lines: Vec::new(),
-        delivered: 0,
-        total: 0,
-    };
+    // A member's message; `friend`: its author is your friend.
+    let message =
+        |id: u8, (author, friend): (&str, bool), via: Option<&str>, body: &str, at: u64| {
+            GroupMessage {
+                id: [id; 16],
+                mine: false,
+                author: author.into(),
+                from_friend: friend,
+                via: via.map(str::to_owned),
+                body: body.into(),
+                at_ms: at,
+                sent_ms: at,
+                path: None,
+                lines: Vec::new(),
+                delivered: 0,
+                total: 0,
+            }
+        };
     let line = |name: &str, state: &str, relayed: bool| MemberLine {
         name: name.into(),
         state: state.into(),
@@ -222,14 +227,14 @@ fn group_chat(look: Look, size: (u16, u16)) -> App {
         messages: vec![
             message(
                 0x11,
-                "Alex",
+                ("Alex", true),
                 None,
                 "Who is driving on Saturday?",
                 minutes(50),
             ),
             message(
                 0x12,
-                "Jordan",
+                ("Jordan", false),
                 Some("Sam"),
                 "I can take three people.",
                 minutes(42),
@@ -238,6 +243,7 @@ fn group_chat(look: Look, size: (u16, u16)) -> App {
                 id: [0x13; 16],
                 mine: true,
                 author: "you".into(),
+                from_friend: true,
                 via: None,
                 body: "Count me in, I'll bring the map.".into(),
                 at_ms: minutes(30),

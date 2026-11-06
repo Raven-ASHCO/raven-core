@@ -200,7 +200,11 @@ fn the_inbox_lists_received_group_messages_by_group_and_author() {
     m.sign(&other);
     group::ingest(d, &a, &GroupFrame::Msg(m), now_ms()).unwrap();
     let lines = plain(&inbox_lines(d));
-    assert!(lines.contains("[Hikers] Ola: summit at noon"), "{lines}");
+    // Ola is not a friend: the admin's label, marked (APP-02, ASH-2).
+    assert!(
+        lines.contains("[Hikers] Ola (not your friend): summit at noon"),
+        "{lines}"
+    );
     let shown = plain(
         &cmd_group(
             d,
@@ -212,6 +216,111 @@ fn the_inbox_lists_received_group_messages_by_group_and_author() {
         .unwrap(),
     );
     assert!(shown.contains("passed on by Ana"), "{shown}");
+    assert!(
+        shown.contains("not your friend; named by the admin"),
+        "{shown}"
+    );
+}
+
+/// APP-02, ASH-2: a member who is not your friend goes by the label its
+/// admin gave them, which can be any text. `raven group show` and `raven
+/// inbox` mark such an author "not your friend", and never show it under a
+/// name of yours: a label that is, or only looks like, the name of one of
+/// your friends, or "you", gives way to the start of its key.
+#[test]
+fn an_author_who_is_not_your_friend_is_marked_and_never_named_as_a_friend() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let admin = Identity::from_seed(&[0xA1; 32]);
+    let bo = Identity::from_seed(&[0xB0; 32]);
+    let (dir, me) = profile(&[("Ana", &admin), ("Bo", &bo)]);
+    let d = dir.path();
+    // Strangers the admin named: plainly, as your friend Bo, as Bo with a
+    // Cyrillic o, and as you.
+    let strangers = [
+        (Identity::from_seed(&[0x51; 32]), "Ola"),
+        (Identity::from_seed(&[0x52; 32]), "Bo"),
+        (Identity::from_seed(&[0x53; 32]), "B\u{043E}"),
+        (Identity::from_seed(&[0x54; 32]), "You"),
+    ];
+    let salt = [0x66; 16];
+    let id = group::group_id_for(&admin.public_key_bytes(), &salt);
+    let mut members = vec![
+        group::Member {
+            key: admin.public_key_bytes(),
+            label: String::new(),
+        },
+        group::Member {
+            key: me.public_key_bytes(),
+            label: String::new(),
+        },
+    ];
+    members.extend(strangers.iter().map(|(s, label)| group::Member {
+        key: s.public_key_bytes(),
+        label: (*label).into(),
+    }));
+    let mut state = group::GroupState {
+        group: id,
+        salt,
+        epoch: 1,
+        name: "Hikers".into(),
+        admin: admin.public_key_bytes(),
+        issued_ms: now_ms(),
+        members,
+        sig: [0; 64],
+    };
+    state.sign(&admin);
+    let a = admin.public_key_bytes();
+    group::ingest(d, &a, &GroupFrame::State(state), now_ms()).unwrap();
+    // The admin writes, then each stranger, passed on by the admin.
+    let say = |author: &Identity, n: u8, body: &str| {
+        let mut m = GroupMsg {
+            group: id,
+            id: [n; 16],
+            epoch: 1,
+            from: [0; 32],
+            sent_ms: now_ms(),
+            body: body.into(),
+            sig: [0; 64],
+            relay: Vec::new(),
+        };
+        m.sign(author);
+        assert_eq!(
+            group::ingest(d, &a, &GroupFrame::Msg(m), now_ms()),
+            Ok(true)
+        );
+    };
+    say(&admin, 1, "hello all");
+    for (n, (stranger, _)) in strangers.iter().enumerate() {
+        say(stranger, n as u8 + 2, &format!("note {n}"));
+    }
+    let inbox = plain(&inbox_lines(d));
+    let shown = plain(
+        &cmd_group(
+            d,
+            GroupArg::Show {
+                group: hex::encode(id),
+                all: false,
+            },
+        )
+        .unwrap(),
+    );
+    for text in [&inbox, &shown] {
+        // The admin is your friend: your name for them, unmarked.
+        assert!(text.contains("Ana: hello all"), "{text}");
+        assert!(text.contains("Ola (not your friend): note 0"), "{text}");
+        for (n, (stranger, label)) in strangers.iter().enumerate().skip(1) {
+            let start = hex::encode(&stranger.public_key_bytes()[..4]);
+            let line = format!("{start} (not your friend): note {n}");
+            assert!(text.contains(&line), "{line} in {text}");
+            for named in [format!("{label}: "), format!("{label} (not your friend)")] {
+                assert!(!text.contains(&named), "{named} in {text}");
+            }
+        }
+    }
+    // The member list says who each one is.
     assert!(
         shown.contains("not your friend; named by the admin"),
         "{shown}"

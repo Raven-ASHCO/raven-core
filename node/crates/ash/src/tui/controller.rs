@@ -375,8 +375,14 @@ pub(super) struct GroupMessage {
     pub(super) id: [u8; 16],
     /// Written here.
     pub(super) mine: bool,
-    /// Its author: a friend's name, else the name the admin gave them.
+    /// Its author: a friend's name, else the name the admin gave them (the
+    /// start of the key for a label that is, or only looks like, the name
+    /// of one of your friends: `group_cli::author_of`).
     pub(super) author: String,
+    /// You or one of your friends wrote it, named by you. Otherwise the chat
+    /// marks the author 'not your friend', in a neutral style (APP-02,
+    /// ASH-2).
+    pub(super) from_friend: bool,
     /// The member that passed it on, when it did not come from its author.
     pub(super) via: Option<String>,
     pub(super) body: String,
@@ -1474,26 +1480,30 @@ impl Controller {
         let names = group::friend_names(&self.data_dir);
         let messages = history
             .into_iter()
-            .map(|m| GroupMessage {
-                id: m.id,
-                mine: m.mine,
-                author: view.name_of(&m.from, &names),
-                via: m.via.map(|via| view.name_of(&via, &names)),
-                body: m.body,
-                at_ms: m.received_ms,
-                sent_ms: m.sent_ms,
-                path: m.path,
-                lines: m
-                    .lines
-                    .iter()
-                    .map(|(key, state, via)| MemberLine {
-                        name: view.name_of(key, &names),
-                        state: state.clone(),
-                        relayed: via == group::store::VIA_RELAY,
-                    })
-                    .collect(),
-                delivered: m.delivered,
-                total: m.total,
+            .map(|m| {
+                let author = super::super::group_cli::author_of(&view, &m.from, &names);
+                GroupMessage {
+                    id: m.id,
+                    mine: m.mine,
+                    author: author.name,
+                    from_friend: m.mine || author.friend,
+                    via: m.via.map(|via| view.name_of(&via, &names)),
+                    body: m.body,
+                    at_ms: m.received_ms,
+                    sent_ms: m.sent_ms,
+                    path: m.path,
+                    lines: m
+                        .lines
+                        .iter()
+                        .map(|(key, state, via)| MemberLine {
+                            name: view.name_of(key, &names),
+                            state: state.clone(),
+                            relayed: via == group::store::VIA_RELAY,
+                        })
+                        .collect(),
+                    delivered: m.delivered,
+                    total: m.total,
+                }
             })
             .collect();
         Ok(GroupChat { view, messages })
@@ -1795,8 +1805,9 @@ fn name_key(name: &str) -> String {
 }
 
 /// `name` (lower case) with each look-alike letter of [`CONFUSABLES`] as the
-/// Latin letter it passes for.
-pub(super) fn fold_confusables(name: &str) -> String {
+/// Latin letter it passes for. Also what the CLI compares group labels by
+/// (`group_cli::author_of`).
+pub(crate) fn fold_confusables(name: &str) -> String {
     name.chars()
         .map(|c| {
             CONFUSABLES

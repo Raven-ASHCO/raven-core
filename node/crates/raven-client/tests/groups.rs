@@ -3,7 +3,9 @@
 //! friends, both are B's. B (the admin) creates the group; A's message
 //! reaches C only through B's forward, C verifies A's signature with A's key
 //! from B's roster and stores it exactly once, and A sees C delivered by
-//! C's signed receipt (passed back by B).
+//! C's signed receipt (passed back by B). C calls a friend of its own by
+//! the name B gives A: A's message at C still says it is not from a friend
+//! (`from_friend`, `last_from_friend`: APP-02).
 //!
 //! Lab switches for this process and the raven-nodes it starts:
 //! `RAVEN_LAB_TEST_A=1 RAVEN_LAB_HORIZON=1 RAVEN_LAB_GROUPS=1` (one test
@@ -107,12 +109,16 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
     let a = profile("Desk A");
     let b = profile("Desk B");
     let c = profile("Desk C");
-    let _guards = [guard(&a), guard(&b), guard(&c)];
+    // D never runs a node: only C's friend, whom C calls "Friend A", the
+    // name B gives A in the group (APP-02).
+    let d = profile("Desk D");
+    let _guards = [guard(&a), guard(&b), guard(&c), guard(&d)];
     // B is friends with both; A and C only with B.
     befriend(&a, &b, "Friend B");
     befriend(&b, &a, "Friend A");
     befriend(&b, &c, "Friend C");
     befriend(&c, &b, "Friend B");
+    befriend(&c, &d, "Friend A");
     let (a_at, b_at, c_at) = (start(&a), start(&b), start(&c));
     for (who, friend, at) in [
         (&a, &b, &b_at),
@@ -173,6 +179,7 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
     );
     let id = sent["message"]["id"].as_str().unwrap().to_owned();
     assert_eq!(sent["message"]["total"], 2, "{sent}");
+    assert_eq!(sent["message"]["from_friend"], true, "yours: {sent}");
     let receipts = sent["message"]["receipts"].as_array().unwrap().clone();
     let via_of = |addr: &Value| {
         receipts
@@ -192,6 +199,23 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
     assert_eq!(at_c["from_address"], a.me["address"], "{at_c}");
     assert_eq!(at_c["via_name"], "Friend B", "passed on by B: {at_c}");
     assert_eq!(at_c["mine"], false);
+    // APP-02: A is not C's friend. The name is the admin's label, which is
+    // also C's name for D; from_friend says it is not a name C chose, so
+    // the apps never show A as C's friend.
+    assert_eq!(at_c["from_name"], "Friend A", "the admin's label: {at_c}");
+    assert_eq!(at_c["from_friend"], false, "{at_c}");
+    let last_at = |p: &Profile| {
+        ok(&p.client, "groups.list", json!({}))["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == group.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("no group {group}"))
+    };
+    let listed = last_at(&c);
+    assert_eq!(listed["last_from"], "Friend A", "{listed}");
+    assert_eq!(listed["last_from_friend"], false, "{listed}");
     // How the copy that brought it came (here: B's forward on the LAN).
     assert_eq!(at_c["path_kind"], "lan", "{at_c}");
     assert_eq!(at_c["path"], "LAN direct", "{at_c}");
@@ -203,6 +227,11 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
     });
     assert!(at_b.get("via_name").is_none(), "{at_b}");
     assert_eq!(at_b["path_kind"], "lan", "{at_b}");
+    // A is B's friend: by B's name for A.
+    assert_eq!(at_b["from_name"], "Friend A", "{at_b}");
+    assert_eq!(at_b["from_friend"], true, "{at_b}");
+    let listed = last_at(&b);
+    assert_eq!(listed["last_from_friend"], true, "{listed}");
 
     // A sees both delivered: B by the pairwise receipt, C by C's signed
     // group receipt that B passed back.
@@ -222,11 +251,12 @@ fn a_message_reaches_a_non_friend_through_the_admins_forward_exactly_once() {
         .count();
     assert_eq!(copies, 1);
     let events = common::events_until(&c.client, &mut c_after, Duration::from_secs(3), |_| false);
-    let arrivals = events
+    let arrivals: Vec<&Value> = events
         .iter()
         .filter(|e| e["kind"] == "group_message" && e["message"]["id"] == id.as_str())
-        .count();
-    assert_eq!(arrivals, 1, "{events:#?}");
+        .collect();
+    assert_eq!(arrivals.len(), 1, "{events:#?}");
+    assert_eq!(arrivals[0]["message"]["from_friend"], false, "{events:#?}");
     // Group copies never show in a 1:1 chat.
     for (p, friend) in [(&a, &b), (&b, &c), (&c, &b)] {
         let chat = ok(

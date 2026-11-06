@@ -9,10 +9,12 @@
 //! - A group's chat: the name with the member count, then the messages,
 //!   each under its author's name ('You' for yours; a member who is your
 //!   friend by your name for them, any other by the name the admin gave
-//!   them) and its age, with 'passed on by <member>' when another member
-//!   forwarded it. Yours have a tick and 'Delivered to 1 of 2'; WHO HAS IT
-//!   lists each member's copy. A group you left or were removed from has
-//!   a notice where the composer was.
+//!   them, marked 'not your friend' in the neutral style of times, and by
+//!   the start of the key when that name is, or looks like, a friend's:
+//!   APP-02, ASH-2) and its age, with 'passed on by <member>' when another
+//!   member forwarded it. Yours have a tick and 'Delivered to 1 of 2';
+//!   WHO HAS IT lists each member's copy. A group you left or were removed
+//!   from has a notice where the composer was.
 //! - Every name and body is untrusted and drawn through display.rs.
 
 use std::time::Instant;
@@ -53,6 +55,9 @@ const LIST_UNREADABLE: &str = "Raven can't read your groups right now.";
 const LEFT: &str = "left";
 const REMOVED: &str = "removed";
 const CHAT_UNREADABLE: &str = "Raven can't read this group right now.";
+/// After the name of a member who is not your friend: in their messages'
+/// header and in MEMBERS.
+const NOT_YOUR_FRIEND: &str = "not your friend";
 const LEFT_NOTICE: &str =
     "You left this group. What you received stays here; nothing more comes or goes.";
 const REMOVED_NOTICE: &str =
@@ -349,11 +354,14 @@ fn tail(app: &App, width: u16, needed: usize, now: Instant) -> Vec<Line<'static>
     messages.into_iter().rev().flatten().collect()
 }
 
-/// Who `item` is from, as its header row says it: yours, or its author and
-/// the member that passed it on.
-fn sender(item: GroupItem<'_>) -> Option<(&str, Option<&str>)> {
+/// Who `item` is from, as its header row says it: yours, or its author
+/// (whether a friend: a member who is not never goes on from a friend's
+/// run under its header) and the member that passed it on.
+fn sender(item: GroupItem<'_>) -> Option<(&str, bool, Option<&str>)> {
     match item {
-        GroupItem::Message(m) if !m.mine => Some((m.author.as_str(), m.via.as_deref())),
+        GroupItem::Message(m) if !m.mine => {
+            Some((m.author.as_str(), m.from_friend, m.via.as_deref()))
+        }
         _ => None,
     }
 }
@@ -395,15 +403,24 @@ fn message_lines(
     if marked {
         head.push(Span::styled(format!("{} ", g.selected), t.accent));
     }
-    // Calm: yours in the accent, a member's name bold.
+    // Calm: yours in the accent, a friend's name bold; a member who is not
+    // your friend goes by the name the admin gave them, so that name is in
+    // the neutral style of times and marked (APP-02, ASH-2).
     let mine = !matches!(item, GroupItem::Message(m) if !m.mine);
+    let stranger = matches!(item, GroupItem::Message(m) if !m.mine && !m.from_friend);
     let who_style = if mine {
         t.accent.add_modifier(Modifier::BOLD)
+    } else if stranger {
+        t.secondary
     } else {
         t.title
     };
     if !continued {
         head.push(Span::styled(who, who_style));
+        if stranger {
+            head.push(Span::styled(g.inline_separator, t.secondary));
+            head.push(Span::styled(NOT_YOUR_FRIEND, t.secondary));
+        }
         let age = super::bridge::short_age(app.now_ms(), item.at_ms());
         if !age.is_empty() {
             head.push(Span::styled(g.inline_separator, t.secondary));
@@ -958,7 +975,7 @@ fn render_members(f: &mut Frame, area: Rect, app: &App, members: &MembersState) 
             tags.push(if member.friend_name.is_some() {
                 "your friend"
             } else {
-                "not your friend"
+                NOT_YOUR_FRIEND
             });
         }
         let name = if member.me {

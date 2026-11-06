@@ -6,7 +6,10 @@
 //! Lab only: with raven-core's gate closed `groups.list` says
 //! `available: false` and every other op is NOT_AVAILABLE_YET, nothing
 //! read or written. Members are named by Raven address; a friend by this
-//! profile's name for them, anyone else by the admin's label.
+//! profile's name for them, anyone else by the admin's label. A label can
+//! be any text, the name of one of your friends too, so an author named by
+//! it says so: `from_friend` and `last_from_friend` are false, and the apps
+//! show "not your friend" (APP-02, ASH-2).
 
 use std::collections::{HashMap, HashSet};
 
@@ -148,6 +151,9 @@ fn short_address(address: &str) -> String {
 struct Names {
     friends: HashMap<Key, String>,
     me: String,
+    /// This profile's key: its own messages go by `me`, also in a group it
+    /// is no longer a member of.
+    me_key: Key,
     holders: HashMap<String, String>,
 }
 
@@ -167,16 +173,26 @@ fn path_kind_of(via: ArrivedVia) -> &'static str {
 
 impl Names {
     fn of(&self, view: &GroupView, key: &Key) -> String {
-        if let Some(m) = view.member(key) {
-            if m.me {
-                return self.me.clone();
-            }
+        if self.is_me(view, key) {
+            return self.me.clone();
         }
         if let Some(name) = self.friends.get(key) {
             return name.clone();
         }
         let shown = view.name_of(key, &HashMap::new());
         safety::line(&shown)
+    }
+
+    fn is_me(&self, view: &GroupView, key: &Key) -> bool {
+        *key == self.me_key || view.member(key).is_some_and(|m| m.me)
+    }
+
+    /// Whether [`Names::of`] names `key` by a name this profile chose (you,
+    /// or your name for a friend): API.md's `from_friend`. Otherwise it is
+    /// the admin's label, which can be any text, the name of one of your
+    /// friends too (APP-02, ASH-2).
+    fn chose(&self, view: &GroupView, key: &Key) -> bool {
+        self.is_me(view, key) || self.friends.contains_key(key)
     }
 }
 
@@ -197,6 +213,7 @@ impl Inner {
             .map(|n| safety::line(&n))
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| "You".to_owned());
+        let me_key = self.identity()?.public_key_bytes();
         let holders = self
             .data_dir()
             .map(crate::engine::copy_holders)
@@ -209,6 +226,7 @@ impl Inner {
         Ok(Names {
             friends,
             me,
+            me_key,
             holders,
         })
     }
@@ -255,11 +273,19 @@ impl Inner {
         if let Some((from, text)) = &s.last {
             map.insert("last_ms".into(), s.last_ms.into());
             map.insert("last_text".into(), safety::line(text).into());
-            let who = match view {
-                Some(v) => names.of(v, from),
-                None => names.friends.get(from).cloned().unwrap_or_default(),
+            // Whether that name is one you chose (yours, a friend's); else
+            // it is the admin's label, which the apps mark "not your
+            // friend" (APP-02).
+            let (who, chosen) = match view {
+                Some(v) => (names.of(v, from), names.chose(v, from)),
+                None if *from == names.me_key => (names.me.clone(), true),
+                None => match names.friends.get(from) {
+                    Some(name) => (name.clone(), true),
+                    None => (String::new(), false),
+                },
             };
             map.insert("last_from".into(), who.into());
+            map.insert("last_from_friend".into(), chosen.into());
         }
         Value::Object(map)
     }
@@ -306,6 +332,13 @@ impl Inner {
                 names.of(view, &m.from)
             }
             .into(),
+        );
+        // Whether from_name is a name you chose (yours, a friend's); else it
+        // is the admin's label, which the apps mark "not your friend"
+        // (APP-02).
+        map.insert(
+            "from_friend".into(),
+            (m.mine || names.chose(view, &m.from)).into(),
         );
         map.insert("mine".into(), m.mine.into());
         map.insert("text".into(), safety::text(&m.body).into());
