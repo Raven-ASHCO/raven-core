@@ -859,21 +859,45 @@ pub(crate) fn lan_status() -> Option<raven_core::ipc::LanStatus> {
     })
 }
 
-/// The identity the listener loaded at its preflight ([`listener_identity`]).
-static LISTENER_IDENTITY: Mutex<Option<Arc<Identity>>> = Mutex::new(None);
+/// The identity the listener loaded at its preflight ([`listener_identity`]):
+/// one per process.
+#[cfg(not(test))]
+fn identity_held() -> &'static Mutex<Option<Arc<Identity>>> {
+    static HELD: Mutex<Option<Arc<Identity>>> = Mutex::new(None);
+    &HELD
+}
+
+/// Tests: one per test thread, as the lock's state is (`crate::lock`): a
+/// test's runtime runs its listener on the test's own thread, and another
+/// test's lock, which forgets the identity, never forgets this test's.
+#[cfg(test)]
+fn identity_held() -> &'static Mutex<Option<Arc<Identity>>> {
+    thread_local! {
+        static HELD: &'static Mutex<Option<Arc<Identity>>> =
+            Box::leak(Box::new(Mutex::new(None)));
+    }
+    HELD.with(|held| *held)
+}
 
 /// The identity the LAN listener loaded once at start, after its preflight:
 /// the LAN beacon ([`crate::lan_beacon`]) answers with it and never opens
 /// the keystore itself. `None` before that.
 #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub(crate) fn listener_identity() -> Option<Arc<Identity>> {
-    locked(&LISTENER_IDENTITY).clone()
+    locked(identity_held()).clone()
 }
 
 /// Lock v2 (P6.40): the listener's identity is no longer kept (the listener
 /// task, which holds the other reference, stops with the lock).
 pub(crate) fn forget_listener_identity() {
-    *locked(&LISTENER_IDENTITY) = None;
+    *locked(identity_held()) = None;
+}
+
+/// Keeps `identity` as the listener's ([`listener_identity`]) until the
+/// returned guard drops.
+fn keep_listener_identity(identity: &Arc<Identity>) -> ListenerIdentityHeld {
+    *locked(identity_held()) = Some(Arc::clone(identity));
+    ListenerIdentityHeld
 }
 
 /// Forgets the listener's identity when the listener ends or is dropped (a
@@ -955,7 +979,7 @@ pub(crate) struct ListenerStateForTest;
 impl Drop for ListenerStateForTest {
     fn drop(&mut self) {
         *locked(&PLAN) = None;
-        *locked(&LISTENER_IDENTITY) = None;
+        forget_listener_identity();
     }
 }
 
@@ -1629,8 +1653,7 @@ async fn run_listener_with_limits(
         })
         .await,
     );
-    *locked(&LISTENER_IDENTITY) = Some(Arc::clone(&identity));
-    let _held = ListenerIdentityHeld;
+    let _held = keep_listener_identity(&identity);
     let on = lan_switch().subscribe();
     match serve_while_on(&plan, rule, data_dir, identity, limits, on, || {
         // Back on the network: whatever the outbox holds is worth a try now.
@@ -2876,6 +2899,27 @@ mod tests {
             let _ = task.await;
             assert!(!listener_is_up());
         });
+    }
+
+    /// The listener's identity is this test's own: another test's lock,
+    /// which forgets the identity (`crate::lock`, Lock v2), runs on that
+    /// test's thread and leaves this one alone. It was one per process, so
+    /// a test that locked (the learning model's) could clear it while
+    /// `the_listener_keeps_its_identity_for_the_beacon` waited to read it,
+    /// and that test failed now and then.
+    #[test]
+    fn another_tests_lock_leaves_this_tests_listener_identity() {
+        let _state = listener_state_test_lock();
+        let _cleared = ListenerStateForTest;
+        let identity = Arc::new(Identity::from_seed(&[0x5A; 32]));
+        let _held = keep_listener_identity(&identity);
+        // What another test's lock does, on that test's thread.
+        std::thread::spawn(forget_listener_identity).join().unwrap();
+        assert_eq!(
+            listener_identity().map(|id| id.public_key_bytes()),
+            Some(identity.public_key_bytes()),
+            "another test's lock forgot this test's listener identity"
+        );
     }
 
     fn test_slot() -> AdmissionSlot {
