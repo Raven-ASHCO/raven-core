@@ -150,12 +150,15 @@ A behaviour change of the listeners' admission, not of the wire format: no frame
 bit or vector changed, and the local helper protocol stays version 2.
 
 - **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) §5: a
-  full onion listener never closes a pre-authentication link in its first 10 s (it refuses the
-  newcomer instead), and a rendezvous circuit that lost a pre-authentication link gets no slot in
-  a full listener for the rest of the helper's life (TOR-1). Before, a stranger who holds the card
-  could keep every friend's inbound onion link from completing by opening streams on the circuits
-  it holds. A contact holds at most 4 authenticated links; a newer one closes its oldest (TOR-2).
-  §5 now says what these limits defend and what they do not.
+  rendezvous circuit that lost a pre-authentication link (closed for a newcomer, or ended before
+  it authenticated) gets no slot in a full onion listener for the rest of the helper's life, and
+  so closes no link (TOR-1, partly closed). Before, a stranger who holds the card could keep every
+  friend's inbound onion link from completing by opening stream after stream on about 17 circuits
+  it holds; now each link it closes before its handshake costs it a circuit it never used in this
+  helper life (an introduction), and enough of them still close a friend's (§5, not defended). A
+  full listener still closes a pre-authentication link however young, so silent streams cannot
+  lock a friend out. A contact holds at most 4 authenticated links; a newer one closes its oldest
+  (TOR-2). §5 now says what these limits defend and what they do not.
 - **LAN Beacon V1 (draft).** [`RAVEN_LAN_BEACON_V1.md`](RAVEN_LAN_BEACON_V1.md) §0: the LAN
   listener's per-source caps take an IPv6 host on the local network as its whole address, by the
   penalty box's rule, instead of its /64, so one host's handshakes no longer use up its IPv6

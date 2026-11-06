@@ -584,28 +584,24 @@ impl Drop for Friends {
 }
 
 /// Inbound onion slots are counted per circuit, and a full listener
-/// displaces a stalled link of the busiest circuit once that link is past
-/// its first 10 s (TOR-1: so never a friend's handshake): a friend gets in
-/// while a stranger who holds the card keeps 16 Tor streams open to the
-/// onion service, each stalled after one byte of Noise message 1 (its
-/// first-message wait does not close it).
+/// displaces a silent link of the busiest circuit: a friend gets in while a
+/// stranger who holds the card keeps 16 silent Tor streams open to the onion
+/// service.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stalled_tor_streams_of_a_stranger_cannot_lock_a_friend_out() {
+async fn silent_tor_streams_of_a_stranger_cannot_lock_a_friend_out() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let Some(f) = Friends::new().await else {
         return;
     };
     let mut held = Vec::new();
     for _ in 0..16 {
-        let mut s = f.silent_stream_to_bob().await;
-        s.write_all(&[0]).await.unwrap();
-        held.push(s);
+        held.push(f.silent_stream_to_bob().await);
     }
-    tokio::time::sleep(netutil::ONION_INBOUND.preauth_grace + Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let replies = f
         .alice_dials_bob("over Tor, past a stranger's streams")
         .await
-        .expect("a friend is not locked out by stalled streams");
+        .expect("a friend is not locked out by silent streams");
     assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
     drop(held);
 }

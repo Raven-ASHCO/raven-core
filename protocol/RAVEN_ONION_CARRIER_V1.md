@@ -103,8 +103,7 @@ is derived live for each plan from a verified binding (§3) and never stored in
 - Inbound limits: 16 links; each rendezvous circuit (the helper's circuit number, §6) counts as
   one source (Tor hides who dialled): at most 4 links per circuit, 2 of them before
   authentication. A full listener closes the oldest pre-authentication link of the circuit holding
-  the most to admit a link of a less busy one, but never a link in its first 10 s: while every
-  pre-authentication link is that young, the newcomer is refused. A circuit that lost a
+  the most to admit a link of a less busy one, however young that link is. A circuit that lost a
   pre-authentication link (closed for a newcomer, or ended before it authenticated) gets no slot
   in a full listener, and so closes no link, for the rest of the helper's life; the node forgets
   these circuits at each new token (§6), and keeps at most 4096 of them, the oldest forgotten
@@ -113,21 +112,22 @@ is derived live for each plan from a verified binding (§3) and never stored in
   taken. Noise message 1 must start within 10 s of the stream; handshake deadline 30 s; lifetime
   180 s; 64 frames.
 - **What the inbound limits defend, and what they do not.** Anyone who holds the card can open
-  streams to the service. Defended: such a stranger cannot close a friend's link before it
-  authenticates by opening stream after stream, on the circuits it holds or on fresh ones. A
-  friend's link that got a slot has 10 s for its handshake (about three Tor round trips), an
-  authenticated link is never closed for a stranger's, and each slot the stranger takes from a
-  full listener costs it a circuit it never used in this helper life (each one an introduction:
-  5 per second per introduction point, burst 20). One contact, or whoever holds its key, holds at
-  most 4 of the 16 slots with authenticated links, so those cannot keep another friend out
-  (TOR-2); its links before they authenticate are a stranger's. Not defended: such a stranger can
-  keep the listener full, and a friend then gets no slot. While every pre-authentication link is
-  in its first 10 s a newcomer is refused, and a slot that frees (a silent stream closes after
-  10 s) goes to whichever stream comes first, a stranger's on a circuit it holds included. A
-  friend whose link ended before it authenticated (a dial the race cut, §9) is refused on that
-  circuit while the listener is full. Closing these needs a proof that the dialer is a friend
-  before a slot is given (a change to the link's first message) or restricted discovery (§13):
-  owner decisions, not in V1.
+  streams to the service. Defended: such a stranger cannot keep a friend out with silent or
+  stalled streams, however young: a friend's link on a circuit new to the listener closes the
+  oldest pre-authentication link of the busiest circuit. Streams the stranger opens on circuits it
+  holds, or held and lost a link on, close no friend's link before it authenticates (a lone
+  pre-authentication link on its circuit), and an authenticated link is never closed for a
+  stranger's. One contact, or whoever holds its key, holds at most 4 of the 16 slots with
+  authenticated links, so those cannot keep another friend out (TOR-2); its links before they
+  authenticate are a stranger's. Not defended (TOR-1 is only partly closed): each circuit the
+  stranger never used in this helper life closes one pre-authentication link of a full listener
+  (the busiest circuit's oldest), so a stranger who opens enough of them (at most 16) while a
+  friend's handshake runs (about three Tor round trips) closes the friend's link; each one costs
+  it an introduction (5 per second per introduction point, burst 20, shared with friends). A
+  friend whose link was closed, or ended before it authenticated (a dial the race cut, §9), is
+  refused on that circuit while the listener is full. Closing these needs a proof that the dialer
+  is a friend before a slot is given (a change to the link's first message) or restricted
+  discovery (§13): owner decisions, not in V1.
 - The helper tears down a rendezvous circuit that opens more than 8 streams at once, and asks
   its introduction points to pass on at most 5 introductions per second (burst 20; the
   EST_INTRO DoS extension).
