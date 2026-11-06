@@ -52,6 +52,7 @@ p2p-host = [
     "libp2p/dcutr",
     "libp2p/relay",
     "libp2p/upnp",
+    "dep:igd-next",
     "dep:zeroize",
 ]
 # No `libp2p/dns`. raven-node resolves `/dns*/` route names with the system
@@ -92,6 +93,11 @@ libp2p-stream = { version = "=0.5.0-alpha", optional = true }
 # AutoNAT v2 (libp2p 0.57) takes a rand 0.10 RNG; the rest of Raven stays on
 # rand 0.8. OS-seeded StdRng, as libp2p's own Default does.
 rand_autonat = { package = "rand", version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
+# libp2p-upnp's UPnP-IGD client, told once which router may answer its
+# search (`portmap::new_upnp`, STRANGER-UPNP-1: the patched fork in
+# node/third_party). Already built through libp2p-upnp (0.17.1, its features
+# active): a lock edge, no new crate.
+igd-next = { version = "0.17.1", optional = true }
 # The listen-port probe binds IPv6 IPv6-only, as libp2p-tcp / libp2p-quic do
 # (`host::probe_listen_addr`, P3). Already built through them (0.6): a lock
 # edge, no new crate.

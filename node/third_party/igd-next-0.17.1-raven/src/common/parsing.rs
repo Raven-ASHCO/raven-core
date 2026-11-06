@@ -38,7 +38,8 @@ pub fn parse_control_urls<R>(resp: R) -> Result<(String, String), SearchError>
 where
     R: io::Read,
 {
-    let root = Element::parse(resp)?;
+    let resp = crate::raven_delta::shallow_xml(resp)?;
+    let root = Element::parse(&resp[..])?;
 
     let mut urls = root.children.iter().filter_map(|child| {
         let child = child.as_element()?;
@@ -121,7 +122,8 @@ pub fn parse_schemas<R>(resp: R) -> Result<HashMap<String, Vec<String>>, SearchE
 where
     R: io::Read,
 {
-    let root = Element::parse(resp)?;
+    let resp = crate::raven_delta::shallow_xml(resp)?;
+    let root = Element::parse(&resp[..])?;
 
     let mut schema = root.children.iter().filter_map(|child| {
         let child = child.as_element()?;
@@ -192,6 +194,9 @@ pub struct RequestReponse {
 pub type RequestResult = Result<RequestReponse, RequestError>;
 
 pub fn parse_response(text: String, ok: &str) -> RequestResult {
+    if !crate::raven_delta::xml_shallow(text.as_bytes()) {
+        return Err(RequestError::InvalidResponse(text));
+    }
     let mut xml = match xmltree::Element::parse(text.as_bytes()) {
         Ok(xml) => xml,
         Err(..) => return Err(RequestError::InvalidResponse(text)),

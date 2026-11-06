@@ -144,6 +144,30 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: the UPnP search answered by the default router only)
+
+A behaviour change of the port mapping client, not of the wire format: no
+frame layout, entry type, flag bit, caps bit, card field or vector changed,
+no NAT-PMP, PCP or UPnP-IGD message changed, the RRH1 version byte stays 1,
+and every gate stays as it was. Security and speed report 2026-11-05 §2 and
+§6 (STRANGER-UPNP-1; owner decision 1 of 2026-11-06).
+
+- **Port Mapping Profile V1 (draft).** [`RAVEN_PORT_MAPPING_V1.md`](RAVEN_PORT_MAPPING_V1.md)
+  §9.1: the UPnP-IGD gateway search (the Raven patch of igd-next 0.17.1, the
+  client of libp2p-upnp, vendored in `node/third_party` and recorded in
+  `node/third_party/forks.json`) takes an SSDP answer only when its source
+  is the IPv4 default router, the router NAT-PMP and PCP ask, and its
+  LOCATION names that same address; any other answer is ignored and the
+  search keeps waiting, and with no such router no search is sent. An SSDP
+  answer over 1500 bytes, a device or service description over 64 KiB, a
+  SOAP response over 16 KiB, and any of them nested deeper than 32 elements
+  or with a DOCTYPE, are refused before they are parsed. Before, a stranger
+  on the LAN could answer first, make the node fetch a description from a
+  host of its choosing, and end the node with a deeply nested one (a stack
+  overflow aborts the process). Still open: a host that forges the address
+  of the router as the source of its answer; the requests then go to the
+  address of the router, and what it names still waits for the sighting.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: a UPnP mapping used only once seen from outside)
 
 A behaviour change of the port mapping client and of the friend relay's

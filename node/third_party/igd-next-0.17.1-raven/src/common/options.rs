@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 /// Default timeout for a gateway search.
@@ -31,6 +31,10 @@ pub struct SearchOptions {
     pub timeout: Option<Duration>,
     /// Timeout for a single search response (defaults to 5s)
     pub single_search_timeout: Option<Duration>,
+    /// Raven: the IPv4 default router, the only address whose answer the
+    /// async search takes (defaults to what [`crate::set_gateway_lookup`]
+    /// finds; `None` takes no answer)
+    pub gateway: Option<Ipv4Addr>,
 }
 
 impl Default for SearchOptions {
@@ -40,6 +44,7 @@ impl Default for SearchOptions {
             broadcast_address: "239.255.255.250:1900".parse().unwrap(),
             timeout: Some(DEFAULT_TIMEOUT),
             single_search_timeout: Some(RESPONSE_TIMEOUT),
+            gateway: crate::raven_delta::default_gateway(),
         }
     }
 }

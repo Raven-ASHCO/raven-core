@@ -13,6 +13,7 @@ pub use self::errors::{
 };
 pub use self::errors::{Error, Result};
 pub use self::gateway::Gateway;
+pub use self::raven_delta::set_gateway_lookup;
 
 // search of gateway
 pub use self::search::search_gateway;
@@ -22,6 +23,7 @@ pub mod aio;
 mod common;
 mod errors;
 mod gateway;
+mod raven_delta;
 mod search;
 
 use std::fmt;

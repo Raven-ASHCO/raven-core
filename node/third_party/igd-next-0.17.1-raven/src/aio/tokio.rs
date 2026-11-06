@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use futures::prelude::*;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::Empty;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Request;
 use hyper_util::client::legacy::Client;
@@ -15,6 +15,7 @@ use super::{Provider, HEADER_NAME, MAX_RESPONSE_SIZE};
 use crate::common::options::{DEFAULT_TIMEOUT, RESPONSE_TIMEOUT};
 use crate::common::{messages, parsing, SearchOptions};
 use crate::errors::SearchError;
+use crate::raven_delta;
 use crate::{aio::Gateway, RequestError};
 use log::debug;
 
@@ -37,7 +38,9 @@ impl Provider for Tokio {
             .body(body)?;
 
         let resp = client.request(req).await?;
-        let body = resp.into_body().collect().await?.to_bytes();
+        let body = raven_delta::read_capped(resp.into_body(), raven_delta::MAX_SOAP_RESPONSE)
+            .await
+            .map_err(raven_delta::request_body_error)?;
         let string = String::from_utf8(body.to_vec())?;
         Ok(string)
     }
@@ -57,6 +60,11 @@ pub async fn search_gateway(options: SearchOptions) -> Result<Gateway<Tokio>, Se
 }
 
 async fn search_gateway_inner(options: SearchOptions) -> Result<Gateway<Tokio>, SearchError> {
+    // Raven: only the default router may answer; none known, no search.
+    let Some(router) = options.gateway else {
+        return Err(SearchError::NoResponseWithinTimeout);
+    };
+
     // Create socket for future calls
     let mut socket = UdpSocket::bind(&options.bind_addr).await?;
 
@@ -86,6 +94,12 @@ async fn search_gateway_inner(options: SearchOptions) -> Result<Gateway<Tokio>, 
                 continue;
             }
         };
+
+        // Raven: an answer from another host, or naming one, is ignored.
+        if !raven_delta::from_gateway(router, &from, &addr) {
+            debug!("ignoring a broadcast response not from the default router");
+            continue;
+        }
 
         let (control_schema_url, control_url) = match get_control_urls(&addr, &root_url).await {
             Ok(v) => v,
@@ -129,9 +143,13 @@ async fn send_search_request(socket: &mut UdpSocket, addr: SocketAddr) -> Result
 }
 
 async fn receive_search_response(socket: &mut UdpSocket) -> Result<(Vec<u8>, SocketAddr), SearchError> {
-    let mut buff = [0u8; MAX_RESPONSE_SIZE];
+    // Raven: one byte more, so that a longer answer is refused, not cut.
+    let mut buff = [0u8; MAX_RESPONSE_SIZE + 1];
     let (n, from) = socket.recv_from(&mut buff).map_err(SearchError::from).await?;
     debug!("received broadcast response from: {}", from);
+    if n > MAX_RESPONSE_SIZE {
+        return Err(SearchError::InvalidResponse);
+    }
     Ok((buff[..n].to_vec(), from))
 }
 
@@ -157,7 +175,9 @@ async fn get_control_urls(addr: &SocketAddr, path: &str) -> Result<(String, Stri
     debug!("requesting control url from: {uri}");
     let client: Client<_, Empty<Bytes>> = Client::builder(hyper_util::rt::TokioExecutor::new()).build_http();
 
-    let resp = client.get(uri).await?.into_body().collect().await?.to_bytes();
+    let resp = raven_delta::read_capped(client.get(uri).await?.into_body(), raven_delta::MAX_DESCRIPTION)
+        .await
+        .map_err(raven_delta::search_body_error)?;
 
     debug!("handling control response from: {addr}");
     let c = std::io::Cursor::new(&resp);
@@ -176,7 +196,9 @@ async fn get_control_schemas(
     debug!("requesting control schema from: {uri}");
     let client: Client<_, Empty<Bytes>> = Client::builder(hyper_util::rt::TokioExecutor::new()).build_http();
 
-    let resp = client.get(uri).await?.into_body().collect().await?.to_bytes();
+    let resp = raven_delta::read_capped(client.get(uri).await?.into_body(), raven_delta::MAX_DESCRIPTION)
+        .await
+        .map_err(raven_delta::search_body_error)?;
 
     debug!("handling schema response from: {addr}");
     let c = std::io::Cursor::new(&resp);

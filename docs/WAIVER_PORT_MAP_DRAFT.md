@@ -109,19 +109,22 @@ allowed in release builds by owner decision O4-10.
    router is itself behind another NAT; Raven detects that and deletes.
 6. **Router packets** on every network change and renewals at most hourly:
    negligible next to the 15 s relay pings, to be measured with the real rows.
-7. **UPnP-IGD answers stay unauthenticated** (STRANGER-UPNP-1, open). The
-   SSDP answer is taken from anyone on the network, its LOCATION may name any
-   host, and the device description it points to is read whole and parsed
-   (igd-next 0.17, through libp2p-upnp 0.7) before Raven sees anything:
-   neither crate lets Raven check the answer's source or LOCATION host
-   against the default router, or bound the body. A stranger on the network
-   can therefore make this node fetch from a host it chooses and parse what
-   it sends, and, by naming this computer's real public IP, claim a mapping
-   the router never made: contacts then dial a port that reaches nothing
-   (one failed attempt before the circuit) or, where the stranger had the
-   router forward that port to a host of its own, that host, because the
-   port of a mapping is not checked (§5). Closing it needs a patched or
-   vendored igd-next, or UPnP off, both owner decisions.
+7. **UPnP-IGD answers stay unauthenticated.** Since 2026-11-06
+   (STRANGER-UPNP-1, owner decision 1: the Raven patch of igd-next 0.17.1,
+   the client of libp2p-upnp 0.7, vendored in `node/third_party`) the SSDP
+   answer is taken only from the IPv4 default router with its LOCATION on
+   that address, no search is sent when no such router is known, and an
+   answer over 1500 bytes, a description over 64 KiB, a SOAP response over
+   16 KiB and any document nested deeper than 32 elements or with a DOCTYPE
+   are refused before parsing. Before, a stranger on the network could make
+   this node fetch from a host it chose and end it with a deeply nested
+   description. What is left: a host that forges the address of the router
+   as the source of its answer still answers the search (the requests then
+   go to that address), and by naming this computer's real public IP it can
+   claim a mapping the router never made: contacts then dial a port that
+   reaches nothing (one failed attempt before the circuit) or, where it had
+   the router forward that port to a host of its own, that host, because
+   the port of a mapping is not checked (§5).
 
 ## 5. Compensating controls in place
 

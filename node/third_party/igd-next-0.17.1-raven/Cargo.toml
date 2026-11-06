@@ -24,7 +24,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Internet Gateway Protocol client"
+description = "Internet Gateway Protocol client (Raven patch: RAVEN_DELTA.md)"
 homepage = "https://github.com/dariusc93/rust-igd"
 readme = "README.md"
 keywords = [
@@ -48,7 +48,7 @@ aio_tokio = [
     "bytes",
     "http",
 ]
-default = []
+default = ["aio_tokio"]
 
 [lib]
 name = "igd_next"
@@ -136,10 +136,3 @@ version = "2"
 
 [dependencies.xmltree]
 version = "0.10"
-
-[dev-dependencies.simplelog]
-version = "0.12"
-
-[dev-dependencies.tokio]
-version = "1"
-features = ["full"]

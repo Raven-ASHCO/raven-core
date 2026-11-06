@@ -652,6 +652,9 @@ jobs:
             rm -f "$log"
           }
           cargo test --locked -p raven-swarm --all-features --all-targets
+          # STRANGER-UPNP-1: the vendored igd-next takes the default router's
+          # answer only and bounds every response (a loopback router and stranger).
+          cargo test --locked -p igd-next --lib
           cargo build --locked --release -p raven-swarm \
             --features experimental-offline-mailbox \
             --bin raven-swarm-mailbox-experimental
@@ -1026,6 +1029,8 @@ jobs:
           cargo test --locked -p raven-core -p ash -p raven-node
           cargo test --locked -p raven-core --lib lan_
           cargo test --locked -p raven-swarm --features p2p-host,wss --lib
+          # STRANGER-UPNP-1: the vendored igd-next (a loopback router and stranger).
+          cargo test --locked -p igd-next --lib
           cargo build --locked -p raven-swarm -p raven-node
           cargo build --locked --release -p raven-core -p raven-node -p ash
       # The app channel tests (submit, probe, pairing budget, the guard). The
