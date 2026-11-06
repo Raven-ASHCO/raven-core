@@ -72,7 +72,8 @@ pub(crate) const PENDING_MAX: usize = 32;
 /// channel.
 pub(crate) const CONDUIT: &str = "conduit";
 /// [`proto::Config::forward`] for a channel a helper process inherited:
-/// `fd:<n>`.
+/// `fd:<n>` (macOS and Linux).
+#[cfg(unix)]
 pub(crate) const INHERITED: &str = "fd:";
 
 /// Where every key and proof of this version starts.

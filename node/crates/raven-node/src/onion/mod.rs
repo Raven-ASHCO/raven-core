@@ -115,7 +115,10 @@ fn circuit_source(circuit: u64) -> IpAddr {
 /// Local connections still owing the helper's header, at most: one more
 /// closes the oldest of them. The helper writes its header at once, so
 /// only a program without the token ever waits here, and it holds no
-/// admission slot while it does.
+/// admission slot while it does. As many forward streams of the helper
+/// channel wait for [`serve_forward`] (macOS, Linux; on Windows only the
+/// tests name it).
+#[cfg(any(unix, test))]
 const PRE_TOKEN_MAX: usize = channel::PENDING_MAX;
 /// How long an admitted onion link waits for the dialer's first byte
 /// (Noise message 1, sent right after its CONNECTED): well below the whole
