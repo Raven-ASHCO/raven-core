@@ -4696,7 +4696,16 @@ fn cmd_outbox_cli(data_dir: &Path, cmd: Option<OutboxCommands>) -> Result<(), St
         OutboxCommands::Cancel { mid, yes } => ext::OutboxCmd::Cancel { mid, yes },
         OutboxCommands::Resend { contact } => {
             // Also the rvn1 address, which the held lines name the contact
-            // by (ASH-1: never its name in a command to paste).
+            // by (ASH-1: never its name in a command to paste). An empty one
+            // is refused here, in the words of this command: the contact
+            // selector would answer with flags resend does not take.
+            if contact.trim().is_empty() {
+                return Err(
+                    "raven outbox resend: name the contact with --contact (its name, @tag or \
+                     rvn1 address)"
+                        .into(),
+                );
+            }
             let contacts = load_contacts(data_dir)?;
             let one = select_contact_for_edit(&contacts, Some(&contact), None, None, None)?;
             let peer = parse_pub_hex(&one.pub_hex)?;
@@ -24501,6 +24510,35 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
             "{by_name:?}"
         );
         assert_eq!(resend(&id.address()), by_name);
+    }
+
+    /// ASH-1 (review): an empty `--contact` is refused in resend's own words,
+    /// never with the `--tag`, `--petname` and `--address` flags it does not
+    /// take.
+    #[test]
+    fn outbox_resend_refuses_an_empty_contact_in_its_own_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        save_contacts(d, &[book_row(&ident(0x91), "Sara", "sara")]).unwrap();
+        for contact in ["", "   "] {
+            let err = cmd_outbox_cli(
+                d,
+                Some(OutboxCommands::Resend {
+                    contact: contact.into(),
+                }),
+            )
+            .unwrap_err();
+            assert!(err.starts_with("raven outbox resend: "), "{err}");
+            assert!(err.contains("--contact"), "{err}");
+            for flag in ["--tag", "--petname", "--address"] {
+                assert!(!err.contains(flag), "{err}");
+            }
+            let prose = err.replace("--contact", "");
+            assert!(
+                !prose.contains(['-', '\u{2013}', '\u{2014}', '\'', '\u{2019}']),
+                "{err}"
+            );
+        }
     }
 
     #[test]

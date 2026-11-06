@@ -550,7 +550,7 @@ fn action_text(code: &str, about: About<'_>) -> Option<String> {
 
 /// The CLI command for `act` (none for an act without one). `verify` is the
 /// `raven contact verify` argument that names the contact, one word safe to
-/// paste (`--petname Sara`, `--tag sara`); without one the command says
+/// paste (`--petname=Sara`, `--tag=sara`); without one the command says
 /// `NAME`.
 pub(crate) fn cli_hint(act: Act, verify: Option<&str>) -> Option<String> {
     match act {
@@ -1080,8 +1080,8 @@ mod tests {
     #[test]
     fn the_cli_names_the_command_for_each_act() {
         assert_eq!(
-            cli_hint(Act::CompareWords, Some("--petname Sara")).as_deref(),
-            Some("raven contact verify --petname Sara")
+            cli_hint(Act::CompareWords, Some("--petname=Sara")).as_deref(),
+            Some("raven contact verify --petname=Sara")
         );
         assert_eq!(
             cli_hint(Act::CompareWords, None).as_deref(),

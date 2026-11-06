@@ -348,7 +348,9 @@ Do these on a calm day.
   never takes a message from the command line: type it after the command and
   finish with Ctrl-D (on Windows: Ctrl-Z, then Enter). Nicknames and addresses
   you type into a command do stay in the history; the full-screen app (`ash`)
-  keeps them out of it.
+  keeps them out of it. A command Raven prints for you to paste stays in the
+  history too once you paste it, and many of them name the contact by its
+  rvn1 address.
 
   ```sh
   raven send --contact Sam

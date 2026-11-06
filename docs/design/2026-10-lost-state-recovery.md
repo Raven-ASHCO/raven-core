@@ -810,7 +810,9 @@ No claim of s15-style recovery is made for Keychain installs beyond these tests.
 
 ## 16. UX text (exact; `{who}`, `{until}` and `{preview}` are the existing `SendCtx` helpers)
 
-`{address}` is the contact's rvn1 address (`NAME` when its key is not known). A command to paste names the contact by it, never by `{who}`: a name can hold what a shell runs once the command is pasted (ASH-1, security review 2026-11). `raven outbox resend --contact` takes it, as it takes a name or an @tag.
+`{address}` is the contact's rvn1 address (`NAME` when its key is not known). A command to paste names the contact by it, never by `{who}`: a name can hold what a shell runs once the command is pasted (ASH-1, security review 2026-11), two contacts can share a name, and `--contact` reads a name that starts with `@` or `rvn1` as a tag or an address. `raven outbox resend --contact` takes it, as it takes a name or an @tag. An empty `--contact` is refused in resend's own words: `raven outbox resend: name the contact with --contact (its name, @tag or rvn1 address)`.
+
+Once pasted, such a command leaves the contact's rvn1 address in the shell history, as the shell keeps every command typed there. It is the contact's identity address, never a network address, and the offline safety guide says it stays in the history. The other hints that name a contact by its address (`raven contact add`, `contact block`, `contact unverify` and `contact show`) leave it there too. `raven security` names no address: its `raven contact verify` hint gives the petname (else the tag) as one quoted word after `--petname=` (`--tag=`), so a name that starts with `-` stays the value of that flag.
 
 The prefixes scripts match stay: `status delivered`, `not delivered yet`, `NOT SENT`, `sent, delivery unconfirmed`.
 

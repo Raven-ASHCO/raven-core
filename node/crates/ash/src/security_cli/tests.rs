@@ -104,7 +104,7 @@ fn the_list_shows_alerts_and_warnings_and_only_counts_notices() {
             "     Raven kept the old key.",
             "     If Sara really has a new key (a new computer or a reinstall), compare security \
              words with Sara before you add it. If not, ignore that invite.",
-            "       raven contact verify --petname Sara",
+            "       raven contact verify --petname=Sara",
             "2. - Mail that came through Rena's computer failed Raven's checks (2 times, latest \
              this afternoon)",
             "     Raven didn't show it. It stopped using Rena as a mailbox for a day.",
@@ -145,7 +145,7 @@ fn explain_adds_counts_whom_and_the_code() {
             "  What you can do If Sara really has a new key (a new computer or a reinstall), \
              compare security words with Sara before you add it. If not, ignore that invite."
                 .into(),
-            "                    raven contact verify --petname Sara".into(),
+            "                    raven contact verify --petname=Sara".into(),
             "Details".into(),
             format!("  About           Sara (verified friend, key {prefix})"),
             "  Per day         today 1, 2 days ago 3".into(),
@@ -330,7 +330,7 @@ fn status_has_a_section_only_while_something_is_open() {
             "  Raven kept the old key.",
             "  If Sara really has a new key (a new computer or a reinstall), compare security \
              words with Sara before you add it. If not, ignore that invite.",
-            "    raven contact verify --petname Sara",
+            "    raven contact verify --petname=Sara",
             "- Mail that came through Rena's computer failed Raven's checks (2 times, latest this \
              afternoon)",
             "  Raven didn't show it. It stopped using Rena as a mailbox for a day.",
@@ -370,7 +370,7 @@ fn doctor_counts_the_open_alerts_and_says_what_to_do() {
                  words with Sara before you add it. If not, ignore that invite."
                     .into()
             ),
-            ("", "  raven contact verify --petname Sara".into()),
+            ("", "  raven contact verify --petname=Sara".into()),
         ]
     );
 }
@@ -401,16 +401,16 @@ fn send_notes_only_an_open_alert_about_that_contact() {
 #[test]
 fn verify_names_the_contact_as_one_shell_word() {
     let mut c = contact(0x5a, "Sara", true);
-    assert_eq!(verify_arg(&c).as_deref(), Some("--petname Sara"));
+    assert_eq!(verify_arg(&c).as_deref(), Some("--petname=Sara"));
     c.petname = "Sara K. (work)".into();
     assert_eq!(
         verify_arg(&c).as_deref(),
-        Some("--petname \"Sara K. (work)\"")
+        Some("--petname=\"Sara K. (work)\"")
     );
     c.petname = "a\"b$c`d".into();
-    assert_eq!(verify_arg(&c).as_deref(), Some("--petname 'a\"b$c`d'"));
+    assert_eq!(verify_arg(&c).as_deref(), Some("--petname='a\"b$c`d'"));
     c.petname = String::new();
-    assert_eq!(verify_arg(&c).as_deref(), Some("--tag sara"));
+    assert_eq!(verify_arg(&c).as_deref(), Some("--tag=sara"));
     c.public_tag = String::new();
     assert_eq!(verify_arg(&c), None);
     assert_eq!(display_name(&c), "an unnamed contact");
@@ -425,20 +425,20 @@ fn verify_names_the_contact_as_one_shell_word() {
 fn verify_hint_is_one_safe_word_in_powershell() {
     let mut c = contact(0x5a, "Sara", true);
     for (petname, arg) in [
-        ("Sara", "--petname Sara"),
+        ("Sara", "--petname=Sara"),
         (
             "Sara \u{201c}work\u{201d}; calc",
-            "--petname 'Sara \u{201c}work\u{201d}; calc'",
+            "--petname='Sara \u{201c}work\u{201d}; calc'",
         ),
-        ("it's", "--petname 'it''s'"),
-        ("a$b`c", "--petname 'a$b`c'"),
-        ("50%off", "--petname '50%off'"),
+        ("it's", "--petname='it''s'"),
+        ("a$b`c", "--petname='a$b`c'"),
+        ("50%off", "--petname='50%off'"),
     ] {
         c.petname = petname.into();
         assert_eq!(verify_arg_for(&c, true).as_deref(), Some(arg), "{petname}");
     }
     c.petname = String::new();
-    assert_eq!(verify_arg_for(&c, true).as_deref(), Some("--tag sara"));
+    assert_eq!(verify_arg_for(&c, true).as_deref(), Some("--tag=sara"));
 }
 
 /// ASH-1, the other hints: the `raven contact verify` argument pastes into
@@ -449,16 +449,103 @@ fn verify_hint_is_one_safe_word_in_powershell() {
 fn verify_hint_keeps_any_name_one_safe_word() {
     let mut c = contact(0x5a, "Sara", true);
     for (petname, arg) in [
-        ("Bob!!", "--petname 'Bob!!'"),
-        ("x!#:s/a/b/", "--petname 'x!#:s/a/b/'"),
-        ("a\"b$c`d", "--petname 'a\"b$c`d'"),
-        ("x$(id)", "--petname 'x$(id)'"),
-        ("it's", "--petname \"it's\""),
-        ("Ali & Sara", "--petname \"Ali & Sara\""),
+        ("Bob!!", "--petname='Bob!!'"),
+        ("x!#:s/a/b/", "--petname='x!#:s/a/b/'"),
+        ("a\"b$c`d", "--petname='a\"b$c`d'"),
+        ("x$(id)", "--petname='x$(id)'"),
+        ("it's", "--petname=\"it's\""),
+        ("Ali & Sara", "--petname=\"Ali & Sara\""),
     ] {
         c.petname = petname.into();
         assert_eq!(verify_arg(&c).as_deref(), Some(arg), "{petname}");
     }
+}
+
+/// The words a shell hands `raven` for `line` once pasted: split at blanks
+/// outside quotes, the quotes taken away (a POSIX shell: `'...'`, `"..."`
+/// and `\`; PowerShell: `'...'`, in which `''` is one quote). It reads only
+/// the quoting `ext::paste_word` gives.
+fn pasted_words(line: &str, windows: bool) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' => words.extend(word.take()),
+            '\'' => {
+                let w = word.get_or_insert_with(String::new);
+                while let Some(q) = chars.next() {
+                    if q != '\'' {
+                        w.push(q);
+                    } else if windows && chars.peek() == Some(&'\'') {
+                        chars.next();
+                        w.push('\'');
+                    } else {
+                        break;
+                    }
+                }
+            }
+            '"' if !windows => {
+                let w = word.get_or_insert_with(String::new);
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                    w.push(q);
+                }
+            }
+            '\\' if !windows => word.get_or_insert_with(String::new).extend(chars.next()),
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// ASH-1 (review): the hint gives the name after `=`, so a name that starts
+/// with `-` (`-rf`, `--address`, `--tag=sara`) stays the value of
+/// `--petname` once pasted, never an option of its own: `raven contact
+/// verify` reads back the same name, in a POSIX shell and in PowerShell.
+#[test]
+fn a_name_that_looks_like_an_option_stays_the_value_of_its_flag() {
+    use super::super::{Cli, Commands, ContactCommands};
+    use clap::Parser;
+    let mut c = contact(0x5a, "Sara", true);
+    for petname in [
+        "-rf",
+        "--address",
+        "--",
+        "-x y",
+        "--tag=sara",
+        "Sara",
+        "it's",
+    ] {
+        c.petname = petname.into();
+        for windows in [false, true] {
+            let arg = verify_arg_for(&c, windows).unwrap();
+            let argv = ["raven", "contact", "verify"]
+                .into_iter()
+                .map(String::from)
+                .chain(pasted_words(&arg, windows));
+            match Cli::try_parse_from(argv).map(|cli| cli.cmd) {
+                Ok(Some(Commands::Contact {
+                    cmd:
+                        ContactCommands::Verify {
+                            selector: None,
+                            tag: None,
+                            alias: None,
+                            petname: Some(got),
+                            address: None,
+                            check: None,
+                        },
+                })) => assert_eq!(got, petname, "{arg}"),
+                other => panic!("{arg} (windows {windows}): {other:?}"),
+            }
+        }
+    }
+    c.petname = String::new();
+    assert_eq!(verify_arg_for(&c, false).as_deref(), Some("--tag=sara"));
+    assert_eq!(verify_arg_for(&c, true).as_deref(), Some("--tag=sara"));
 }
 
 /// A temporary sealed profile (a debug build with the lab file backend),

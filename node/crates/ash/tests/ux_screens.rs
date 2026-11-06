@@ -3691,7 +3691,7 @@ fn security_notices_in_the_cli() {
         "Raven kept the old key.",
         "If Alice really has a new key (a new computer or a reinstall), compare security words \
          with Alice before you add it. If not, ignore that invite.",
-        "raven contact verify --petname Alice",
+        "raven contact verify --petname=Alice",
         "More about one: raven security explain N.",
     ] {
         assert!(list.contains(line), "{line:?} missing: {list}");
@@ -3745,7 +3745,7 @@ fn security_notices_in_the_cli() {
             .unwrap_or_else(|| panic!("no SECURITY section: {status}"));
         for line in [
             &format!("  - {headline} ("),
-            "    raven contact verify --petname Alice",
+            "    raven contact verify --petname=Alice",
             "  Strangers refused in the last hour: 37 (they learned nothing about you)",
             "  Details: raven security",
         ] {
@@ -3769,7 +3769,7 @@ fn security_notices_in_the_cli() {
         "{summary}"
     );
     assert!(
-        summary.contains("raven contact verify --petname Alice"),
+        summary.contains("raven contact verify --petname=Alice"),
         "{summary}"
     );
 

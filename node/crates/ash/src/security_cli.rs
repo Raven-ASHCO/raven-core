@@ -287,8 +287,8 @@ fn display_name(c: &Contact) -> String {
     }
 }
 
-/// What `raven contact verify` takes to name `c`: `--petname NAME` or
-/// `--tag TAG`; none for a contact with neither.
+/// What `raven contact verify` takes to name `c`: `--petname=NAME` or
+/// `--tag=TAG`; none for a contact with neither.
 fn verify_arg(c: &Contact) -> Option<String> {
     verify_arg_for(c, cfg!(windows))
 }
@@ -296,15 +296,16 @@ fn verify_arg(c: &Contact) -> Option<String> {
 /// [`verify_arg`] for a POSIX shell, or (`windows`) for PowerShell. The name
 /// is one word that pastes unchanged, whole and quoted as ash's other hints
 /// quote a name (`ext::paste_word`, ASH-1): no character a shell acts on
-/// stays bare, none is dropped. No address replaces it: no text here names
-/// one.
+/// stays bare, none is dropped. It follows the flag after `=`, so a name
+/// that starts with `-` stays the value of that flag, never an option of
+/// its own. No address replaces it: no text here names one.
 fn verify_arg_for(c: &Contact, windows: bool) -> Option<String> {
     let petname = sanitize_terminal_line(c.petname.trim());
     let tag = normalize_tag(&c.public_tag);
     if !petname.is_empty() {
-        Some(format!("--petname {}", paste_word(&petname, windows)))
+        Some(format!("--petname={}", paste_word(&petname, windows)))
     } else if !tag.is_empty() {
-        Some(format!("--tag {}", paste_word(&tag, windows)))
+        Some(format!("--tag={}", paste_word(&tag, windows)))
     } else {
         None
     }
