@@ -2088,6 +2088,54 @@ fn pending_frames_are_taken_again_in_one_read_of_the_store() {
     assert_eq!(ingest_all(d, &[]).unwrap(), 0);
 }
 
+/// G4 pending, the work: frames refused for lack of room stay behind their
+/// ACK intents and every prune pass takes them again ([`ingest_all`]). A
+/// message past its author's share and an invitation past its admin's
+/// groups are refused before their signatures are checked, so a pass over
+/// N such rows checks no signature.
+#[test]
+fn refused_frames_cost_no_signature_check_when_taken_again() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    let state = GroupFrame::State(roster(1, &[2, 3, 4], 1));
+    assert!(ingest(d, &key(1), &state, NOW).unwrap());
+    for n in 1..store::MAX_GROUPS_PER_ADMIN {
+        let other = GroupFrame::State(roster_salted(1, &[3], [n as u8; 16]));
+        assert!(ingest(d, &key(1), &other, NOW).unwrap());
+    }
+    let flooder = hex::encode(key(2));
+    store::edit(d, |f| {
+        for i in 0..f.groups[0].share() {
+            f.groups[0].seen.push(&flooder, &format!("{i:032x}"), NOW);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut frames: Vec<(Key, GroupFrame)> = (1..=40u8)
+        .map(|n| {
+            let m = msg_with_id(2, 1, "again", [n; 16], &[]);
+            (key(2), GroupFrame::Msg(m))
+        })
+        .collect();
+    for n in 0..8u8 {
+        let invite = roster_salted(1, &[3], [0xc0 + n; 16]);
+        frames.push((key(1), GroupFrame::State(invite)));
+    }
+    let items: Vec<(Key, &GroupFrame, u64)> =
+        frames.iter().map(|(k, f)| (*k, f, NOW + 1)).collect();
+    let checks = super::signature_checks_for_tests();
+    assert_eq!(ingest_all(d, &items).unwrap(), 0, "every one refused");
+    assert_eq!(
+        super::signature_checks_for_tests() - checks,
+        0,
+        "no signature checked for a refused frame"
+    );
+    let file = store::load(d).unwrap();
+    assert_eq!(file.places_used(), store::MAX_GROUPS_PER_ADMIN);
+    assert!(file.groups[0].messages.is_empty());
+}
+
 /// G4 bound: a group's `seen` over its size loses the keys of authors who
 /// are no member first (here a former member's), then the author holding
 /// the most loses the key sent first; a member's key still inside the

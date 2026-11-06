@@ -90,6 +90,24 @@ pub fn lab_groups_for_this_thread() -> Option<bool> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static SIGNATURE_CHECKS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// A roster's or a message's signature checked (the tests count the work
+/// a receive or a prune pass does on this thread).
+fn note_signature_check() {
+    #[cfg(test)]
+    SIGNATURE_CHECKS.with(|n| n.set(n.get() + 1));
+}
+
+/// Rosters' and messages' signatures checked on this thread.
+#[cfg(test)]
+pub(crate) fn signature_checks_for_tests() -> usize {
+    SIGNATURE_CHECKS.with(Cell::get)
+}
+
 pub const GROUP_FRAME_MAGIC: &str = "RVNGRP/1";
 pub const GROUP_RESERVED_PREFIX: &str = "RVNGRP/";
 /// Members of a group, the admin included (design §7).
@@ -245,6 +263,7 @@ impl GroupState {
 
     /// Well formed (§1) and signed by `admin`.
     pub fn verify(&self) -> bool {
+        note_signature_check();
         self.well_formed() && Identity::verify(&self.admin, &self.signing_bytes(), &self.sig)
     }
 
@@ -298,6 +317,7 @@ impl GroupMsg {
 
     /// Signed by `from` (the caller checks `from` is a member).
     pub fn verify(&self) -> bool {
+        note_signature_check();
         body_ok(&self.body)
             && self.sent_ms <= MAX_TIME_MS
             && Identity::verify(&self.from, &self.signing_bytes(), &self.sig)
@@ -933,13 +953,23 @@ pub fn friend_names(data_dir: &Path) -> std::collections::HashMap<Key, String> {
 
 // ------------------------------------------------------------------ receive
 
+/// Rows of one friend's device a receiver keeps behind their ACK intents
+/// for frames refused for lack of room ([`deliver`]): as many as a friend
+/// may have waiting for it ([`park::MAX_WAITING_PER_FRIEND`]), so an honest
+/// friend's refused copies all stay to be taken later. Past it, a refused
+/// frame is dropped (counted) and ACKed: a member's flood past its share
+/// leaves at most this many rows, which every prune pass takes again for
+/// the life of their session.
+pub const MAX_REFUSED_ROWS_PER_SENDER: usize = park::MAX_WAITING_PER_FRIEND;
+
 /// After commit: the frame `frame` arrived on the session `key` from the
 /// friend's device `sender_device`. The carrier peer is the session-bound
 /// certificate's user key, never a link bundle. `Ok(true)`: handled (stored,
 /// held, or dropped as invalid: ACK it); `Ok(false)`: the store could not
 /// take it now, or refused it for lack of room ([`ingest`]): no ACK; the
 /// endpoint row stays, and the copy sent again (or the archive) brings it
-/// back.
+/// back. A refused frame past [`MAX_REFUSED_ROWS_PER_SENDER`] rows waiting
+/// from its device is dropped (counted) and `Ok(true)`.
 pub fn deliver(
     data_dir: &Path,
     sessions: &mut crate::indexed_session_store::IndexedSessionStore,
@@ -957,10 +987,38 @@ pub fn deliver(
     else {
         return Ok(false);
     };
-    Ok(matches!(
-        ingest(data_dir, &cert.user_ed_pub, frame, now_ms),
-        Ok(true)
-    ))
+    match ingest(data_dir, &cert.user_ed_pub, frame, now_ms) {
+        Ok(true) => Ok(true),
+        Ok(false) => Ok(past_refused_rows(data_dir, sessions, sender_device)),
+        Err(_) => Ok(false),
+    }
+}
+
+/// A frame from `sender_device` was refused for lack of room: whether its
+/// device has more than [`MAX_REFUSED_ROWS_PER_SENDER`] rows waiting
+/// behind their ACK intents (this one included). Then the frame is dropped
+/// (counted, when the store takes the count) and is to be ACKed. Rows that
+/// cannot be counted are left as they are (no ACK).
+fn past_refused_rows(
+    data_dir: &Path,
+    sessions: &crate::indexed_session_store::IndexedSessionStore,
+    sender_device: &[u8; 32],
+) -> bool {
+    let Ok(intents) = sessions.pending_endpoint_ack_intents() else {
+        return false;
+    };
+    let waiting = intents
+        .iter()
+        .filter(|i| i.remote_device == *sender_device)
+        .count();
+    if waiting <= MAX_REFUSED_ROWS_PER_SENDER {
+        return false;
+    }
+    let _ = store::edit(data_dir, |file| {
+        file.dropped = file.dropped.saturating_add(1);
+        Ok(())
+    });
+    true
 }
 
 /// Apply one received frame from the carrier peer `peer` to the group store

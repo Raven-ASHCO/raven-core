@@ -136,7 +136,11 @@ so it is taken once there is room. Its author sees that copy as not
 delivered meanwhile (§5). A `msg` past its author's share that another
 member carried (`P` is not `from`: a forward) is dropped and counted, and
 ACKed: the carrier cannot send it again for the author, and it must not
-wait in the carrier's queue for the receiver.
+wait in the carrier's queue for the receiver. A receiver keeps at most 32
+such rows of one sender's device (as many as a friend may have waiting
+for it); past that it drops (counts) and ACKs a refused frame. The room is
+checked before the signature, so a refused frame costs no signature check
+when it is taken again.
 
 **`state`**: verified under `admin`, with `group` the id of `admin` and
 `salt` (§1). For an unknown group it is accepted

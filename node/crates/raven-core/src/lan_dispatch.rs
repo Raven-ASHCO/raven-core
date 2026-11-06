@@ -4191,14 +4191,18 @@ mod tests {
         }
     }
 
-    /// Bob's group of Alice (admin), Bob and `author`, with `author`'s
-    /// share of its room for message keys full at Bob.
-    fn bob_group_with_a_full_author(lab: &AppLab, author: &Identity) -> crate::group::GroupId {
+    /// Bob's group of Alice (admin), Bob and `third`, with the share of
+    /// `full` (one of them) in its room for message keys full at Bob.
+    fn bob_group_with_a_full_member(
+        lab: &AppLab,
+        third: &Identity,
+        full: &[u8; 32],
+    ) -> crate::group::GroupId {
         use crate::group::{GroupFrame, GroupState, Member};
         let (a, b, m) = (
             lab.alice.public_key_bytes(),
             lab.bob.public_key_bytes(),
-            author.public_key_bytes(),
+            third.public_key_bytes(),
         );
         let salt = [0x5a; 16];
         let member = |key| Member {
@@ -4218,7 +4222,7 @@ mod tests {
         state.sign(&lab.alice);
         let invite = GroupFrame::State(state.clone());
         assert!(crate::group::ingest(lab.b_dir.path(), &a, &invite, now()).unwrap());
-        let from = hex::encode(m);
+        let from = hex::encode(full);
         crate::group::store::edit(lab.b_dir.path(), |f| {
             let g = &mut f.groups[0];
             for i in 0..g.share() {
@@ -4255,7 +4259,7 @@ mod tests {
         let _groups = GroupLab::on();
         let lab = AppLab::new();
         let author = Identity::from_seed(&[0x44; 32]);
-        let group = bob_group_with_a_full_author(&lab, &author);
+        let group = bob_group_with_a_full_member(&lab, &author, &author.public_key_bytes());
         let bob_device = lab.b_bundle.cert.device_ed_pub;
         let waiting = || {
             IndexedSessionStore::open(lab.a_dir.path())
@@ -4280,6 +4284,34 @@ mod tests {
         assert_eq!(lab.bob_pending_intents(), 0, "no row left at Bob");
         let file = crate::group::store::load(lab.b_dir.path()).unwrap();
         assert_eq!(file.dropped, 40);
+        assert!(file.groups[0].messages.is_empty());
+    }
+
+    /// G4 pending, bounded: Alice's own messages past her share at Bob are
+    /// refused (no ACK; the rows stay for her to send again) up to as many
+    /// as a friend may have waiting; past that each is dropped (counted) and
+    /// ACKed, so a flood leaves Bob at most that many rows that every prune
+    /// pass takes again.
+    #[test]
+    fn refused_group_rows_from_one_sender_are_bounded() {
+        let _groups = GroupLab::on();
+        let lab = AppLab::new();
+        let third = Identity::from_seed(&[0x44; 32]);
+        let alice = lab.alice.public_key_bytes();
+        let group = bob_group_with_a_full_member(&lab, &third, &alice);
+        let bound = crate::group::park::MAX_WAITING_PER_FRIEND as u8;
+        for n in 1..=bound {
+            let replies = lab.deliver(&lab.seal(&group_copy(group, &lab.alice, n)));
+            assert!(replies.is_empty(), "copy {n} is refused, not ACKed");
+        }
+        assert_eq!(lab.bob_pending_intents(), bound as usize);
+        for n in bound + 1..=bound + 5 {
+            let replies = lab.deliver(&lab.seal(&group_copy(group, &lab.alice, n)));
+            assert_eq!(replies.len(), 1, "copy {n} past the bound is ACKed");
+        }
+        assert_eq!(lab.bob_pending_intents(), bound as usize);
+        let file = crate::group::store::load(lab.b_dir.path()).unwrap();
+        assert_eq!(file.dropped, 5, "dropped and counted");
         assert!(file.groups[0].messages.is_empty());
     }
 

@@ -208,9 +208,6 @@ fn apply_state(
     contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
-    if !state.verify() {
-        return dropped(file);
-    }
     // A new record here (an invitation, or a forgotten group's roster that
     // names this profile again) is bounded by the admin's records and by
     // the places: a roster past either is refused, so it is not ACKed and
@@ -219,16 +216,23 @@ fn apply_state(
     // makes it active again takes nothing new.
     let admin_full = file.records_of(&state.admin) >= store::MAX_GROUPS_PER_ADMIN;
     let places_full = file.places_used() >= store::MAX_GROUPS;
+    if file.group(&state.group).is_none() {
+        // An invitation comes from the admin itself, to a member. These
+        // checks need no signature, so an invitation they turn away costs
+        // none, also each time a prune pass takes a refused row again.
+        if state.admin != *peer || !state.has(me) {
+            return dropped(file);
+        }
+        if admin_full || places_full {
+            return refused();
+        }
+    }
+    if !state.verify() {
+        return dropped(file);
+    }
     let mut done = Applied::default();
     match file.group_mut(&state.group) {
         None => {
-            // An invitation comes from the admin itself, to a member.
-            if state.admin != *peer || !state.has(me) {
-                return dropped(file);
-            }
-            if admin_full || places_full {
-                return refused();
-            }
             file.groups.push(GroupRecord::new(state, now_ms));
             done.changed = true;
         }
@@ -422,15 +426,29 @@ fn apply_msg(
         }
         return done;
     }
-    if !msg.verify() {
-        return dropped(file);
-    }
-    // A signed message older than the replay horizon (or dated far in the
-    // future) is refused, and its key is kept until then, so an old message
-    // cannot come back as new.
+    // The checks that need no signature come first, so a frame they turn
+    // away costs none, also each time a prune pass takes a refused row
+    // again. A message older than the replay horizon (or dated far in the
+    // future) is dropped, and the key of a message taken is kept until
+    // then, so an old message cannot come back as new.
     if msg.sent_ms.saturating_add(store::REPLAY_HORIZON_MS) <= now_ms
         || msg.sent_ms > now_ms.saturating_add(store::MAX_FUTURE_SKEW_MS)
     {
+        return dropped(file);
+    }
+    // Its author's share of the group's room for message keys is full; every
+    // other author's messages are still taken. The author's own copy is
+    // refused, not ACKed, so the author sends it again once some of its keys
+    // expire. A copy another member carried (a forward) is dropped and
+    // counted, so it is ACKed: its carrier cannot send it again for the
+    // author, and it must not wait in that member's queue for this profile
+    // until its horizon. (Only the author's own session carries a copy
+    // refused here unchecked; a blocked member's message is dropped below.)
+    let forwarded = *peer != msg.from;
+    if !blocked && g.author_share(&hex::encode(msg.from), now_ms) >= g.share() {
+        return if forwarded { dropped(file) } else { refused() };
+    }
+    if !msg.verify() {
         return dropped(file);
     }
     if blocked {
@@ -441,17 +459,6 @@ fn apply_msg(
             g.seen.push(&from, &id, msg.sent_ms);
         }
         return Applied::change(false);
-    }
-    // Its author's share of the group's room for message keys is full; every
-    // other author's messages are still taken. The author's own copy is
-    // refused, not ACKed, so the author sends it again once some of its keys
-    // expire. A copy another member carried (a forward) is dropped and
-    // counted, so it is ACKed: its carrier cannot send it again for the
-    // author, and it must not wait in that member's queue for this profile
-    // until its horizon.
-    let forwarded = *peer != msg.from;
-    if g.author_share(&hex::encode(msg.from), now_ms) >= g.share() {
-        return if forwarded { dropped(file) } else { refused() };
     }
     g.messages.push(StoredMsg {
         id: id.clone(),
