@@ -130,10 +130,14 @@ fn approving_takes_a_unique_prefix_once() {
 fn rows_are_bounded_and_forgotten_once_installed() {
     let _manual = Manual::set();
     let mut rows = Downloads::default();
-    rows.note_offer(&[1; 32], &offer(5, 0), T0);
+    rows.note_offer(&[0x80; 32], &offer(5, 0), T0);
     rows.approve(&hex::encode([0; 32]), T0).unwrap();
     for i in 1..=(MAX_ROWS as u8 + 3) {
-        rows.note_offer(&[1; 32], &offer(5 + u64::from(i), i), T0 + u64::from(i));
+        rows.note_offer(
+            &[0x80 + i; 32],
+            &offer(5 + u64::from(i), i),
+            T0 + u64::from(i),
+        );
     }
     assert_eq!(rows.rows.len(), MAX_ROWS);
     assert!(
@@ -151,6 +155,69 @@ fn rows_are_bounded_and_forgotten_once_installed() {
         .iter()
         .all(|r| r.build_serial > 10 || r.digest == [5; 32]));
     assert!(!rows.forget_installed(10));
+}
+
+/// Security review 2026-11 (UPD-2): offers are unsigned claims, so one
+/// friend keeps at most 2 offers not approved, its own oldest going first,
+/// and can push out no row only other friends offered. Rows more friends
+/// offer outlive rows fewer offer.
+#[test]
+fn one_friend_cannot_push_out_what_other_friends_offered() {
+    let _manual = Manual::set();
+    let (sara, rena, mallory) = ([0x5A; 32], [0x7E; 32], [0x66; 32]);
+    let digests = |rows: &Downloads, who: &[u8; 32]| -> Vec<[u8; 32]> {
+        rows.rows
+            .iter()
+            .filter(|r| r.from.contains(who))
+            .map(|r| r.digest)
+            .collect()
+    };
+    let mut rows = Downloads::default();
+    rows.note_offer(&sara, &offer(5, 1), T0);
+    rows.note_offer(&rena, &offer(5, 1), T0 + 1);
+    rows.note_offer(&rena, &offer(6, 2), T0 + 2);
+    // Four links of four made up offers each, with huge build serials.
+    for i in 0..16u8 {
+        let at = T0 + 10 + u64::from(i);
+        rows.note_offer(&mallory, &offer(u64::MAX - u64::from(i), 0x80 + i), at);
+    }
+    assert_eq!(
+        rows.row(&[1; 32]).map(|r| r.from.clone()),
+        Some(vec![rena, sara]),
+        "the release two friends offered stays"
+    );
+    assert!(rows.row(&[2; 32]).is_some(), "another friend's offer stays");
+    assert_eq!(
+        digests(&rows, &mallory),
+        [[0x8E; 32], [0x8F; 32]],
+        "its own newest two"
+    );
+    // Joining releases others offered counts toward its share too: past it,
+    // it leaves the oldest of them, which stays for the others.
+    rows.note_offer(&mallory, &offer(5, 1), T0 + 40);
+    rows.note_offer(&mallory, &offer(6, 2), T0 + 41);
+    assert_eq!(digests(&rows, &mallory), [[1; 32], [2; 32]]);
+    assert!(rows.note_offer(&mallory, &offer(u64::MAX, 0x90), T0 + 42));
+    assert_eq!(digests(&rows, &mallory), [[2; 32], [0x90; 32]]);
+    assert_eq!(rows.row(&[1; 32]).unwrap().from, vec![rena, sara]);
+    assert_eq!(rows.rows.len(), 3);
+    // Past MAX_ROWS the offer fewest friends made goes first, the oldest
+    // of those first: not the older release two friends offered.
+    for i in 0..(MAX_ROWS as u8) {
+        let friend = [0xA0 + i; 32];
+        rows.note_offer(
+            &friend,
+            &offer(7 + u64::from(i), 0xA0 + i),
+            T0 + 100 + u64::from(i),
+        );
+    }
+    assert_eq!(rows.rows.len(), MAX_ROWS);
+    assert!(rows.row(&[1; 32]).is_some(), "two friends offered it");
+    assert!(rows.row(&[2; 32]).is_some(), "two friends offered it");
+    for gone in [0x90, 0xA0, 0xA1] {
+        assert!(rows.row(&[gone; 32]).is_none(), "{gone:#x}");
+    }
+    assert!(rows.row(&[0xA2; 32]).is_some());
 }
 
 #[test]

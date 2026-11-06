@@ -330,7 +330,9 @@ lifts the hold only this way). A hold on `feature/mesh-update`, or a BROKEN
   frame's.
 - **Notices.** GET_ADVISORY when the HAVE's advisory serial is higher than
   the newest known, or equal with another digest (equivocation when the
-  signed bodies differ: the update state freezes); else GET_LOG when its log
+  signed bodies differ: the update state freezes, once the log the notice
+  came with checks and lists it; a body no checked log lists is unlogged
+  and goes to quarantine, RAD1 §7); else GET_LOG when its log
   is longer, or as long with another root (a split view: it freezes). While
   frozen nothing is asked for: no advisory lifts a freeze (RAD1 §6.1). The
   same claims of a friend are asked for at most every 10 minutes; a friend
@@ -361,7 +363,13 @@ lifts the hold only this way). A hold on `feature/mesh-update`, or a BROKEN
 - **Releases.** An offer for this computer's target with a build serial
   above the installed one becomes a row of `updates/downloads` (the digest,
   serial, target, size and up to 8 friends that offered it; at most 16
-  rows). Nothing is fetched until the row is approved (`raven update
+  rows). Offers are unsigned claims, so one friend names at most 2 rows not
+  approved yet: past that, its own oldest goes first, a row only it offered
+  before one other friends offered too, which it leaves and which stays for
+  them; it never pushes out a row only others offered. Past 16 rows the
+  offer not approved that the fewest friends made goes first, the oldest of
+  those first (security review 2026-11, UPD-2). Nothing is fetched until
+  the row is approved (`raven update
   download`, or Y in the terminal app's UPDATES; IPC `UpdateKick` wakes the
   task). An approved row is fetched from the friends that offered it, the
   one that offered it last first, in turn: GET_MANIFEST first, verified as

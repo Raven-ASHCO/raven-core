@@ -819,7 +819,11 @@ fn assert_vector(file: &str, expected: &Value) {
 }
 
 fn key_set_json(seeds: &[u8; 3]) -> Value {
-    let set = set_of(seeds);
+    key_set_json_of(2, seeds)
+}
+
+fn key_set_json_of(threshold: u8, seeds: &[u8; 3]) -> Value {
+    let set = key_set_of(threshold, seeds);
     json!({
         "threshold": set.threshold(),
         "seeds_hex": seeds.iter().map(|b| hex::encode([*b; 32])).collect::<Vec<_>>(),
@@ -1169,6 +1173,118 @@ fn update_vectors() {
             }),
         ),
     );
+    assert_vector("negative/rad1_weak_rotation_001.json", &rotation_vector());
+}
+
+/// A case of [`rotation_vector`]: its name, the current set's threshold
+/// and seed bytes, the next set's, whether the build is a debug one, and
+/// the rule's answer.
+type RotationCase = (&'static str, u8, [u8; 3], u8, [u8; 3], bool, &'static str);
+
+/// The next key set a `KEY_SET` entry names keeps the bar (spec §6.2,
+/// security review 2026-11 UPD-1): each case is an advisory under its
+/// case's current key set that verifies and names a next set, and what
+/// [`crate::update_state::check_rotation`] says of it.
+fn rotation_vector() -> Value {
+    const CLEAN: [u8; 3] = [0x44, 0x55, 0x66];
+    const FRESH: [u8; 3] = [0x55, 0x66, 0x77];
+    let cases: [RotationCase; 7] = [
+        (
+            "weak_threshold",
+            2,
+            CURRENT,
+            1,
+            NEXT,
+            true,
+            "WEAK_THRESHOLD",
+        ),
+        (
+            "lowered_threshold",
+            3,
+            CURRENT,
+            2,
+            NEXT,
+            true,
+            "LOWERED_THRESHOLD",
+        ),
+        (
+            "test_key",
+            2,
+            CLEAN,
+            2,
+            [0x22, 0x55, 0x66],
+            true,
+            "TEST_KEY",
+        ),
+        (
+            "test_key_release_build",
+            2,
+            CURRENT,
+            2,
+            NEXT,
+            false,
+            "TEST_KEY",
+        ),
+        ("test_keys_in_a_lab", 2, CURRENT, 2, NEXT, true, "OK"),
+        ("clean", 2, CLEAN, 2, FRESH, false, "OK"),
+        ("higher_threshold", 2, CLEAN, 3, FRESH, false, "OK"),
+    ];
+    let mut inputs = Vec::new();
+    let mut results = Vec::new();
+    for (name, threshold, seeds, next_threshold, next_seeds, debug, want) in cases {
+        let current = key_set_of(threshold, &seeds);
+        let next = key_set_of(next_threshold, &next_seeds);
+        let entries = vec![
+            e(
+                EntryKind::Notice,
+                Severity::Info,
+                NOTICE_TARGET,
+                b"new keys",
+                0,
+            ),
+            e(
+                EntryKind::KeySet,
+                Severity::Info,
+                KEY_SET_TARGET,
+                &next.encode(),
+                0,
+            ),
+        ];
+        let a = signed(&draft(&current, 1, [0; 32], entries), &seeds, &[0, 1, 2]);
+        assert_eq!(a.verify(&current), Ok(()), "{name}");
+        let named = a.entries.iter().find_map(Entry::key_set).unwrap();
+        assert_eq!(named, next, "{name}");
+        let got = crate::update_state::check_rotation(&current, &named, debug)
+            .err()
+            .map_or("OK", |e| e.code());
+        assert_eq!(got, want, "{name}");
+        inputs.push(json!({
+            "name": name,
+            "key_set": key_set_json_of(threshold, &seeds),
+            "advisory_hex": hex::encode(a.bytes()),
+            "debug_build": debug,
+        }));
+        results.push(json!({
+            "name": name,
+            "verify": "OK",
+            "next_key_set_hex": hex::encode(next.encode()),
+            "rotation": want,
+        }));
+    }
+    vector(
+        "rad1_weak_rotation_001",
+        "The next key set a KEY_SET entry names keeps the bar of the set that signs it \
+         (RAVEN_SECURITY_ADVISORY_V1 §6.2), checked with the signatures (§6.1 step 2), \
+         in this order: a threshold of at least 2 (WEAK_THRESHOLD), not below the \
+         current set's (LOWERED_THRESHOLD), and no published test key (§2.4, TEST_KEY) \
+         unless debug_build is true and the current set holds a test key itself (a lab \
+         key file). A refusal makes the advisory forged (SEC_ADVISORY_FORGED): nothing \
+         rotates and nothing freezes; OK rotates. Each advisory is serial 1 under its \
+         case's key_set, signed by all three of its keys, with a NOTICE and the KEY_SET \
+         entry",
+        json!({ "cases": inputs }),
+        json!({ "results": results }),
+    )
 }
 
 /// The committed `keyset_*` and `rad1_*` files are exactly the ones
@@ -1209,6 +1325,7 @@ fn update_vector_files() {
             "rad1_equivocation_pair_001.json",
             "rad1_one_sig_001.json",
             "rad1_rollback_pair_001.json",
+            "rad1_weak_rotation_001.json",
             "rad1_wrong_keyset_001.json",
         ]
     );

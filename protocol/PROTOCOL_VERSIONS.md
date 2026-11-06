@@ -144,6 +144,39 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: rotations that keep the bar, unlogged second bodies, offers per friend)
+
+Behaviour changes of the update state and the download rows, not of the
+wire format: no RAD1, RTL1, RRB1 or RUP1 layout, entry kind, version byte or
+caps bit changed, no existing vector changed (one negative vector is new),
+and every gate stays as it was (the update gates stay off). Security and
+speed report 2026-11-05 §2 and §6 (UPD-1, UPD-2, UPD-3).
+
+- **Security Advisory V1 (draft).** [`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md)
+  §6.1, §6.2, §10 and §11: a `KEY_SET` entry that names another key set is
+  forged (`SEC_ADVISORY_FORGED`: nothing rotates, nothing freezes) when the
+  next set's threshold is below 2 (`WEAK_THRESHOLD`) or below the current
+  set's (`LOWERED_THRESHOLD`), or the next set holds a published test key
+  (`TEST_KEY`) outside a debug build whose current set holds one itself.
+  Before, any set that decodes was taken, so two keys could rotate a node to
+  a 1-of-n set or to the published test keys for good. New vector
+  `update/negative/rad1_weak_rotation_001.json`, checked by the Python
+  reference (`advisory.check_rotation`).
+- **Security Advisory V1 (draft).** §6.1 and §7: every `EQUIVOCATION`
+  (another body under the newest serial, or the next serial naming another
+  advisory) freezes only when the log snapshot it came with checks under the
+  current key set and lists it; otherwise it is `SEC_UPDATE_UNLOGGED` (kept
+  in quarantine) or forged. Before, only the compiled floor needed the log,
+  so a signed body that was never published froze updates until a release
+  was installed by hand.
+- **Update Exchange V1 (draft).** [`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md)
+  §7 (Releases) and §7.1 (Notices): one friend names at most 2 download
+  rows not approved yet, its own oldest going first (a row only it offered
+  goes; it leaves a row other friends offered too), and past 16 rows the
+  offer the fewest friends made goes first. Before, one friend's made up
+  offers pushed every other friend's offer out of the table. §7.1 says that
+  an equivocating notice no checked log lists is unlogged.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: a relay confirmation from before the UPnP rule not carried on)
 
 A behaviour change of the local status file of the relay, not of the wire
