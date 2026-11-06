@@ -960,7 +960,7 @@ pub fn deliver(
 /// `Ok(true)`: handled (stored, held, a duplicate, or dropped as invalid or
 /// as a blocked member's), so it is ACKed. `Ok(false)`: a verified frame
 /// refused for lack of room (its author's share of the group's seen keys,
-/// its admin's active groups, the places for groups;
+/// its admin's groups, the places for groups;
 /// [`rules::Applied::refused`]): not stored and not ACKed, so its sender
 /// sends it again later. A frame the store has no room for in bytes (its
 /// budget, after shedding held frames, done markers and intents) is dropped

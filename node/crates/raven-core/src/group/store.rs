@@ -48,10 +48,13 @@ const REPAIR_READ_CAP: u64 = 2 * at_rest::MAX_SEALED_FILE_BYTES;
 /// again), and so is a new group of this profile ([`GroupError::TooManyGroups`]).
 /// [`forget`] frees a place.
 pub const MAX_GROUPS: usize = 64;
-/// Active groups of one admin: its next invitation (or a roster that would
-/// make one of its groups active again) is refused, not ACKed, until one of
-/// them is left; so one friend cannot take every place. Other admins'
-/// invitations are not affected.
+/// Groups of one admin kept here, active, left or removed (a forgotten one
+/// does not count, as for [`MAX_GROUPS`]): its next invitation (or a roster
+/// that names this profile again in one of its forgotten groups) is
+/// refused, not ACKed, until one of them is forgotten. A group left or
+/// removed keeps counting, so one friend cannot take every place by
+/// inviting and removing again; a roster that makes such a group active
+/// again takes nothing new. Other admins' invitations are not affected.
 pub const MAX_GROUPS_PER_ADMIN: usize = 8;
 /// Forgotten groups kept ([`forget`]): their ids, epochs and seen keys, so
 /// their old frames do not bring them back. Over it, the one forgotten
@@ -577,12 +580,13 @@ impl GroupsFile {
         self.groups.iter().filter(|g| !g.is_forgotten()).count()
     }
 
-    /// The active groups of `admin` here ([`MAX_GROUPS_PER_ADMIN`]).
-    pub fn active_of(&self, admin: &Key) -> usize {
+    /// The groups of `admin` kept here, active, left or removed (a
+    /// forgotten one does not count): [`MAX_GROUPS_PER_ADMIN`].
+    pub fn records_of(&self, admin: &Key) -> usize {
         let hex = hex::encode(admin);
         self.groups
             .iter()
-            .filter(|g| g.is_active() && g.state.admin == hex)
+            .filter(|g| !g.is_forgotten() && g.state.admin == hex)
             .count()
     }
 

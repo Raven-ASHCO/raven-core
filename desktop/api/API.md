@@ -230,10 +230,11 @@ raven-node).
 - **Members.** A group has at most 16 members, you included, and one admin (its creator) who alone
   adds and removes; the admin can't leave. Only your friends (`contacts.list`, not blocked) can be
   added. Joining is automatic: a group a friend adds you to appears in `groups.list` (with a
-  `group_changed` event); you can leave it. You are in at most 8 groups of one admin at a time and
-  64 groups in all (left and removed ones count until forgotten): an invitation past either waits
-  on the admin's side and joins when it comes again once there is room; other admins' invitations
-  are not affected.
+  `group_changed` event); you can leave it. You keep at most 8 groups of one admin and 64 groups
+  in all, left and removed ones counted until you forget them (`groups.forget`): an invitation
+  past either waits on the admin's side and joins when it comes again once there is room; other
+  admins' invitations are not affected. A group you were removed from that adds you back takes
+  no new room.
 - **Names.** `GroupMember.name` is your name for a member who is your friend, else the name the
   admin gave them (`label`); `friend: false` members are shown as "not your friend" and are never
   added to your friends by the group. You are `me: true` (name: your display name, else "You").

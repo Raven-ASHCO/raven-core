@@ -127,8 +127,8 @@ frame the receiver has no room to store in bytes (§4.3): it is counted, not
 taken later.
 
 **Refused, not ACKed.** A verified frame refused only for lack of room by
-the limits below (a `state` past its admin's share of active groups or the
-receiver's 64 groups; a `msg` past its author's share of the group's
+the limits below (a `state` past its admin's 8 groups or the receiver's
+64 groups; a `msg` past its author's share of the group's
 remembered ids) is not stored and **not ACKed**: the receiver does not
 count it as handled, its endpoint row stays, and the sender's copy keeps
 waiting and is sent again until its horizon, so it is taken once there is
@@ -140,13 +140,14 @@ only when `P` is `admin` and the receiver is in `members`. For a known group
 `admin` must equal the group's admin and `epoch` must be newer than the
 roster held; then it replaces it. A receiver not in the new `members` stops
 taking and sending messages for the group. An equal epoch with other bytes
-is ignored. A receiver holds at most 8 active groups of one admin and 64
-groups in all (active, left or removed); an invitation past either, or a
-roster that would make a group of an admin at 8 active again, is refused
-(not ACKed, above). A group the receiver forgot keeps its id, epoch and
-remembered ids: an older or equal epoch is ignored, and only a roster
+is ignored. A receiver holds at most 8 groups of one admin and 64 groups
+in all, each counted while it is active, left or removed (until the
+receiver forgets it); an invitation past either is refused (not ACKed,
+above). A roster that makes a group left or removed active again adds no
+group and is not refused. A group the receiver forgot keeps its id, epoch
+and remembered ids: an older or equal epoch is ignored, and only a roster
 naming the receiver after one that did not is a new invitation (as for a
-group it left).
+group it left), counted and refused as one.
 
 **`msg`**: accepted when the group is known and active, `from` is in the
 roster held, the signature verifies under `from` and the pair (`from`,

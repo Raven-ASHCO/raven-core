@@ -454,11 +454,14 @@ fn a_leaver_stays_out_until_a_roster_without_it_then_one_with_it() {
     assert_eq!(group(&file).status, STATUS_ACTIVE);
 }
 
-/// G2: one admin holds at most 8 active groups here: its 64 invitations
-/// join 8 times and are refused after (not stored, not counted as dropped,
-/// so they are not ACKed and come again), and another admin's invitation
-/// still joins. A group left frees its admin's share; a roster that would
-/// make a group of a full admin active again is refused too.
+/// G2: one admin holds at most 8 groups here (active, left or removed):
+/// its 64 invitations join 8 times and are refused after (not stored, not
+/// counted as dropped, so they are not ACKed and come again), and another
+/// admin's invitation still joins. A group left still counts; a group
+/// forgotten frees its admin's share. A roster that makes a group removed
+/// active again takes nothing new and is taken; a forgotten group's roster
+/// that names this profile again is a new invitation, refused while the
+/// admin is full.
 #[test]
 fn one_admin_cannot_take_every_group_place() {
     let me = key(3);
@@ -500,50 +503,49 @@ fn one_admin_cannot_take_every_group_place() {
     assert_eq!(of_one(&file), store::MAX_GROUPS_PER_ADMIN);
     assert_eq!(refused, store::MAX_GROUPS - store::MAX_GROUPS_PER_ADMIN);
     assert_eq!(file.dropped, 0, "refused, not dropped");
-    // A group left no longer counts: the next invitation joins.
+    // A group left still counts: the next invitation is refused.
     file.groups[0].status = STATUS_LEFT.into();
     let ninth = roster_salted(1, &[3], [0xb0; 16]);
-    apply(
-        &mut file,
-        &me,
-        &key(1),
-        &GroupFrame::State(ninth.clone()),
-        &none,
-        NOW,
-    );
+    let invite = GroupFrame::State(ninth.clone());
+    assert!(apply(&mut file, &me, &key(1), &invite, &none, NOW).refused);
+    assert!(file.group(&ninth.group).is_none());
+    // Forgotten, it frees the admin's share: the invitation joins.
+    let first = file.groups[0].roster().unwrap();
+    file.forget(&first.group, NOW).unwrap();
+    assert!(!apply(&mut file, &me, &key(1), &invite, &none, NOW).refused);
     assert!(file.group(&ninth.group).is_some_and(|g| g.is_active()));
-    assert_eq!(file.active_of(&key(1)), store::MAX_GROUPS_PER_ADMIN);
+    assert_eq!(file.records_of(&key(1)), store::MAX_GROUPS_PER_ADMIN);
     // Removed from one group, then added back while the admin is full:
-    // refused, the group stays removed.
+    // its record already counts, so the roster is taken.
     let removed = file.groups[1].roster().unwrap();
     let mut out = roster_salted(1, &[], removed.salt);
     out.epoch = 2;
     out.sign(&id(1));
     apply(&mut file, &me, &key(1), &GroupFrame::State(out), &none, NOW);
     assert_eq!(file.groups[1].status, STATUS_REMOVED);
-    let tenth = roster_salted(1, &[3], [0xb1; 16]);
-    apply(
-        &mut file,
-        &me,
-        &key(1),
-        &GroupFrame::State(tenth),
-        &none,
-        NOW,
-    );
+    let tenth = GroupFrame::State(roster_salted(1, &[3], [0xb1; 16]));
+    assert!(apply(&mut file, &me, &key(1), &tenth, &none, NOW).refused);
     let mut back = roster_salted(1, &[3], removed.salt);
     back.epoch = 3;
     back.sign(&id(1));
-    let done = apply(
-        &mut file,
-        &me,
-        &key(1),
-        &GroupFrame::State(back),
-        &none,
-        NOW,
-    );
-    assert!(done.refused);
-    assert_eq!(file.groups[1].status, STATUS_REMOVED);
-    assert_eq!(file.groups[1].roster().unwrap().epoch, 2);
+    let back = GroupFrame::State(back);
+    assert!(!apply(&mut file, &me, &key(1), &back, &none, NOW).refused);
+    assert_eq!(file.groups[1].status, STATUS_ACTIVE);
+    assert_eq!(file.records_of(&key(1)), store::MAX_GROUPS_PER_ADMIN);
+    // The forgotten group named again after a roster without this
+    // profile: a new invitation, refused while the admin is full.
+    let mut without = roster_salted(1, &[], first.salt);
+    without.epoch = 2;
+    without.sign(&id(1));
+    let without = GroupFrame::State(without);
+    assert!(!apply(&mut file, &me, &key(1), &without, &none, NOW).refused);
+    let mut again = roster_salted(1, &[3], first.salt);
+    again.epoch = 3;
+    again.sign(&id(1));
+    let again = GroupFrame::State(again);
+    assert!(apply(&mut file, &me, &key(1), &again, &none, NOW).refused);
+    assert_eq!(file.groups[0].status, STATUS_FORGOTTEN);
+    assert_eq!(file.dropped, 0, "refused, not dropped");
 }
 
 /// G2: a forgotten group leaves every list and operation, keeps its id,
@@ -1501,6 +1503,53 @@ fn create_succeeds_after_leave_and_forget() {
     assert!(ingest(d, &key(10), &again, NOW + 6).unwrap());
     assert_eq!(view(d, &left), Err(GroupError::NotFound));
     assert_eq!(list(d).unwrap().len(), store::MAX_GROUPS);
+}
+
+/// G2 on disk: an admin that invites this profile to 8 groups and then
+/// removes it from them, 8 times over, still holds no more than its 8
+/// records here (a group left or removed counts against its admin until
+/// it is forgotten): its later invitations are refused, another admin's
+/// invitation still joins, and a new group of this profile is made.
+#[test]
+fn invite_and_remove_cycles_do_not_take_every_place() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann"), (2, "Bea")]);
+    let mut refused = 0;
+    for round in 0..store::MAX_GROUPS / store::MAX_GROUPS_PER_ADMIN {
+        for n in 0..store::MAX_GROUPS_PER_ADMIN {
+            let salt = [(round * store::MAX_GROUPS_PER_ADMIN + n) as u8; 16];
+            let invite = GroupFrame::State(roster_salted(1, &[3], salt));
+            refused += usize::from(!ingest(d, &key(1), &invite, NOW).unwrap());
+            let mut out = roster_salted(1, &[], salt);
+            out.epoch = 2;
+            out.sign(&id(1));
+            assert!(ingest(d, &key(1), &GroupFrame::State(out), NOW).unwrap());
+        }
+    }
+    let other = roster_salted(2, &[3], [0xaa; 16]);
+    let invite = GroupFrame::State(other.clone());
+    assert!(
+        ingest(d, &key(2), &invite, NOW + 1).unwrap(),
+        "another admin's invitation joins"
+    );
+    assert_eq!(view(d, &other.group).unwrap().summary.status, STATUS_ACTIVE);
+    let members = [(key(1), "Ann".to_owned())];
+    let mine = create(d, &id(3), "Mine", &members, NOW + 2).unwrap();
+    assert!(view(d, &mine).unwrap().summary.i_am_admin);
+    assert_eq!(
+        refused,
+        store::MAX_GROUPS - store::MAX_GROUPS_PER_ADMIN,
+        "one admin's records stop at its share"
+    );
+    let file = store::load(d).unwrap();
+    assert_eq!(file.places_used(), store::MAX_GROUPS_PER_ADMIN + 2);
+    // Only the removals from groups never joined are dropped.
+    assert_eq!(file.dropped as usize, refused);
 }
 
 // ------------------------------------------------------------------ vector
@@ -2508,7 +2557,7 @@ fn the_store_on_disk_stays_readable_after_any_edit() {
     let size = std::fs::metadata(store::groups_path(d)).unwrap().len();
     assert!(size <= crate::at_rest::MAX_SEALED_FILE_BYTES, "{size}");
     // A roster for one more group goes in (another admin's: admin 1 holds
-    // more active groups than its share already).
+    // more groups than its share already).
     ingest(
         d,
         &key(2),

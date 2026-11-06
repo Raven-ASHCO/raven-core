@@ -31,7 +31,7 @@ pub struct Applied {
     /// Intents were recorded (raven-node should scan).
     pub work: bool,
     /// A verified frame there is no room for now (its author's share of the
-    /// group's seen keys, its admin's active groups, the places for groups):
+    /// group's seen keys, its admin's groups, the places for groups):
     /// not stored and not handled, so it is not ACKed and its sender sends
     /// it again later (protocol §4.2).
     pub refused: bool,
@@ -211,11 +211,13 @@ fn apply_state(
     if !state.verify() {
         return dropped(file);
     }
-    // Joining (an invitation, or a group this profile is not active in
-    // turning active again) is bounded by the admin's active groups and by
-    // the places: a roster past either is refused, so it is not ACKed
-    // and joins when it comes again once there is room.
-    let admin_full = file.active_of(&state.admin) >= store::MAX_GROUPS_PER_ADMIN;
+    // A new record here (an invitation, or a forgotten group's roster that
+    // names this profile again) is bounded by the admin's records and by
+    // the places: a roster past either is refused, so it is not ACKed and
+    // joins when it comes again once there is room. A group left or
+    // removed keeps its record until it is forgotten, so a roster that
+    // makes it active again takes nothing new.
+    let admin_full = file.records_of(&state.admin) >= store::MAX_GROUPS_PER_ADMIN;
     let places_full = file.places_used() >= store::MAX_GROUPS;
     let mut done = Applied::default();
     match file.group_mut(&state.group) {
@@ -247,10 +249,7 @@ fn apply_state(
             }
             let in_it = state.has(me);
             let (status, left_seen_out) = status_after(&g.status, g.left_seen_out, in_it);
-            if status == STATUS_ACTIVE
-                && !g.is_active()
-                && (admin_full || (forgotten && places_full))
-            {
+            if status == STATUS_ACTIVE && forgotten && (admin_full || places_full) {
                 return refused();
             }
             if status == STATUS_FORGOTTEN {
