@@ -1206,6 +1206,42 @@ pub(crate) mod lock_replay_test {
         std::fs::write(dir.join(lock), [1u8; 512]).unwrap();
         std::fs::write(dir.join(format!("{lock}-journal")), journal).unwrap();
     }
+
+    /// Plants, in `dir`, a lock database `lock` in WAL mode and the `-wal`
+    /// beside it that holds its last transaction (a table `planted` with one
+    /// row): both copied from a database whose connection was still open,
+    /// before any checkpoint. SQLite recovers that transaction into the lock
+    /// (and makes a `-shm`) as whoever opens it. Proven on a second copy of
+    /// the pair, from which SQLite reads the row.
+    pub(crate) fn plant_wal(dir: &Path, lock: &str) {
+        let scratch = tempfile::tempdir().unwrap();
+        let db = scratch.path().join("planted.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        conn.execute_batch(
+            "PRAGMA wal_autocheckpoint=0; CREATE TABLE planted(x); \
+             INSERT INTO planted VALUES (1);",
+        )
+        .unwrap();
+        let wal = scratch.path().join("planted.sqlite-wal");
+        let copy_to = |to: &Path| {
+            std::fs::copy(&db, to.join(lock)).unwrap();
+            std::fs::copy(&wal, to.join(format!("{lock}-wal"))).unwrap();
+        };
+        copy_to(dir);
+        let proof = tempfile::tempdir().unwrap();
+        copy_to(proof.path());
+        drop(conn);
+        assert!(std::fs::metadata(dir.join(lock)).unwrap().len() > 0);
+        let row: i64 = rusqlite::Connection::open(proof.path().join(lock))
+            .unwrap()
+            .query_row("SELECT x FROM planted", [], |row| row.get(0))
+            .expect("SQLite recovers the planted transaction");
+        assert_eq!(row, 1);
+    }
 }
 
 #[cfg(test)]
@@ -1908,20 +1944,22 @@ mod tests {
         assert!(refused.contains(lock_replay_test::REFUSED), "{refused}");
     }
 
-    /// A lock database never takes WAL mode either: a `-wal` beside one
-    /// that is not empty is refused before SQLite opens it (it would recover
-    /// it and make a `-shm` beside it).
+    /// A lock database never takes WAL mode either: a real `-wal` beside
+    /// one that is not empty is refused before SQLite opens it, which would
+    /// recover the planted transaction into the lock and make a `-shm`
+    /// beside it. The `-wal` stays byte for byte.
     #[test]
     fn a_lock_beside_a_planted_wal_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let name = ".probe.lock.sqlite";
-        std::fs::write(dir.path().join(name), [1u8; 512]).unwrap();
-        std::fs::write(dir.path().join(format!("{name}-wal")), [2u8; 64]).unwrap();
+        lock_replay_test::plant_wal(dir.path(), name);
+        let wal = dir.path().join(format!("{name}-wal"));
+        let planted = std::fs::read(&wal).unwrap();
         let refused = DataDirLock::acquire_within(dir.path(), name, Duration::ZERO)
             .err()
             .expect("the lock was taken");
         assert!(refused.contains(lock_replay_test::REFUSED), "{refused}");
-        assert!(dir.path().join(format!("{name}-wal")).exists());
+        assert_eq!(std::fs::read(&wal).ok(), Some(planted), "the -wal changed");
         assert!(!dir.path().join(format!("{name}-shm")).exists());
     }
 
