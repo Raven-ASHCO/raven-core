@@ -864,7 +864,7 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
 /// [`serve_forward`] (macOS, Linux: they come over the life's channel,
 /// [`take_forwards`]).
 #[cfg(unix)]
-type Forwards = tokio::sync::mpsc::Sender<tokio::net::UnixStream>;
+type Forwards = tokio::sync::mpsc::Sender<channel::pair::PairStream>;
 #[cfg(not(unix))]
 type Forwards = Infallible;
 
@@ -1781,7 +1781,7 @@ enum Intake {
     Tcp(TcpListener),
     /// Every helper life's channel (macOS, Linux; [`take_forwards`]).
     #[cfg(unix)]
-    Channel(tokio::sync::mpsc::Receiver<tokio::net::UnixStream>),
+    Channel(tokio::sync::mpsc::Receiver<channel::pair::PairStream>),
 }
 
 /// A forward stream from the helper.

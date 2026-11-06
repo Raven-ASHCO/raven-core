@@ -11,7 +11,10 @@
 //!   raven-node's process (the iOS app) is handed its end ([`Handed`],
 //!   config `conduit`). Every stream, either way, is a fresh socket pair
 //!   whose one end goes over the channel ([`Conduit`], SCM_RIGHTS): no other
-//!   program, of this user or another, can open one. On Windows the streams
+//!   program, of this user or another, can open one. The opener keeps its
+//!   copy of that end until the other side answers on it
+//!   ([`pair::PairStream`]; macOS would collect an end in flight with no
+//!   other copy). On Windows the streams
 //!   stay on loopback TCP (raven-node's forward listener, the helper's
 //!   connect port), and each listener holds at most [`PENDING_MAX`]
 //!   connections that still owe their hello ([`Pending`]).
@@ -361,7 +364,7 @@ impl Pending {
 pub(crate) enum Stream<N> {
     Net(N),
     #[cfg(unix)]
-    Pair(tokio::net::UnixStream),
+    Pair(pair::PairStream),
 }
 
 impl<N: AsyncRead + Unpin> AsyncRead for Stream<N> {
@@ -510,8 +513,10 @@ pub(crate) mod pair {
     use std::mem::size_of;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
-    use tokio::io::Interest;
+    use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
     use tokio::net::UnixStream;
 
     /// The kind byte with a connect stream (raven-node to its helper).
@@ -569,8 +574,18 @@ pub(crate) mod pair {
         }
 
         /// A new stream to the other side: one end of a fresh socket pair
-        /// goes over the channel, the other is returned.
-        pub(crate) async fn open(&self) -> io::Result<UnixStream> {
+        /// goes over the channel, the other is returned, and with it this
+        /// side's copy of the end it sent, until the other side answers on
+        /// that end ([`PairStream`]). macOS and iOS collect a socket whose
+        /// every copy is in a message in flight whenever a Unix socket closes
+        /// anywhere on the system: closed at once, the other side would take
+        /// a dead stream (its reads end at once, writes to it are lost). No
+        /// fixed wait would do: an end may stay in flight longer, while an
+        /// app is suspended. The opener reads first on both kinds (a connect
+        /// stream's hello, a forward stream's challenge), within
+        /// [`super::HELLO_WAIT`]; a stream the other side never answers
+        /// shows its end only when that wait ran out.
+        pub(crate) async fn open(&self) -> io::Result<PairStream> {
             let (ours, theirs) = StdUnixStream::pair()?;
             no_sigpipe(&ours)?;
             no_sigpipe(&theirs)?;
@@ -578,15 +593,16 @@ pub(crate) mod pair {
             self.sock
                 .async_io(Interest::WRITABLE, || send_fd(sock, self.sends, fd))
                 .await?;
-            // The other side has its own copy now.
-            drop(theirs);
             ours.set_nonblocking(true)?;
-            UnixStream::from_std(ours)
+            Ok(PairStream {
+                sock: UnixStream::from_std(ours)?,
+                sent: Some(theirs),
+            })
         }
 
         /// The next stream the other side opened; `None` once the channel
         /// ended (the other side is gone).
-        pub(crate) async fn accept(&self) -> io::Result<Option<UnixStream>> {
+        pub(crate) async fn accept(&self) -> io::Result<Option<PairStream>> {
             let sock = self.sock.as_raw_fd();
             loop {
                 let got = self
@@ -602,8 +618,75 @@ pub(crate) mod pair {
                 };
                 let stream = StdUnixStream::from(fd);
                 stream.set_nonblocking(true)?;
-                return UnixStream::from_std(stream).map(Some);
+                return Ok(Some(PairStream {
+                    sock: UnixStream::from_std(stream)?,
+                    sent: None,
+                }));
             }
+        }
+    }
+
+    /// One stream of the channel: an end of a socket pair of its own. The
+    /// side that opened it ([`Conduit::open`]) keeps its copy of the end it
+    /// sent until a byte, or the end, comes from the other side: then the
+    /// other side holds that end, and no copy of it is in flight any more.
+    pub(crate) struct PairStream {
+        sock: UnixStream,
+        /// The opener's copy of the end it sent, until the other side
+        /// answers on it.
+        sent: Option<StdUnixStream>,
+    }
+
+    impl AsRawFd for PairStream {
+        fn as_raw_fd(&self) -> RawFd {
+            self.sock.as_raw_fd()
+        }
+    }
+
+    impl AsyncRead for PairStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let room = buf.remaining();
+            let read = Pin::new(&mut this.sock).poll_read(cx, buf);
+            if room > 0 && matches!(read, Poll::Ready(Ok(()))) {
+                // The other side wrote on its end, or shut it: it has it.
+                this.sent = None;
+            }
+            read
+        }
+    }
+
+    impl AsyncWrite for PairStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.get_mut().sock).poll_write(cx, buf)
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.get_mut().sock).poll_write_vectored(cx, bufs)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            self.sock.is_write_vectored()
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().sock).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().sock).poll_shutdown(cx)
         }
     }
 
@@ -686,9 +769,10 @@ pub(crate) mod pair {
 
     /// Waits until `stream` has a byte to read, or its end, without taking
     /// it (as [`tokio::net::TcpStream::peek`]): how many bytes a peek saw.
-    pub(crate) async fn peek_one(stream: &UnixStream) -> io::Result<usize> {
+    pub(crate) async fn peek_one(stream: &PairStream) -> io::Result<usize> {
         let fd = stream.as_raw_fd();
         stream
+            .sock
             .async_io(Interest::READABLE, || {
                 let mut one = 0u8;
                 // SAFETY: a buffer of one byte.
@@ -729,7 +813,7 @@ pub(crate) mod pair {
     }
 
     /// One byte, `kind`, with the descriptor `fd` on the channel `sock`.
-    fn send_fd(sock: RawFd, kind: u8, fd: RawFd) -> io::Result<()> {
+    pub(super) fn send_fd(sock: RawFd, kind: u8, fd: RawFd) -> io::Result<()> {
         let mut byte = [kind];
         let mut iov = libc::iovec {
             iov_base: byte.as_mut_ptr().cast(),
@@ -1073,6 +1157,15 @@ mod tests {
         );
     }
 
+    /// `step` within a few seconds: a dead stream fails a test at once
+    /// instead of holding it.
+    #[cfg(unix)]
+    async fn soon<T>(step: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), step)
+            .await
+            .expect("within 5 s")
+    }
+
     /// Streams both ways over one channel: each side takes only the kind
     /// the other opens; a descriptor that arrives is closed on exec; the
     /// end of the channel ends `accept`; a peek takes no byte.
@@ -1086,21 +1179,27 @@ mod tests {
             Conduit::node(node_end).unwrap(),
             Conduit::helper(helper_end).unwrap(),
         );
-        let mut dialled = node.open().await.unwrap();
-        let mut asked = helper.accept().await.unwrap().expect("a connect stream");
+        let mut dialled = soon(node.open()).await.unwrap();
+        let mut asked = soon(helper.accept())
+            .await
+            .unwrap()
+            .expect("a connect stream");
         // SAFETY: fcntl on an open descriptor.
         let flags = unsafe { libc::fcntl(asked.as_raw_fd(), libc::F_GETFD) };
         assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
-        dialled.write_all(b"to the helper").await.unwrap();
-        assert_eq!(pair::peek_one(&asked).await.unwrap(), 1);
+        soon(dialled.write_all(b"to the helper")).await.unwrap();
+        assert_eq!(soon(pair::peek_one(&asked)).await.unwrap(), 1);
         let mut got = [0u8; 13];
-        asked.read_exact(&mut got).await.unwrap();
+        soon(asked.read_exact(&mut got)).await.unwrap();
         assert_eq!(&got, b"to the helper");
-        let mut forwarded = helper.open().await.unwrap();
-        let mut came = node.accept().await.unwrap().expect("a forward stream");
-        forwarded.write_all(b"to the node").await.unwrap();
+        let mut forwarded = soon(helper.open()).await.unwrap();
+        let mut came = soon(node.accept())
+            .await
+            .unwrap()
+            .expect("a forward stream");
+        soon(forwarded.write_all(b"to the node")).await.unwrap();
         let mut got = [0u8; 11];
-        came.read_exact(&mut got).await.unwrap();
+        soon(came.read_exact(&mut got)).await.unwrap();
         assert_eq!(&got, b"to the node");
         // A node end never takes a connect stream (the kind its own side
         // opens), nor a helper end a forward stream.
@@ -1109,11 +1208,139 @@ mod tests {
             Conduit::node(node_end).unwrap(),
             Conduit::node(helper_end).unwrap(),
         );
-        let _wrong = helper.open().await.unwrap();
+        let _wrong = soon(helper.open()).await.unwrap();
         drop(helper);
         assert!(
-            node.accept().await.unwrap().is_none(),
+            soon(node.accept()).await.unwrap().is_none(),
             "skipped, then the end"
         );
+    }
+
+    /// What `stream` holds right now, without a wait: `Some(0)` its end,
+    /// `Some(1)` a byte to read, `None` nothing yet.
+    #[cfg(unix)]
+    fn peek_now(stream: &impl std::os::fd::AsRawFd) -> Option<usize> {
+        let mut one = 0u8;
+        // SAFETY: a buffer of one byte.
+        let n = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                (&mut one as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if n >= 0 {
+            return Some(n as usize);
+        }
+        let e = io::Error::last_os_error();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock, "{e}");
+        None
+    }
+
+    /// The opener keeps its copy of the end it sent until the other side
+    /// answers on it, and no longer: a stream the other side took and
+    /// closed without a word shows no end while that copy is kept (it goes
+    /// with the stream, which its hello wait ends); once the other side
+    /// wrote, its close ends the stream at once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_opener_keeps_the_sent_end_until_the_other_side_answers() {
+        let (node_end, helper_end) = pair::new_channel().unwrap();
+        let (node, helper) = (
+            Conduit::node(node_end).unwrap(),
+            Conduit::helper(helper_end).unwrap(),
+        );
+        let unanswered = soon(node.open()).await.unwrap();
+        drop(
+            soon(helper.accept())
+                .await
+                .unwrap()
+                .expect("a connect stream"),
+        );
+        assert_eq!(peek_now(&unanswered), None, "an end while the copy is kept");
+        let mut answered = soon(node.open()).await.unwrap();
+        let mut taken = soon(helper.accept())
+            .await
+            .unwrap()
+            .expect("a connect stream");
+        soon(taken.write_all(b"h")).await.unwrap();
+        let mut one = [0u8; 1];
+        soon(answered.read_exact(&mut one)).await.unwrap();
+        drop(taken);
+        assert_eq!(peek_now(&answered), Some(0), "its end, at once");
+    }
+
+    /// No stream dies on its way over the channel (security review 2026-11,
+    /// onion3): macOS and iOS collect a socket whose every copy is in a
+    /// message in flight whenever a Unix socket closes somewhere, and the
+    /// side that takes it then holds a dead stream (its reads end at once).
+    /// Streams both ways, each in the order of its hello (a connect stream's
+    /// opener speaks first, a forward stream's taker), while two threads
+    /// close Unix sockets that carry descriptors: every stream carries its
+    /// bytes both ways.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_stream_dies_in_flight_while_unix_sockets_close() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        const STREAMS: usize = 2000;
+        let stop = Arc::new(AtomicBool::new(false));
+        let closing: Vec<_> = (0..2)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Relaxed) {
+                        let (a, b) = StdUnixStream::pair().unwrap();
+                        let (x, y) = StdUnixStream::pair().unwrap();
+                        let _ = pair::send_fd(a.as_raw_fd(), b'x', x.as_raw_fd());
+                        // `x` in flight to `b`, then every one closed.
+                        drop((x, y, b, a));
+                    }
+                })
+            })
+            .collect();
+        let (node_end, helper_end) = pair::new_channel().unwrap();
+        let (node, helper) = (
+            Conduit::node(node_end).unwrap(),
+            Conduit::helper(helper_end).unwrap(),
+        );
+        let mut dead = None;
+        for i in 0..STREAMS {
+            let connect = i % 2 == 0;
+            let (opener, taker) = if connect {
+                (&node, &helper)
+            } else {
+                (&helper, &node)
+            };
+            let carried = tokio::time::timeout(HELLO_WAIT, async {
+                let mut opened = opener.open().await?;
+                let mut taken = taker.accept().await?.ok_or(io::ErrorKind::UnexpectedEof)?;
+                let mut one = [0u8; 1];
+                if connect {
+                    opened.write_all(b"c").await?;
+                    taken.read_exact(&mut one).await?;
+                    taken.write_all(b"h").await?;
+                    opened.read_exact(&mut one).await?;
+                } else {
+                    taken.write_all(b"c").await?;
+                    opened.read_exact(&mut one).await?;
+                    opened.write_all(b"h").await?;
+                    taken.read_exact(&mut one).await?;
+                }
+                io::Result::Ok(())
+            })
+            .await;
+            if !matches!(carried, Ok(Ok(()))) {
+                dead = Some((i, carried));
+                break;
+            }
+        }
+        stop.store(true, Relaxed);
+        for thread in closing {
+            thread.join().unwrap();
+        }
+        assert!(dead.is_none(), "a stream died on its way: {dead:?}");
     }
 }
