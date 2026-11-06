@@ -1,4 +1,5 @@
-//! The Tor onion carrier (lab; `protocol/RAVEN_ONION_CARRIER_V1.md`, design
+//! The Tor onion carrier (on in release builds since 2026-10-29;
+//! `protocol/RAVEN_ONION_CARRIER_V1.md`, design
 //! `docs/design/2026-10-tor-fallback.md`).
 //!
 //! **Tor is only a pipe.** Every onion stream carries the same Raven Noise
@@ -37,8 +38,8 @@
 //! **Logs** carry states and counts only: never a friend's onion address,
 //! never this node's own, never Arti's own text.
 //!
-//! **Lab only:** `raven_core::onion_live_enabled()` (debug builds with
-//! `RAVEN_LAB_TEST_A=1` and `RAVEN_LAB_TOR=1`). Debug builds may name the
+//! **Gate:** `raven_core::onion_live_enabled()` (on in release builds since
+//! 2026-10-29; a debug build closes it with `RAVEN_LAB_TOR=0`). Debug builds may name the
 //! helper (`RAVEN_TOR_HELPER=<absolute path>`) or run the loopback helper
 //! instead (`RAVEN_LAB_TOR_LOOPBACK=<directory>`, [`loopback`]: the same
 //! protocol with no Tor network, for tests).

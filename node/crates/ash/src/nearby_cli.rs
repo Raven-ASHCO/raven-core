@@ -9,8 +9,10 @@
 //! the custody consents (`raven node custody on`, `raven custody use on`).
 //!
 //! Held by [`raven_core::nearby_live_enabled`] (`NEARBY_PRODUCTION_ENABLED`
-//! is false; a debug build opens it with `RAVEN_LAB_TEST_A=1` and
-//! `RAVEN_LAB_NEARBY=1`): held, every command but `status` refuses with the
+//! is true on macOS since 2026-10-29 and false on Windows and Linux, where a
+//! debug build opens it with `RAVEN_LAB_TEST_A=1` and `RAVEN_LAB_NEARBY=1`;
+//! a debug build on macOS closes it with `RAVEN_LAB_NEARBY=0`). While it is
+//! held, every command but `status` refuses with the
 //! hold and changes nothing, a send asks nothing, and `raven status` shows
 //! nothing unless a choice was saved. The running raven-node does the work
 //! (IPC `NearbyControl`); with none running, `enable` and `disable` save the

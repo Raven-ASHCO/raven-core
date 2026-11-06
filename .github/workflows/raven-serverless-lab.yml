@@ -576,7 +576,8 @@ jobs:
   # the AP), "cable-linklocal" (169.254/16 only; a listener bound once its
   # address appears) and "three-rooms" (route hints and custody: a custodian
   # carried between two rooms).
-  # Debug build + RAVEN_LAB_TEST_A=1 while P2P_PRODUCTION_ENABLED=false. A software
+  # Debug build + RAVEN_LAB_TEST_A=1 (P2P_PRODUCTION_ENABLED is true since
+  # 2026-10-29). A software
   # substitute: it does not replace physical rows R7b / R8
   # (docs/NAT_SOFTWARE_SIM.md). The script exits 2 when it cannot run here
   # (no namespaces, or an nft preflight finds no named counters or no

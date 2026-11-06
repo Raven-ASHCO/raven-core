@@ -840,8 +840,9 @@ struct Profile {
     /// process of this profile; the C1 profiles run without it.
     lab_internet: bool,
     /// Route hints (RRH1) on every process of this profile: the debug switch
-    /// `RAVEN_LAB_ROUTE_HINTS=1` while `ROUTE_HINTS_PRODUCTION_ENABLED` is
-    /// false ([`Profile::with_route_hints`]). Off by default, so C1-C16 run
+    /// `RAVEN_LAB_ROUTE_HINTS=1`, else `=0`, which closes the gate
+    /// (`ROUTE_HINTS_PRODUCTION_ENABLED` is true since 2026-10-29;
+    /// [`Profile::with_route_hints`]). Off by default, so C1-C16 run
     /// without hints whatever the caller exported.
     route_hints: bool,
     /// Friend relays (Phase 2) on every process of this profile
