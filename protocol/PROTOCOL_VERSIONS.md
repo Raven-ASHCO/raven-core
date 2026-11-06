@@ -144,6 +144,127 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: group bounds, blocks, receipts and leaves)
+
+Behaviour changes of the group receiver and sender rules, not of the wire
+format: no frame layout, kind, field, `RVNGRP/1` version, caps bit, card
+field or vector changed, and every gate stays as it was. Two rules now
+leave the pairwise ACK out: a copy the receiver refuses for lack of room,
+and every group frame while the receiver cannot read its block list; a
+sender of any version sends such a copy again, as it does any copy not
+ACKed (§6). The layout of `groups.json` (local, never sent) and the new
+error code are local. G7 changed no rule: the code now does what §4.2
+already said (a copy that did not come straight from its author is never
+forwarded). Security and speed report 2026-11-05 §2, §4 and §6 (findings
+G1 to G8).
+
+- **Group V1 (draft): the store's bytes (G1, G3).** [`RAVEN_GROUP_V1.md`](RAVEN_GROUP_V1.md)
+  §4.2 and §4.3: a frame the receiver has no room to store in bytes is
+  dropped, counted and ACKed. A frame is held only when its signature
+  verifies under its `from`, at most 64 and 256 KiB per group, 32 and
+  256 KiB for groups not known yet, and 1 MiB in all; over a bound the
+  carrier peer holding the most loses its oldest held frame first, so one
+  carrier's frames never push out another's. The receiver's group store
+  has a 32 MiB sealed budget, and held frames are the first to go. Before,
+  held frames had count bounds only and were held before their signature
+  was checked, so one friend could grow the store past the 64 MiB at-rest
+  read limit, after which every group operation failed. How the kept
+  messages are shared out between groups (by admin, G3) is a local store
+  rule: [`docs/design/2026-10-groups.md`](../docs/design/2026-10-groups.md)
+  §6.
+- **Group V1 (draft): groups held (G2).** §4.2: a receiver holds at most 8
+  groups of one admin and 64 in all, each counted while it is active, left
+  or removed, until the receiver forgets it; an invitation past either is
+  refused, not ACKed, so it comes again and is taken once there is room. A
+  roster that makes a group left or removed active again adds no group. A
+  forgotten group keeps its id, epoch and remembered ids, so its older
+  rosters and messages do not bring it back; only a roster naming the
+  receiver after one that did not is a new invitation. Before, one friend
+  could take all 64 places for good, and every later invitation was
+  dropped and ACKed.
+- **Group V1 (draft): an author's share (G4).** §4.2 and §5: each author
+  has a share of each group, 8,192 over the roster's members and at least
+  512, held by its messages kept and its ids remembered within the 7 day
+  horizon. A `msg` past it is refused, not ACKed, when its author carried
+  it (that copy keeps waiting, is sent again until its horizon and is never
+  shown as delivered before the receiver took it), and dropped and ACKed
+  when another member forwarded it; every other author's messages are
+  still taken. A sender sends no `msg` past its own share. Past 8,192
+  remembered ids the ids of authors who are no member go first, a receiver
+  keeps at most 32 refused rows of one sender's device (it drops and ACKs
+  more), and the room is checked before the signature. Before, the 8,192
+  remembered ids of a group were shared by every author: one member could
+  fill them, the group then took no new message for about 8 days, and each
+  copy refused meanwhile was ACKed, so its author saw it as delivered.
+- **Group V1 (draft): blocked keys (G5).** §4.2 and §5: nothing of a key the
+  receiver blocked is taken and nothing goes to it. Its messages and
+  receipts are dropped (ACKed; its ids are still remembered, so an unblock
+  brings nothing back) and it is never a forward target; no receipt is
+  signed for it, and an author sends a member it blocked no copy, names it
+  in no `relay` and shows its line as failed at once. A receiver that
+  cannot read its block list takes no group frame (none is ACKed) and sends
+  nothing until it can. Before, a block did not reach groups: the blocked
+  member's messages were shown, and the user's group messages and signed
+  receipts still went to it.
+- **Group V1 (draft): receipts passed on (G6).** §4.2: a `receipt` for
+  another member is passed on only when the receiver itself forwarded that
+  message to the receipt's signer, and it counts as one of the signer's at
+  most 16 waiting forwards in the group. Before, a member could have
+  another member park receipt copies without bound for any member who is
+  its friend, filling the queue that 1:1 chat shares.
+- **Group V1 (draft): a leave made again (G8).** §5: a member whose `leave`
+  crossed a newer roster that still names it makes the leave again for that
+  roster, once per roster, until a roster without it comes (also after it
+  forgot the group), and a leave whose copy was given up before the admin
+  took it is made again when the member leaves again. Before, such a leave
+  was lost for good and the member could not leave again, so it stayed in
+  every member's roster.
+- **Error codes.** [`RAVEN_ERROR_CODES_V1.md`](RAVEN_ERROR_CODES_V1.md): the
+  local groups code `GROUP_STILL_MEMBER` (only a group this profile left or
+  was removed from, or one with no other member, can be forgotten; G2).
+  `GROUP_TOO_LARGE` now says that forgetting a group this profile left
+  frees its place (G2), `GROUP_QUEUE_FULL` also covers a message past this
+  profile's own share (G4), and `GROUP_STORE` also covers a change past the
+  store's 32 MiB budget (`groups.json is full`, nothing written; G1) and a
+  block list that cannot be read (G5). These are codes of the CLI and the
+  engine (`groups.forget`); the node IPC is unchanged and stays version 1.
+
+## Freeze record changes (2026-11-06, security review 2026-11: a public address told only once seen from outside)
+
+A behaviour change of frozen sender rules, not of the wire format: no frame
+layout, entry type, flag bit, caps bit, card field or vector changed, the
+RRH1 and RLX1 version bytes stay 1, the receiver's rules are unchanged, and
+every gate stays as it was. Security and speed report 2026-11-05 §2 and §6
+(INET-STUN-1). Design:
+[`docs/design/2026-10-auto-reach.md`](../docs/design/2026-10-auto-reach.md)
+§3.2.
+
+- **Route Hints V1 (draft).** [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md)
+  §4 and §6 (DIRECT): an IPv4 address from STUN discovery or from the
+  router (a NAT-PMP, PCP or UPnP mapping, or one AutoNAT confirmed) is told
+  only once a verified contact, or a relay the sender holds a slot on, saw
+  the sender at that very IP: libp2p Identify's observed address on a
+  connection the sender dialled directly (not relayed, not a hole punch,
+  not over a WebSocket) at an IP no DNS answer gave it, within 24 hours and
+  since the sender's last network change. The p2p QUIC endpoint is told
+  only once such a view over QUIC from the sender's QUIC listen socket
+  named that very IP and port. A confirmation (reached from outside) counts
+  only for the public IP STUN named when it was made. §11.4: an address
+  STUN discovery found makes a friend relay worth offering only once it was
+  seen so. §13.3 (INET_DIRECT): sent only for a public IP seen so, and its
+  CONFIRMED flag counts only for the public IP STUN named when the contact
+  reached the listener. Before, what STUN or the router named was told to
+  every verified contact as soon as it was found, though neither answer is
+  authenticated: whoever answered the sender's DNS for the STUN servers'
+  names, or forged their replies or the router's on its network, could
+  have every contact dial a host of its own and so learn the contacts' IPs
+  and when they dial. IPv6 addresses are told as before. Open owner
+  decisions (design §12): AR-5, a node that no contact or relay has seen
+  tells no public address, so two friends behind NATs with no relay slot
+  and no direct path never punch to each other; AR-6, the TCP forward
+  guess, INET_DIRECT and the friend relay's ports still take STUN's word
+  that the NAT keeps ports.
+
 ## Freeze record changes (2026-11-06, pipelined kept Tor links and the batch hedge, lab only)
 
 A behaviour change of the onion dialer behind gates that stay false, not of
