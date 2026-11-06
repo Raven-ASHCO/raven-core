@@ -336,7 +336,10 @@ every gate stays as it was. Security and speed report 2026-11-05 §2 and §6
   and when they dial. IPv6 addresses are told as before. Open owner
   decisions (design §12): AR-5, a node that no contact or relay has seen
   tells no public address, so two friends behind NATs with no relay slot
-  and no direct path never punch to each other; AR-6, the TCP forward
+  and no direct path never punch to each other, and since STRANGER-UPNP-2
+  a friend relay reached through a UPnP mapping alone no longer gives a
+  group where nobody has been seen its first relay slot (`--external`
+  still does); AR-6, the TCP forward
   guess, INET_DIRECT and the friend relay's ports still take STUN's word
   that the NAT keeps ports.
 
