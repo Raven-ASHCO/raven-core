@@ -44,6 +44,12 @@ pub const RELAY_LOCK_FILE: &str = ".relay.lock.sqlite";
 pub const RELAY_STATUS_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Older than this, the status file is a stopped (or stuck) relay's.
 pub const RELAY_STATUS_STALE_MS: u64 = 35_000;
+/// The `version` a relay writes in `relay_status.json`: 2 since 2026-11-06.
+/// A version 1 file may hold a `confirmed_at_ms` that a UPnP mapping alone
+/// stamped (before STRANGER-UPNP-2), so a new run of the relay carries a
+/// stamp on only from a file of this version or later (raven-node
+/// `relay::earlier_confirmed_at`). Readers take any version.
+pub const RELAY_STATUS_VERSION: u32 = 2;
 const ALLOW_VERSION: u32 = 1;
 /// A relay schedule's entry for epoch `e` admits until this long after `e`
 /// ends (peer rotation spec §7): a friend whose clock runs late still

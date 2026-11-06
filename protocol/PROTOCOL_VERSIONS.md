@@ -144,6 +144,23 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: a relay confirmation from before the UPnP rule not carried on)
+
+A behaviour change of the local status file of the relay, not of the wire
+format: no frame layout, entry type, flag bit, caps bit, card field or
+vector changed, no NAT-PMP, PCP or UPnP-IGD message changed, the RRH1
+version byte stays 1, and every gate stays as it was. Review of the round 2
+fixes (STRANGER-UPNP-2).
+
+- **Port Mapping Profile V1 (draft).** [`RAVEN_PORT_MAPPING_V1.md`](RAVEN_PORT_MAPPING_V1.md)
+  §9.1: a relay writes `relay_status.json` version 2, and a new run carries
+  the `confirmed_at_ms` of its last run on only from a file of version 2 or
+  later. A version 1 file was written before the rule that a UPnP mapping
+  alone never stamps it, and may hold such a stamp: after an upgrade it made
+  the friend relay CONFIRMED for up to a day more. Now it is dropped, and the
+  relay is CONFIRMED again once a member reserves from a globally routable
+  IP. Readers of the file take any version.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: the UPnP search answered by the default router only)
 
 A behaviour change of the port mapping client, not of the wire format: no

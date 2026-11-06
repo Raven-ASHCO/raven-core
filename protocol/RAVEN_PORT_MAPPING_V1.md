@@ -232,6 +232,9 @@ is. A mapping once used stays used until libp2p-upnp ends it: its external addre
 the gateway is found, and a network change builds a new endpoint. The friend relay names its
 UPnP addresses, and sets CONFIRMED from them, only while the sighting stands
 (RAVEN_ROUTE_HINTS_V1 §11.1), and a mapping alone never stamps its `confirmed_at_ms`.
+A new run of the relay carries the stamp of its last run with the same key on, but only from
+`relay_status.json` version 2, which relays write since 2026-11-06: a version 1 file was written
+before this rule and may hold a stamp that a mapping alone set.
 
 The gateway search (STRANGER-UPNP-1, since 2026-11-06: the Raven patch of igd-next 0.17.1, the
 client of libp2p-upnp, `node/third_party/igd-next-0.17.1-raven`) takes an SSDP answer only when

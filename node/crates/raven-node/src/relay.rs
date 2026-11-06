@@ -76,7 +76,7 @@ use raven_core::ipc::RelayCounts;
 use raven_core::p2p_route::{relay_listen_multiaddrs, ExtraTcp, P2pListen};
 use raven_core::relay_allow::{
     load_relay_allow, relay_is_running, write_relay_status, RelayStatusFile, RELAY_ALLOW_FILE,
-    RELAY_KEY_FILE, RELAY_LOCK_FILE, RELAY_STATUS_HEARTBEAT,
+    RELAY_KEY_FILE, RELAY_LOCK_FILE, RELAY_STATUS_HEARTBEAT, RELAY_STATUS_VERSION,
 };
 use raven_swarm::host::{
     addr_ip, build_relay_swarm, is_circuit, is_global_ip, listen_port_label, probe_listen_addr,
@@ -649,11 +649,14 @@ const CONFIRMED_CLOCK_SLACK_MS: u64 = 5 * 60 * 1000;
 /// (`peer`). A new run (a wake or a network change restarts the friend
 /// relay, so does a new port) keeps it, so the confirmation, and the friend
 /// relay's offer that rests on it, outlives the restart; its age still
-/// counts from then. 0 when there is none, or it is from the future.
+/// counts from then. 0 when there is none, it is from the future, or the
+/// file is older than [`RELAY_STATUS_VERSION`] (written before a UPnP
+/// mapping alone stopped stamping it, so it may be such a stamp).
 fn earlier_confirmed_at(dir: &Path, peer: &PeerId, now_ms: u64) -> u64 {
     raven_core::relay_allow::load_relay_status(dir)
         .ok()
         .flatten()
+        .filter(|st| st.version >= RELAY_STATUS_VERSION)
         .filter(|st| st.peer_id == peer.to_string())
         .map(|st| st.confirmed_at_ms)
         .filter(|at| *at <= now_ms.saturating_add(CONFIRMED_CLOCK_SLACK_MS))
@@ -1127,7 +1130,7 @@ pub(crate) async fn run_relay(
                     last_log = Some(tokio::time::Instant::now());
                 }
                 let status = RelayStatusFile {
-                    version: 1,
+                    version: RELAY_STATUS_VERSION,
                     peer_id: peer_id.to_string(),
                     listen_addrs: listen_addrs.iter().map(|a| a.to_string()).collect(),
                     counts: now,
@@ -1260,7 +1263,7 @@ pub(crate) mod tests {
         let now = 20_000 * 86_400_000u64;
         assert_eq!(earlier_confirmed_at(dir.path(), &me, now), 0, "no status");
         let status = |peer: &PeerId, at: u64| RelayStatusFile {
-            version: 1,
+            version: RELAY_STATUS_VERSION,
             peer_id: peer.to_string(),
             confirmed_at_ms: at,
             ..RelayStatusFile::default()
@@ -1271,6 +1274,34 @@ pub(crate) mod tests {
         assert_eq!(earlier_confirmed_at(dir.path(), &other, now), 0);
         write_relay_status(dir.path(), &status(&me, now + 3_600_000)).unwrap();
         assert_eq!(earlier_confirmed_at(dir.path(), &me, now), 0, "future");
+    }
+
+    /// A status written before the UPnP check (version 1, before
+    /// 2026-11-06) may hold a stamp that a UPnP mapping alone set: a new run
+    /// does not keep it. The stamp of a status of this version is kept.
+    #[test]
+    fn a_stamp_from_a_status_before_the_upnp_check_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = load_or_create_relay_key(dir.path())
+            .unwrap()
+            .public()
+            .to_peer_id();
+        let now = 20_000 * 86_400_000u64;
+        let stamped = |version: u32| RelayStatusFile {
+            version,
+            peer_id: me.to_string(),
+            upnp: "mapped 4001".into(),
+            confirmed_at_ms: now - 3_600_000,
+            ..RelayStatusFile::default()
+        };
+        write_relay_status(dir.path(), &stamped(1)).unwrap();
+        assert_eq!(
+            earlier_confirmed_at(dir.path(), &me, now),
+            0,
+            "the stamp of a version 1 status was kept"
+        );
+        write_relay_status(dir.path(), &stamped(RELAY_STATUS_VERSION)).unwrap();
+        assert_eq!(earlier_confirmed_at(dir.path(), &me, now), now - 3_600_000);
     }
 
     /// The same through a real restart: the new run reports the earlier
@@ -1287,6 +1318,10 @@ pub(crate) mod tests {
         let mut st = raven_core::relay_allow::load_relay_status(dir.path())
             .unwrap()
             .unwrap();
+        assert_eq!(
+            st.version, RELAY_STATUS_VERSION,
+            "the relay wrote an old version"
+        );
         let at = now_ms() - 3_600_000;
         st.confirmed_at_ms = at;
         st.updated_at_ms = 1;
