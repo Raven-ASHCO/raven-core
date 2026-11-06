@@ -15,7 +15,7 @@
 | **Approver** | Protocol owner (signature pending) |
 | **Date drafted** | 2026-10-22 |
 | **Review by** | the review-by date of the p2p relay waiver |
-| **Withdrawal** | Set `V6_PINHOLE_PRODUCTION_ENABLED = false` (pinholes only) or both flags `false` in `node/crates/raven-core/src/portmap_gate.rs`. The const asserts there keep pinholes off while mapping is off, and mapping off while `P2P_PRODUCTION_ENABLED` is off. With both off the endpoint does Phase 1's UPnP-IGD, byte for byte |
+| **Withdrawal** | Set `V6_PINHOLE_PRODUCTION_ENABLED = false` (pinholes only) or both flags `false` in `node/crates/raven-core/src/portmap_gate.rs`. The const asserts there keep pinholes off while mapping is off, and mapping off while `P2P_PRODUCTION_ENABLED` is off. With both off the endpoint does Phase 1's UPnP-IGD, each mapping used only at an IP a contact or relay saw this computer at (§5, STRANGER-UPNP-2) |
 | **Spec** | [`RAVEN_PORT_MAPPING_V1.md`](../protocol/RAVEN_PORT_MAPPING_V1.md) (a client profile of RFC 6886 and RFC 6887; not a Raven wire) |
 | **Design** | the any-network reachability plan (not published) §3 "Phase 4" and decision D11; the Phase 4 plan `docs/roadmap/plans/phase45-design.json` (`.designs[1]`, owner decisions O4-9 to O4-11 and O4-16) |
 | **User docs** | `INSTALL_macOS.md`, `INSTALL_Linux.md`, `INSTALL_Windows.md` (section "Router port mapping") |
@@ -109,6 +109,19 @@ allowed in release builds by owner decision O4-10.
    router is itself behind another NAT; Raven detects that and deletes.
 6. **Router packets** on every network change and renewals at most hourly:
    negligible next to the 15 s relay pings, to be measured with the real rows.
+7. **UPnP-IGD answers stay unauthenticated** (STRANGER-UPNP-1, open). The
+   SSDP answer is taken from anyone on the network, its LOCATION may name any
+   host, and the device description it points to is read whole and parsed
+   (igd-next 0.17, through libp2p-upnp 0.7) before Raven sees anything:
+   neither crate lets Raven check the answer's source or LOCATION host
+   against the default router, or bound the body. A stranger on the network
+   can therefore make this node fetch from a host it chooses and parse what
+   it sends, and, by naming this computer's real public IP, claim a mapping
+   the router never made: contacts then dial a port that reaches nothing
+   (one failed attempt before the circuit) or, where the stranger had the
+   router forward that port to a host of its own, that host, because the
+   port of a mapping is not checked (§5). Closing it needs a patched or
+   vendored igd-next, or UPnP off, both owner decisions.
 
 ## 5. Compensating controls in place
 
@@ -124,14 +137,27 @@ allowed in release builds by owner decision O4-10.
   review of 2026-11-06). So the external IPv4 address a router reply names
   goes into route hints DIRECT only once a verified contact or a relay this
   node holds a slot on saw this node at that very IP over a connection this
-  node dialled directly (auto-reach design §3.2); route hints never carry a
-  forged answer naming someone else's address. That control covers route
-  hints DIRECT only. Elsewhere a mapped address still goes out before anyone
-  saw it, open under STRANGER-UPNP-2: libp2p Identify names it (one of the
-  swarm's external addresses) to the peers it runs with (contacts, this
-  node's relays and its relay members), DCUtR offers it to a contact as a
-  candidate of the first tier in a hole punch, and the friend relay names
-  its own UPnP addresses (`upnp_addrs`) in its offer.
+  node dialled directly at an IP no DNS answer gave (auto-reach design
+  §3.2); route hints never carry a forged answer naming someone else's
+  address. For a NAT-PMP or PCP mapping that control covers route hints
+  DIRECT only: elsewhere its address still goes out before anyone saw it,
+  still open and not part of STRANGER-UPNP-2: libp2p Identify names it (one
+  of the swarm's external addresses) to the peers it runs with (contacts,
+  this node's relays and its relay members), and DCUtR offers it to a
+  contact as a candidate of the first tier in a hole punch.
+- UPnP-IGD is weaker still: libp2p-upnp takes the first answer to its SSDP
+  search, from anyone on the network, and the external address that "router"
+  names (STRANGER-UPNP-2, review of 2026-11-05). Since 2026-11-06 a UPnP
+  mapping, the endpoint's and the friend relay's alike, is held back until
+  its IPv4 address is one a verified contact or a relay this node holds a
+  slot on saw this node at (the same sighting; raven-swarm `VettedUpnp`):
+  only then is it confirmed as an external address (hole-punch candidates,
+  Identify, relay reservations) and reported (`mapped <port>`, reach class
+  `mapped`). Without a sighting nothing is used (fail closed), an IPv6 UPnP
+  address never is, and the friend relay names its UPnP addresses and sets
+  CONFIRMED from them only while that sighting stands. A mapping alone no
+  longer stamps the friend relay's `confirmed_at_ms`, which a restart carries
+  on for a day; only a member reserving from a global IP does.
 - Logs and IPC name the protocol, ports, renewals and restarts only, never an
   IP address; no request carries a Raven identity, PeerId or contact.
 - Port-mapping state lives in memory; nothing about the router or a lease is

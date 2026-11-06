@@ -168,7 +168,13 @@ this computer at that very IP:
 - The same rule holds for an IPv4 address the router reports (a NAT-PMP, PCP
   or UPnP mapping: answers anyone on this network can forge) or that an
   AutoNAT server confirmed: it goes into DIRECT only once seen at its IP.
-  IPv6 addresses (this computer's own) are told as before.
+  IPv6 addresses (this computer's own) are told as before. A UPnP mapping,
+  the endpoint's and the friend relay's, is not used at all before that
+  sighting (STRANGER-UPNP-2, 2026-11-06: it is not confirmed to the swarm,
+  so no Identify, hole punch candidate, relay reservation, `mapped` state or
+  friend relay CONFIRMED; `protocol/RAVEN_PORT_MAPPING_V1.md` §9.1). A
+  NAT-PMP or PCP mapping still is: the swarm confirms it as soon as the
+  router answers, so Identify and hole punching name it before any sighting.
 - Not gated: the NAT class (§3.4) and this node's own punch decisions still
   follow the answers; a lie there costs only failed attempts.
 - A node no contact or relay has seen from outside yet tells no public
@@ -342,8 +348,8 @@ to another network: the snapshot lives 72 h on the receiver.
 
 - `externals()` takes the discovered public IP with the relay's own ports
   (TCP, QUIC, and TCP 443 while that listener is open), after the operator's
-  `relay_external` and UPnP, like the host's confirmed IPs, where the NAT
-  keeps ports (§3.3).
+  `relay_external` and UPnP (only at an IP seen from outside, §3.2), like
+  the host's confirmed IPs, where the NAT keeps ports (§3.3).
 - An address found this way, and seen from outside (§3.2), is **worth
   offering** without `--external` (spec §11.4 gains "or STUN discovery found
   the address and a contact or relay saw it"), without the
@@ -501,7 +507,7 @@ back.
 | Both friends behind the same NAT | They meet over LAN; a punch toward the shared public IP needs the router to hairpin and simply fails otherwise. |
 | A friend moved and its old endpoint is stale | Its punches go to the old endpoint and fail until a link (LAN, relay, custody, a forward) brings its new hints; nothing serverless can tell a moved friend's new endpoint to a friend behind address-dependent filtering. |
 | Clocks more than a few seconds apart | Slots do not overlap; punches fail; the other paths work. |
-| A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. Nor a port of its own at the seen IP for the QUIC endpoint (§3.2); by claiming the NAT keeps ports it can still have this node guess its listen ports at the seen IP (AR-6). It can make this node's own punches fail. (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
+| A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. Nor a port of its own at the seen IP for the QUIC endpoint (§3.2); by claiming the NAT keeps ports it can still have this node guess its listen ports at the seen IP (AR-6). It can make this node's own punches fail. A forged NAT-PMP or PCP answer's address still reaches contacts before any sighting as a hole punch candidate and in Identify (§3.2); a UPnP one no longer does (STRANGER-UPNP-2). (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
 | Relay slots and contact routes all named by DNS (a relay `via=` name, a friend relay's `--external` name) | No sighting comes from them (§3.2): whoever answers the DNS could pass those connections on. The STUN address is not told until a relay or contact reached at an IP literal sees this computer; until then it is as for a node nobody has seen (below). |
 | Dual-stack network where the relay slots and the contacts this node dials are all reached over IPv6 | Their views name this computer's IPv6 address, so no IPv4 sighting comes (§3.2): the STUN address (IPv4) is not told, and IPv4-only friends cannot dial it directly or punch to it. IPv6 addresses (this computer's own) are told as before. Not done: dialling one relay slot over IPv4 to get that sighting. |
 | No contact or relay has seen this computer from outside yet (a new node; one whose contacts are all on its LAN or behind NATs; no relay slot) | Its public address is not told, so friends cannot dial it directly or punch to it, and its friend relay is not offered without `--external`. It stays reachable through Tor (the onion address in its card), a relay it holds a slot on (set by hand or offered by a friend: that relay's view counts within a minute of the reservation, and so makes the address seen), the LAN, friend custody, and the operator's `relay_external`. The first contact it dials directly over the internet does the same. **[OWNER] AR-5, open (§12):** this costs honest friends something. Two friends behind NATs, neither holding a relay slot and neither reachable directly by the other or by any other contact, never see each other from outside: neither tells its endpoint, so serverless punching between them (§5) never starts, and a friend relay behind a forwarded port is never offered without `--external`. Before INET-STUN-1 both happened on STUN's word alone. A check on the receiving side cannot close the gap: the receiver has no direct path to the sender either, so it has nothing of its own to compare the told address with. |

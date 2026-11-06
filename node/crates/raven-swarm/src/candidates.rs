@@ -19,13 +19,15 @@
 //!   hole-punch on it, but nothing reports its own address as a candidate.
 //!
 //! [`CandidateBook::candidates`] lists five tiers, highest first: confirmed
-//! external addresses (UPnP, AutoNAT); own global IPv6 listen addresses (only
-//! the OS-preferred source address once the host knows it, else at most two
-//! IPs); raw observations that one of our relays, or two or more peers,
-//! reported within [`OBSERVED_TTL`]; own global IPv4 listen addresses; then
-//! the swarm's candidates (Identify's possibly rewritten guess, at most
-//! four). Duplicates keep their highest tier, every QUIC address goes before
-//! every TCP one, and at most [`MAX_CANDIDATES`] are offered.
+//! external addresses (router mappings, a UPnP one only once its IP was
+//! vouched for, [`crate::portmap::VettedUpnp`]; AutoNAT); own global IPv6
+//! listen addresses (only the OS-preferred source address once the host
+//! knows it, else at most two IPs); raw observations that one of our
+//! relays, or two or more peers, reported within [`OBSERVED_TTL`]; own
+//! global IPv4 listen addresses; then the swarm's candidates (Identify's
+//! possibly rewritten guess, at most four). Duplicates keep their highest
+//! tier, every QUIC address goes before every TCP one, and at most
+//! [`MAX_CANDIDATES`] are offered.
 //!
 //! **Privacy.** Only `/ip4|ip6/<ip>/tcp/<port>` and
 //! `/ip4|ip6/<ip>/udp/<port>/quic-v1` (port not 0) whose IP the
@@ -114,7 +116,8 @@ pub struct CandidateBook {
     rule: AddrRule,
     /// Own listen addresses ([`FromSwarm::NewListenAddr`] / `Expired`).
     listen: BTreeSet<Multiaddr>,
-    /// Confirmed external addresses (UPnP, AutoNAT), oldest first.
+    /// Confirmed external addresses (router mappings, UPnP ones only at a
+    /// vouched IP, [`crate::portmap::VettedUpnp`]; AutoNAT), oldest first.
     confirmed: Vec<Multiaddr>,
     /// Raw observed addresses, from the host.
     observed: HashMap<Multiaddr, Seen>,

@@ -848,7 +848,14 @@ Record version 1. All integers are big-endian.
 
 - **flags.** Writers set only these three bits. Readers ignore the others.
   - CONFIRMED: a member reserved on the relay from a globally routable IP
-    within the last 24 hours, or UPnP mapped the relay's port.
+    within the last 24 hours, or UPnP mapped the relay's port at an IPv4
+    address a verified contact or a relay the sender holds a slot on saw
+    the sender at (the §6 sighting). A UPnP answer is not authenticated:
+    whoever answers the gateway search first, anyone on the sender's
+    network, names the mapping's external address, so a mapping at any
+    other address, or at an IPv6 one, never sets CONFIRMED, is never
+    named in `addrs`, and never counts as a reservation from outside
+    (STRANGER-UPNP-2, 2026-11-06; RAVEN_PORT_MAPPING_V1 §9.1).
   - AUTONAT: the relay answers AutoNAT v2.
   - PORT_443: one of the addresses is `/tcp/443`.
 - **relay_pub** must be a valid Ed25519 point (it decompresses). The relay's
@@ -933,7 +940,8 @@ A sender adds RELAY_OFFER only when all of these hold:
 - the sender may show its IP to that receiver: hide my IP (§8) is off globally
   and for this contact;
 - the relay is up and has an address worth offering: the sender's reach class
-  is public or mapped, or the relay is CONFIRMED, or the operator declared the
+  is public or mapped (a UPnP mapping only once seen from outside, §11.1), or
+  the relay is CONFIRMED, or the operator declared the
   relay's external addresses, or (auto-reach) STUN discovery found the
   sender's public address and a contact or relay saw the sender there (§6),
   which the relay then names with its own ports.

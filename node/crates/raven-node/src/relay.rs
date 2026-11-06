@@ -53,7 +53,9 @@
 //! and folder): [`RelayCmd::label`] starts every line, its members come from
 //! a shared watch instead of `relay_allow.json` ([`PolicySource`]), the
 //! addresses it names from a feed, and it may ask the router for its port
-//! (UPnP).
+//! (UPnP; a mapping is used only at an IP a contact or relay saw this
+//! computer at, [`crate::autoreach::upnp_check`], and never confirms the
+//! relay, [`OwnReach`]).
 //!
 //! What a relay learns: both PeerIds and IPs of every circuit, its timing,
 //! duration and bytes, who reserves (and, with `--autonat-server`, the
@@ -362,7 +364,9 @@ pub(crate) struct RelayCmd {
     pub wss: Option<WssListen>,
     /// A counts line at most this often (and only when the counts changed).
     pub counts_every: Duration,
-    /// Ask the router to map the listen ports (UPnP-IGD, IPv4 only).
+    /// Ask the router to map the listen ports (UPnP-IGD, IPv4 only; a
+    /// mapping used only at an IP a contact or relay saw this computer at,
+    /// [`crate::autoreach::upnp_check`]).
     pub upnp: bool,
     pub policy: PolicySource,
     /// Each new value replaces the named addresses
@@ -631,8 +635,8 @@ fn plan_listeners(
 const CONFIRMED_CLOCK_SLACK_MS: u64 = 5 * 60 * 1000;
 
 /// When this relay was last confirmed reachable (`confirmed_at_ms`: a member
-/// reserved from a globally routable IP, or UPnP mapped its port), as the
-/// status file of its last run in `dir` says, when that run had this key
+/// reserved from a globally routable IP; never UPnP alone, [`OwnReach`]), as
+/// the status file of its last run in `dir` says, when that run had this key
 /// (`peer`). A new run (a wake or a network change restarts the friend
 /// relay, so does a new port) keeps it, so the confirmation, and the friend
 /// relay's offer that rests on it, outlives the restart; its age still
@@ -676,7 +680,8 @@ impl InboundFrom {
 
 /// `relay_status.json` `advertised`: the addresses the advertiser names, in
 /// its order (the operator's), then the swarm's other external addresses
-/// (UPnP-confirmed), sorted. Never the loopback placeholder: it is the only
+/// (UPnP-confirmed, at an IP a contact or relay saw this computer at),
+/// sorted. Never the loopback placeholder: it is the only
 /// loopback external address the advertiser does not name (a router never
 /// maps a loopback address).
 fn advertised<'a>(
@@ -691,22 +696,71 @@ fn advertised<'a>(
     named.iter().chain(rest).map(|a| a.to_string()).collect()
 }
 
+/// What the relay says about its own reach in `relay_status.json`: its
+/// UPnP state and mappings (`upnp`, `upnp_addrs`), and when a member last
+/// reserved from a globally routable IP (`confirmed_at_ms`).
+struct OwnReach {
+    upnp: String,
+    upnp_addrs: Vec<Multiaddr>,
+    confirmed_at_ms: u64,
+}
+
+impl OwnReach {
+    /// `upnp`: the relay asks the router for its ports. `confirmed_at_ms`
+    /// as an earlier run left it ([`earlier_confirmed_at`]).
+    fn new(upnp: bool, confirmed_at_ms: u64) -> Self {
+        Self {
+            upnp: if upnp { "on".into() } else { String::new() },
+            upnp_addrs: Vec::new(),
+            confirmed_at_ms,
+        }
+    }
+
+    /// A member reserved from a globally routable IP: the relay is
+    /// reachable from the Internet (RAVEN_ROUTE_HINTS_V1 §11.1 CONFIRMED).
+    fn reserved_from_outside(&mut self) {
+        self.confirmed_at_ms = now_ms();
+    }
+
+    /// One of the relay's own UPnP events: its mappings and state follow
+    /// it, and the line to log when the state changed. A mapping never
+    /// confirms the relay (STRANGER-UPNP-2): whoever answers the gateway
+    /// search first, anyone on this network, may claim one, and
+    /// `confirmed_at_ms` outlives this run ([`earlier_confirmed_at`]). The
+    /// swarm reports one only at an IP a contact or relay saw this computer
+    /// at ([`crate::autoreach::upnp_check`]), and the friend relay checks
+    /// that again before it names or counts one.
+    fn upnp_event(&mut self, label: &str, event: &upnp::Event) -> Option<String> {
+        note_upnp(&mut self.upnp_addrs, event);
+        let (state, line) = crate::p2p::upnp_report(label, event);
+        if state == self.upnp {
+            return None;
+        }
+        self.upnp = state;
+        Some(line)
+    }
+
+    /// `upnp_addrs` as the status file lists them: sorted.
+    fn upnp_texts(&self) -> Vec<String> {
+        let mut texts: Vec<String> = self.upnp_addrs.iter().map(|a| a.to_string()).collect();
+        texts.sort();
+        texts
+    }
+}
+
 /// Keep `mapped`, the external addresses UPnP mapped for this relay's
-/// ports (`relay_status.json` `upnp_addrs`), in step with `event`. `true`
-/// when a mapping was confirmed.
-fn note_upnp(mapped: &mut Vec<Multiaddr>, event: &upnp::Event) -> bool {
+/// ports (`relay_status.json` `upnp_addrs`), in step with `event`.
+fn note_upnp(mapped: &mut Vec<Multiaddr>, event: &upnp::Event) {
     match event {
         upnp::Event::NewExternalAddr { external_addr, .. } => {
             if !mapped.contains(external_addr) {
                 mapped.push(external_addr.clone());
             }
-            true
         }
         upnp::Event::ExpiredExternalAddr { external_addr, .. } => {
             mapped.retain(|a| a != external_addr);
-            false
         }
-        upnp::Event::GatewayNotFound | upnp::Event::NonRoutableGateway => false,
+        upnp::Event::GatewayNotFound | upnp::Event::NonRoutableGateway => {}
     }
 }
 
@@ -869,7 +923,7 @@ pub(crate) async fn run_relay(
         cmd.limits,
         &guard,
         cmd.autonat_server,
-        cmd.upnp,
+        cmd.upnp.then(crate::autoreach::upnp_check),
         wss,
     )
     .map_err(|e| RelayExit::Other(format!("relay: {e}")))?;
@@ -928,13 +982,10 @@ pub(crate) async fn run_relay(
     }
     let mut feed = cmd.external_feed.clone();
     let mut inbound = InboundFrom::default();
-    let mut upnp_state = if cmd.upnp {
-        "on".to_string()
-    } else {
-        String::new()
-    };
-    let mut confirmed_at_ms = earlier_confirmed_at(&cmd.data_dir, &peer_id, now_ms());
-    let mut upnp_addrs: Vec<Multiaddr> = Vec::new();
+    let mut reach = OwnReach::new(
+        cmd.upnp,
+        earlier_confirmed_at(&cmd.data_dir, &peer_id, now_ms()),
+    );
     let mut listen_addrs: Vec<Multiaddr> = Vec::new();
     let (mut circuits, mut res_refused, mut circ_refused) = (0u32, 0u64, 0u64);
     let mut published: Option<RelayStatusFile> = None;
@@ -995,7 +1046,7 @@ pub(crate) async fn run_relay(
                     match event {
                         relay::Event::ReservationReqAccepted { src_peer_id, .. } => {
                             if inbound.global(&src_peer_id) {
-                                confirmed_at_ms = now_ms();
+                                reach.reserved_from_outside();
                             }
                         }
                         relay::Event::CircuitReqAccepted { .. } => circuits += 1,
@@ -1006,13 +1057,8 @@ pub(crate) async fn run_relay(
                     }
                 }
                 SwarmEvent::Behaviour(RelayBehaviourEvent::Upnp(event)) => {
-                    if note_upnp(&mut upnp_addrs, &event) {
-                        confirmed_at_ms = now_ms();
-                    }
-                    let (state, line) = crate::p2p::upnp_report(label, &event);
-                    if state != upnp_state {
+                    if let Some(line) = reach.upnp_event(label, &event) {
                         eprintln!("{line}");
-                        upnp_state = state;
                     }
                 }
                 SwarmEvent::Behaviour(RelayBehaviourEvent::Ping(event)) => {
@@ -1073,14 +1119,9 @@ pub(crate) async fn run_relay(
                     updated_at_ms: 0,
                     pid: std::process::id(),
                     advertised: advertised(advertiser.named(), swarm.external_addresses()),
-                    upnp: upnp_state.clone(),
-                    upnp_addrs: {
-                        let mut texts: Vec<String> =
-                            upnp_addrs.iter().map(|a| a.to_string()).collect();
-                        texts.sort();
-                        texts
-                    },
-                    confirmed_at_ms,
+                    upnp: reach.upnp.clone(),
+                    upnp_addrs: reach.upnp_texts(),
+                    confirmed_at_ms: reach.confirmed_at_ms,
                     extra_tcp: mapped_ports(&cmd.also_tcp),
                 };
                 let stamped = RelayStatusFile {
@@ -2109,8 +2150,7 @@ pub(crate) mod tests {
         assert!(!seen.global(&a));
     }
 
-    /// `upnp_addrs` holds what UPnP mapped until the mapping expires; only a
-    /// mapping confirms the relay.
+    /// `upnp_addrs` holds what UPnP mapped until the mapping expires.
     #[test]
     fn upnp_mappings_are_kept_until_they_expire() {
         let a = |t: &str| -> Multiaddr { t.parse().unwrap() };
@@ -2119,29 +2159,68 @@ pub(crate) mod tests {
             external_addr: a(external),
         };
         let mut held = Vec::new();
-        assert!(note_upnp(&mut held, &mapped("/ip4/8.8.8.8/tcp/7427")));
-        assert!(note_upnp(
-            &mut held,
-            &mapped("/ip4/8.8.8.8/udp/7427/quic-v1")
-        ));
-        assert!(
-            note_upnp(&mut held, &mapped("/ip4/8.8.8.8/tcp/7427")),
-            "a renewal"
-        );
+        note_upnp(&mut held, &mapped("/ip4/203.0.113.9/tcp/7427"));
+        note_upnp(&mut held, &mapped("/ip4/203.0.113.9/udp/7427/quic-v1"));
+        // A renewal.
+        note_upnp(&mut held, &mapped("/ip4/203.0.113.9/tcp/7427"));
         assert_eq!(held.len(), 2);
         for event in [
             upnp::Event::GatewayNotFound,
             upnp::Event::NonRoutableGateway,
         ] {
-            assert!(!note_upnp(&mut held, &event));
+            note_upnp(&mut held, &event);
         }
         assert_eq!(held.len(), 2);
         let expired = upnp::Event::ExpiredExternalAddr {
             local_addr: a("/ip4/192.168.1.5/tcp/7427"),
-            external_addr: a("/ip4/8.8.8.8/tcp/7427"),
+            external_addr: a("/ip4/203.0.113.9/tcp/7427"),
         };
-        assert!(!note_upnp(&mut held, &expired));
-        assert_eq!(held, [a("/ip4/8.8.8.8/udp/7427/quic-v1")]);
+        note_upnp(&mut held, &expired);
+        assert_eq!(held, [a("/ip4/203.0.113.9/udp/7427/quic-v1")]);
+    }
+
+    /// STRANGER-UPNP-2: what UPnP reports never confirms the relay. Its
+    /// state and mappings go into the status file (the friend relay uses
+    /// them only at an IP a contact saw this computer at), but
+    /// `confirmed_at_ms`, which the next run carries on for a day
+    /// ([`earlier_confirmed_at`]), moves only when a member reserves from a
+    /// globally routable IP.
+    #[test]
+    fn a_upnp_mapping_alone_never_confirms_the_relay() {
+        let label = "raven-node friend relay";
+        let local: Multiaddr = "/ip4/192.168.1.5/tcp/7427".parse().unwrap();
+        let external: Multiaddr = "/ip4/203.0.113.9/tcp/7427".parse().unwrap();
+        let mut reach = OwnReach::new(true, 0);
+        assert_eq!(reach.upnp, "on");
+        let mapped = upnp::Event::NewExternalAddr {
+            local_addr: local.clone(),
+            external_addr: external.clone(),
+        };
+        assert_eq!(
+            reach.upnp_event(label, &mapped).as_deref(),
+            Some("raven-node friend relay: upnp mapped port 7427")
+        );
+        assert_eq!(reach.upnp, "mapped 7427");
+        assert_eq!(reach.upnp_texts(), ["/ip4/203.0.113.9/tcp/7427"]);
+        assert_eq!(reach.confirmed_at_ms, 0, "confirmed by UPnP alone");
+        // The same state again: no line.
+        assert_eq!(reach.upnp_event(label, &mapped), None);
+        // A member reserving from outside confirms it; the mapping's end
+        // leaves that as it is.
+        reach.reserved_from_outside();
+        let at = reach.confirmed_at_ms;
+        assert_ne!(at, 0);
+        let expired = upnp::Event::ExpiredExternalAddr {
+            local_addr: local,
+            external_addr: external,
+        };
+        assert!(reach.upnp_event(label, &expired).is_some());
+        assert_eq!(reach.upnp, "failed");
+        assert!(reach.upnp_texts().is_empty());
+        assert_eq!(reach.confirmed_at_ms, at);
+        // An earlier run's stamp is kept as it was; no UPnP: no state.
+        let earlier = OwnReach::new(false, 42);
+        assert_eq!((earlier.upnp.as_str(), earlier.confirmed_at_ms), ("", 42));
     }
 
     #[test]

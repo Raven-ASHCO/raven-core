@@ -428,6 +428,22 @@ key, and a wrong key ends the link). Two ways to be that listener:
   And a limit, not an exposure: a node whose relay slots and contacts are
   all named by DNS is never seen by them, so it tells no public address
   until a relay or contact reached at an IP literal sees it.
+- *By answering the UPnP gateway search* (STRANGER-UPNP-2, review of
+  2026-11-05): libp2p-upnp takes the first answer to its SSDP search, from
+  anyone on the network, and confirmed the external address that "router"
+  named, so a stranger on the LAN could have hole punching, Identify, the
+  friend relay's reservations and offers, and its CONFIRMED flag point
+  contacts and relay members at a host it chose. Control (2026-11-06): a
+  UPnP mapping is used only at an IPv4 address the sighting above vouches
+  for (raven-swarm `VettedUpnp`; RAVEN_PORT_MAPPING_V1 §9.1), never at an
+  IPv6 one, and never confirms the friend relay on its own. What is left
+  (STRANGER-UPNP-1, open): the answer's source and LOCATION host are not
+  checked against the default router and the description it points to is
+  read and parsed unbounded (igd-next offers no hook). A stranger who names
+  this computer's real public IP can still claim a mapping the router never
+  made: contacts then try a port that reaches nothing, or, where the
+  stranger had the router forward that port to a host of its own, that host
+  (the port is not checked, as above).
 
 **Phase 6b (built, gated off; not in this version):**
 

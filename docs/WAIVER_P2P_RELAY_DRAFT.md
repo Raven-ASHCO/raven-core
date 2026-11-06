@@ -168,9 +168,9 @@ Internet direct draft, now for p2p. In addition:
    | A relay | Both PeerIds and IPs of every circuit, its timing, duration and byte count; who reserves; with `--autonat-server`, the probe targets | Raven IDs (unless it holds cards mapping PeerId to Raven ID), plaintext, PairInit, RLB1, route tags, message IDs: all inside libp2p Noise and, inside that, the Raven Noise link `raven/p2p-link/v1` |
    | A relay that also holds friends' cards | The friend graph at PeerId level | Message contents |
    | Anyone who connects to an open 7423 (not a contact, relay or member) | The node's PeerId (libp2p identifies itself in its Noise handshake; it is on the card anyway) and that a node listens; then the peer gate closes the connection | Identify (protocols, agent, observed or external addresses), DCUtR candidates, AutoNAT, the Raven link and the Raven ID: none of them runs for it. A stranger's circuit is refused before this node accepts it, so the stranger learns no address of the node at all |
-   | Own relays and relay members (and contacts) | What Identify sends: its protocols, the agent `raven`, the address it observed for the peer, and only the node's **confirmed external** addresses (relay circuits, addresses AutoNAT v2 found reachable, a UPnP mapping, global IPv6; for a relay, the addresses of §5 "relay addresses") | Its listen addresses: Identify runs with `with_hide_listen_addrs(true)` and no listen-address push (checked against libp2p-identify 0.47: only the external set is sent), so LAN, link-local and loopback listen addresses are never published |
+   | Own relays and relay members (and contacts) | What Identify sends: its protocols, the agent `raven`, the address it observed for the peer, and only the node's **confirmed external** addresses (relay circuits, addresses AutoNAT v2 found reachable, a UPnP mapping once a contact or relay saw the node at its IP, global IPv6; for a relay, the addresses of §5 "relay addresses") | Its listen addresses: Identify runs with `with_hide_listen_addrs(true)` and no listen-address push (checked against libp2p-identify 0.47: only the external set is sent), so LAN, link-local and loopback listen addresses are never published |
    | A holder of a `raven-card/2` | The mapping PeerId to Raven ID, and the relays named in `via=` (their IPs and PeerIds) | - |
-   | Verified contacts and the relay during DCUtR | The address candidates exchanged for hole punching, offered to verified contacts only (the peer gate admits nobody else, and a relayed connection's DCUtR handler is built only past it): at most 8, all globally routable, in this order: the router mapping (UPnP) and addresses AutoNAT confirmed; the node's own global IPv6, only the address the OS sends from once known (usually a temporary one), else at most two; addresses the node's own relays, or at least two peers, observed it at on direct connections (the last 10 min); its own global IPv4 listen addresses; Identify's own guesses (at most 4). The relay sees that an exchange happens, inside Noise | LAN, loopback, link-local, ULA, CGNAT and documentation addresses, DNS names and circuits: never offered, and a hole-punch dial to one is refused. Nothing is offered to a stranger (carrier_matrix C16 proves it from inside the circuit) |
+   | Verified contacts and the relay during DCUtR | The address candidates exchanged for hole punching, offered to verified contacts only (the peer gate admits nobody else, and a relayed connection's DCUtR handler is built only past it): at most 8, all globally routable, in this order: the router mapping (UPnP, once a contact or relay saw the node at its IP) and addresses AutoNAT confirmed; the node's own global IPv6, only the address the OS sends from once known (usually a temporary one), else at most two; addresses the node's own relays, or at least two peers, observed it at on direct connections (the last 10 min); its own global IPv4 listen addresses; Identify's own guesses (at most 4). The relay sees that an exchange happens, inside Noise | LAN, loopback, link-local, ULA, CGNAT and documentation addresses, DNS names and circuits: never offered, and a hole-punch dial to one is refused. Nothing is offered to a stranger (carrier_matrix C16 proves it from inside the circuit) |
    | ISP / network observer | IPs, ports, timing, volume, that libp2p is in use | Contents |
 
    A relay can also refuse service, delay, drop or selectively degrade
@@ -214,6 +214,16 @@ Internet direct draft, now for p2p. In addition:
    the node stops depend on the router **(verify)**; consumer UPnP stacks have a
    weak security record; behind CGNAT a mapping does not make the node
    reachable. Logs show only the mapped external port and success or failure.
+   UPnP answers are not authenticated: libp2p-upnp takes the first answer to
+   its SSDP search, from anyone on the network, and the external address that
+   "router" names. Since 2026-11-06 (STRANGER-UPNP-2) a mapping is used
+   (confirmed as an external address, so Identify, hole punching and relay
+   reservations name it, and shown as `mapped`) only at an IPv4 address a
+   verified contact or one of the node's relays saw it at (the auto-reach
+   sighting, RAVEN_PORT_MAPPING_V1 §9.1); without one nothing is used. The
+   answer's source, its LOCATION host and the size of the description it
+   points to are still unchecked (STRANGER-UPNP-1, open: igd-next offers no
+   hook).
 7. **DCUtR limits.** Hole punching fails on symmetric NAT and CGNAT-to-CGNAT
    pairs (the published libp2p success rate of roughly 70 % is unverified,
    design §3.6). Such pairs stay relay-only, so the relay sees the metadata of
@@ -264,7 +274,8 @@ Internet direct draft, now for p2p. In addition:
       accepts the circuit, runs Noise, Identify or DCUtR;
     - inside a circle, a member can learn the same about the other members;
     - Identify still shows this node's confirmed external addresses (circuit
-      addresses on its other relay, global IPv6, a UPnP mapping) to its own
+      addresses on its other relay, global IPv6, a UPnP mapping once seen
+      from outside) to its own
       relays and to its relay members, a deliberate exception: own relays
       provide observed-address learning, and members need our observations
       of them;
@@ -674,7 +685,12 @@ peer gate of §2 are unchanged. Added, and only in this combination:
     relays can confirm `public` for each other's members;
   - relay-side UPnP: while the profile's UPnP setting is on, the relay asks
     the router to map its own ports (UPnP-IGD, IPv4), as the endpoint does
-    for 7423 (§4 item 6);
+    for 7423 (§4 item 6), under the same rule: a mapping is named in
+    reservations and offers, and sets CONFIRMED, only at an IPv4 address a
+    verified contact or one of the node's relays saw this computer at, and
+    it never stamps the relay's `confirmed_at_ms` (STRANGER-UPNP-2; before
+    2026-11-06 any answer to the gateway search could name the address
+    members were sent to);
   - **consent, asked once** (owner decision "relay consent prompt"):
     `raven relay offer on|off`, `raven-node service --relay`
     (`--relay-open` is an alias) or `RAVEN_P2P_RELAY=1`. The question is asked

@@ -7762,11 +7762,19 @@ impl Host {
     /// drop the mappings it made), then every waiting dial is answered, then
     /// every connection is closed (QUIC sends its close frame, a relay frees
     /// our reservation at once). Drives the swarm until all of them are gone
-    /// or `wait` passed. `upnp_grace` (shutdown): with a port mapped, it keeps
+    /// or `wait` passed. `upnp_grace` (shutdown): with a port mapped (also
+    /// one held back until its IP is vouched for, STRANGER-UPNP-2), it keeps
     /// driving until `wait` passed, because libp2p-upnp's gateway task
     /// completes a mapping removal only while the behaviour is there to take
     /// the answer.
     async fn close_everything(&mut self, wait: Duration, upnp_grace: bool) {
+        let upnp_maps = self.upnp.starts_with("mapped")
+            || self
+                .swarm
+                .behaviour()
+                .port_map
+                .as_ref()
+                .is_some_and(|m| m.upnp_maps_any());
         let mut closing: HashSet<ListenerId> = self
             .listens
             .iter_mut()
@@ -7789,7 +7797,7 @@ impl Host {
         for peer in &peers {
             let _ = self.swarm.disconnect_peer_id(*peer);
         }
-        let linger = upnp_grace && self.upnp.starts_with("mapped");
+        let linger = upnp_grace && upnp_maps;
         let deadline = Instant::now() + wait;
         while linger || !(lock(&self.handle.conns).is_empty() && closing.is_empty()) {
             match tokio::time::timeout_at(deadline, self.swarm.select_next_some()).await {
@@ -8402,7 +8410,9 @@ struct HostSeed<'a> {
     /// ([`ProxySource::invalidate`]).
     proxy: Arc<ProxySource>,
     /// Router port mapping's parts made once: the profile's nonce key
-    /// (`raven_core::portmap::nonce_key`), else [`PortMapConfig::upnp_only`].
+    /// (`raven_core::portmap::nonce_key`) and the check a UPnP mapping must
+    /// pass ([`crate::autoreach::upnp_check`]), else
+    /// [`PortMapConfig::upnp_only`].
     port_map_base: PortMapConfig,
     /// What every generation reads again to set up router port mapping
     /// ([`RouterLookup`]).
@@ -8610,13 +8620,14 @@ impl<'a> HostSeed<'a> {
     }
 
     /// Router port mapping for one generation, with the consent `upnp` and
-    /// `v6_pinhole` of `config`: `None` while the PORT_MAP gate is closed
-    /// (UPnP-IGD exactly as in Phase 1, [`PortMapConfig::upnp_only`]) or no
-    /// consent was given. Otherwise the routers, the egress IPv6 address and
-    /// the gates are read again here, so every network change searches
-    /// anew. The second value is IPC `port_map`'s starting state while the
-    /// gate is open. While a harness names the router (review E-2) UPnP
-    /// never runs: with the gate closed the config then says only that.
+    /// `v6_pinhole` of `config`. While the PORT_MAP gate is closed:
+    /// UPnP-IGD as in Phase 1, each mapping used only at an IP a contact or
+    /// relay saw this computer at (the base's check, STRANGER-UPNP-2), and
+    /// no IPC `port_map`. With the gate open, `None` when no consent was
+    /// given; otherwise the routers, the egress IPv6 address and the gates
+    /// are read again here, so every network change searches anew. The
+    /// second value is IPC `port_map`'s starting state while the gate is
+    /// open. While a harness names the router (review E-2) UPnP never runs.
     fn port_map_config(
         &self,
         config: &P2pConfig,
@@ -8626,10 +8637,11 @@ impl<'a> HostSeed<'a> {
         let upnp_fallback = !(self.router.lab_gateway)();
         if !pcp {
             let confined = PortMapConfig {
+                pcp,
                 upnp_fallback,
-                ..PortMapConfig::upnp_only()
+                ..self.port_map_base.clone()
             };
-            return ((!upnp_fallback).then_some(confined), None);
+            return (Some(confined), None);
         }
         let upnp = config.upnp == Some(true);
         let v6_wanted = upnp && v6_gate && config.v6_pinhole == Some(true);
@@ -8958,6 +8970,19 @@ impl<'a> HostSeed<'a> {
     }
 }
 
+/// Router port mapping's parts made once per host start
+/// ([`HostSeed::port_map_base`]): the profile's nonce key
+/// (`raven_core::portmap::nonce_key`) and the check a UPnP-IGD mapping must
+/// pass before it is used ([`crate::autoreach::upnp_check`],
+/// STRANGER-UPNP-2).
+fn port_map_base_for(identity: &Identity) -> PortMapConfig {
+    PortMapConfig {
+        nonce_key: raven_core::portmap::nonce_key(identity),
+        public_ip: Some(crate::autoreach::upnp_check()),
+        ..PortMapConfig::upnp_only()
+    }
+}
+
 /// The service's libp2p host (supervised in `main`). Never returns `Ok`;
 /// after a clean shutdown it parks. The gate, the preflight and the key are
 /// done once; the endpoint is rebuilt whenever it is re-homed.
@@ -9021,10 +9046,7 @@ pub(crate) async fn run_host(
         );
         blocking(move || Ok(AutoRelays::load(&dd, &me, live))).await?
     };
-    let port_map_base = PortMapConfig {
-        nonce_key: raven_core::portmap::nonce_key(&identity),
-        ..PortMapConfig::upnp_only()
-    };
+    let port_map_base = port_map_base_for(&identity);
     let mut seed = HostSeed::new(
         &gate,
         keypair,
@@ -9944,6 +9966,7 @@ mod tests {
             *cfg.nonce_key,
             *raven_core::portmap::nonce_key(&Identity::from_seed(&[13; 32]))
         );
+        assert!(cfg.public_ip.is_some(), "UPnP after a silent router");
         assert_eq!(GATEWAY_LOOKUPS.load(Ordering::SeqCst), 3);
         // No consent: the gate open says `off`, and nothing is looked up.
         let off = P2pConfig {
@@ -9956,7 +9979,9 @@ mod tests {
         let (none, state) = seed.port_map_config(&off, false);
         assert!(none.is_none());
         assert_eq!(state.map(|s| s.v4), Some("off"));
-        // The gate closed: Phase 1's UPnP-IGD exactly, no lookup.
+        // The gate closed: Phase 1's UPnP-IGD, no lookup and no IPC
+        // `port_map`; a mapping is used only at an IP a contact or relay saw
+        // this computer at (STRANGER-UPNP-2), and nobody saw it at any here.
         let closed = HostSeed {
             router: RouterLookup {
                 gates: || (false, true),
@@ -9964,8 +9989,14 @@ mod tests {
             },
             ..seed
         };
-        let (none, state) = closed.port_map_config(&config, false);
-        assert!(none.is_none() && state.is_none());
+        let (cfg, state) = closed.port_map_config(&config, false);
+        let cfg = cfg.expect("UPnP-IGD with the check");
+        assert!(!cfg.pcp && cfg.upnp_fallback && !cfg.v6);
+        let check = cfg.public_ip.expect("a check UPnP mappings must pass");
+        for addr in ["/ip4/203.0.113.9/tcp/7423", "/ip6/2001:db8::9/tcp/7423"] {
+            assert!(!check.vouches_for(&addr.parse().unwrap()), "{addr}");
+        }
+        assert!(state.is_none());
         assert_eq!(GATEWAY_LOOKUPS.load(Ordering::SeqCst), 4);
         // The pinhole: its gate and consent, and the egress address read
         // only then.
@@ -10955,10 +10986,7 @@ mod tests {
             config.auto.is_some(),
         );
         let setting = config.proxy.setting.clone();
-        let port_map_base = PortMapConfig {
-            nonce_key: raven_core::portmap::nonce_key(&Identity::from_seed(&[13; 32])),
-            ..PortMapConfig::upnp_only()
-        };
+        let port_map_base = port_map_base_for(&Identity::from_seed(&[13; 32]));
         let seed = HostSeed::new(
             gate,
             keypair,

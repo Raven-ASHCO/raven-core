@@ -575,8 +575,9 @@ pub struct RelayStatusFile {
     pub pid: u32,
     /// The relay's own named addresses: `swarm.external_addresses()` minus
     /// the loopback placeholder (explicit `--external` / `--public-host`,
-    /// global listen addresses and UPnP-confirmed ones). Never a client's
-    /// address.
+    /// global listen addresses and UPnP-confirmed ones, which the friend
+    /// relay's swarm confirms only at an IP a contact or relay saw this
+    /// computer at). Never a client's address.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advertised: Vec<String>,
     /// The relay's own UPnP-IGD state (`on`, `mapped <port>`, `failed`);
@@ -584,12 +585,13 @@ pub struct RelayStatusFile {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub upnp: String,
     /// The external addresses UPnP mapped for the relay's own ports, sorted
-    /// (each is in `advertised` too); empty when it does not use UPnP.
+    /// (each is in `advertised` too), once its swarm saw the IP vouched for
+    /// (STRANGER-UPNP-2); empty when it does not use UPnP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upnp_addrs: Vec<String>,
     /// When this relay was last seen to be reachable from the Internet (a
-    /// member reserved from a globally routable IP, or UPnP mapped its
-    /// port), in Unix ms; 0 when never.
+    /// member reserved from a globally routable IP; a UPnP mapping alone
+    /// never sets it), in Unix ms; 0 when never.
     #[serde(default)]
     pub confirmed_at_ms: u64,
     /// The relay's `--also-tcp` ports that friends reach on another port: a

@@ -50,7 +50,7 @@
 //! Lines carry counts and ports only.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -591,7 +591,8 @@ fn relay_ports(listen: &[Multiaddr], also_443: bool) -> (Option<u16>, Option<u16
 /// The addresses the friend relay names for itself, in its reservations and
 /// in the offers route hints carry:
 /// 1. the operator's `relay_external`, alone;
-/// 2. else what UPnP mapped for the relay's own ports;
+/// 2. else what UPnP mapped for the relay's own ports, at an IPv4 address a
+///    contact or relay saw this computer at (`seen`, [`upnp_vouched`]);
 /// 3. else the IPs the profile's p2p host is known at (its confirmed, then,
 ///    auto-reach, `found`: the public IP STUN discovery found where the NAT
 ///    keeps ports, [`crate::autoreach::forward_ip`], then its listen
@@ -612,6 +613,7 @@ fn externals(
     found: Option<IpAddr>,
     also_443: bool,
     local_ok: bool,
+    seen: &dyn Fn(Ipv4Addr) -> bool,
 ) -> Vec<Multiaddr> {
     if !declared.is_empty() {
         return declared.to_vec();
@@ -624,7 +626,10 @@ fn externals(
     };
     let named = |a: &Multiaddr| addr_ip(a).is_some_and(|ip| usable_ip(ip, local_ok));
     let listen = parse(&relay.listen_addrs);
-    let mut out: Vec<Multiaddr> = parse(&relay.upnp_addrs).into_iter().filter(named).collect();
+    let mut out: Vec<Multiaddr> = upnp_vouched(relay, seen)
+        .into_iter()
+        .filter(named)
+        .collect();
     if out.is_empty() {
         let (tcp, quic, port_443) = relay_ports(&listen, also_443);
         let mut ips: Vec<IpAddr> = Vec::new();
@@ -657,10 +662,28 @@ fn externals(
     out
 }
 
+/// What UPnP mapped for the relay's ports (`relay_status.json`
+/// `upnp_addrs`) at an IPv4 address a contact or one of this node's relays
+/// saw this computer at (`seen`, [`crate::autoreach::seen_ip`];
+/// STRANGER-UPNP-2). Whoever answers the gateway search first, anyone on
+/// this network, names a mapping's external address, so nothing else
+/// counts: no other IPv4 address, no IPv6 one. The relay's swarm holds such
+/// a mapping back already ([`crate::autoreach::upnp_check`]); this asks
+/// again at the moment the address is named.
+fn upnp_vouched(relay: &RelayStatusFile, seen: &dyn Fn(Ipv4Addr) -> bool) -> Vec<Multiaddr> {
+    relay
+        .upnp_addrs
+        .iter()
+        .filter_map(|t| t.parse::<Multiaddr>().ok())
+        .filter(|a| matches!(a.iter().next(), Some(Protocol::Ip4(ip)) if seen(ip)))
+        .collect()
+}
+
 /// CONFIRMED (RAVEN_ROUTE_HINTS_V1 §11.1): a member reserved from a globally
-/// routable IP within the last 24 hours, or UPnP mapped the relay's port.
-fn confirmed(relay: &RelayStatusFile, now_ms: u64) -> bool {
-    relay.upnp.starts_with("mapped")
+/// routable IP within the last 24 hours, or UPnP maps the relay's port at an
+/// IPv4 address a contact or relay saw this computer at ([`upnp_vouched`]).
+fn confirmed(relay: &RelayStatusFile, now_ms: u64, seen: &dyn Fn(Ipv4Addr) -> bool) -> bool {
+    (relay.upnp.starts_with("mapped") && !upnp_vouched(relay, seen).is_empty())
         || (relay.confirmed_at_ms != 0
             && now_ms.saturating_sub(relay.confirmed_at_ms) <= CONFIRMED_FOR_MS)
 }
@@ -689,7 +712,8 @@ fn worth_offering(
 /// routable, any unicast one under `local_ok`), and its flags: AUTONAT
 /// always (it runs an AutoNAT v2 server), CONFIRMED by [`confirmed`],
 /// PORT_443 when one of them is TCP 443. `None` when no such address is
-/// worth offering ([`worth_offering`]).
+/// worth offering ([`worth_offering`]). `seen` as for [`confirmed`].
+#[allow(clippy::too_many_arguments)]
 fn offer_record(
     relay: &RelayStatusFile,
     names: &[Multiaddr],
@@ -698,6 +722,7 @@ fn offer_record(
     found: bool,
     now_ms: u64,
     local_ok: bool,
+    seen: &dyn Fn(Ipv4Addr) -> bool,
 ) -> Option<RelayOfferRecord> {
     let relay_pub = parse_peer_id(&relay.peer_id).ok()?;
     let mut dialable: Vec<Multiaddr> = Vec::new();
@@ -717,7 +742,7 @@ fn offer_record(
             dialable.push(name.clone());
         }
     }
-    let is_confirmed = confirmed(relay, now_ms);
+    let is_confirmed = confirmed(relay, now_ms, seen);
     if !worth_offering(&dialable, declared, is_confirmed, reach, found) {
         return None;
     }
@@ -1053,13 +1078,15 @@ impl FriendRelay {
     /// at once).
     fn feed(&mut self, settings: &Settings) {
         let relay = lock(&self.sink).clone();
+        let local_ok = raven_core::p2p_local_candidates_enabled();
         let names = externals(
             &settings.declared,
             relay.as_ref(),
             crate::p2p::own_routes().as_ref(),
             crate::autoreach::forward_ip().map(IpAddr::V4),
             settings.key.also_443,
-            raven_core::p2p_local_candidates_enabled(),
+            local_ok,
+            &|ip| crate::autoreach::seen_ip(ip, local_ok),
         );
         self.ext_tx.send_if_modified(|held| {
             if *held == names {
@@ -1085,6 +1112,7 @@ impl FriendRelay {
             return None;
         }
         let relay = lock(&self.sink).clone()?;
+        let local_ok = raven_core::p2p_local_candidates_enabled();
         offer_record(
             &relay,
             &self.ext_tx.borrow(),
@@ -1092,7 +1120,8 @@ impl FriendRelay {
             reach,
             crate::autoreach::forward_ip().is_some(),
             now_ms,
-            raven_core::p2p_local_candidates_enabled(),
+            local_ok,
+            &|ip| crate::autoreach::seen_ip(ip, local_ok),
         )
     }
 
@@ -1189,7 +1218,9 @@ impl FriendRelay {
             (None, _) => "starting",
         };
         let names = self.ext_tx.borrow().clone();
-        let is_confirmed = relay.as_ref().is_some_and(|r| confirmed(r, now_ms));
+        let local_ok = raven_core::p2p_local_candidates_enabled();
+        let seen = |ip| crate::autoreach::seen_ip(ip, local_ok);
+        let is_confirmed = relay.as_ref().is_some_and(|r| confirmed(r, now_ms, &seen));
         let listen: Vec<Multiaddr> = relay
             .iter()
             .flat_map(|r| r.listen_addrs.iter().filter_map(|t| t.parse().ok()))
@@ -2398,6 +2429,10 @@ mod tests {
             upnp_addrs: upnp.iter().map(|t| t.to_string()).collect(),
             ..RelayStatusFile::default()
         };
+        // Whether a contact or relay saw this computer at an IPv4 address
+        // (`autoreach::seen_ip`): nobody did, or (case 2) at every one.
+        let nobody = |_: Ipv4Addr| false;
+        let anyone = |_: Ipv4Addr| true;
         let host = OwnP2p {
             peer_id: peer(1),
             relays: Vec::new(),
@@ -2428,15 +2463,23 @@ mod tests {
         // 1. Declared addresses win alone, whatever else is known.
         let declared = [a("/dns4/home.example.net/tcp/7427")];
         assert_eq!(
-            externals(&declared, Some(&relay), Some(&host), None, true, false),
+            externals(
+                &declared,
+                Some(&relay),
+                Some(&host),
+                None,
+                true,
+                false,
+                &nobody
+            ),
             declared
         );
         assert_eq!(
-            externals(&declared, None, None, None, false, false),
+            externals(&declared, None, None, None, false, false, &nobody),
             declared
         );
         // Nothing known before the relay reports its listeners.
-        assert!(externals(&[], None, Some(&host), None, false, false).is_empty());
+        assert!(externals(&[], None, Some(&host), None, false, false, &nobody).is_empty());
         // 3. The profile host's global IPs with the relay's ports (TCP 443
         // while it listens there), then the relay's own global listen
         // addresses; no loopback or LAN address.
@@ -2447,7 +2490,8 @@ mod tests {
                 Some(&host),
                 None,
                 true,
-                false
+                false,
+                &nobody
             )),
             [
                 "/ip4/8.8.8.8/tcp/7427",
@@ -2466,17 +2510,28 @@ mod tests {
             None,
             false,
             false,
+            &nobody,
         ));
         assert!(!plain.iter().any(|t| t.ends_with("/tcp/443")), "{plain:?}");
         // No host: only the relay's own global listen addresses.
         assert_eq!(
-            texts(&externals(&[], Some(&relay), None, None, true, false)),
+            texts(&externals(
+                &[],
+                Some(&relay),
+                None,
+                None,
+                true,
+                false,
+                &nobody
+            )),
             [
                 "/ip6/2001:4860::5/tcp/7427",
                 "/ip6/2001:4860::5/udp/7427/quic-v1"
             ]
         );
-        // 2. What UPnP mapped for the relay beats the host's IPs.
+        // 2. What UPnP mapped for the relay beats the host's IPs, at an
+        // IPv4 address a contact or relay saw this computer at
+        // (STRANGER-UPNP-2).
         let mapped = status(
             &relay
                 .listen_addrs
@@ -2496,7 +2551,8 @@ mod tests {
                 Some(&host),
                 None,
                 true,
-                false
+                false,
+                &anyone
             )),
             [
                 "/ip4/9.9.9.9/tcp/7427",
@@ -2504,6 +2560,13 @@ mod tests {
                 "/ip6/2001:4860::5/tcp/7427",
                 "/ip6/2001:4860::5/udp/7427/quic-v1",
             ]
+        );
+        // Nobody saw this computer there: the UPnP data counts for nothing,
+        // the names are those of case 3.
+        assert_eq!(
+            externals(&[], Some(&mapped), Some(&host), None, true, false, &nobody),
+            externals(&[], Some(&relay), Some(&host), None, true, false, &nobody),
+            "UPnP data nobody vouched for"
         );
         // Loopback harnesses (debug RAVEN_LAB_P2P_LOCAL_CANDIDATES=1): local
         // addresses too, with the port the relay really got.
@@ -2526,14 +2589,84 @@ mod tests {
                 Some(&lab_host),
                 None,
                 false,
-                true
+                true,
+                &nobody
             )),
             [
                 "/ip4/127.0.0.1/tcp/50001",
                 "/ip4/127.0.0.1/udp/50002/quic-v1"
             ]
         );
-        assert!(externals(&[], Some(&lab), Some(&lab_host), None, false, false).is_empty());
+        assert!(externals(
+            &[],
+            Some(&lab),
+            Some(&lab_host),
+            None,
+            false,
+            false,
+            &nobody
+        )
+        .is_empty());
+    }
+
+    /// STRANGER-UPNP-2: what UPnP says it mapped for the relay (state
+    /// `mapped`, `upnp_addrs`) is named, and makes the relay CONFIRMED, only
+    /// at an IPv4 address a contact or one of this node's relays saw this
+    /// computer at (`seen`, `autoreach::seen_ip`): whoever answers the
+    /// gateway search first, anyone on this network, names that address.
+    /// Never at an IPv6 one. (Documentation addresses stand for public ones
+    /// here, so the lab switch `local_ok` is on.)
+    #[test]
+    fn upnp_data_counts_only_at_an_ip_a_contact_saw_this_computer_at() {
+        let now = 10 * CONFIRMED_FOR_MS;
+        let seen = |ip: Ipv4Addr| ip == Ipv4Addr::new(203, 0, 113, 9);
+        let status = |upnp: &str, upnp_addrs: &[&str]| RelayStatusFile {
+            version: 1,
+            peer_id: peer(0x63),
+            upnp: upnp.into(),
+            upnp_addrs: upnp_addrs.iter().map(|t| t.to_string()).collect(),
+            ..RelayStatusFile::default()
+        };
+        // The "router" said 198.51.100.7; nobody saw this computer there:
+        // not named, not CONFIRMED, nothing to offer for it.
+        let stranger = status(
+            "mapped 7427",
+            &[
+                "/ip4/198.51.100.7/tcp/7427",
+                "/ip4/198.51.100.7/udp/7427/quic-v1",
+                "/ip6/2001:db8::9/tcp/7427",
+            ],
+        );
+        let named = externals(&[], Some(&stranger), None, None, false, true, &seen);
+        assert!(named.is_empty(), "{named:?}");
+        assert!(!confirmed(&stranger, now, &seen));
+        let names = [a("/ip4/198.51.100.7/tcp/7427")];
+        assert_eq!(
+            offer_record(&stranger, &names, false, "", false, now, true, &seen),
+            None
+        );
+        // At the IP a contact saw: named (not the IPv6 one), CONFIRMED.
+        let vouched = status(
+            "mapped 7427",
+            &[
+                "/ip4/203.0.113.9/tcp/7427",
+                "/ip4/203.0.113.9/udp/7427/quic-v1",
+                "/ip6/2001:db8::9/tcp/7427",
+            ],
+        );
+        let named = externals(&[], Some(&vouched), None, None, false, true, &seen);
+        assert_eq!(
+            texts(&named),
+            [
+                "/ip4/203.0.113.9/tcp/7427",
+                "/ip4/203.0.113.9/udp/7427/quic-v1"
+            ]
+        );
+        assert!(confirmed(&vouched, now, &seen));
+        let r = offer_record(&vouched, &named, false, "", false, now, true, &seen).unwrap();
+        assert_eq!(r.flags, FLAG_AUTONAT | FLAG_CONFIRMED);
+        // The state alone, with nothing mapped: not CONFIRMED.
+        assert!(!confirmed(&status("mapped 7427", &[]), now, &seen));
     }
 
     /// Auto-reach: a host behind NAT (private listen addresses only, no
@@ -2563,6 +2696,7 @@ mod tests {
             ..RelayStatusFile::default()
         };
         let found = Some(IpAddr::from([11, 0, 3, 7]));
+        let nobody = |_: Ipv4Addr| false;
         assert_eq!(
             texts(&externals(
                 &[],
@@ -2570,13 +2704,14 @@ mod tests {
                 Some(&host),
                 found,
                 false,
-                false
+                false,
+                &nobody
             )),
             ["/ip4/11.0.3.7/tcp/17427", "/ip4/11.0.3.7/udp/17427/quic-v1"]
         );
         // Without it (no discovery, or a NAT that shifts ports): nothing to
         // name, the field case before auto-reach.
-        assert!(externals(&[], Some(&relay), Some(&host), None, false, false).is_empty());
+        assert!(externals(&[], Some(&relay), Some(&host), None, false, false, &nobody).is_empty());
     }
 
     #[test]
@@ -2588,11 +2723,18 @@ mod tests {
             upnp: upnp.into(),
             ..RelayStatusFile::default()
         };
-        assert!(!confirmed(&at(0, ""), now));
-        assert!(!confirmed(&at(0, "on"), now));
-        assert!(confirmed(&at(0, "mapped 7427"), now));
-        assert!(confirmed(&at(now - CONFIRMED_FOR_MS, ""), now));
-        assert!(!confirmed(&at(now - CONFIRMED_FOR_MS - 1, ""), now));
+        let (nobody, anyone) = (|_: Ipv4Addr| false, |_: Ipv4Addr| true);
+        assert!(!confirmed(&at(0, ""), now, &nobody));
+        assert!(!confirmed(&at(0, "on"), now, &nobody));
+        // UPnP's state alone names no mapping a contact vouched for
+        // (STRANGER-UPNP-2).
+        assert!(!confirmed(&at(0, "mapped 7427"), now, &anyone));
+        assert!(confirmed(&at(now - CONFIRMED_FOR_MS, ""), now, &nobody));
+        assert!(!confirmed(
+            &at(now - CONFIRMED_FOR_MS - 1, ""),
+            now,
+            &nobody
+        ));
         assert!(
             !worth_offering(&[], true, true, "public", true),
             "no address"
@@ -2633,9 +2775,20 @@ mod tests {
             a("/ip6/2001:4860::5/tcp/7427"),
             a("/dns4/relay.example.org/tcp/7427"),
         ];
+        let (nobody, anyone) = (|_: Ipv4Addr| false, |_: Ipv4Addr| true);
         // Confirmed a moment ago: CONFIRMED, and PORT_443 for the TCP 443
         // address. No private, repeated or overlong name; four at most.
-        let r = offer_record(&status(now - 1, ""), &names, false, "", false, now, false).unwrap();
+        let r = offer_record(
+            &status(now - 1, ""),
+            &names,
+            false,
+            "",
+            false,
+            now,
+            false,
+            &nobody,
+        )
+        .unwrap();
         assert_eq!(r.relay_peer_id(), relay_peer);
         assert_eq!(
             r.addrs,
@@ -2650,35 +2803,59 @@ mod tests {
         // A record receivers accept as it is.
         let body = raven_core::route_hints::encode_offer(&r);
         assert_eq!(raven_core::route_hints::decode_offer(&body), Ok(r.clone()));
-        // UPnP mapped confirms too; no TCP 443 name, no PORT_443.
-        let r = offer_record(
-            &status(0, "mapped 7427"),
-            &names[..3],
-            false,
-            "",
-            false,
-            now,
-            false,
-        );
+        // UPnP mapped, at an IP a contact saw this computer at, confirms
+        // too (STRANGER-UPNP-2); no TCP 443 name, no PORT_443.
+        let mapped = RelayStatusFile {
+            upnp_addrs: vec![names[0].to_string()],
+            ..status(0, "mapped 7427")
+        };
+        let r = offer_record(&mapped, &names[..3], false, "", false, now, false, &anyone);
         assert_eq!(r.unwrap().flags, FLAG_AUTONAT | FLAG_CONFIRMED);
+        // Nobody saw this computer there: not confirmed, and so not offered
+        // for that.
+        assert_eq!(
+            offer_record(&mapped, &names[..3], false, "", false, now, false, &nobody),
+            None,
+            "UPnP data nobody vouched for"
+        );
         // Unconfirmed: offered only on a public or mapped node, or with
         // declared addresses, and then without CONFIRMED.
         let cold = status(0, "on");
         assert_eq!(
-            offer_record(&cold, &names, false, "unknown", false, now, false),
+            offer_record(&cold, &names, false, "unknown", false, now, false, &nobody),
             None
         );
         assert_eq!(
-            offer_record(&cold, &names, false, "relayed", false, now, false),
+            offer_record(&cold, &names, false, "relayed", false, now, false, &nobody),
             None
         );
         for (declared, reach) in [(false, "public"), (false, "mapped"), (true, "")] {
-            let r = offer_record(&cold, &names[..1], declared, reach, false, now, false).unwrap();
+            let r = offer_record(
+                &cold,
+                &names[..1],
+                declared,
+                reach,
+                false,
+                now,
+                false,
+                &nobody,
+            )
+            .unwrap();
             assert_eq!(r.flags, FLAG_AUTONAT, "{declared} {reach}");
         }
         // Auto-reach: an address STUN discovery found is offered on an
         // unknown node too, unconfirmed (a forward makes it right).
-        let found = offer_record(&cold, &names[..3], false, "unknown", true, now, false).unwrap();
+        let found = offer_record(
+            &cold,
+            &names[..3],
+            false,
+            "unknown",
+            true,
+            now,
+            false,
+            &nobody,
+        )
+        .unwrap();
         assert_eq!(found.flags, FLAG_AUTONAT);
         assert_eq!(
             found.addrs,
@@ -2691,14 +2868,23 @@ mod tests {
             a("/ip4/192.168.1.5/udp/7427/quic-v1"),
         ];
         assert_eq!(
-            offer_record(&cold, &local, true, "", false, now, false),
+            offer_record(&cold, &local, true, "", false, now, false, &nobody),
             None
         );
-        let lab = offer_record(&cold, &local, true, "", false, now, true).unwrap();
+        let lab = offer_record(&cold, &local, true, "", false, now, true, &nobody).unwrap();
         assert_eq!(texts(&local), lab.addrs);
         // No name at all, or a status without a usable PeerId: nothing.
         assert_eq!(
-            offer_record(&status(now, ""), &[], true, "public", true, now, false),
+            offer_record(
+                &status(now, ""),
+                &[],
+                true,
+                "public",
+                true,
+                now,
+                false,
+                &nobody
+            ),
             None
         );
         let nameless = RelayStatusFile {
@@ -2706,7 +2892,7 @@ mod tests {
             ..status(now, "")
         };
         assert_eq!(
-            offer_record(&nameless, &names, true, "public", true, now, false),
+            offer_record(&nameless, &names, true, "public", true, now, false, &nobody),
             None
         );
     }

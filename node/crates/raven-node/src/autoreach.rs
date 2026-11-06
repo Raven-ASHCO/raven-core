@@ -28,7 +28,8 @@
 //!   directly at an IP no DNS answer gave (Identify's observed address,
 //!   which the p2p host feeds in), within [`SEEN_FOR`] and since the last
 //!   network change ([`shared_ip`]). An address a router mapped
-//!   (NAT-PMP, PCP, UPnP) waits for the same sighting ([`seen_ip`]). The
+//!   (NAT-PMP, PCP, UPnP) waits for the same sighting ([`seen_ip`]), and a
+//!   UPnP mapping is not used at all before it ([`upnp_check`]). The
 //!   class, and this node's own punch decisions, still follow every answer.
 //! - **What it gives** ([`discovered_p2p`], [`public_ip`], [`own_class`],
 //!   [`inet_direct`], [`forward_ip`]): addresses fresh for [`FRESH_FOR`] and
@@ -54,6 +55,7 @@ use raven_core::ipc::AutoReachStatus;
 use raven_core::stun::{self, Answer, Discovery, StunClass, TxId};
 use raven_swarm::libp2p::multiaddr::Protocol;
 use raven_swarm::libp2p::Multiaddr;
+use raven_swarm::portmap::PublicIpCheck;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 
@@ -596,6 +598,16 @@ fn shared_ip(s: &State, lab_local: bool, now: Instant) -> Option<Ipv4Addr> {
 /// forge) is told to contacts only then (the p2p host's route hints).
 pub(crate) fn seen_ip(ip: Ipv4Addr, lab_local: bool) -> bool {
     with_state(|s| seen_at(s, ip, lab_local, Instant::now()))
+}
+
+/// [`seen_ip`] as the check a UPnP-IGD mapping must pass before the p2p
+/// host or the friend relay uses it (raven-swarm's `VettedUpnp`,
+/// STRANGER-UPNP-2): whoever answers the gateway search first, anyone on
+/// this network, names the mapping's external address, so it counts only
+/// at an IP a contact or relay saw this computer at.
+pub(crate) fn upnp_check() -> PublicIpCheck {
+    let lab_local = raven_core::p2p_local_candidates_enabled();
+    PublicIpCheck::new(move |ip| seen_ip(ip, lab_local))
 }
 
 /// Where a contact or one of this node's relays saw this computer

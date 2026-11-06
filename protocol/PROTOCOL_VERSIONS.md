@@ -144,6 +144,40 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: a UPnP mapping used only once seen from outside)
+
+A behaviour change of the port mapping client and of the friend relay's
+sender rules, not of the wire format: no frame layout, entry type, flag bit,
+caps bit, card field or vector changed, no NAT-PMP or PCP byte changed, the
+RRH1 version byte stays 1, the receiver's rules are unchanged, and every gate
+stays as it was. Security and speed report 2026-11-05 §2 and §6
+(STRANGER-UPNP-2).
+
+- **Port Mapping Profile V1 (draft).** [`RAVEN_PORT_MAPPING_V1.md`](RAVEN_PORT_MAPPING_V1.md)
+  §9.1 (new; §1, §6 and §9 point to it): a UPnP-IGD mapping, the endpoint's
+  and the friend relay's, is held until its IPv4 address is one a verified
+  contact or a relay the node holds a slot on saw the node at (the
+  sighting of [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §6). Only
+  then is it confirmed as an external address (hole punch candidates,
+  Identify, relay reservations) and reported (`mapped <port>`, reach class
+  `mapped`); with no sighting nothing is used, and an IPv6 UPnP address
+  never is. Before, libp2p-upnp took the first answer to its SSDP search,
+  from anyone on the network, and confirmed the external address that answer
+  named, so a stranger on the LAN could have contacts and relay members dial
+  a host of its own and learn their IPs and dial times. §9 also says that a
+  NAT-PMP or PCP address waits for the sighting in route hints only. Still
+  open: STRANGER-UPNP-1 (the SSDP answer's source, its LOCATION host and the
+  size of the description are not checked) and the mapping's port, which the
+  sighting does not cover.
+- **Route Hints V1 (draft).** [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md)
+  §11.1 (RELAY_OFFER `flags`, CONFIRMED) and §11.4: a UPnP mapping of the
+  friend relay's port sets CONFIRMED and is named in `addrs` only at an IPv4
+  address that sighting vouches for, never at an IPv6 one, and it never
+  counts as a reservation from outside (the relay's local
+  `relay_status.json` `confirmed_at_ms`, which a restart carries on for a
+  day). The sender's reach class `mapped` counts a UPnP mapping only once
+  seen so.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: group bounds, blocks, receipts and leaves)
 
 Behaviour changes of the group receiver and sender rules, not of the wire

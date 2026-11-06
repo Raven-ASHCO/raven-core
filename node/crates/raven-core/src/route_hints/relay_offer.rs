@@ -20,7 +20,9 @@ use crate::p2p_route::{is_global_ip, parse_host_transport, peer_id_from_ed25519_
 /// [`OfferDecode::Unsupported`].
 pub const RELAY_OFFER_VERSION: u8 = 1;
 /// Flag bit 0: a member reserved on the relay from a globally routable IP
-/// within the last 24 hours, or UPnP mapped the relay's port.
+/// within the last 24 hours, or UPnP mapped the relay's port at an IPv4
+/// address a contact or relay saw the relay's computer at
+/// (RAVEN_ROUTE_HINTS_V1 §11.1).
 pub const FLAG_CONFIRMED: u8 = 1;
 /// Flag bit 1: the relay answers AutoNAT v2.
 pub const FLAG_AUTONAT: u8 = 2;

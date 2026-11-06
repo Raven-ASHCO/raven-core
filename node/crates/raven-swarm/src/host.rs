@@ -5,8 +5,9 @@
 //!   Circuit Relay v2 client, DCUtR, AutoNAT v2 client (one per relay
 //!   slot), Identify ([`IDENTIFY_PROTOCOL`]), Ping, `connection_limits`,
 //!   per-IP limits, optional router port mapping ([`crate::portmap`]:
-//!   UPnP-IGD; NAT-PMP, PCP and IPv6 pinholes only behind
-//!   PORT_MAP/V6_PINHOLE), and `libp2p-stream` for [`RAVEN_LINK_PROTOCOL`]. With
+//!   UPnP-IGD, a mapping used only at an IP something else vouches for;
+//!   NAT-PMP, PCP and IPv6 pinholes only behind PORT_MAP/V6_PINHOLE), and
+//!   `libp2p-stream` for [`RAVEN_LINK_PROTOCOL`]. With
 //!   `service --relay` it also carries the relay server ([`RelayLimits`],
 //!   [`RelayGuard`]); its relay PeerId is then the user's own PeerId. The
 //!   peer gate ([`crate::gate`]) is its third behaviour: everyone who is not
@@ -17,9 +18,10 @@
 //!   first), not libp2p's own list.
 //! - **Relay** ([`build_relay_swarm`], `raven-node relay`): relay server,
 //!   optional AutoNAT v2 server, Identify, Ping, the limits and optional
-//!   UPnP-IGD (off for the dedicated relay); no Raven link protocol, no
-//!   Kademlia, no mailbox. Its peer gate admits the peers on its allow-list
-//!   (anyone with `--open`) and nobody else.
+//!   UPnP-IGD (off for the dedicated relay; a mapping used only at an IP
+//!   something else vouches for, [`crate::portmap::VettedUpnp`]); no Raven
+//!   link protocol, no Kademlia, no mailbox. Its peer gate admits the peers
+//!   on its allow-list (anyone with `--open`) and nobody else.
 //! - **WSS** (feature `wss`; RWS1, `protocol/RAVEN_WSS_TRANSPORT_V1.md`):
 //!   libp2p's "other" transport, never `SwarmBuilder::with_websocket` (it
 //!   would bring libp2p-dns). The endpoint dials relays at
@@ -1218,7 +1220,8 @@ pub struct EndpointConfig {
     pub upnp: bool,
     /// How the router is asked once [`EndpointConfig::upnp`] allows it
     /// ([`crate::portmap::PortMapConfig`], built per generation). `None` is
-    /// today's UPnP-IGD only.
+    /// UPnP-IGD only with no [`crate::portmap::PublicIpCheck`]: no mapping
+    /// is ever used (fail closed).
     pub port_map: Option<crate::portmap::PortMapConfig>,
     /// `service --relay`: also relay for others (the user's own PeerId).
     pub relay_server: Option<(RelayLimits, RelayGuard)>,
@@ -1335,14 +1338,16 @@ pub struct EndpointBehaviour {
     pub identify: Scoped<identify::Behaviour>,
     pub ping: ping::Behaviour,
     /// Router port mapping ([`crate::portmap::PortMap`]; libp2p-upnp in it
-    /// while the PORT_MAP gate is closed).
+    /// while the PORT_MAP gate is closed, its mappings used only at an IP
+    /// something else vouches for, [`crate::portmap::VettedUpnp`]).
     pub port_map: Toggle<crate::portmap::PortMap>,
     pub stream: libp2p_stream::Behaviour,
 }
 
 /// Identify names only this host's *external* addresses: those a relay
-/// reservation, UPnP or AutoNAT confirmed (plus, on a relay, the ones
-/// [`relay_may_advertise`] admits). Listen addresses (LAN, link-local,
+/// reservation, the router (UPnP only at an IP something else vouches for,
+/// [`crate::portmap::VettedUpnp`]) or AutoNAT confirmed (plus, on a relay,
+/// the ones [`relay_may_advertise`] admits). Listen addresses (LAN, link-local,
 /// loopback) are never sent, and nothing is pushed unasked. DCUtR and AutoNAT
 /// do not need them. AutoNAT works from the addresses peers *observe*
 /// (`NewExternalAddrCandidate`, which Identify still reports); DCUtR from the
@@ -1505,8 +1510,10 @@ pub struct RelayBehaviour {
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
     /// UPnP-IGD for the relay's own port (IPv4 only); a mapping is
-    /// reported as a confirmed external address, which reservations name.
-    pub upnp: Toggle<upnp::tokio::Behaviour>,
+    /// reported as a confirmed external address, which reservations name,
+    /// only at an IP something else vouches for
+    /// ([`crate::portmap::VettedUpnp`], STRANGER-UPNP-2).
+    pub upnp: Toggle<crate::portmap::VettedUpnp>,
 }
 
 /// What a relay's two-protocol WSS listener needs (`wss::ServerSide`,
@@ -1523,16 +1530,18 @@ pub enum WssServerSide {}
 
 /// `raven-node relay`: the relay server with `limits` and `guard`, an
 /// optional AutoNAT v2 server, Identify, Ping and optional UPnP-IGD (the
-/// dedicated relay never asks a router). No Raven link protocol. With `wss`
-/// it can also listen on `…/tcp/<p>/tls/ws`, a two-protocol port (RWS1 §6);
-/// it never dials over WSS, so [`DialBackGuard`]'s dial-backs never do.
+/// dedicated relay never asks a router). `upnp`: ask the router, a mapping
+/// used only at an IP that check vouches for ([`crate::portmap::VettedUpnp`]);
+/// `None` asks nothing. No Raven link protocol. With `wss` it can also
+/// listen on `…/tcp/<p>/tls/ws`, a two-protocol port (RWS1 §6); it never
+/// dials over WSS, so [`DialBackGuard`]'s dial-backs never do.
 pub fn build_relay_swarm(
     _gate: &HostGate,
     identity: Keypair,
     limits: RelayLimits,
     guard: &RelayGuard,
     autonat_server: bool,
-    upnp: bool,
+    upnp: Option<crate::portmap::PublicIpCheck>,
     wss: Option<WssServerSide>,
 ) -> Result<Swarm<RelayBehaviour>, Box<dyn Error + Send + Sync>> {
     limits.validate()?;
@@ -1573,7 +1582,9 @@ pub fn build_relay_swarm(
                     .with_interval(Duration::from_secs(15))
                     .with_timeout(Duration::from_secs(5)),
             ),
-            upnp: Toggle::from(upnp.then(upnp::tokio::Behaviour::default)),
+            upnp: Toggle::from(upnp.map(|check| {
+                crate::portmap::VettedUpnp::new(upnp::tokio::Behaviour::default(), Some(check))
+            })),
         })?
         .with_swarm_config(|c| {
             c.with_idle_connection_timeout(Duration::from_secs(60))
@@ -2060,8 +2071,7 @@ mod tests {
     async fn relay_lab(limits: RelayLimits, policy: AllowPolicy) -> Lab {
         let guard = RelayGuard::new(policy, &limits);
         let mut relay =
-            build_relay_swarm(&gate(), key(RELAY_SEED), limits, &guard, false, false, None)
-                .unwrap();
+            build_relay_swarm(&gate(), key(RELAY_SEED), limits, &guard, false, None, None).unwrap();
         let relay_addr = listen_loopback(&mut relay).await;
         relay.add_external_address(relay_addr.clone());
         let relay_addr = relay_addr.with(Protocol::P2p(*relay.local_peer_id()));
@@ -2381,7 +2391,7 @@ mod tests {
                 RelayLimits::friends(),
                 &guard,
                 false,
-                false,
+                None,
                 None,
             )
             .unwrap();
@@ -3159,7 +3169,9 @@ mod tests {
 
     /// The relay's UPnP behaviour (a dummy handler) comes after every other
     /// one, so the gate still comes first and the dial-back guard still
-    /// before the AutoNAT server; the dedicated relay builds it off.
+    /// before the AutoNAT server; the dedicated relay builds it off, and
+    /// it is on only with a check its mappings must pass
+    /// ([`crate::portmap::VettedUpnp`]).
     #[tokio::test]
     async fn relay_behaviour_field_order_keeps_gate_first_with_upnp_last() {
         let relay = behaviour_fields("pub struct RelayBehaviour {");
@@ -3178,7 +3190,8 @@ mod tests {
             ]
         );
         let guard = RelayGuard::new(AllowPolicy::Open, &RelayLimits::friends());
-        for upnp in [false, true] {
+        for upnp in [None, Some(crate::portmap::PublicIpCheck::new(|_| false))] {
+            let on = upnp.is_some();
             let swarm = build_relay_swarm(
                 &gate(),
                 key(0xE1),
@@ -3189,7 +3202,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert_eq!(swarm.behaviour().upnp.is_enabled(), upnp);
+            assert_eq!(swarm.behaviour().upnp.is_enabled(), on);
         }
     }
 
@@ -3236,7 +3249,7 @@ mod tests {
             limits,
             &guard,
             false,
-            false,
+            None,
             Some(wss_server()),
         )
         .unwrap();
@@ -3273,7 +3286,7 @@ mod tests {
                 RelayLimits::friends(),
                 &guard,
                 false,
-                false,
+                None,
                 wss,
             )
             .unwrap()

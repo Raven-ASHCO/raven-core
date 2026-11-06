@@ -198,7 +198,8 @@ pub struct Candidate {
     pub addrs: Vec<String>,
     pub source: Source,
     /// The offer is CONFIRMED (a member reserved on it from a global IP
-    /// within 24 h, or UPnP mapped it).
+    /// within 24 h, or UPnP mapped it at an IP the relay's own host was seen
+    /// at from outside).
     pub confirmed: bool,
     /// The network of its first IP address ([`net_group`]).
     pub group: Option<String>,

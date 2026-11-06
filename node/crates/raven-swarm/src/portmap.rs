@@ -4,8 +4,9 @@
 //!
 //! - **Gate closed** ([`PortMapConfig::pcp`] false, `PORT_MAP_PRODUCTION_ENABLED`):
 //!   libp2p-upnp is created at once and sees every swarm event, and its
-//!   output passes through unchanged ([`PortMapEvent::Upnp`]): today's
-//!   UPnP-IGD behaviour, byte for byte. No socket is opened.
+//!   output passes through ([`PortMapEvent::Upnp`]) as in Phase 1, except
+//!   that a mapping is used only at an IP [`PortMapConfig::public_ip`]
+//!   vouches for (below). No socket is opened.
 //! - **Gate open:** a driver per family runs `raven_core::portmap::MapperCore`
 //!   (NAT-PMP and PCP) on a tokio task that owns a UDP socket connected to
 //!   the default router ([`PortMapConfig::gw_v4`], [`PortMapConfig::gw_v6`]
@@ -26,6 +27,14 @@
 //!   family per network). Not while a harness names the router
 //!   ([`PortMapConfig::upnp_fallback`] false): libp2p-upnp searches the
 //!   real network, never the lab's fake router, so it is never created.
+//! - **UPnP-IGD is not authenticated** (STRANGER-UPNP-2): whoever answers
+//!   the SSDP search first, anyone on the network, names the external
+//!   address. [`VettedUpnp`] holds each mapping until
+//!   [`PortMapConfig::public_ip`] vouches for its IPv4 address (raven-node:
+//!   a contact or relay saw this computer there); without a check nothing
+//!   is used. NAT-PMP and PCP answers are taken from the default router's
+//!   address only (a connected socket) and are not held here; route hints
+//!   still name their IPv4 address only once it was seen from outside.
 //! - **Leases:** IPv4 mappings ask [`PortMapConfig::lifetime`], IPv6
 //!   pinholes at most `raven_core::portmap::PINHOLE_LIFETIME_S` (3600 s).
 //! - **Drop:** each driver's command channel closes, and its task sends the
@@ -41,6 +50,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -61,6 +71,42 @@ use zeroize::Zeroizing;
 /// `raven_core::portmap::MAX_PCP` bytes, and a longer one is refused by the
 /// codec.
 const RECV_BUF: usize = 2048;
+
+/// Says whether something other than the router vouches that this host's
+/// public IPv4 address is `ip`: raven-node asks whether a verified contact
+/// or one of its relays saw this computer there, on a connection it dialled
+/// directly (`autoreach::seen_ip`). A UPnP-IGD answer is not authenticated:
+/// whoever answers the SSDP search first, anyone on the network, names the
+/// external address, and contacts and relay members would dial a host of
+/// theirs (STRANGER-UPNP-2). [`VettedUpnp`] uses a mapping only at an IP this
+/// vouches for.
+#[derive(Clone)]
+pub struct PublicIpCheck(Arc<dyn Fn(Ipv4Addr) -> bool + Send + Sync>);
+
+impl PublicIpCheck {
+    /// `vouches`: is this public IPv4 address this host's, by something
+    /// other than the router? Asked on every poll while a mapping is held,
+    /// so it must be cheap and must not block.
+    pub fn new(vouches: impl Fn(Ipv4Addr) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(vouches))
+    }
+
+    /// Does it vouch for the IP of `addr`? Never for anything but an
+    /// `/ip4/…` address.
+    pub fn vouches_for(&self, addr: &Multiaddr) -> bool {
+        match addr.iter().next() {
+            Some(Protocol::Ip4(ip)) => (self.0)(ip),
+            _ => false,
+        }
+    }
+}
+
+/// No address in Debug output (there is none to show).
+impl std::fmt::Debug for PublicIpCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PublicIpCheck")
+    }
+}
 
 /// What the endpoint maps, built per endpoint generation (so the router is
 /// looked up again on every network change).
@@ -101,10 +147,18 @@ pub struct PortMapConfig {
     /// router (`RAVEN_LAB_PORTMAP_GATEWAY`): libp2p-upnp's SSDP search would
     /// reach the real network's router instead of the lab's.
     pub upnp_fallback: bool,
+    /// Who vouches for this host's public IPv4 address besides the router
+    /// (raven-node: `autoreach::seen_ip`). A UPnP-IGD mapping is used, as a
+    /// confirmed external address and in libp2p-upnp's events, only at an IP
+    /// this vouches for ([`VettedUpnp`], STRANGER-UPNP-2). `None` vouches for
+    /// none: no UPnP mapping is ever used (fail closed). NAT-PMP and PCP
+    /// mappings do not ask it.
+    pub public_ip: Option<PublicIpCheck>,
 }
 
 impl PortMapConfig {
-    /// Today's behaviour: UPnP-IGD only, no NAT-PMP, PCP or pinhole.
+    /// UPnP-IGD only, no NAT-PMP, PCP or pinhole; and no [`PublicIpCheck`],
+    /// so no UPnP mapping is ever used until a caller sets one.
     pub fn upnp_only() -> Self {
         Self {
             gw_v4: None,
@@ -118,6 +172,7 @@ impl PortMapConfig {
             any_ip: false,
             gw_port: PCP_PORT,
             upnp_fallback: true,
+            public_ip: None,
         }
     }
 }
@@ -138,6 +193,14 @@ impl std::fmt::Debug for PortMapConfig {
             .field("any_ip", &self.any_ip)
             .field("gw_port", &self.gw_port)
             .field("upnp_fallback", &self.upnp_fallback)
+            .field(
+                "public_ip",
+                &if self.public_ip.is_some() {
+                    "checked"
+                } else {
+                    "none"
+                },
+            )
             .finish()
     }
 }
@@ -155,7 +218,8 @@ pub enum LostWhy {
 /// What the behaviour reports. No variant carries an address.
 #[derive(Debug)]
 pub enum PortMapEvent {
-    /// libp2p-upnp's own event, unchanged.
+    /// libp2p-upnp's own event, unchanged, as [`VettedUpnp`] lets it
+    /// pass.
     Upnp(upnp::Event),
     /// The router maps `port` (external) for the egress address of the
     /// family; one event per protocol.
@@ -323,7 +387,9 @@ pub struct PortMap<U = upnp::tokio::Behaviour> {
     cfg: PortMapConfig,
     v4: Option<Driver>,
     v6: Option<Driver>,
-    upnp: Option<U>,
+    /// libp2p-upnp, its mappings used only at an IP
+    /// [`PortMapConfig::public_ip`] vouches for.
+    upnp: Option<VettedUpnp<U>>,
     make_upnp: Box<dyn Fn() -> U + Send>,
     /// Every listen address the swarm reported, for the UPnP replay.
     listen: Vec<(ListenerId, Multiaddr)>,
@@ -361,7 +427,7 @@ where
         };
         if !map.cfg.pcp {
             if map.cfg.upnp_fallback {
-                map.upnp = Some((map.make_upnp)());
+                map.upnp = Some(map.vetted_upnp());
             }
             return map;
         }
@@ -503,6 +569,19 @@ where
         }
     }
 
+    /// libp2p-upnp reported a mapping that has not ended, used or held back
+    /// ([`VettedUpnp::maps_any`]): the endpoint's shutdown waits a moment
+    /// for its delete.
+    pub fn upnp_maps_any(&self) -> bool {
+        self.upnp.as_ref().is_some_and(VettedUpnp::maps_any)
+    }
+
+    /// A new libp2p-upnp, its mappings used only at an IP
+    /// [`PortMapConfig::public_ip`] vouches for ([`VettedUpnp`]).
+    fn vetted_upnp(&self) -> VettedUpnp<U> {
+        VettedUpnp::new((self.make_upnp)(), self.cfg.public_ip.clone())
+    }
+
     /// libp2p-upnp after NAT-PMP and PCP stayed silent on IPv4: created
     /// now, and told the egress IPv4 listen addresses the swarm already
     /// reported (it maps on `NewListenAddr` only).
@@ -510,7 +589,7 @@ where
         if self.upnp.is_some() {
             return;
         }
-        let mut upnp = (self.make_upnp)();
+        let mut upnp = self.vetted_upnp();
         for (listener_id, addr) in &self.listen {
             if self.is_egress_v4(addr) {
                 upnp.on_swarm_event(FromSwarm::NewListenAddr(NewListenAddr {
@@ -724,6 +803,257 @@ where
     }
 }
 
+/// libp2p-upnp, with each mapping held back until something else vouches
+/// for its IP ([`PublicIpCheck`], STRANGER-UPNP-2).
+///
+/// libp2p-upnp takes the first answer to its SSDP search, from anyone on
+/// the network, asks that "router" for its external IP once, and confirms
+/// every mapping at that IP if only it is global. Here a mapping is used
+/// (its `ExternalAddrConfirmed`, which DCUtR candidates, Identify and relay
+/// reservations name, then its `NewExternalAddr` event, status `mapped`)
+/// only once the check vouches for its IP: at once when it already does,
+/// else as soon as it does, looked at again each time the swarm polls the
+/// behaviour (raven-node's loops do at least every two seconds). Until then
+/// the mapping is held, and its end, or the end of the listen address it
+/// maps, drops it unheard. An IPv6 address, or no check at all, is never
+/// vouched for: nothing is used (fail closed). A mapping once used stays
+/// used until libp2p-upnp ends it: its external IP is fixed when the
+/// gateway is found, and a network change makes a new behaviour. Events
+/// about no mapping (`GatewayNotFound`, `NonRoutableGateway`) pass at once.
+pub struct VettedUpnp<U = upnp::tokio::Behaviour> {
+    inner: U,
+    check: Option<PublicIpCheck>,
+    /// Mappings not used yet: the external address and, once its event
+    /// came, the listen address it maps.
+    held: Vec<(Multiaddr, Option<Multiaddr>)>,
+    /// External addresses in use (confirmed to the swarm), until their end.
+    told: Vec<Multiaddr>,
+    /// Ended ones whose `ExpiredExternalAddr` is still to pass.
+    ending: Vec<Multiaddr>,
+    /// Held mappings just vouched for: each one's confirmation, then its
+    /// event.
+    out: VecDeque<ToSwarm<upnp::Event, Infallible>>,
+}
+
+impl<U> VettedUpnp<U>
+where
+    U: NetworkBehaviour<ConnectionHandler = dummy::ConnectionHandler, ToSwarm = upnp::Event>,
+{
+    /// `inner`'s mappings, used only at an IP `check` vouches for (`None`:
+    /// never).
+    pub fn new(inner: U, check: Option<PublicIpCheck>) -> Self {
+        Self {
+            inner,
+            check,
+            held: Vec::new(),
+            told: Vec::new(),
+            ending: Vec::new(),
+            out: VecDeque::new(),
+        }
+    }
+
+    /// Did libp2p-upnp report a mapping that has not ended, used or held
+    /// back? Its delete is worth waiting for at shutdown either way.
+    pub fn maps_any(&self) -> bool {
+        !self.held.is_empty() || !self.told.is_empty()
+    }
+
+    fn vouched(&self, external: &Multiaddr) -> bool {
+        self.check
+            .as_ref()
+            .is_some_and(|check| check.vouches_for(external))
+    }
+
+    /// What libp2p-upnp emitted, if it may pass now.
+    fn vet(
+        &mut self,
+        next: ToSwarm<upnp::Event, Infallible>,
+    ) -> Option<ToSwarm<upnp::Event, Infallible>> {
+        match next {
+            ToSwarm::ExternalAddrConfirmed(external) => {
+                if !self.told.contains(&external) {
+                    if !self.vouched(&external) {
+                        if !self.held.iter().any(|(held, _)| *held == external) {
+                            self.held.push((external, None));
+                        }
+                        return None;
+                    }
+                    self.held.retain(|(held, _)| *held != external);
+                    self.told.push(external.clone());
+                }
+                Some(ToSwarm::ExternalAddrConfirmed(external))
+            }
+            ToSwarm::GenerateEvent(upnp::Event::NewExternalAddr {
+                local_addr,
+                external_addr,
+            }) => {
+                if self.told.contains(&external_addr) {
+                    return Some(ToSwarm::GenerateEvent(upnp::Event::NewExternalAddr {
+                        local_addr,
+                        external_addr,
+                    }));
+                }
+                match self
+                    .held
+                    .iter_mut()
+                    .find(|(held, _)| *held == external_addr)
+                {
+                    Some((_, local)) => *local = Some(local_addr),
+                    None => self.held.push((external_addr, Some(local_addr))),
+                }
+                None
+            }
+            ToSwarm::ExternalAddrExpired(external) => {
+                let Some(at) = self.told.iter().position(|told| *told == external) else {
+                    self.held.retain(|(held, _)| *held != external);
+                    return None;
+                };
+                self.told.remove(at);
+                self.ending.push(external.clone());
+                Some(ToSwarm::ExternalAddrExpired(external))
+            }
+            ToSwarm::GenerateEvent(upnp::Event::ExpiredExternalAddr {
+                local_addr,
+                external_addr,
+            }) => {
+                let Some(at) = self.ending.iter().position(|e| *e == external_addr) else {
+                    self.held.retain(|(held, _)| *held != external_addr);
+                    return None;
+                };
+                self.ending.remove(at);
+                Some(ToSwarm::GenerateEvent(upnp::Event::ExpiredExternalAddr {
+                    local_addr,
+                    external_addr,
+                }))
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Held mappings whose IP is vouched for now go out: each one's
+    /// confirmation, then its event once that came.
+    fn release(&mut self) {
+        let (now, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|(external, _)| self.vouched(external));
+        self.held = still;
+        for (external, local) in now {
+            self.out
+                .push_back(ToSwarm::ExternalAddrConfirmed(external.clone()));
+            if let Some(local_addr) = local {
+                self.out
+                    .push_back(ToSwarm::GenerateEvent(upnp::Event::NewExternalAddr {
+                        local_addr,
+                        external_addr: external.clone(),
+                    }));
+            }
+            self.told.push(external);
+        }
+    }
+}
+
+/// The key libp2p-upnp keeps a mapping under, TCP (`true`) or UDP and the
+/// port, of the private IPv4 listen address it maps
+/// (`multiaddr_to_socketaddr_protocol`) or of a mapping's external address
+/// (the same port).
+fn upnp_key(addr: &Multiaddr) -> Option<(bool, u16)> {
+    match addr.iter().nth(1)? {
+        Protocol::Tcp(port) => Some((true, port)),
+        Protocol::Udp(port) => Some((false, port)),
+        _ => None,
+    }
+}
+
+impl<U> NetworkBehaviour for VettedUpnp<U>
+where
+    U: NetworkBehaviour<ConnectionHandler = dummy::ConnectionHandler, ToSwarm = upnp::Event>,
+{
+    type ConnectionHandler = dummy::ConnectionHandler;
+    type ToSwarm = upnp::Event;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        peer: PeerId,
+        local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.inner.handle_established_inbound_connection(
+            connection_id,
+            peer,
+            local_addr,
+            remote_addr,
+        )
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        peer: PeerId,
+        addr: &Multiaddr,
+        role_override: Endpoint,
+        port_use: PortUse,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.inner.handle_established_outbound_connection(
+            connection_id,
+            peer,
+            addr,
+            role_override,
+            port_use,
+        )
+    }
+
+    fn on_swarm_event(&mut self, event: FromSwarm) {
+        // libp2p-upnp drops the mapping of a private IPv4 listen address's
+        // port when that address goes, and says nothing: a held one must not
+        // be used later. A used one stays as the swarm keeps it, so that a
+        // later end of that address still passes.
+        if let FromSwarm::ExpiredListenAddr(ExpiredListenAddr { addr, .. }) = event {
+            if matches!(addr.iter().next(), Some(Protocol::Ip4(ip)) if ip.is_private()) {
+                if let Some(key) = upnp_key(addr) {
+                    self.held
+                        .retain(|(external, _)| upnp_key(external) != Some(key));
+                }
+            }
+        }
+        self.inner.on_swarm_event(event);
+    }
+
+    fn on_connection_handler_event(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
+        self.inner
+            .on_connection_handler_event(peer_id, connection_id, event)
+    }
+
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        loop {
+            if let Some(next) = self.out.pop_front() {
+                return Poll::Ready(next);
+            }
+            match self.inner.poll(cx) {
+                Poll::Ready(next) => {
+                    if let Some(next) = self.vet(next) {
+                        return Poll::Ready(next);
+                    }
+                }
+                Poll::Pending => break,
+            }
+        }
+        self.release();
+        match self.out.pop_front() {
+            Some(next) => Poll::Ready(next),
+            None => Poll::Pending,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -888,6 +1218,7 @@ mod tests {
             any_ip: true,
             gw_port: gw.port,
             upnp_fallback: true,
+            public_ip: None,
         }
     }
 
@@ -976,11 +1307,14 @@ mod tests {
 
     /// With the gate closed the stub UPnP behaviour exists from the start,
     /// sees every swarm event (VPN and Docker addresses too, as today), and
-    /// what it emits comes out unchanged in the same order; no driver and no
-    /// socket.
+    /// what it emits about a mapping at a public IP something else vouches
+    /// for comes out unchanged in the same order; no driver and no socket.
     #[tokio::test]
     async fn gate_closed_creates_upnp_at_once_and_starts_no_driver() {
-        let (mut map, log) = stub_map(PortMapConfig::upnp_only());
+        let (mut map, log) = stub_map(PortMapConfig {
+            public_ip: Some(PublicIpCheck::new(|ip| ip == FAKE_EXTERNAL_V4)),
+            ..PortMapConfig::upnp_only()
+        });
         assert_eq!(log.made.load(Ordering::SeqCst), 1);
         assert!(map.v4.is_none() && map.v6.is_none());
         let id = ListenerId::next();
@@ -1034,6 +1368,165 @@ mod tests {
         );
         assert!(map.pending.is_empty() && map.wanted.is_empty());
         assert_eq!(log.made.load(Ordering::SeqCst), 1);
+    }
+
+    /// One UPnP mapping as libp2p-upnp reports it (behaviour.rs 418-442):
+    /// the external address confirmed, then its event.
+    fn upnp_mapped(
+        local: &Multiaddr,
+        external: &Multiaddr,
+    ) -> [ToSwarm<upnp::Event, Infallible>; 2] {
+        [
+            ToSwarm::ExternalAddrConfirmed(external.clone()),
+            ToSwarm::GenerateEvent(upnp::Event::NewExternalAddr {
+                local_addr: local.clone(),
+                external_addr: external.clone(),
+            }),
+        ]
+    }
+
+    /// Its end as libp2p-upnp reports it (a renewal refused): the external
+    /// address expired, then its event.
+    fn upnp_ended(
+        local: &Multiaddr,
+        external: &Multiaddr,
+    ) -> [ToSwarm<upnp::Event, Infallible>; 2] {
+        [
+            ToSwarm::ExternalAddrExpired(external.clone()),
+            ToSwarm::GenerateEvent(upnp::Event::ExpiredExternalAddr {
+                local_addr: local.clone(),
+                external_addr: external.clone(),
+            }),
+        ]
+    }
+
+    /// STRANGER-UPNP-2: libp2p-upnp takes the first SSDP answer from anyone
+    /// on the network and confirms the external address that answer's
+    /// "router" names (it checks only that the address is global). A mapping
+    /// comes out (the confirmed external address: DCUtR candidates,
+    /// Identify, relay reservations; and its `NewExternalAddr` event: status
+    /// `mapped`) only once something else vouches for its IP (raven-node: a
+    /// contact or relay saw this computer there), and then in libp2p-upnp's
+    /// order, its end following, also after its listen address went away.
+    /// Nothing comes out of a mapping at an IP nobody vouches for, at
+    /// another IP, at an IPv6 address, or with no check at all (fail
+    /// closed), not even its end, nor of one whose listen address went away
+    /// while it was held. Events about no mapping pass at once.
+    #[tokio::test]
+    async fn a_upnp_mapping_is_used_only_at_a_public_ip_something_else_vouches_for() {
+        let seen: Arc<Mutex<Vec<Ipv4Addr>>> = Arc::default();
+        let check = {
+            let seen = seen.clone();
+            PublicIpCheck::new(move |ip| seen.lock().unwrap().contains(&ip))
+        };
+        let (mut map, log) = stub_map(PortMapConfig {
+            public_ip: Some(check),
+            ..PortMapConfig::upnp_only()
+        });
+        let local = ma("/ip4/192.168.1.20/tcp/7423");
+        let external = ma("/ip4/203.0.113.9/tcp/7423");
+        let v6 = ma("/ip6/2001:db8::9/udp/7423/quic-v1");
+        {
+            let mut script = log.script.lock().unwrap();
+            script.extend(upnp_mapped(&local, &external));
+            script.extend(upnp_mapped(&local, &v6));
+            script.push_back(ToSwarm::GenerateEvent(upnp::Event::NonRoutableGateway));
+        }
+        // Nobody vouches for 203.0.113.9 yet: only the event about no
+        // mapping (a held one still counts for the shutdown's wait).
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(
+            got,
+            ["Upnp(NonRoutableGateway)"],
+            "used before anyone saw it"
+        );
+        assert!(map.upnp_maps_any());
+        // A contact saw this computer at another IP: still nothing.
+        seen.lock().unwrap().push(Ipv4Addr::new(198, 51, 100, 7));
+        assert!(collect_until(&mut map, 1, |_| false).await.is_empty());
+        // ... and at the mapping's IP: confirmed, then its event. The IPv6
+        // one stays held.
+        seen.lock().unwrap().push(Ipv4Addr::new(203, 0, 113, 9));
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(
+            got,
+            [
+                "confirmed /ip4/203.0.113.9/tcp/7423",
+                "Upnp(NewExternalAddr { local_addr: /ip4/192.168.1.20/tcp/7423, \
+                 external_addr: /ip4/203.0.113.9/tcp/7423 })",
+            ]
+        );
+        // Ends: the told mapping's end comes out unchanged, the held one's
+        // never.
+        {
+            let mut script = log.script.lock().unwrap();
+            script.extend(upnp_ended(&local, &v6));
+            script.extend(upnp_ended(&local, &external));
+        }
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(
+            got,
+            [
+                "expired /ip4/203.0.113.9/tcp/7423",
+                "Upnp(ExpiredExternalAddr { local_addr: /ip4/192.168.1.20/tcp/7423, \
+                 external_addr: /ip4/203.0.113.9/tcp/7423 })",
+            ]
+        );
+        // A mapping at an IP already vouched for comes out at once, in
+        // libp2p-upnp's order.
+        log.script
+            .lock()
+            .unwrap()
+            .extend(upnp_mapped(&local, &external));
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0], "confirmed /ip4/203.0.113.9/tcp/7423");
+        // Its listen address goes: libp2p-upnp drops that port's mapping
+        // unheard, and the swarm keeps the address. Mapped again, then
+        // ended, with nobody vouching for the IP by then: both still pass,
+        // so the swarm never keeps an address libp2p-upnp ended.
+        expired_listen(&mut map, ListenerId::next(), &local);
+        seen.lock().unwrap().clear();
+        {
+            let mut script = log.script.lock().unwrap();
+            script.extend(upnp_mapped(&local, &external));
+            script.extend(upnp_ended(&local, &external));
+        }
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(got.len(), 4, "a used mapping lost: {got:?}");
+        assert_eq!(got[2], "expired /ip4/203.0.113.9/tcp/7423");
+        assert!(!map.upnp_maps_any());
+        // No check at all (fail closed): never.
+        let (mut closed, log) = stub_map(PortMapConfig::upnp_only());
+        {
+            let mut script = log.script.lock().unwrap();
+            script.extend(upnp_mapped(&local, &external));
+            script.extend(upnp_ended(&local, &external));
+            script.push_back(ToSwarm::GenerateEvent(upnp::Event::GatewayNotFound));
+        }
+        let got = collect_until(&mut closed, 1, |_| false).await;
+        assert_eq!(got, ["Upnp(GatewayNotFound)"], "used with no check");
+        // A held mapping whose listen address went away (libp2p-upnp drops
+        // the mapping of that port, unheard) is never used, even once its
+        // IP is vouched for.
+        let (mut gone, log) = stub_map(PortMapConfig {
+            public_ip: Some(PublicIpCheck::new({
+                let seen = seen.clone();
+                move |ip| seen.lock().unwrap().contains(&ip)
+            })),
+            ..PortMapConfig::upnp_only()
+        });
+        let later = ma("/ip4/198.51.100.20/tcp/7423");
+        log.script
+            .lock()
+            .unwrap()
+            .extend(upnp_mapped(&local, &later));
+        assert!(collect_until(&mut gone, 1, |_| false).await.is_empty());
+        expired_listen(&mut gone, ListenerId::next(), &local);
+        seen.lock().unwrap().push(Ipv4Addr::new(198, 51, 100, 20));
+        let got = collect_until(&mut gone, 1, |_| false).await;
+        assert!(got.is_empty(), "{got:?}");
+        assert!(!gone.upnp_maps_any());
     }
 
     /// A PCP router maps the egress TCP and QUIC ports: each is confirmed

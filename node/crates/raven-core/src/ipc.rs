@@ -1363,8 +1363,9 @@ pub struct FriendRelayInfo {
     #[serde(default)]
     pub counts: RelayCounts,
     /// `confirmed` (a member reserved from a globally routable IP within 24
-    /// hours, or UPnP mapped its port), `unconfirmed` (it names addresses
-    /// nobody has proved yet) or `no_address`.
+    /// hours, or UPnP maps its port at an IP a contact or relay saw this
+    /// computer at), `unconfirmed` (it names addresses nobody has proved
+    /// yet) or `no_address`.
     #[serde(default)]
     pub reachable: String,
     /// How long ago it was last confirmed, in seconds.

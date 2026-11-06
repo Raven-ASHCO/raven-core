@@ -27,7 +27,8 @@ answers. It is not a Raven wire: no Raven peer ever sees these bytes (§13).
 | `V6_PINHOLE_PRODUCTION_ENABLED` | PCP MAP pinholes for the egress global IPv6 address (needs the gate above) | also `RAVEN_LAB_V6_PINHOLE=1` |
 
 Both gates sit on the p2p carrier (`P2P_PRODUCTION_ENABLED`). With the gates closed the endpoint
-keeps today's UPnP-IGD behaviour byte for byte. The harness switches
+keeps today's UPnP-IGD behaviour, except that a UPnP mapping is used only at an IP seen from
+outside (§9.1). The harness switches
 `RAVEN_LAB_PORTMAP_GATEWAY` (a fake gateway's `IP:PORT`) and `RAVEN_LAB_PORTMAP_LIFETIME`
 (8..=7200 s) are read only in a debug build with the lab unlock. While
 `RAVEN_LAB_PORTMAP_GATEWAY` names the router, UPnP-IGD never runs (its SSDP search would reach
@@ -134,9 +135,9 @@ about the seed, another profile's nonces differ, and so do another router's (§1
 - **Probe.** A PCP ANNOUNCE and a NAT-PMP external address request go out together at 0, 250,
   750 and 1750 ms; the probe ends at 3750 ms. A version-2 answer means PCP. A NAT-PMP-only
   answer (§4) means NAT-PMP at once; a successful NAT-PMP answer with no PCP answer means
-  NAT-PMP 250 ms after it (a PCP answer in that time wins). Silence starts UPnP-IGD for IPv4, or
-  the optional IGDv2 pinhole path for IPv6 (§11). IPv6 probes with PCP only. Mappings wanted
-  during the probe are asked when it ends.
+  NAT-PMP 250 ms after it (a PCP answer in that time wins). Silence starts UPnP-IGD for IPv4 (its
+  mappings held as §9.1 says), or the optional IGDv2 pinhole path for IPv6 (§11). IPv6 probes
+  with PCP only. Mappings wanted during the probe are asked when it ends.
   - **Deviation:** RFC 6887 §8.1.1 retransmits after an initial 3 s, and RFC 6886 §3.1 after
     250 ms doubling up to 9 times. The probe uses the short schedule above for both, so a node
     on a network without a mapping router falls back to UPnP within 4 s. Mapping requests and
@@ -206,6 +207,37 @@ gone.
 - A confirmed mapping becomes the listen address `/ip4/EXT/tcp/PORT` or
   `/ip4/EXT/udp/PORT/quic-v1`, and for an IPv6 pinhole `/ip6/ADDR/tcp/PORT` or
   `/ip6/ADDR/udp/PORT/quic-v1`.
+- The external IPv4 address of a NAT-PMP or PCP answer is told to contacts (route hints DIRECT)
+  only once a verified contact or a relay the node holds a slot on saw the node at that IP
+  (INET-STUN-1; RAVEN_ROUTE_HINTS_V1 §6). It is confirmed as an external address as soon as
+  the router answers, so libp2p Identify names it and hole punching offers it before that
+  sighting; only UPnP-IGD mappings wait for it there too (§9.1).
+
+### 9.1 UPnP-IGD mappings (STRANGER-UPNP-2)
+
+UPnP-IGD answers are not authenticated: libp2p-upnp takes the first answer to its SSDP search,
+from anyone on the network, and the external IPv4 address that "router" names (it checks only
+that the address is global). So a UPnP mapping, the endpoint's and the friend relay's alike, is
+held until its IPv4 address is one a verified contact or a relay the node holds a slot on saw
+the node at, on a connection the node dialled directly at an IP no DNS answer gave, within 24
+hours and since the last network change (the auto-reach sighting, `autoreach::seen_ip`;
+RAVEN_ROUTE_HINTS_V1 §6). The sighting vouches for the IP only: the mapping's port is the
+listen port libp2p-upnp asked for, and is not checked. Only then is it used: confirmed
+as an external address (hole-punch candidates, Identify, relay reservations) and reported (the
+legacy `upnp` state `mapped <port>`, reach class `mapped`). Until then it is not confirmed and
+not reported (the state stays `on`), and its end, or the end of the listen address it maps,
+drops it unheard. With no sighting nothing is used (fail closed); an IPv6 UPnP address never
+is. A mapping once used stays used until libp2p-upnp ends it: its external address is fixed when
+the gateway is found, and a network change builds a new endpoint. The friend relay names its
+UPnP addresses, and sets CONFIRMED from them, only while the sighting stands
+(RAVEN_ROUTE_HINTS_V1 §11.1), and a mapping alone never stamps its `confirmed_at_ms`.
+
+Still open (STRANGER-UPNP-1): the SSDP answer's source and its LOCATION host are not checked
+against the default router, and the device description is read whole and parsed before Raven
+sees anything (igd-next, through libp2p-upnp, offers no hook for either). A stranger who names
+the node's real public IP can still claim a mapping the router never made: contacts then dial a
+port that reaches nothing or, where the stranger had the router forward that port to a host of
+its own, that host.
 
 ## 10. IPv6 pinholes
 
