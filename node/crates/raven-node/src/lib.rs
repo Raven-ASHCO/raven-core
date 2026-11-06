@@ -6,6 +6,16 @@
 //! [`main_entry`]) and, with the `embedded` feature, a node inside the
 //! caller's own process (`embedded`: the iOS app, docs/IOS.md).
 
+// The lab switches of the node (`RAVEN_LAB_*`, the locked-file backends) are
+// read only with `debug_assertions`, and a release profile can switch that
+// on. Such a build stops here: this library is built with every program of
+// the package (security review 2026-11, DEP-3; raven-core checks the same
+// for itself).
+const _: () = assert!(
+    !(cfg!(debug_assertions) && matches!(raven_core::BUILD_PROFILE.as_bytes(), b"release")),
+    "debug assertions in a release build open the lab gates"
+);
+
 /// Every line raven-node writes to its log starts with its UTC time
 /// ([`netutil::log_line`]): a failed delivery has to be matched to a
 /// friend's report (E1). It shadows the standard `eprintln!` in every module

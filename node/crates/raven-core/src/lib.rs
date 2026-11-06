@@ -4,6 +4,28 @@
 //! Content sealing: authenticated ChaCha20-Poly1305 interim path with clear hooks for
 //! full ATSAM hybrid+ratchet (see `protocol/ATSAM_PRIMITIVE_MAPPING_V1.md`).
 
+/// Cargo's profile of this build, as build.rs passes on Cargo's `PROFILE`:
+/// "release" for the release profile (and a profile that inherits it),
+/// "debug" otherwise.
+pub const BUILD_PROFILE: &str = env!("RAVEN_BUILD_PROFILE");
+
+// Every lab switch reader (`p2p_gate::lab_flag`, `lab_value` and
+// `lab_switch`, `pair_init::lab_test_a_enabled`, the locked-file backends of
+// the key stores) is live only under `debug_assertions`, and a release
+// profile can switch that on (`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`,
+// `RUSTFLAGS=-Cdebug-assertions`, a per-package profile override). Such a
+// build stops here, so no release build honours a lab switch (security
+// review 2026-11, DEP-3); ash and raven-node, with lab switches of their own,
+// check the same. cargo-fuzz builds the release profile with debug
+// assertions and `--cfg fuzzing` (node/fuzz, which ships nothing): that build
+// is let through, and the release scripts refuse `--cfg fuzzing`
+// (scripts/release/cargo_config_guard.sh). Checked by
+// node/scripts/release_debug_assertions_check.sh.
+const _: () = assert!(
+    !(cfg!(debug_assertions) && !cfg!(fuzzing) && matches!(BUILD_PROFILE.as_bytes(), b"release")),
+    "debug assertions in a release build open the lab gates"
+);
+
 pub mod ack;
 pub mod address;
 pub mod advisory;

@@ -11,6 +11,9 @@ fn main() {
         println!("cargo:rustc-env=RAVEN_BUILD_TARGET={target}");
     }
     println!("cargo:rustc-env=RAVEN_BUILD_PROFILE={profile}");
+    // cargo-fuzz sets `--cfg fuzzing`; lib.rs lets that build have debug
+    // assertions in the release profile (security review 2026-11, DEP-3).
+    println!("cargo::rustc-check-cfg=cfg(fuzzing)");
 
     // Primary release hold. Defence in depth: full_braid_durable_lab/mod.rs
     // refuses to compile without debug assertions, libsqlite3-sys-raven holds

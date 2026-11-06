@@ -149,13 +149,15 @@ jobs:
       # its own, the Linux, macOS and Windows jobs each run both release inert
       # test sets, and every release gate step survives a failed step before
       # it (static; the self-test plants faults it must catch). The inert test
-      # script runs against a stand-in cargo: nothing is built.
+      # script runs against a stand-in cargo: nothing is built. So does the
+      # debug assertions check of DEP-3 (its real run is in rust-linux).
       - name: Release gate steps on every OS (check_ci_release_gates.py, release_inert_tests.sh)
         run: |
           set -euo pipefail
           python3 -I scripts/check_ci_release_gates.py --self-test
           python3 -I scripts/check_ci_release_gates.py
           bash node/scripts/release_inert_tests.sh --self-test
+          bash node/scripts/release_debug_assertions_check.sh --self-test
       # The secret scanner must still see a real seed after many allow-listed RFC 8032
       # test seeds, and the O6 IPC-surface guard must fire on an injected forbidden op
       # (both used to be silent no-ops). Neither writes anything. The Keychain guard
@@ -706,6 +708,15 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: bash scripts/release_inert_tests.sh pinned
+      # Security review 2026-11 (DEP-3): the lab switch readers are live only
+      # under debug_assertions, so raven-core, ash and raven-node each refuse
+      # to compile in the release profile with debug assertions on (a const
+      # assert in each src/lib.rs), and a plain release check still compiles.
+      # cargo check only: no program is made or run.
+      - name: release profile with debug assertions does not compile (DEP-3)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/release_debug_assertions_check.sh check
       - name: libp2p swarm smoke
         run: ./scripts/libp2p_swarm_smoke.sh
       - name: bootstrap manual-peer smoke

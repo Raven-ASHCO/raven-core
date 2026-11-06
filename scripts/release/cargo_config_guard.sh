@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Sourced by scripts/release/build_reproducible.sh (Phase 6 review
 # lock-updates-local-5; security review 2026-11 DEP-1), and for
-# raven_no_outer_cargo_config by scripts/release/make-linux.sh. The
-# reproducible build runs under /tmp, which every local account can write.
+# raven_no_outer_cargo_config by scripts/release/make-linux.sh; for
+# raven_no_release_debug_assertions (DEP-3) by both and by
+# node/scripts/ios/build_xcframework.sh. The reproducible build runs under
+# /tmp, which every local account can write.
 # What another account leaves there must never run as the builder or
 # change the binaries whose hashes are signed:
 #
@@ -46,6 +48,18 @@
 #       here), that rustc and cargo are that version (a rustc that is not
 #       rustup's ignores the variable). Returns 1, saying what it found,
 #       otherwise.
+#   raven_no_release_debug_assertions
+#       Returns 1, naming each one on stderr, when the environment switches
+#       debug assertions on for a release build: they open the lab gates
+#       (security review 2026-11, DEP-3; raven-core, ash and raven-node also
+#       refuse to compile then). That is a CARGO_PROFILE_RELEASE_* variable
+#       for debug assertions that is not false, or a flag in RUSTFLAGS,
+#       CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS or a
+#       CARGO_TARGET_<triple>_RUSTFLAGS that names debug assertions or the
+#       fuzzing cfg (raven-core lets a cargo-fuzz build through). 0
+#       otherwise. Reads only. scripts/release/make-linux.sh,
+#       build_reproducible.sh and (for a release library)
+#       node/scripts/ios/build_xcframework.sh call it before they build.
 
 raven_no_outer_cargo_config() {
   local dir="$1" home="${2:-}" found=0 name
@@ -176,4 +190,35 @@ raven_pin_toolchain() {
         ;;
     esac
   done
+}
+
+raven_no_release_debug_assertions() {
+  local name value flag found=0
+  local -a flags
+  for name in $(compgen -e); do
+    case "$name" in
+      CARGO_PROFILE_RELEASE_*DEBUG_ASSERTIONS)
+        if [[ "${!name}" != false ]]; then
+          echo "debug assertions switched on for the release build: $name=${!name}" >&2
+          found=1
+        fi
+        ;;
+      RUSTFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_BUILD_RUSTFLAGS | CARGO_TARGET_*_RUSTFLAGS)
+        # CARGO_ENCODED_RUSTFLAGS separates its flags with 0x1f.
+        value="${!name}"
+        value="${value//$'\037'/ }"
+        flags=()
+        read -r -a flags <<<"$value" || true
+        for flag in ${flags[@]+"${flags[@]}"}; do
+          case "$flag" in
+            *debug-assertions* | *debug_assertions* | fuzzing | fuzzing=* | --cfg=fuzzing | --cfg=fuzzing=*)
+              echo "a flag in $name switches the lab gates on in the release build: $flag" >&2
+              found=1
+              ;;
+          esac
+        done
+        ;;
+    esac
+  done
+  [[ "$found" -eq 0 ]]
 }

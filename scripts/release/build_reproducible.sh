@@ -210,6 +210,12 @@ if ! raven_no_outer_cargo_config "$ROOT" "$CARGO_HOME"; then
   echo "build_reproducible: a cargo configuration outside the source would change this build; remove it (and find out who put it there), then build again" >&2
   exit 1
 fi
+# No debug assertions from the environment: they open the lab gates
+# (security review 2026-11, DEP-3; the crates refuse to compile then too).
+if ! raven_no_release_debug_assertions; then
+  echo "build_reproducible: unset the debug assertion settings named above, then build again" >&2
+  exit 1
+fi
 # The same packages as build_unsigned.sh; no features.
 (cd "$NODE" && cargo build --locked --release -p raven-node -p ash -p raven-swarm)
 if ! raven_no_outer_cargo_config "$ROOT" "$CARGO_HOME"; then

@@ -49,7 +49,13 @@ renewal, the hybrid ratchet) is compiled in but held off by `*_PRODUCTION_ENABLE
 release build never reads the `RAVEN_LAB_*` switches that open them in debug builds. CI checks this
 on Linux, macOS and Windows (the "lab switches inert in release" and "production flags as pinned"
 steps, both from `node/scripts/release_inert_tests.sh`), in steps that still run when a step before
-them fails; the RustSec audit runs in a job of its own, so an advisory cannot skip them.
+them fails; the RustSec audit runs in a job of its own, so an advisory cannot skip them. Every lab
+switch reader hangs on `debug_assertions`, which a release profile can switch on, so a release build
+with debug assertions does not compile: `raven-core`, `ash` and `raven-node` each hold a const assert
+against it in `src/lib.rs` (only the cargo-fuzz build of `raven-core` is let through), the release
+scripts refuse the flags and profile settings that switch them on before they build, and CI checks
+both (`node/scripts/release_debug_assertions_check.sh` on Linux,
+`scripts/release/cargo_config_guard_selftest.sh`).
 
 ## 2. Components, in priority order
 

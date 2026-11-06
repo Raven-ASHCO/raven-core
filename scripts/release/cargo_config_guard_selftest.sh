@@ -222,5 +222,51 @@ rc=0
 [[ "$rc" -eq 2 && ! -s "$seen" ]] \
   || check "a manifest toolchain that is not a plain version must stop reproduce_check.sh before rustc (rc=$rc)"
 
+# Security review 2026-11 (DEP-3): debug assertions in a release build open
+# the lab gates, so the release scripts refuse every way the environment
+# switches them on (and nothing else), and each script asks before its
+# cargo release build.
+da_case() {
+  # da_case <expected rc> <what> [VAR=value...], in a clean environment.
+  local want="$1" what="$2" rc=0 v a
+  shift 2
+  (
+    for v in $(compgen -e); do
+      case "$v" in
+        RUSTFLAGS | CARGO_ENCODED_RUSTFLAGS | CARGO_BUILD_RUSTFLAGS | CARGO_TARGET_*_RUSTFLAGS | CARGO_PROFILE_*) unset "$v" ;;
+      esac
+    done
+    for a in "$@"; do export "${a?}"; done
+    raven_no_release_debug_assertions
+  ) 2>"$D/err" || rc=$?
+  [[ "$rc" -eq "$want" ]] || check "$what (rc=$rc, want $want)"
+}
+da_case 0 "a release environment without debug assertion settings must pass"
+da_case 0 "path rewrites in RUSTFLAGS must pass" "RUSTFLAGS=--remap-path-prefix=/home/b=~ -Clink-arg=-Wl,-S"
+da_case 0 "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false must pass" CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false
+da_case 0 "a dev profile setting must pass" CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true
+da_case 1 "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true must stop it" CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true
+da_case 1 "a per package override must stop it" CARGO_PROFILE_RELEASE_PACKAGE_ASH_DEBUG_ASSERTIONS=true
+da_case 1 "-Cdebug-assertions in RUSTFLAGS must stop it" "RUSTFLAGS=-Copt-level=3 -Cdebug-assertions"
+da_case 1 "-C debug-assertions=on in RUSTFLAGS must stop it" "RUSTFLAGS=-C debug-assertions=on"
+da_case 1 "--cfg debug_assertions must stop it" "CARGO_BUILD_RUSTFLAGS=--cfg debug_assertions"
+da_case 1 "--cfg fuzzing (raven-core lets a cargo-fuzz build through) must stop it" \
+  "CARGO_TARGET_AARCH64_APPLE_IOS_RUSTFLAGS=--cfg fuzzing"
+da_case 1 "--cfg=fuzzing must stop it" "RUSTFLAGS=--cfg=fuzzing"
+da_case 1 "a flag in CARGO_ENCODED_RUSTFLAGS must stop it" \
+  "CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=/a=/b$(printf '\037')-Cdebug-assertions"
+grep -q 'CARGO_ENCODED_RUSTFLAGS' "$D/err" || check "the refusal must name the variable"
+for script in "$HERE/make-linux.sh" "$HERE/build_reproducible.sh" "$HERE/../../node/scripts/ios/build_xcframework.sh"; do
+  python3 -I - "$script" <<'PY' || check "$(basename "$script") must call raven_no_release_debug_assertions before its cargo release build"
+import re, sys
+
+lines = [l for l in open(sys.argv[1]).read().splitlines() if not l.lstrip().startswith("#")]
+guard = [i for i, l in enumerate(lines) if re.search(r"(^|[\s;&|(!])raven_no_release_debug_assertions([\s;&|)]|$)", l)]
+# A cargo build or rustc command (its next word a flag), not a word list.
+build = [i for i, l in enumerate(lines) if re.search(r"(^|[\s;&|(])cargo (build|rustc) --", l)]
+sys.exit(0 if guard and build and guard[0] < build[0] else 1)
+PY
+done
+
 [[ "$failed" -eq 0 ]] || exit 1
 echo "CARGO_CONFIG_GUARD_SELFTEST_OK"

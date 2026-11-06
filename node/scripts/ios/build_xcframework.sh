@@ -21,6 +21,9 @@
 #
 # A debug build honours the lab switches and the file-backed key stores
 # (tests, the simulator); a release build refuses both, as on the desktop.
+# So a release build stops before it starts when the environment switches
+# debug assertions on (RUSTFLAGS, CARGO_PROFILE_RELEASE_*; security review
+# 2026-11, DEP-3), and raven-core refuses to compile then too.
 #
 # A release library keeps no build-machine path (and so no user name) in
 # its strings: the panic locations of the dependencies name their source
@@ -76,6 +79,14 @@ for t in "${TARGETS[@]}"; do
   grep -qx "$t" <<<"$installed" \
     || fail "the Rust target $t is missing: rustup target add ${TARGETS[*]}"
 done
+
+# ── Debug assertions ─────────────────────────────────────────────────────────
+if [[ "$PROFILE" == release ]]; then
+  # shellcheck source=scripts/release/cargo_config_guard.sh
+  source "$ROOT/scripts/release/cargo_config_guard.sh"
+  raven_no_release_debug_assertions \
+    || fail "unset the debug assertion settings named above for a release library"
+fi
 
 # ── Build-machine paths ──────────────────────────────────────────────────────
 REMAP="${RAVEN_REMAP_PATHS:-}"

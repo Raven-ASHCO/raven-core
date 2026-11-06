@@ -12,7 +12,11 @@ stays true:
   2. the Linux, macOS and Windows jobs each run both release inert test sets
      (node/scripts/release_inert_tests.sh switches and pinned);
   3. every release gate step runs with if: ${{ !cancelled() }}, so a failed
-     step before it does not skip it.
+     step before it does not skip it;
+  4. the Linux job checks that raven-core, ash and raven-node refuse the
+     release profile with debug assertions on
+     (node/scripts/release_debug_assertions_check.sh check, DEP-3; the same
+     Rust code on every OS, and cargo check only, so Linux alone).
 
 The workflow is read line by line (GitHub layout: jobs two spaces in, steps
 six), so no YAML library is needed; shell comments in run blocks do not
@@ -37,8 +41,9 @@ WORKFLOW = REPO / ".github" / "workflows" / "raven-serverless.yml"
 OS_JOBS = ("rust-linux", "rust-macos", "rust-windows")
 AUDIT = "audit_active_dependencies.py"
 INERT_RUNS = ("release_inert_tests.sh switches", "release_inert_tests.sh pinned")
+LINUX_RUNS = ("release_debug_assertions_check.sh check",)
 # A step whose run text holds one of these is a release gate step.
-GATE_MARKERS = INERT_RUNS + (
+GATE_MARKERS = INERT_RUNS + LINUX_RUNS + (
     "sqlcipher_release_feature_audit.sh",
     "release_tool_feature_audit.sh",
     "unsafe-demo-crypto is forbidden in release builds",
@@ -131,7 +136,7 @@ def problems_in(text: str) -> List[str]:
         if job not in jobs:
             problems.append(f"{job}: the job is missing")
             continue
-        for run in INERT_RUNS:
+        for run in INERT_RUNS + (LINUX_RUNS if job == "rust-linux" else ()):
             if not any(step.runs(run) for step in jobs[job]):
                 problems.append(f"{job}: no step runs {run}")
     for job, steps in jobs.items():
@@ -147,7 +152,7 @@ def problems_in(text: str) -> List[str]:
 
 def sample(audit_in_linux: bool = False, extra_audit_step: bool = False, windows_pinned: bool = True,
            inert_if: str = "${{ !cancelled() }}", gate_if: str = "${{ !cancelled() }}",
-           commented_switches: bool = False) -> str:
+           commented_switches: bool = False, linux_da_check: bool = True) -> str:
     """A small workflow in the layout of raven-serverless.yml, with one planted fault at a time."""
     audit_step = (
         "      - name: RustSec active dependency audit\n"
@@ -182,23 +187,33 @@ def sample(audit_in_linux: bool = False, extra_audit_step: bool = False, windows
             )
         if job == "rust-linux":
             text += f"      - name: SQLCipher gate\n        if: {gate_if}\n        run: bash scripts/sqlcipher_release_feature_audit.sh\n"
+            if linux_da_check:
+                text += (
+                    "      - name: debug assertions\n        if: ${{ !cancelled() }}\n"
+                    "        run: bash scripts/release_debug_assertions_check.sh check\n"
+                )
     text += "\n  later-job:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo done\n"
     return text
 
 
-def self_test() -> List[str]:
-    failures = []
-    if problems_in(sample()):
-        failures.append(f"a correct layout must pass, got {problems_in(sample())}")
-    planted = {
+def planted_faults() -> Dict[str, str]:
+    """One workflow per fault the checks must catch."""
+    return {
         "the audit inside the Linux job": sample(audit_in_linux=True),
         "another run step in the audit job": sample(extra_audit_step=True),
         "no pinned run on Windows": sample(windows_pinned=False),
         "an inert step without !cancelled()": sample(inert_if="success()"),
         "a gate step without !cancelled()": sample(gate_if=""),
         "the switches run only in a shell comment on Windows": sample(commented_switches=True),
+        "no debug assertions check on Linux": sample(linux_da_check=False),
     }
-    for name, text in planted.items():
+
+
+def self_test() -> List[str]:
+    failures = []
+    if problems_in(sample()):
+        failures.append(f"a correct layout must pass, got {problems_in(sample())}")
+    for name, text in planted_faults().items():
         if not problems_in(text):
             failures.append(f"{name} was not caught")
     return failures
@@ -218,7 +233,7 @@ def main() -> int:
             print(f"FAIL: self test: {failure}", file=sys.stderr)
         if failures:
             return 1
-        print("PASS: self test: a correct layout passes and 6 planted faults are caught")
+        print(f"PASS: self test: a correct layout passes and {len(planted_faults())} planted faults are caught")
         return 0
     try:
         text = args.workflow.read_text(encoding="utf-8")
@@ -231,8 +246,9 @@ def main() -> int:
     if problems:
         return 1
     print(
-        "PASS: the RustSec audit runs in a job of its own, and the Linux, macOS and Windows jobs "
-        "each run both release inert test sets in steps that survive an earlier failure"
+        "PASS: the RustSec audit runs in a job of its own, the Linux, macOS and Windows jobs "
+        "each run both release inert test sets, and Linux the debug assertions check, in steps "
+        "that survive an earlier failure"
     )
     return 0
 
