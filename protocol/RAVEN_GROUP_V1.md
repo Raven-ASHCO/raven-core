@@ -179,9 +179,14 @@ verifies under `from`.
 - A copy that did not come straight from its author is never forwarded.
 
 **`receipt`**: when `to` is the receiver: verified under `from` (a member),
-it marks `from` as having message `of`. Otherwise, only when `P` = `from`
-and `to` is in `relay`, the roster and the receiver's friends: forwarded to
-`to` with `relay` = `[]`, once per `(to, of, from)`.
+it marks `from` as having message `of`. Otherwise, only when `P` = `from`,
+`to` is in `relay`, the roster and the receiver's friends, and the receiver
+itself forwarded message (`to`, `of`) to `from`: forwarded to `to` with
+`relay` = `[]`, once per `(to, of, from)`. A receipt for a copy the
+receiver never forwarded to its signer is dropped. A receipt passed on
+counts as one of `from`'s forwards that may wait (at most 16 per group,
+above; more are not taken on), so one member's receipts cannot push out
+the receiver's other pending copies.
 
 **`leave`**: taken by the admin only, from a current member, verified under
 `from`, and only when its `epoch` is the roster epoch the admin holds (an

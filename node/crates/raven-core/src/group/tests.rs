@@ -891,8 +891,18 @@ fn a_receipt_reaches_the_author_through_the_forwarder() {
         relay: vec![key(2)],
     };
     receipt.sign(&id(3));
-    // The forwarder passes it on to the author, once.
-    let mut admin = joined(1, &state);
+    // The forwarder passed the message on to 3 (that copy parked), so it
+    // passes the receipt on to the author, once.
+    let forwarder = || {
+        let mut admin = joined(1, &state);
+        let m = msg_with_id(2, 1, "x", [2; 16], &[3]);
+        let m = GroupFrame::Msg(m);
+        apply(&mut admin, &key(1), &key(2), &m, &friends(&[2, 3]), NOW);
+        assert_eq!(intents_of(&admin, INTENT_SEND).len(), 1, "the forward");
+        admin.groups[0].intents.clear();
+        admin
+    };
+    let mut admin = forwarder();
     let frame = GroupFrame::Receipt(receipt.clone());
     apply(&mut admin, &key(1), &key(3), &frame, &friends(&[2, 3]), NOW);
     apply(
@@ -907,7 +917,7 @@ fn a_receipt_reaches_the_author_through_the_forwarder() {
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].to, hex::encode(key(2)));
     // Not from its signer: not passed on.
-    let mut other = joined(1, &state);
+    let mut other = forwarder();
     apply(&mut other, &key(1), &key(2), &frame, &friends(&[2, 3]), NOW);
     assert!(intents_of(&other, INTENT_SEND).is_empty());
     // The author marks member 3 delivered.
@@ -3256,4 +3266,165 @@ fn an_unreadable_block_list_takes_nothing_and_sends_nothing() {
         send(d, &id(3), &gid(), "after", NOW + 4),
         Err(GroupError::Store(_))
     ));
+}
+
+/// A receipt `signer` signed for message `of` of `author`, asking its
+/// carrier to pass it on to `relay`.
+fn receipt_by(signer: u8, author: u8, of: [u8; 16], relay: &[u8]) -> GroupReceipt {
+    let mut r = GroupReceipt {
+        group: gid(),
+        of,
+        epoch: 1,
+        from: [0; 32],
+        to: key(author),
+        at_ms: NOW,
+        sig: [0; 64],
+        relay: relay.iter().map(|k| key(*k)).collect(),
+    };
+    r.sign(&id(signer));
+    r
+}
+
+/// The 16-byte id of test message `n`.
+fn nth_id(n: usize) -> [u8; 16] {
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&(n as u64 + 1).to_be_bytes());
+    id
+}
+
+/// G6: a receipt is passed on only for a copy this profile forwarded to its
+/// signer: a member's receipts for messages never forwarded to it make no
+/// intent (and so cannot push the sync answer out), and a receipt for a copy
+/// that was forwarded goes on once.
+#[test]
+fn a_receipt_is_passed_on_only_for_a_copy_this_profile_forwarded() {
+    let state = roster(1, &[2, 3, 4], 1);
+    let mut admin = joined(1, &state);
+    let me = key(1);
+    let mine = friends(&[2, 3, 4]);
+    let sync = GroupFrame::Sync(GroupSync {
+        group: state.group,
+        epoch: 0,
+    });
+    apply(&mut admin, &me, &key(2), &sync, &mine, NOW);
+    let answer = intents_of(&admin, INTENT_SEND)[0].id.clone();
+    for i in 0..store::MAX_INTENTS_PER_GROUP {
+        let r = receipt_by(3, 4, nth_id(i), &[4]);
+        apply(
+            &mut admin,
+            &me,
+            &key(3),
+            &GroupFrame::Receipt(r),
+            &mine,
+            NOW,
+        );
+        admin.enforce_caps();
+    }
+    let g = &admin.groups[0];
+    assert!(
+        !g.intents.iter().any(|i| i.to == hex::encode(key(4))),
+        "none is passed on"
+    );
+    assert!(
+        g.intents.iter().any(|i| i.id == answer),
+        "the sync answer stays"
+    );
+    let m = msg_with_id(2, 1, "for 4", [0x42; 16], &[4]);
+    apply(&mut admin, &me, &key(2), &GroupFrame::Msg(m), &mine, NOW);
+    let r = GroupFrame::Receipt(receipt_by(4, 2, [0x42; 16], &[2]));
+    apply(&mut admin, &me, &key(4), &r, &mine, NOW);
+    apply(&mut admin, &me, &key(4), &r, &mine, NOW + 1);
+    let passed = intents_of(&admin, INTENT_SEND)
+        .into_iter()
+        .filter(|i| i.to == hex::encode(key(2)))
+        .filter(|i| {
+            matches!(
+                parse_frame(i.frame.as_bytes()),
+                Some(GroupFrame::Receipt(_))
+            )
+        })
+        .count();
+    assert_eq!(passed, 1, "a receipt for a copy forwarded goes on, once");
+}
+
+/// G6: receipts passed on count with their signer's forwards: at most
+/// [`store::MAX_FORWARDS_PER_AUTHOR`] wait, and they are the first to go
+/// when the intents are over their cap.
+#[test]
+fn receipts_passed_on_count_with_their_signers_forwards() {
+    let state = roster(1, &[2, 3, 4], 1);
+    let mut admin = joined(1, &state);
+    let me = key(1);
+    let mine = friends(&[2, 3, 4]);
+    let n = store::MAX_FORWARDS_PER_AUTHOR + 4;
+    // The admin forwarded n messages of 2 to 4 (each parked, so none waits).
+    for i in 0..n {
+        let m = msg_with_id(2, 1, "x", nth_id(i), &[4]);
+        apply(&mut admin, &me, &key(2), &GroupFrame::Msg(m), &mine, NOW);
+        admin.groups[0].intents.clear();
+    }
+    let sync = GroupFrame::Sync(GroupSync {
+        group: state.group,
+        epoch: 0,
+    });
+    apply(&mut admin, &me, &key(3), &sync, &mine, NOW);
+    let answer = intents_of(&admin, INTENT_SEND)[0].id.clone();
+    for i in 0..n {
+        let r = receipt_by(4, 2, nth_id(i), &[2]);
+        apply(
+            &mut admin,
+            &me,
+            &key(4),
+            &GroupFrame::Receipt(r),
+            &mine,
+            NOW,
+        );
+    }
+    let signer = hex::encode(key(4));
+    let by_4 = |file: &GroupsFile| {
+        file.groups[0]
+            .intents
+            .iter()
+            .filter(|i| i.author == signer)
+            .count()
+    };
+    assert_eq!(by_4(&admin), store::MAX_FORWARDS_PER_AUTHOR);
+    let fill = store::MAX_INTENTS_PER_GROUP + 1 - admin.groups[0].intents.len();
+    for _ in 0..fill {
+        admin.groups[0]
+            .intents
+            .push(send_intent_for_tests(&key(3), NOW));
+    }
+    admin.enforce_caps();
+    assert!(
+        admin.groups[0].intents.iter().any(|i| i.id == answer),
+        "a receipt passed on goes first, not the older answer"
+    );
+    assert_eq!(by_4(&admin), store::MAX_FORWARDS_PER_AUTHOR - 1);
+}
+
+/// G7: a copy carried by a member who is not its author is never
+/// forwarded, and neither is one carried by a non-member (protocol §4.2:
+/// a forward only when the carrier is the author), whatever its relay list
+/// says: a removed member keeping old messages cannot have a member pass
+/// them on.
+#[test]
+fn a_non_member_carriers_relay_list_is_ignored() {
+    let me = key(3);
+    let mut file = joined(3, &roster(1, &[2, 3, 4], 1));
+    let m = msg(2, 1, "kept by a removed member", &[4]);
+    apply(
+        &mut file,
+        &me,
+        &key(9),
+        &GroupFrame::Msg(m),
+        &friends(&[4, 9]),
+        NOW,
+    );
+    assert_eq!(group(&file).messages.len(), 1, "its author signed it");
+    assert!(
+        group(&file).intents.is_empty(),
+        "no forward and no receipt: {:?}",
+        group(&file).intents
+    );
 }

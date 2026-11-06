@@ -438,23 +438,29 @@ fn apply_msg(
     });
     g.updated_ms = now_ms;
     let mut done = Applied::change(false);
-    // A signed receipt goes only to a carrier that is a member (never a
-    // membership oracle for anyone else holding an old message).
-    if forwarded && roster.has(peer) {
-        // Tell the author through the member that passed it on.
-        g.push_intent(Intent {
-            id: new_intent_id(),
-            kind: INTENT_RECEIPT.into(),
-            to: hex::encode(msg.from),
-            frame: String::new(),
-            of: id.clone(),
-            via: hex::encode(peer),
-            line_of: String::new(),
-            made_ms: now_ms,
-            tries: 0,
-            author: String::new(),
-        });
-        done.work = true;
+    if forwarded {
+        // A copy that did not come straight from its author is never
+        // forwarded, whatever its relay list says (a carrier that is no
+        // member, such as a removed member keeping old messages, cannot
+        // have a member pass them on). A signed receipt goes only to a
+        // carrier that is a member (never a membership oracle for anyone
+        // else holding an old message).
+        if roster.has(peer) {
+            // Tell the author through the member that passed it on.
+            g.push_intent(Intent {
+                id: new_intent_id(),
+                kind: INTENT_RECEIPT.into(),
+                to: hex::encode(msg.from),
+                frame: String::new(),
+                of: id.clone(),
+                via: hex::encode(peer),
+                line_of: String::new(),
+                made_ms: now_ms,
+                tries: 0,
+                author: String::new(),
+            });
+            done.work = true;
+        }
     } else {
         // Only the author's own word asks for a forward; one hop.
         let mut copy = msg.clone();
@@ -534,19 +540,31 @@ fn apply_receipt(
     {
         return dropped(file);
     }
-    let marker = format!(
-        "r:{}/{}:{}",
-        hex::encode(r.to),
-        hex::encode(r.of),
-        hex::encode(r.from)
-    );
+    let to = hex::encode(r.to);
+    let of = hex::encode(r.of);
+    let signer = hex::encode(r.from);
+    // Only for a copy this profile forwarded to its signer (the forward's
+    // done marker, [`apply_msg`]): a member's receipts for messages it
+    // never got from here are not queued in this profile's name.
+    if !g.is_done(&format!("{to}/{of}:{signer}")) {
+        return dropped(file);
+    }
+    let marker = format!("r:{to}/{of}:{signer}");
     if g.is_done(&marker) {
+        return Applied::default();
+    }
+    // A receipt passed on counts with its signer's forwards
+    // ([`store::MAX_FORWARDS_PER_AUTHOR`]); more are not taken on, so one
+    // member's receipts cannot evict every other pending intent.
+    if g.intents.iter().filter(|i| i.author == signer).count() >= store::MAX_FORWARDS_PER_AUTHOR {
         return Applied::default();
     }
     g.mark_done(marker);
     let mut copy = r.clone();
     copy.relay.clear();
-    g.push_intent(send_intent(&r.to, &GroupFrame::Receipt(copy), None, now_ms));
+    let mut intent = send_intent(&r.to, &GroupFrame::Receipt(copy), None, now_ms);
+    intent.author = signer;
+    g.push_intent(intent);
     Applied::change(true)
 }
 

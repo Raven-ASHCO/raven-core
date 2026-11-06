@@ -100,12 +100,14 @@ pub const MAX_UNKNOWN_HELD_BYTES: usize = 256 * 1024;
 pub const MAX_HELD_BYTES_TOTAL: usize = 1024 * 1024;
 pub const MAX_INTENTS_PER_GROUP: usize = 512;
 /// Intents across groups, by the bytes they take in the store. Over it, the
-/// admin whose groups hold the most loses first: forwards first, then the
-/// oldest (a copy of an own message that goes fails its line).
+/// admin whose groups hold the most loses first: forwards (and receipts
+/// passed on) first, then the oldest (a copy of an own message that goes
+/// fails its line).
 pub const MAX_INTENT_BYTES_TOTAL: usize = 4 * 1024 * 1024;
-/// Forwards of one author's messages that may wait per group (one member's
-/// forward requests cannot evict every other pending intent): 15 authors at
-/// most use under half of [`MAX_INTENTS_PER_GROUP`].
+/// Forwards of one author's messages that may wait per group, receipts
+/// that member signed and this profile passes on counted with them (one
+/// member's forward requests and receipts cannot evict every other pending
+/// intent): 15 authors at most use under half of [`MAX_INTENTS_PER_GROUP`].
 pub const MAX_FORWARDS_PER_AUTHOR: usize = 16;
 pub const MAX_DONE_PER_GROUP: usize = 4_096;
 /// Done markers across groups, by bytes: over it, the admin whose groups
@@ -187,7 +189,9 @@ pub struct GroupRecord {
     pub held: Vec<Held>,
     #[serde(default)]
     pub intents: Vec<Intent>,
-    /// Forwards and relayed receipts made (`<id>:<target>`, `r:<of>:<from>`).
+    /// Forwards and relayed receipts made (`<author>/<id>:<target>`,
+    /// `r:<author>/<id>:<signer>`, keys in hex): a receipt is passed on
+    /// only for a forward made to its signer.
     #[serde(default)]
     pub done: Vec<String>,
     /// Messages received after this are unread.
@@ -272,9 +276,10 @@ pub struct Intent {
     pub made_ms: u64,
     #[serde(default)]
     pub tries: u32,
-    /// A forward's author (hex): forwards are counted per author
-    /// ([`MAX_FORWARDS_PER_AUTHOR`]) and are the first to go when the
-    /// intents are over their cap. Empty for every other intent.
+    /// A forward's author, or the signer of a receipt passed on (hex): they
+    /// are counted per key ([`MAX_FORWARDS_PER_AUTHOR`]) and are the first
+    /// to go when the intents are over their cap. Empty for every other
+    /// intent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub author: String,
 }
@@ -835,8 +840,9 @@ fn trim_intents(g: &mut GroupRecord) {
     }
 }
 
-/// The order a group's intents go in: forwards (they carry another
-/// author's message) first, then the others, each oldest first.
+/// The order a group's intents go in: forwards and receipts passed on
+/// (they carry another member's frame) first, then the others, each oldest
+/// first.
 fn intent_order(g: &GroupRecord) -> Vec<usize> {
     let (forwards, others): (Vec<usize>, Vec<usize>) =
         (0..g.intents.len()).partition(|&i| !g.intents[i].author.is_empty());
