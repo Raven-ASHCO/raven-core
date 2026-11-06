@@ -25,22 +25,29 @@
 //! phones), no exit circuits built ahead of need, a stream's BEGIN given
 //! up after [`STREAM_CONNECT_TIMEOUT`], at most [`MAX_STREAMS_PER_CIRCUIT`]
 //! streams per rendezvous circuit and an introduction rate limit sent to
-//! the introduction points.
+//! the introduction points. The service keeps at most
+//! [`MAX_RENDEZVOUS_CIRCUITS`] rendezvous circuits and closes one that went
+//! [`RENDEZVOUS_IDLE`] without a stream ([`keep_rendezvous`]).
 //! No bridges, no pluggable transports, no proof-of-work, no experimental
 //! APIs.
 
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arti_client::config::onion_service::OnionServiceConfigBuilder;
 use arti_client::config::{BoolOrAuto, TorClientConfigBuilder};
 use arti_client::{HasKind as _, IsolationToken, StreamPrefs, TorClient};
-use futures::StreamExt;
+use futures::stream::BoxStream;
+use futures::{Stream, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tor_rtcompat::PreferredRuntime;
 
 use super::proto::{self, Command, Config, ConnectReply, Event, ServiceState};
@@ -66,6 +73,18 @@ const MAX_STREAMS_PER_CIRCUIT: u32 = 8;
 /// personal service needs far fewer).
 const INTRO_RATE_PER_S: u32 = 5;
 const INTRO_BURST: u32 = 20;
+
+/// Rendezvous circuits the helper keeps at once (TOR-5): a newcomer closes
+/// the one that has gone longest without a stream, or is refused while each
+/// carries one (RAVEN_ONION_CARRIER_V1 §5). raven-node holds at most 16
+/// links, so most of them are quiet.
+const MAX_RENDEZVOUS_CIRCUITS: usize = 64;
+
+/// A rendezvous circuit that has carried no stream for this long is closed
+/// (TOR-5). A client keeps its own rendezvous circuit as long after its last
+/// use (Arti, RAVEN_ONION_CARRIER_V1 §10), so a friend's next dial still
+/// finds its circuit.
+const RENDEZVOUS_IDLE: Duration = Duration::from_secs(10 * 60);
 
 /// Events to raven-node, one writer.
 #[derive(Clone)]
@@ -400,28 +419,196 @@ async fn tor_main(
             }
         });
     }
-    // Each rendezvous circuit gets its own number, sent to raven-node after
-    // the token with each of its streams: raven-node counts its slots per
-    // circuit, so one client cannot take them all. The numbers are opaque
-    // and never reused in this life.
-    let mut requests = Box::pin(requests);
-    let mut circuits: u64 = 0;
-    while let Some(rend) = requests.next().await {
-        circuits += 1;
-        let circuit = circuits;
-        tokio::spawn(async move {
-            let Ok(mut streams) = rend.accept().await else {
-                return;
-            };
-            while let Some(request) = streams.next().await {
-                tokio::spawn(forward_stream(request, forward, token, port, circuit));
-            }
-        });
-    }
+    keep_rendezvous(Box::pin(requests), move |request, circuit| {
+        forward_stream(request, forward, token, port, circuit)
+    })
+    .await;
     // The service ended (it should not): raven-node notices nothing more
     // and restarts the helper when it stops answering.
     events.error("onion service ended");
     drop(service);
+}
+
+/// One rendezvous request as the accept loop sees it: Arti's
+/// [`tor_hsservice::RendRequest`], or a test's.
+trait Rendezvous: Send + 'static {
+    /// A request for a stream on the circuit.
+    type Request: Send + 'static;
+
+    /// Build the circuit to the client's rendezvous point: the circuit's
+    /// stream requests, or `None` if it failed. The circuit lives as long as
+    /// they and its streams are held (tor-hsservice `RendRequest::accept`).
+    fn open(self) -> impl Future<Output = Option<BoxStream<'static, Self::Request>>> + Send;
+}
+
+impl Rendezvous for tor_hsservice::RendRequest {
+    type Request = tor_hsservice::StreamRequest;
+
+    async fn open(self) -> Option<BoxStream<'static, Self::Request>> {
+        self.accept().await.ok().map(StreamExt::boxed)
+    }
+}
+
+/// The onion service's rendezvous circuits, each with its streams
+/// (`serve`). Each circuit gets its own number, sent to raven-node after the
+/// token with each of its streams: raven-node counts its slots per circuit,
+/// so one client cannot take them all. The numbers are opaque and never
+/// reused in this life.
+///
+/// Each circuit is an introduction someone made, and its client may keep it
+/// with no stream for as long as it likes (TOR-5). So at most
+/// [`MAX_RENDEZVOUS_CIRCUITS`] are kept: a newcomer closes the circuit that
+/// has gone longest without a stream, and is refused while every circuit
+/// carries one (no link in use is cut for it); and a circuit with no stream
+/// for [`RENDEZVOUS_IDLE`] is closed.
+async fn keep_rendezvous<R, F, Fut>(mut requests: impl Stream<Item = R> + Unpin, serve: F)
+where
+    R: Rendezvous,
+    F: Fn(R::Request, u64) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let mut live: BTreeMap<u64, Kept> = BTreeMap::new();
+    let mut circuits: u64 = 0;
+    while let Some(rend) = requests.next().await {
+        // Circuits that ended (their client closed them, idle, not built).
+        live.retain(|_, kept| !kept.close.is_closed());
+        if live.len() >= MAX_RENDEZVOUS_CIRCUITS && !make_room(&mut live) {
+            // Refused: the request is dropped, as Arti's
+            // `RendRequest::reject` does (the client hears nothing).
+            continue;
+        }
+        circuits += 1;
+        let usage = Arc::new(Mutex::new(Usage::Quiet(Instant::now())));
+        let (close, closed) = oneshot::channel();
+        live.insert(
+            circuits,
+            Kept {
+                usage: Arc::clone(&usage),
+                close,
+            },
+        );
+        tokio::spawn(keep_circuit(rend, circuits, usage, closed, serve.clone()));
+    }
+}
+
+/// Whether a rendezvous circuit carries a stream: its task and the keeper
+/// both read it, under its lock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Usage {
+    /// No stream since this instant (or since the circuit came).
+    Quiet(Instant),
+    /// At least one stream is open.
+    Busy,
+    /// The keeper closed it for a newcomer: no stream starts on it.
+    Closed,
+}
+
+/// A rendezvous circuit the keeper holds.
+struct Kept {
+    usage: Arc<Mutex<Usage>>,
+    /// Dropped to close the circuit; closed once the circuit's task ended.
+    close: oneshot::Sender<()>,
+}
+
+fn usage_of(usage: &Mutex<Usage>) -> std::sync::MutexGuard<'_, Usage> {
+    usage.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Close the circuit that has gone longest without a stream (the older one
+/// on a tie); `false` when every circuit carries a stream. Under its lock, so
+/// no stream starts on the circuit chosen.
+fn make_room(live: &mut BTreeMap<u64, Kept>) -> bool {
+    loop {
+        let quietest = live
+            .iter()
+            .filter_map(|(&number, kept)| match *usage_of(&kept.usage) {
+                Usage::Quiet(since) => Some((since, number)),
+                Usage::Busy | Usage::Closed => None,
+            })
+            .min();
+        let Some((_, number)) = quietest else {
+            return false;
+        };
+        let mut state = usage_of(&live[&number].usage);
+        // A stream may have started since it was read.
+        if matches!(*state, Usage::Quiet(_)) {
+            *state = Usage::Closed;
+            drop(state);
+            // Its sender dropped: the circuit's task ends, and with it the
+            // circuit.
+            live.remove(&number);
+            return true;
+        }
+    }
+}
+
+/// Ready once the circuit has gone [`RENDEZVOUS_IDLE`] without a stream;
+/// pending while it carries one.
+async fn idle(usage: &Mutex<Usage>) {
+    let now = *usage_of(usage);
+    match now {
+        Usage::Quiet(since) => tokio::time::sleep_until(since + RENDEZVOUS_IDLE).await,
+        Usage::Busy | Usage::Closed => std::future::pending().await,
+    }
+}
+
+/// Rendezvous circuit number `circuit`: built, then its streams served until
+/// it ends, which ends them too: its client closed it, the keeper closed it
+/// for a newcomer (`closed`), or it went [`RENDEZVOUS_IDLE`] without a
+/// stream. Dropping its stream requests and streams closes the circuit
+/// (tor-hsservice `RendRequest::accept`).
+async fn keep_circuit<R, F, Fut>(
+    rend: R,
+    circuit: u64,
+    usage: Arc<Mutex<Usage>>,
+    mut closed: oneshot::Receiver<()>,
+    serve: F,
+) where
+    R: Rendezvous,
+    F: Fn(R::Request, u64) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let mut requests = tokio::select! {
+        biased;
+        _ = &mut closed => return,
+        opened = rend.open() => match opened {
+            Some(requests) => requests,
+            None => return,
+        },
+        () = idle(&usage) => return,
+    };
+    let mut streams = JoinSet::new();
+    // The client can open no more streams here (the circuit is closing).
+    let mut ended = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut closed => return,
+            Some(_) = streams.join_next(), if !streams.is_empty() => {
+                if streams.is_empty() {
+                    if ended {
+                        return;
+                    }
+                    *usage_of(&usage) = Usage::Quiet(Instant::now());
+                }
+            }
+            request = requests.next(), if !ended => match request {
+                Some(request) => {
+                    {
+                        let mut state = usage_of(&usage);
+                        if *state == Usage::Closed {
+                            return;
+                        }
+                        *state = Usage::Busy;
+                    }
+                    streams.spawn(serve(request, circuit));
+                }
+                None if streams.is_empty() => return,
+                None => ended = true,
+            },
+            () = idle(&usage) => return,
+        }
+    }
 }
 
 /// The Tor client's configuration: its state and cache under `state_dir`,
@@ -803,5 +990,247 @@ mod tests {
             .and_then(|(_, rest)| rest.split_once('}'))
             .map_or("", |(timeouts, _)| timeouts);
         assert!(timeouts.contains("connect_timeout: 6s"), "{text}");
+    }
+
+    // ── The rendezvous circuits (TOR-5), with fake clients ─────────────────
+
+    use std::collections::BTreeSet;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+
+    /// One stream on a fake circuit: open until the test drops its sender.
+    type FakeStream = oneshot::Receiver<()>;
+
+    /// The fake circuits the keeper holds and has opened, by the number of
+    /// their client (1, 2, … in the order they came).
+    #[derive(Default)]
+    struct Book {
+        live: Mutex<BTreeSet<usize>>,
+        opened: Mutex<BTreeSet<usize>>,
+    }
+
+    /// A client's rendezvous: the circuit opens at once and lives while the
+    /// keeper holds its stream requests; the client sends its streams.
+    struct Fake {
+        number: usize,
+        book: Arc<Book>,
+        streams: UnboundedReceiver<FakeStream>,
+    }
+
+    /// A fake circuit's stream requests: the circuit is live while they are
+    /// held, until the client closes it (drops its sender).
+    struct FakeStreams {
+        streams: UnboundedReceiver<FakeStream>,
+        number: usize,
+        book: Arc<Book>,
+    }
+
+    impl Drop for FakeStreams {
+        fn drop(&mut self) {
+            self.book.live.lock().unwrap().remove(&self.number);
+        }
+    }
+
+    impl Stream for FakeStreams {
+        type Item = FakeStream;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<FakeStream>> {
+            self.get_mut().streams.poll_next_unpin(cx)
+        }
+    }
+
+    impl Rendezvous for Fake {
+        type Request = FakeStream;
+
+        async fn open(self) -> Option<BoxStream<'static, FakeStream>> {
+            self.book.live.lock().unwrap().insert(self.number);
+            self.book.opened.lock().unwrap().insert(self.number);
+            let streams = FakeStreams {
+                streams: self.streams,
+                number: self.number,
+                book: self.book,
+            };
+            Some(streams.boxed())
+        }
+    }
+
+    /// The clients of one keeper.
+    struct Clients {
+        book: Arc<Book>,
+        keeper: UnboundedSender<Fake>,
+        next: usize,
+    }
+
+    impl Clients {
+        /// A keeper whose streams stay open until their client ends them.
+        fn new() -> Clients {
+            let (keeper, requests) = unbounded();
+            tokio::spawn(keep_rendezvous(
+                requests,
+                |stream: FakeStream, _| async move {
+                    let _ = stream.await;
+                },
+            ));
+            Clients {
+                book: Arc::default(),
+                keeper,
+                next: 0,
+            }
+        }
+
+        /// A new client's rendezvous; the sender for its streams (held by
+        /// the test: the client never closes its circuit itself).
+        fn rendezvous(&mut self) -> UnboundedSender<FakeStream> {
+            self.next += 1;
+            let (client, streams) = unbounded();
+            self.keeper
+                .unbounded_send(Fake {
+                    number: self.next,
+                    book: Arc::clone(&self.book),
+                    streams,
+                })
+                .unwrap();
+            client
+        }
+
+        fn live(&self) -> Vec<usize> {
+            self.book.live.lock().unwrap().iter().copied().collect()
+        }
+
+        fn opened(&self) -> Vec<usize> {
+            self.book.opened.lock().unwrap().iter().copied().collect()
+        }
+    }
+
+    /// A stream on the circuit of `client`, open until the sender returned
+    /// is dropped.
+    fn open_stream(client: &UnboundedSender<FakeStream>) -> oneshot::Sender<()> {
+        let (end, stream) = oneshot::channel();
+        client.unbounded_send(stream).unwrap();
+        end
+    }
+
+    /// Everything that can run runs (the clock is paused: it moves 1 ms).
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    /// TOR-5: a client may keep a rendezvous circuit with no stream for as
+    /// long as it likes, and each introduction costs the helper a circuit.
+    /// The helper keeps at most 64: a newcomer closes the one that has gone
+    /// longest without a stream (all as long here: the oldest).
+    #[tokio::test(start_paused = true)]
+    async fn the_helper_keeps_at_most_64_rendezvous_circuits() {
+        let mut clients = Clients::new();
+        let _held: Vec<_> = (0..65).map(|_| clients.rendezvous()).collect();
+        settle().await;
+        let live = clients.live();
+        assert_eq!(live.len(), MAX_RENDEZVOUS_CIRCUITS, "{live:?}");
+        assert!(!live.contains(&1), "the oldest made room: {live:?}");
+        assert!(live.contains(&65), "the newcomer got its circuit: {live:?}");
+        tokio::time::sleep(RENDEZVOUS_IDLE + Duration::from_secs(1)).await;
+        assert_eq!(clients.live(), Vec::<usize>::new(), "none left idle");
+    }
+
+    /// TOR-5: a circuit with no stream for 10 minutes is closed; before
+    /// that it is kept (the client's own reuse window, so a friend's next
+    /// connect still finds its circuit).
+    #[tokio::test(start_paused = true)]
+    async fn a_rendezvous_circuit_with_no_stream_for_10_minutes_closes() {
+        let mut clients = Clients::new();
+        let _held: Vec<_> = (0..3).map(|_| clients.rendezvous()).collect();
+        settle().await;
+        tokio::time::sleep(RENDEZVOUS_IDLE - Duration::from_secs(1)).await;
+        assert_eq!(clients.live(), [1, 2, 3], "kept for the reuse window");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        settle().await;
+        assert_eq!(clients.live(), Vec::<usize>::new(), "10 min and 1 s idle");
+    }
+
+    /// TOR-5: a circuit that carries a stream is neither closed for a
+    /// newcomer nor by the idle limit; it closes 10 minutes after its last
+    /// stream ended.
+    #[tokio::test(start_paused = true)]
+    async fn a_circuit_that_carries_a_stream_is_kept() {
+        let mut clients = Clients::new();
+        let friend = clients.rendezvous();
+        settle().await;
+        let link = open_stream(&friend);
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let _strangers: Vec<_> = (0..64).map(|_| clients.rendezvous()).collect();
+        settle().await;
+        let live = clients.live();
+        assert_eq!(live.len(), MAX_RENDEZVOUS_CIRCUITS, "{live:?}");
+        assert!(live.contains(&1), "it carries a stream: {live:?}");
+        assert!(
+            !live.contains(&2),
+            "the first quiet one made room: {live:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        assert_eq!(clients.live(), [1], "an hour with its stream open");
+        drop(link);
+        settle().await;
+        tokio::time::sleep(RENDEZVOUS_IDLE - Duration::from_secs(1)).await;
+        assert_eq!(clients.live(), [1], "kept for the reuse window");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        settle().await;
+        assert_eq!(clients.live(), Vec::<usize>::new());
+    }
+
+    /// TOR-5: the circuit quiet longest makes room, not the oldest: one
+    /// whose stream ended a moment ago is kept.
+    #[tokio::test(start_paused = true)]
+    async fn a_newcomer_closes_the_circuit_quiet_longest() {
+        let mut clients = Clients::new();
+        let first = clients.rendezvous();
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let _others: Vec<_> = (0..63).map(|_| clients.rendezvous()).collect();
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let link = open_stream(&first);
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        drop(link);
+        settle().await;
+        let _newcomer = clients.rendezvous();
+        settle().await;
+        let live = clients.live();
+        assert_eq!(live.len(), MAX_RENDEZVOUS_CIRCUITS, "{live:?}");
+        assert!(live.contains(&1), "its stream ended last: {live:?}");
+        assert!(!live.contains(&2), "quiet since it came: {live:?}");
+        assert!(live.contains(&65), "{live:?}");
+    }
+
+    /// TOR-5: when every circuit carries a stream (raven-node holds at most
+    /// 16 links, so these are streams it is closing), a newcomer is refused:
+    /// no link in use is cut for it.
+    #[tokio::test(start_paused = true)]
+    async fn when_every_circuit_carries_a_stream_a_newcomer_is_refused() {
+        let mut clients = Clients::new();
+        let held: Vec<_> = (0..64).map(|_| clients.rendezvous()).collect();
+        settle().await;
+        let _links: Vec<_> = held.iter().map(open_stream).collect();
+        settle().await;
+        let _newcomer = clients.rendezvous();
+        settle().await;
+        assert_eq!(clients.live(), (1..=64).collect::<Vec<_>>());
+        assert!(!clients.opened().contains(&65), "{:?}", clients.opened());
+    }
+
+    /// A circuit its client closed leaves its place to a newcomer at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_circuit_its_client_closed_leaves_room() {
+        let mut clients = Clients::new();
+        let mut held: Vec<_> = (0..64).map(|_| clients.rendezvous()).collect();
+        settle().await;
+        drop(held.remove(0));
+        settle().await;
+        let _newcomer = clients.rendezvous();
+        settle().await;
+        assert_eq!(clients.live(), (2..=65).collect::<Vec<_>>());
     }
 }

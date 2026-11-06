@@ -228,7 +228,7 @@ A teammate flooding tasks can only drain Bob's answer bucket for that teammate. 
 
 ### 4.3 Authorisation boundary (corrected rationale)
 
-- **Linux and Windows.** UID peer credentials or the per-user pipe ACL equal the platform boundary (daemon-owned-secrets §3.0). A same-user process can already read the keys and stores. `AppSubmit` equals `SealUnderSession`, which is already UID-only. `AgentSign` and `AppInboxPage` add nothing that same-user code lacks.
+- **Linux and Windows.** UID peer credentials or the per-user pipe ACL equal the platform boundary (daemon-owned-secrets §3.0). A same-user process can already read the keys and stores. `AppSubmit` equals `SealUnderSession`, which is already UID-only. `AgentSign` and `AppInboxPage` add nothing that same-user code lacks. (Since the 2026-11 security review, IPC-1, a release build answers `SealUnderSession` with `NOT_AVAILABLE`: it is a lab op, ADR 0004 D4, served only with a debug build's lab unlock.)
 - **macOS.** That argument does **not** hold. Node keys and stores sit behind Keychain code-identity ACLs. A UID-only `AppInboxPage` returns decrypted content, and `AgentSign` uses the identity key, without the dialog a foreign process would face today.
   - **Decision:** `app_channel_live_enabled()` is false on macOS in non-lab builds until the owner either accepts Q6 (UID-only for the RDAP client) as a documented residual in the ADR 0004 amendment, or the code-identity tier (daemon-owned-secrets §4.4) lands.
   - The debug lab unlock still works, because the lab uses throwaway identities.

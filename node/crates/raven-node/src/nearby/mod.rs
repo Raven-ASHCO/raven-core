@@ -805,7 +805,7 @@ pub(crate) fn serve_inbound(
             },
             () = displaced.notified() => netutil::log_inbound_failure(
                 "nearby inbound",
-                "unauthenticated link displaced by a newcomer",
+                displaced.why(),
             ),
         }
     });

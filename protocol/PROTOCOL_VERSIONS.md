@@ -144,6 +144,37 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: inbound admission, the Tor helper's circuits, a lab IPC op)
+
+Behaviour changes of the listeners' admission, of the Tor helper and of one local IPC op, not of
+the wire format: no frame, header, caps bit or vector changed, the local helper protocol stays
+version 2 and the IPC version stays 1.
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) §5: a
+  rendezvous circuit that lost a pre-authentication link (closed for a newcomer, or ended before
+  it authenticated) gets no slot in a full onion listener for the rest of the helper's life, and
+  so closes no link (TOR-1, partly closed). Before, a stranger who holds the card could keep every
+  friend's inbound onion link from completing by opening stream after stream on about 17 circuits
+  it holds; now each link it closes before its handshake costs it a circuit it never used in this
+  helper life (an introduction), and enough of them still close a friend's (§5, not defended). A
+  full listener still closes a pre-authentication link however young, so silent streams cannot
+  lock a friend out. A contact holds at most 4 authenticated links; a newer one closes its oldest
+  (TOR-2). §5 and §10: the Tor helper keeps at most 64 rendezvous circuits of the service; a
+  newcomer closes the circuit that has gone longest without a stream and is refused while every
+  circuit carries one, and a circuit that has carried no stream for 10 minutes is closed (TOR-5).
+  Before, the helper kept every rendezvous circuit an introduction made for as long as its client
+  kept it open. §5 now says what these limits defend and what they do not.
+- **LAN Beacon V1 (draft).** [`RAVEN_LAN_BEACON_V1.md`](RAVEN_LAN_BEACON_V1.md) §0: the LAN
+  listener's per-source caps take an IPv6 host on the local network as its whole address, by the
+  penalty box's rule, instead of its /64, so one host's handshakes no longer use up its IPv6
+  neighbours' slots; a source from outside this host's networks keeps the /64 (LAN-ADM-1). The
+  LAN listener, too, keeps at most 4 authenticated links per contact (LAN-ADM-2), as do the
+  Internet direct, p2p and nearby responders (nearby: 2, its cap per pipe already).
+- **Error codes.** [`RAVEN_ERROR_CODES_V1.md`](RAVEN_ERROR_CODES_V1.md): the local ipc code
+  `NOT_AVAILABLE`. A release build answers `SealUnderSession` with it: that op is served only
+  with a debug build's lab unlock (IPC-1, ADR 0004 D4); apps use `AppSubmit`. Before, a release
+  build served it to any process of the same user.
+
 ## Freeze record changes (2026-11-01, a frame-less dial asks for route hints)
 
 A behaviour change of a frozen sender rule, not of the wire format: no frame

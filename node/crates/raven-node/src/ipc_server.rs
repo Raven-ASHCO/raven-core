@@ -6,7 +6,9 @@
 //! data dir) plus peer-cred UID check; Windows binds the per-user pipe
 //! `{WINDOWS_NAMED_PIPE}-{SID}` with a current-user DACL (fail-closed).
 //! Requests still refuse secret field names (`raven_core::ipc`).
-//! `SealUnderSession` is served only after the same peer-cred / pipe-ACL gate.
+//! `SealUnderSession` is a lab op (ADR 0004 D4): served only with the debug
+//! lab unlock, after the same peer-cred / pipe-ACL gate; a release build
+//! answers `NOT_AVAILABLE` ([`seal_under_session_enabled`]).
 //! Blocking work (SQLite, identity/secret store, seal) runs on the blocking
 //! pool; `Ping` is answered inline so a busy daemon never looks dead.
 
@@ -179,6 +181,56 @@ fn p2p_capabilities(info: Option<&raven_core::ipc::P2pStatusInfo>) -> Vec<&'stat
         caps.push("p2p_friend_relay");
     }
     caps
+}
+
+/// The refusal of `SealUnderSession` without the lab unlock
+/// (protocol/RAVEN_ERROR_CODES_V1.md).
+const SEAL_NOT_AVAILABLE: &str = "NOT_AVAILABLE";
+
+/// `SealUnderSession` is a lab op (ADR 0004 D4; security review 2026-11,
+/// IPC-1): it seals any text for any peer with a session, past the composer
+/// guard and the contact book, so it is served only with the debug lab
+/// unlock (`RAVEN_LAB_TEST_A=1`). A release build reads no variable and
+/// answers [`SEAL_NOT_AVAILABLE`]; apps use `AppSubmit`.
+fn seal_under_session_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(on) = SEAL_LAB_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    raven_core::pair_init::lab_test_a_enabled()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests set the lab unlock of `SealUnderSession` per thread (the
+    /// variable is process-wide).
+    static SEAL_LAB_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// This thread's lab unlock of `SealUnderSession` (`None`: the variable
+/// again); the one before is returned.
+#[cfg(test)]
+fn set_seal_lab_for_this_thread(on: Option<bool>) -> Option<bool> {
+    SEAL_LAB_FOR_TEST.with(|c| c.replace(on))
+}
+
+/// `work`, for the blocking pool, with this thread's test switches (an
+/// in-process test's lab unlock goes with its request).
+#[cfg(test)]
+fn with_test_switches<T>(work: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    let seal_lab = SEAL_LAB_FOR_TEST.with(std::cell::Cell::get);
+    move || {
+        let before = set_seal_lab_for_this_thread(seal_lab);
+        let out = work();
+        set_seal_lab_for_this_thread(before);
+        out
+    }
+}
+
+/// `work` itself: only tests have switches to carry.
+#[cfg(not(test))]
+fn with_test_switches<T>(work: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    work
 }
 
 fn handle_req(req: IpcRequest, data_dir: &Path, forward: &Option<ForwardQueue>) -> IpcResponse {
@@ -451,6 +503,17 @@ fn handle_req(req: IpcRequest, data_dir: &Path, forward: &Option<ForwardQueue>) 
             peer_hint,
             app_payload_b64,
         } => {
+            // A lab op: before anything is read (IPC-1).
+            if !seal_under_session_enabled() {
+                return IpcResponse::Error {
+                    v,
+                    code: SEAL_NOT_AVAILABLE.into(),
+                    message: format!(
+                        "{SEAL_NOT_AVAILABLE}: SealUnderSession is a lab op (ADR 0004 D4); \
+                         apps use AppSubmit"
+                    ),
+                };
+            }
             // Cheap checks first: never touch the identity lock / secret store
             // for a request that is malformed anyway.
             if !is_device_pub_hex(&peer_hint) {
@@ -1718,13 +1781,15 @@ async fn dispatch_watched(
         Ok(req) => {
             let dd = data_dir.clone();
             let fq = forward.clone();
-            tokio::task::spawn_blocking(move || handle_req_blocking(req, &dd, &fq))
-                .await
-                .unwrap_or_else(|e| IpcResponse::Error {
-                    v: IPC_VERSION,
-                    code: "INTERNAL".into(),
-                    message: format!("ipc worker: {e}"),
-                })
+            tokio::task::spawn_blocking(with_test_switches(move || {
+                handle_req_blocking(req, &dd, &fq)
+            }))
+            .await
+            .unwrap_or_else(|e| IpcResponse::Error {
+                v: IPC_VERSION,
+                code: "INTERNAL".into(),
+                message: format!("ipc worker: {e}"),
+            })
         }
         Err(e) => IpcResponse::Error {
             v: IPC_VERSION,
@@ -2526,6 +2591,8 @@ mod tests {
     #[tokio::test]
     async fn ping_and_seal_do_not_wait_for_forward_queue_lock() {
         use base64::Engine;
+        // The seal's slow path runs (the lab op, on the blocking pool).
+        let _lab = SealLab::set(true);
         let dir = tempfile::tempdir().unwrap();
         let (dd, fq) = shared(dir.path());
         let _held = fq.lock().await;
@@ -2724,6 +2791,7 @@ mod tests {
 
     #[test]
     fn seal_rejects_malformed_peer_hint_before_identity_work() {
+        let _lab = SealLab::set(true);
         let dir = tempfile::tempdir().unwrap();
         let req = IpcRequest::SealUnderSession {
             v: IPC_VERSION,
@@ -3005,9 +3073,59 @@ mod tests {
         assert_eq!(policy.p2p_relays, [relay]);
     }
 
+    /// The lab unlock of `SealUnderSession` on this thread while it lives
+    /// (the variable is process-wide; tests run in parallel).
+    struct SealLab(Option<bool>);
+
+    impl SealLab {
+        fn set(on: bool) -> Self {
+            SealLab(set_seal_lab_for_this_thread(Some(on)))
+        }
+    }
+
+    impl Drop for SealLab {
+        fn drop(&mut self) {
+            set_seal_lab_for_this_thread(self.0);
+        }
+    }
+
+    /// IPC-1: `SealUnderSession` is a lab op (ADR 0004 D4). Without the lab
+    /// unlock it answers NOT_AVAILABLE before any other check and before any
+    /// identity or session work, and nothing is written. CI runs this test in
+    /// a release build with `RAVEN_LAB_TEST_A=1` set: there the real gate
+    /// answers, and a release build reads no variable.
+    #[test]
+    fn seal_under_session_refused_without_lab_unlock() {
+        use base64::Engine;
+        // A debug build reads the variable: this thread stands for a run
+        // without it.
+        let _lab = cfg!(debug_assertions).then(|| SealLab::set(false));
+        let dir = tempfile::tempdir().unwrap();
+        for peer_hint in ["ab".repeat(32), "not-hex".into()] {
+            let req = IpcRequest::SealUnderSession {
+                v: IPC_VERSION,
+                peer_hint,
+                app_payload_b64: base64::engine::general_purpose::STANDARD.encode(b"hi"),
+            };
+            match handle_req(req, dir.path(), &None) {
+                IpcResponse::Error { code, message, .. } => {
+                    assert_eq!(code, "NOT_AVAILABLE", "{message}");
+                    assert!(message.contains("AppSubmit"), "{message}");
+                }
+                other => panic!("expected NOT_AVAILABLE, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "nothing written"
+        );
+    }
+
     #[test]
     fn seal_under_session_refuses_without_session() {
         use base64::Engine;
+        let _lab = SealLab::set(true);
         let dir = tempfile::tempdir().unwrap();
         let req = IpcRequest::SealUnderSession {
             v: IPC_VERSION,

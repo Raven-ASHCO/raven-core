@@ -776,7 +776,7 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
     // self-sign a bundle (see `lan_direct::handle_inbound`).
     let mut seen = SeenLater::default();
     if trusted {
-        slot.authenticated();
+        slot.authenticated(remote_ed);
         // M0: its link authenticated its static (before the dial-back),
         // unless its knock matched: then it is a static for this link only.
         if !knocked.fresh_dialer() {
