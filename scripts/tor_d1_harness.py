@@ -6,8 +6,12 @@ signed receipt (the security and speed report of 5 November 2026, section
 D1 runs from messages.send accepted to the friend signed receipt verified
 and stored by the client, on the monotonic clock. The engine measures it
 (the ms of its receipt event); the harness also times that event as
-events.wait shows it (D1 ui). D1 peer (the friend node storing the message)
-needs a stored time this build does not expose, so that field stays empty.
+events.wait shows it (D1 ui). D1 peer runs to the friend node storing the
+message: the debug raven-node of F adds a stored line to its own stage
+record file for each message it newly stores over Tor (the computer wide
+monotonic clock in ns, nothing else), and the harness takes the one line a
+run that ended ok adds, against the same clock read when messages.send
+returned.
 
 Two locked file lab profiles on this computer, S (the sender, measured)
 and F (the friend), each run their own debug raven-node and their own Tor
@@ -64,9 +68,9 @@ the first run after a restart is discarded. F keeps base.
 Output, in the lab folder
   d1-runs.jsonl    one line per run: case, variant, arm, block, run, minute
                    of day, outcome (ok, queued, failed), carrier, d1_ms,
-                   d1_ui_ms, the stage times of each onion dial S made for
-                   it (RAVEN_LAB_TOR_STAGES), links opened, the Tor life
-                   counter. Durations, counts and fixed words only: no
+                   d1_ui_ms, d1_peer_ms, the stage times of each onion dial
+                   S made for it (RAVEN_LAB_TOR_STAGES), links opened, the
+                   Tor life counter. Durations, counts and fixed words only: no
                    text, keys, onion ids or addresses (each line is checked
                    before it is written, and again when it is analysed).
   d1-analysis.txt  per case, variant and arm: n, the median and p90 with
@@ -321,11 +325,13 @@ def sender_env(common: dict, lab: Path, arm: str, patched: tuple,
 
 
 def friend_env(common: dict, lab: Path) -> dict:
-    """F's raven-node: base always, its own netwatch lab file."""
+    """F's raven-node: base always, its own netwatch lab file and its own
+    stage record file (its stored lines, for D1 peer)."""
     env = dict(common)
     for name in STAGE_A.values():
         env.pop(name, None)
     env.pop(KEEP_WARM_KNOB, None)
+    env['RAVEN_LAB_TOR_STAGES'] = str(lab / 'raw' / 'f-stages.jsonl')
     env['RAVEN_LAB_NETWATCH_EVENTS'] = str(lab / 'f.netwatch')
     return env
 
@@ -552,8 +558,8 @@ OVERFLOW_CHECK = b'attempt to add with overflow'
 WARM_MODEL = (b'RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS', b'RAVEN_LAB_TOR_LOOPBACK_KEPT_MS')
 ARTI_IN_PROCESS = b'tor_hsclient'
 # The D1 lab hooks of a raven-node from this tree (debug only): keep warm's
-# lab knob (CI).
-NODE_D1 = (KEEP_WARM_KNOB.encode(),)
+# lab knob (CI) and the stored line of D1 peer (src/onion/stages.rs).
+NODE_D1 = (KEEP_WARM_KNOB.encode(), b'stored_ns')
 
 
 def engine_name() -> str:
@@ -751,6 +757,35 @@ def dial_from_stage(obj) -> dict | None:
     return dial if _dial(dial) else None
 
 
+# A stored line's clock reading: ns since the computer started.
+CLOCK_NS_MAX = 2 ** 63 - 1
+
+
+def stage_line(obj) -> tuple | None:
+    """One line of a node's stage record file: ('dial', its run entry), or
+    ('stored', ns) for a message the node stored over Tor (D1 peer, the
+    computer wide monotonic clock), or None when it is neither (any other
+    field, any other value)."""
+    if isinstance(obj, dict) and set(obj) == {'stored_ns'}:
+        ns = obj['stored_ns']
+        return ('stored', ns) if _int(ns, 0, CLOCK_NS_MAX) else None
+    dial = dial_from_stage(obj)
+    return ('dial', dial) if dial is not None else None
+
+
+def peer_ms(stored: list, asked_ns, sent_ns) -> int | None:
+    """D1 peer of a run that ended ok: from the send accepted (`sent_ns`,
+    the shared clock when messages.send returned) to the one stored line F
+    added in the run (a store before the call returned counts as 0 ms);
+    None unless exactly one line came, the clock was read and the line is
+    not from before the send call (`asked_ns`)."""
+    if not (_int(asked_ns, 0, CLOCK_NS_MAX) and _int(sent_ns, 0, CLOCK_NS_MAX)):
+        return None
+    if len(stored) != 1 or stored[0] < asked_ns:
+        return None
+    return max(0, int(round((stored[0] - sent_ns) / 1e6)))
+
+
 def links_opened(dials: list) -> int:
     """The Raven links a run opened: its dials with a Noise handshake (a
     dial that rode a kept link has none)."""
@@ -945,6 +980,11 @@ def analyze(records: list) -> str:
         lines.append(f'  D1: median {_dur(s[r50 - 1])} (rank {r50} of {n}), p90 '
                      f'{_dur(s[r90 - 1])} (rank {r90}); D1 ui: median {_dur(su[r50 - 1])}, '
                      f'p90 {_dur(su[r90 - 1])}')
+        peer = sorted(r['d1_peer_ms'] for r in kept if r['d1_peer_ms'] is not None)
+        if peer:
+            lines.append(f'  D1 peer (stored by the friend): median '
+                         f'{_dur(peer[point_rank(len(peer), 0.5) - 1])}, p90 '
+                         f'{_dur(peer[point_rank(len(peer), 0.9) - 1])} ({len(peer)} runs)')
         lines.append(f'  95 percent intervals: median {_interval_words(d1, 0.5)}; p90 '
                      f'{_interval_words(d1, 0.9)}')
         lines.append('  ' + _claim_words('median', d1, 0.5))
@@ -1039,41 +1079,44 @@ class Lives:
 
 
 class Stages:
-    """S's stage record file (RAVEN_LAB_TOR_STAGES, appended by each S node
-    in turn): the dial lines since the last look."""
+    """A node's stage record file (RAVEN_LAB_TOR_STAGES; S's is appended by
+    each S node in turn, F's by its one node): the dial lines and the
+    stored lines since the last look."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.offset = path.stat().st_size if path.exists() else 0
         self.unattributed = 0
 
-    def _read(self) -> list:
+    def _read(self) -> tuple:
         try:
             with open(self.path, 'rb') as f:
                 f.seek(self.offset)
                 data = f.read()
         except OSError:
-            return []
+            return [], []
         end = data.rfind(b'\n')
         if end < 0:
-            return []
+            return [], []
         self.offset += end + 1
-        dials = []
+        dials, stored = [], []
         for raw in data[:end].split(b'\n'):
             try:
-                dial = dial_from_stage(json.loads(raw))
+                line = stage_line(json.loads(raw))
             except ValueError:
-                dial = None
-            if dial is None:
+                line = None
+            if line is None:
                 raise Aborted('harness_error', 'a stage record line is not one')
-            dials.append(dial)
-        return dials
+            (dials if line[0] == 'dial' else stored).append(line[1])
+        return dials, stored
 
     def mark(self) -> None:
         """The lines so far belong to no run (setup, restarts)."""
-        self.unattributed += len(self._read())
+        dials, _ = self._read()
+        self.unattributed += len(dials)
 
-    def since_mark(self) -> list:
+    def since_mark(self) -> tuple:
+        """(the dials, the stored clock readings) since the last look."""
         return self._read()
 
 
@@ -1299,6 +1342,21 @@ def receipt_outcome(waited: bool, ui_ms: int, engine_ms: int) -> tuple:
     return 'ok', engine_ms
 
 
+def shared_clock_ns() -> int | None:
+    """This computer's monotonic clock in ns, the one raven-node's stored
+    line reads (CLOCK_UPTIME_RAW on macOS, CLOCK_MONOTONIC on Linux), or
+    None without it. time.monotonic will not do: on macOS its values do not
+    compare between processes."""
+    name = 'CLOCK_UPTIME_RAW' if sys.platform == 'darwin' else 'CLOCK_MONOTONIC'
+    clock = getattr(time, name, None)
+    if clock is None or not sys.platform.startswith(('darwin', 'linux')):
+        return None
+    try:
+        return time.clock_gettime_ns(clock)
+    except OSError:
+        return None
+
+
 def worker_main(lib_path: str, real: bool = False) -> int:
     """`engine-worker --lib LIB [--real]`: the engine of one profile
     (RAVEN_DATA_DIR) through its C ABI. It refuses unless a run of this
@@ -1375,10 +1433,15 @@ def worker_main(lib_path: str, real: bool = False) -> int:
     def send(address: str, text: str, timeout_s: float) -> dict:
         drain()
         t0 = time.monotonic()
+        asked_ns = shared_clock_ns()
         got = call('messages.send', {'address': address, 'text': text})
+        sent_ns = shared_clock_ns()
         t1 = time.monotonic()
+        # asked_ns and sent_ns stay inside the harness: only the D1 peer
+        # they give goes into a record.
         out = {'outcome': 'failed', 'state': None, 'carrier': None, 'd1_ms': None,
-               'd1_ui_ms': None, 'send_call_ms': ms(t0, t1), 'error': None}
+               'd1_ui_ms': None, 'send_call_ms': ms(t0, t1), 'error': None,
+               'asked_ns': asked_ns, 'sent_ns': sent_ns}
         if not got.get('ok'):
             code = str((got.get('error') or {}).get('code', ''))
             out['error'] = code if re.fullmatch(r'[A-Z_]{1,40}', code) else 'OTHER'
@@ -1539,6 +1602,7 @@ class Run:
         self.arm_env: dict = {}
         self.lives: Lives | None = None
         self.stages: Stages | None = None
+        self.f_stages: Stages | None = None
         self.f_address = ''
         self.warm_built = False
         self.started_pids: set = set()
@@ -1704,6 +1768,7 @@ class Run:
         self.s_node = Node('S', lab / 's', node_bin, lab / 'logs' / 's.node.log', *ports[:2])
         self.f_node = Node('F', lab / 'f', node_bin, lab / 'logs' / 'f.node.log', *ports[2:])
         self.stages = Stages(lab / 'raw' / 's-stages.jsonl')
+        self.f_stages = Stages(lab / 'raw' / 'f-stages.jsonl')
         address = {}
         for node in (self.s_node, self.f_node):
             node.profile.mkdir(mode=0o700)
@@ -1749,6 +1814,7 @@ class Run:
             raise Aborted('setup_failed', 'the first message did not arrive over Tor')
         time.sleep(STAGE_SETTLE_S)
         self.stages.mark()
+        self.f_stages.mark()
         self.loopback_check()
         say(f"setup: S and F are friends over Tor only; the first message arrived in "
             f"{res['d1_ms']} ms")
@@ -1812,8 +1878,10 @@ class Run:
         `arm` (and keep warm's lab knob `keep_warm_ms`), and its engine
         worker."""
         self.stop_sender()
-        assert self.s_node is not None and self.stages is not None
+        assert (self.s_node is not None and self.stages is not None
+                and self.f_stages is not None)
         self.stages.mark()
+        self.f_stages.mark()
         self.arm_env = self.guard_env(
             sender_env(self.common, self.lab, arm, self.patched, keep_warm_ms), arm, False)
         self.write_netwatch('s.netwatch')
@@ -1838,6 +1906,7 @@ class Run:
             if worker:
                 self.start_worker(arm)
         self.stages.mark()
+        self.f_stages.mark()
         self.prev_start = self.prev_end = None
         self.loopback_check()
 
@@ -1849,7 +1918,8 @@ class Run:
 
     def one_run(self, case: str, variant: str, arm: str, block_no: int, index: int,
                 discard: str | None) -> dict:
-        assert self.worker is not None and self.lives is not None and self.stages is not None
+        assert (self.worker is not None and self.lives is not None and self.stages is not None
+                and self.f_stages is not None)
         now = time.monotonic()
         if case in SCHEDULED and self.prev_start is not None and self.prev_end is not None:
             send_at = max(self.prev_start + self.intervals[case], self.prev_end + MIN_GAP_S)
@@ -1883,24 +1953,28 @@ class Run:
                 raise Aborted('harness_error', 'node.resume was refused')
         self.check_sender()
         self.stages.mark()
+        self.f_stages.mark()
         self.seq += 1
         start = time.monotonic()
         res = self.worker.send(self.f_address, f'd1 probe {self.seq}', self.send_timeout)
         end = time.monotonic()
         time.sleep(STAGE_SETTLE_S)
-        dials = self.stages.since_mark()
+        dials, _ = self.stages.since_mark()
+        _, stored = self.f_stages.since_mark()
         lives, _ = self.lives.poll()
         self.prev_start, self.prev_end = start, end
         # Once more after each run: every socket still on loopback.
         self.loopback_check()
         if discard is None and res['carrier'] is not None and res['carrier'] != 'onion':
             discard = 'carrier'
+        peer = (peer_ms(stored, res.get('asked_ns'), res.get('sent_ns'))
+                if res['outcome'] == 'ok' else None)
         rec = {
             'type': 'run', 'v': HARNESS_VERSION, 'mode': self.mode, 'case': case,
             'variant': variant, 'arm': arm, 'block': block_no, 'run': index, 'seq': self.seq,
             'discard': discard, 'minute': minute_of_day(), 'outcome': res['outcome'],
             'state': res['state'], 'carrier': res['carrier'], 'd1_ms': res['d1_ms'],
-            'd1_ui_ms': res['d1_ui_ms'], 'd1_peer_ms': None,
+            'd1_ui_ms': res['d1_ui_ms'], 'd1_peer_ms': peer,
             'send_call_ms': res['send_call_ms'], 'ready_wait_ms': ready_wait_ms,
             'dials': dials, 'links_opened': links_opened(dials), 'tor_life': lives,
         }
@@ -1914,6 +1988,8 @@ class Run:
             shown = 'no receipt'
         if res.get('error'):
             shown += f" (the send was refused: {res['error']})"
+        if peer is not None:
+            shown += f' (stored by F after {peer} ms)'
         say(f"{case} {variant} {arm} block {block_no} run {index}: {rec['outcome']}, {shown}, "
             f"{len(dials)} dials" + (f", discarded ({discard})" if discard else ''))
         return rec
@@ -2236,12 +2312,36 @@ def self_test() -> int:
           and receipt_outcome(True, 1169, 1154) == ('queued', None)
           and receipt_outcome(False, 4000, 121) == ('queued', None),
           'a send that waited, or whose receipt came after its job, is queued')
+    # A stored line of F (D1 peer): the clock reading alone; and D1 peer
+    # from it, only for exactly one line not from before the send call.
+    second = 1_000_000_000
+    stored_ok = (stage_line({'stored_ns': 7 * second}) == ('stored', 7 * second)
+                 and stage_line(json.loads(json.dumps(dial))) == ('dial', dial)
+                 and all(stage_line(bad) is None for bad in (
+                     {'stored_ns': -1}, {'stored_ns': '5'}, {'stored_ns': True},
+                     {'stored_ns': 5, 'from': 'ab12'}, {'stored_ns': 2 ** 63}, {'stored': 5})))
+    peers = (peer_ms([5 * second + 812_400_000], 5 * second - 20_000_000, 5 * second),
+             peer_ms([5 * second - 5_000_000], 5 * second - 20_000_000, 5 * second),
+             peer_ms([5 * second - 30_000_000], 5 * second - 20_000_000, 5 * second),
+             peer_ms([], 5 * second, 5 * second),
+             peer_ms([6 * second, 7 * second], 5 * second, 5 * second),
+             peer_ms([6 * second], None, 5 * second))
     check('stage_lines',
           parsed is not None and parsed['purpose'] == 'check'
           and dial_from_stage(dict(dial, onion='x')) is None
           and dial_from_stage(dict(dial, total_ms=-1)) is None
-          and links_opened([dial, warm, dict(dial, purpose='check')]) == 2,
-          'a dial on a kept link opens no link')
+          and links_opened([dial, warm, dict(dial, purpose='check')]) == 2
+          and stored_ok and peers == (812, 0, None, None, None, None),
+          f'a dial on a kept link opens no link; stored lines hold a clock reading only; '
+          f'D1 peer {peers}')
+
+    # The clock D1 peer is read on, shared with raven-node: ns, never
+    # going back (none on a system without one).
+    clocks = [shared_clock_ns() for _ in range(3)]
+    clock_ok = (all(c is None for c in clocks) if not sys.platform.startswith(('darwin', 'linux'))
+                else all(isinstance(c, int) and c > 0 for c in clocks)
+                and clocks == sorted(clocks))
+    check('clock', clock_ok, 'the computer wide monotonic clock, in ns')
 
     # The real mode guard: the owner OK, and the mode itself.
     with tempfile.TemporaryDirectory() as tmp:
@@ -2341,7 +2441,7 @@ def self_test() -> int:
           and common['RAVEN_LAB_TOR_LOOPBACK_KEPT_MS'] == '45000'
           and w_env['RAVEN_NODE_MODE'] == 'embedded' and w_env['RAVEN_DATA_DIR'] == '/lab/d1/s'
           and s_base.get('RAVEN_LAB_TOR_STAGES') == '/lab/d1/raw/s-stages.jsonl'
-          and 'RAVEN_LAB_TOR_STAGES' not in f_env
+          and f_env.get('RAVEN_LAB_TOR_STAGES') == '/lab/d1/raw/f-stages.jsonl'
           and dry_env_refusal(real) != '' and 'RAVEN_LAB_TOR_LOOPBACK' not in real
           and dry_env_refusal(dict(common, RAVEN_LAB_ROUTE_HINTS='1')) != ''
           and dry_env_refusal(dict(common, RAVEN_LAB_TOR_LOOPBACK='rel/dir')) != '',
@@ -2471,6 +2571,8 @@ def self_test() -> int:
                                d1_ui_ms=None, dials=[])
                 else:
                     rec.update(d1_ms=v, d1_ui_ms=v + 3)
+                    if arm == 'patched':
+                        rec.update(d1_peer_ms=v - 100)
                 out.write(rec)
         out.write(dict(good, case='PW', arm='patched', seq=seq + 1, discard='not_warmed'))
         out.write({'type': 'skip', 'v': HARNESS_VERSION, 'case': 'PW', 'variant': 'plain',
@@ -2491,6 +2593,7 @@ def self_test() -> int:
               'WC plain base: n 30',
               'median under 1 s: not supported (rank 20 of 30 is 1200 ms)',
               'WC plain patched: n 30 (ok 29, queued 0, failed 1)',
+              'D1 peer (stored by the friend): median 300 ms, p90 300 ms (29 runs)',
               'p90 under 1 s: not supported (rank 30 of 30 is failed or queued)',
               'PW plain patched: n 0 (ok 0, queued 0, failed 0), discarded 1',
               'discarded 5 (not_warmed 1, restart 4)',
@@ -2636,6 +2739,9 @@ def self_test() -> int:
         stages = (crates / 'raven-node' / 'src' / 'onion' / 'stages.rs').read_text()
         body = stages.split('pub(crate) struct Record {', 1)[-1].split('}', 1)[0]
         fields = set(re.findall(r'pub\(crate\) (\w+):', body))
+        stored_body = stages.split('struct Stored {', 1)[-1].split('}', 1)[0]
+        stored_fields = set(re.findall(r'(\w+): u64', stored_body)) if 'struct Stored {' in stages \
+            else set()
         names = set()
         for src in crates.rglob('*.rs'):
             names.update(re.findall(r'"(RAVEN_LAB_[A-Z0-9_]+)"', src.read_text(errors='replace')))
@@ -2665,9 +2771,11 @@ def self_test() -> int:
                  'GROUP_KEPT': (secs('raven-node/src/onion/proto.rs', 'GROUP_KEPT'),
                                 ARTI_KEPT_S)}
         moved = sorted(k for k, (rust, here) in times.items() if rust != here)
-        check('rust_tree', fields == set(DIAL_KEYS) and not unknown and not gates_gone
-              and not moved,
+        stored_match = stored_fields == {'stored_ns'}
+        check('rust_tree', fields == set(DIAL_KEYS) and stored_match and not unknown
+              and not gates_gone and not moved,
               f'record fields {"match" if fields == set(DIAL_KEYS) else sorted(fields)}; '
+              f'stored line {"matches" if stored_match else sorted(stored_fields)}; '
               f'unknown names {unknown}; gate names missing {gates_gone}; '
               f'times that moved {moved}')
     else:
