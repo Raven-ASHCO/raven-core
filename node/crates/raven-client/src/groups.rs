@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ash_engine::engine as bridge;
+use ash_engine::engine::{self as bridge, ContactView};
 use raven_core::arrivals::ArrivedVia;
 use raven_core::group::{
     self, GroupError, GroupId, GroupSummary, GroupView, Key, MessageView, MAX_GROUP_BODY_BYTES,
@@ -157,6 +157,9 @@ fn short_address(address: &str) -> String {
 /// yours parked for a member (by the copy's message id, hex), named.
 struct Names {
     friends: HashMap<Key, String>,
+    /// The friends you verified and have not blocked: API.md's
+    /// `via_friend` (APP-02).
+    verified: HashSet<Key>,
     me: String,
     /// This profile's key: its own messages go by `me`, also in a group it
     /// is no longer a member of.
@@ -179,6 +182,42 @@ fn path_kind_of(via: ArrivedVia) -> &'static str {
 }
 
 impl Names {
+    /// The names from this profile's friends (`contacts`, the blocked left
+    /// out), its own name and key, and the friends that hold each copy of
+    /// yours (`copies`: their keys by the copy's message id, hex).
+    fn new(
+        contacts: &[ContactView],
+        me: String,
+        me_key: Key,
+        copies: HashMap<String, Vec<String>>,
+    ) -> Names {
+        let key_of =
+            |c: &ContactView| group::wire::hex_n::<32>(&c.pub_hex.trim().to_ascii_lowercase());
+        let friends = contacts
+            .iter()
+            .filter(|c| !c.blocked)
+            .filter_map(|c| Some((key_of(c)?, safety::line(&c.label))))
+            .collect();
+        let verified = contacts
+            .iter()
+            .filter(|c| c.pinned && !c.blocked)
+            .filter_map(key_of)
+            .collect();
+        let holders = copies
+            .into_iter()
+            .filter_map(|(mid, keys)| {
+                Some((mid, crate::messages::holder_name(Some(&keys), contacts)?))
+            })
+            .collect();
+        Names {
+            friends,
+            verified,
+            me,
+            me_key,
+            holders,
+        }
+    }
+
     fn of(&self, view: &GroupView, key: &Key) -> String {
         if self.is_me(view, key) {
             return self.me.clone();
@@ -206,14 +245,6 @@ impl Names {
 impl Inner {
     fn group_names(&self) -> Result<Names, ApiError> {
         let contacts = self.contacts()?;
-        let friends = contacts
-            .iter()
-            .filter(|c| !c.blocked)
-            .filter_map(|c| {
-                let key = group::wire::hex_n::<32>(&c.pub_hex.trim().to_ascii_lowercase())?;
-                Some((key, safety::line(&c.label)))
-            })
-            .collect();
         let me = self
             .settings_view()
             .display_name
@@ -221,21 +252,11 @@ impl Inner {
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| "You".to_owned());
         let me_key = self.identity()?.public_key_bytes();
-        let holders = self
+        let copies = self
             .data_dir()
             .map(crate::engine::copy_holders)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(mid, keys)| {
-                Some((mid, crate::messages::holder_name(Some(&keys), &contacts)?))
-            })
-            .collect();
-        Ok(Names {
-            friends,
-            me,
-            me_key,
-            holders,
-        })
+            .unwrap_or_default();
+        Ok(Names::new(&contacts, me, me_key, copies))
     }
 
     /// A friend's key from its address: NOT_A_CONTACT for anyone else
@@ -355,6 +376,11 @@ impl Inner {
         );
         if let Some(via) = &m.via {
             map.insert("via_name".into(), names.of(view, via).into());
+            // Whether via_name is a friend you verified and have not
+            // blocked; else it may be the admin's label (any text, the name
+            // of one of your friends too), which the apps mark "not your
+            // friend" (APP-02).
+            map.insert("via_friend".into(), names.verified.contains(via).into());
         }
         // A member's message: how the copy that brought it came.
         if let Some(kind) = m.path.filter(|_| !m.mine).map(path_kind_of) {
@@ -746,6 +772,106 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raven_core::group::MemberView;
+
+    fn contact(key: u8, name: &str, verified: bool, blocked: bool) -> ContactView {
+        ContactView {
+            pub_hex: hex::encode([key; 32]),
+            address: raven_core::encode_address(&[key; 32]),
+            label: name.into(),
+            petname: name.into(),
+            pinned: verified,
+            blocked,
+            lan_dial: String::new(),
+            internet_dial: String::new(),
+            p2p: String::new(),
+        }
+    }
+
+    /// APP-02: the member that passed a message on is named as an author
+    /// is (`via_name`: your name for a friend, else the admin's label), and
+    /// `via_friend` says whether that is a friend you verified and have not
+    /// blocked. A label is any text the admin chose, here the name of one of
+    /// your friends: someone who is not your friend never reads as one.
+    #[test]
+    fn a_label_for_someone_who_is_not_a_friend_gives_via_friend_false() {
+        let me: Key = [1; 32];
+        let (friend, stranger, unverified, blocked, author): (Key, Key, Key, Key, Key) =
+            ([2; 32], [3; 32], [4; 32], [5; 32], [6; 32]);
+        let contacts = [
+            contact(2, "Friend B", true, false),
+            contact(4, "Uma", false, false),
+            contact(5, "Xena", true, true),
+        ];
+        let names = Names::new(&contacts, "Desk C".into(), me, HashMap::new());
+        let member = |key: Key, label: &str| MemberView {
+            key,
+            label: label.into(),
+            friend_name: None,
+            admin: key == friend,
+            me: key == me,
+        };
+        let id = [7; 16];
+        let view = GroupView {
+            summary: GroupSummary {
+                id,
+                name: "Trio".into(),
+                admin: friend,
+                i_am_admin: false,
+                status: "active".into(),
+                epoch: 1,
+                members: 6,
+                unread: 0,
+                last_ms: 2,
+                last: None,
+            },
+            members: vec![
+                member(me, "C"),
+                member(friend, "B"),
+                // The admin calls a stranger by the name of your friend.
+                member(stranger, "Friend B"),
+                member(unverified, "U"),
+                member(blocked, "X"),
+                member(author, "D"),
+            ],
+        };
+        let inner = Inner::new(Err("no profile in this test".into()));
+        let passed_on_by = |via: Option<Key>| {
+            let m = MessageView {
+                id: [9; 16],
+                from: author,
+                mine: false,
+                body: "hi".into(),
+                sent_ms: 1,
+                received_ms: 2,
+                via,
+                lines: Vec::new(),
+                copies: Vec::new(),
+                delivered: 0,
+                total: 0,
+                path: None,
+            };
+            inner.message_json(&id, &view, &m, &names)
+        };
+        for (via, name, is_friend) in [
+            (friend, "Friend B", true),
+            // The admin's label, the same text as your friend's name.
+            (stranger, "Friend B", false),
+            // Your name for them, but not verified.
+            (unverified, "Uma", false),
+            // Verified once, blocked since: the admin's label.
+            (blocked, "X", false),
+            // A key the roster never held.
+            ([8; 32], "a former member (08080808)", false),
+        ] {
+            let m = passed_on_by(Some(via));
+            assert_eq!(m["via_name"], name, "{m}");
+            assert_eq!(m["via_friend"], is_friend, "{m}");
+        }
+        let direct = passed_on_by(None);
+        assert!(direct.get("via_name").is_none(), "{direct}");
+        assert!(direct.get("via_friend").is_none(), "{direct}");
+    }
 
     #[test]
     fn short_forms_keep_both_ends() {

@@ -244,8 +244,10 @@ raven-node).
 - **Authors.** A message's `from_name` is named the same way. A label is any text its admin chose,
   the name of one of your friends too, so `GroupMessage.from_friend` says whether `from_name` is a
   name you chose: true for yours and for a friend's, false for anyone else (the admin's label, or
-  "a former member (1a2b3c4d)"); `Group.last_from_friend` says the same of `last_from`. An author
-  with `from_friend: false` is never shown as a friend: wherever its name is shown (the message, a
+  "a former member (1a2b3c4d)"); `Group.last_from_friend` says the same of `last_from`, and
+  `GroupMessage.via_friend` of `via_name`, the member that passed a message on (true only for a
+  friend you verified and have not blocked). An author with `from_friend: false`, and a `via_name`
+  with `via_friend: false`, is never shown as a friend: wherever its name is shown (the message, a
   list preview, a notification) it goes with "not your friend", in a neutral colour (never one
   derived from the address). `raven group show`, `raven inbox` and the terminal app do so too, and
   show the start of the key instead of a label that is, or only looks like, the name of one of
@@ -345,8 +347,8 @@ stored a moment before, such as a group copy just parked, counts too).
   `completed`: nothing is left.
 - `custody: "off"` (friend custody held in this build): nothing is handed, `left` counts what waits.
   Without a running raven-node (or a paused one) the answer is `NODE_NOT_RUNNING`.
-- Each message a friend took then reads `path_kind: "friend"` (or `"handoff"`) with `via_name`, and a
-  `state` event tells the app.
+- Each message a friend took then reads `path_kind: "friend"` (or `"handoff"`) with `via_name` and
+  `via_friend`, and a `state` event tells the app.
 
 ### Embedded node (iOS)
 
@@ -593,7 +595,7 @@ Chat      { kind: "contact" | "group", address? (kind contact), group? (kind gro
             pinned: bool, last_ms (0 without a message), unread }
 Message   { id, address, direction: "in" | "out", text, at_ms,
             state: "sending" | "sent" | "delivered" | "waiting" | "time_ran_out" | "not_sent_meet_first" | "failed",
-            until_ms?, path?, path_kind?, via_name?, delivered_at_ms?, attempts? }
+            until_ms?, path?, path_kind?, via_name?, via_friend?, delivered_at_ms?, attempts? }
             path_kind and its path words (every label raven-node can report):
               lan "LAN direct" · internet "Internet direct" · p2p "p2p" (path not known) ·
               p2p_direct "p2p · direct" · p2p_reversed "p2p · reversed" · p2p_relayed "p2p · relayed" ·
@@ -612,6 +614,11 @@ Message   { id, address, direction: "in" | "out", text, at_ms,
             the run, so its delivery still says it; it is never written down: after a restart a
             delivered message says only "Held by a friend" (which friends held a message is not
             kept once it is done).
+            via_friend (with via_name): true only while that friend is one you verified and have not
+            blocked, as they are now (a change, such as a block, is told with a `state` event);
+            false: the apps show the name with "not your friend", never as the name of a friend. An
+            engine from before this field sends via_name alone: an app reads a missing via_friend
+            as false.
             A delivery raven-node's outbox made takes raven-node's last path to the friend. The path
             of each delivered message of yours is kept in `desktop_private.rms` (by history id), so
             it comes back after a restart.
@@ -757,7 +764,8 @@ Group     { id, name, short_id, status: "active" | "left" | "removed", admin: bo
             admin's label, shown with "not your friend" (see Groups, Authors).
 GroupMember { address, short_address, name, label, friend: bool, admin: bool, me: bool }
 GroupMessage { id, group, from_address, from_name, from_friend: bool, mine: bool, text, at_ms,
-            via_name? (the member that passed it on, when it was not its author),
+            via_name?, via_friend? (the member that passed it on, when it was not its author, and
+                                    whether it is a friend you verified and have not blocked),
             path_kind?, path? (a member's message: how the copy that brought it came, the kinds and
                                words of Message.path_kind; friend when a friend held it),
             delivered: n, total: n,
@@ -765,6 +773,10 @@ GroupMessage { id, group, from_address, from_name, from_friend: bool, mine: bool
                          via: "direct" | "relay", held_by? }] }   (receipts only on yours)
             from_friend: true for yours and a friend's; false: from_name is the admin's label (or
             "a former member (1a2b3c4d)"), shown with "not your friend" (see Groups, Authors).
+            via_friend (with via_name): true only for a friend you verified and have not blocked;
+            false: the apps never show via_name as the name of a friend (see Groups, Authors). It
+            is then the admin's label, "a former member (1a2b3c4d)", or your name for someone you
+            have not verified. A missing via_friend (an engine from before it) reads as false.
             held_by: the friend that holds the copy for that member while the member is away, by
             your name for them, until it is delivered or given up (its state is then `waiting` or
             `sent`, as raven-node's outbox lists it).
@@ -795,7 +807,7 @@ call it off the UI thread.
 Event     { seq, kind, at_ms, ... } kinds:
             "status_ok"            heartbeat: a successful status check            -> heartbeat pulse
             "send_started"  {id}    a send attempt began                           -> packet travels out
-            "receipt"       {id, address?, path, path_kind, ms, delivered_at_ms?, via_name?}  signed receipt arrived
+            "receipt"       {id, address?, path, path_kind, ms, delivered_at_ms?, via_name?, via_friend?}  signed receipt arrived
                                        -> receipt travels back, Delivered (delivered_at_ms as on Message)
             "incoming"      {message}                                              -> packet travels in, bubble slides in
             "outgoing"      {message}  yours, sent by another program on this profile (the
@@ -803,9 +815,9 @@ Event     { seq, kind, at_ms, ... } kinds:
                                        in the open chat (its path once delivered; a receipt follows)
             "retry"         {id, address, attempts}                                -> retry ring on the friend's dot
             "presence"      {address, presence}                                    -> dot changes (blink)
-            "state"         {id, address?, state, until_ms?, path?, path_kind?, via_name?}  -> tick text changes
+            "state"         {id, address?, state, until_ms?, path?, path_kind?, via_name?, via_friend?}  -> tick text changes
                             (also sent when a waiting message's until_ms becomes known or changes,
-                             and when a friend takes a copy of it: via_name)
+                             when a friend takes a copy of it: via_name, and when via_friend changes)
             "node"          {status}                                               -> header/menu-bar chip changes
             "unread"        {address, unread}  the friend's count changed (a message came, or the
                                        chat was read here or in the terminal app) -> badge follows

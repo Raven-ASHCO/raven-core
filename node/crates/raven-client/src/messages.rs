@@ -144,9 +144,10 @@ pub(crate) struct Pending {
     /// path to the friend then): kept, so a later delivery to the same
     /// friend does not change it.
     pub path: Option<PathLabel>,
-    /// The friend that held a sealed copy of it (their name here), kept
-    /// with `path` for this run: the receipt that follows says "via" them.
-    pub via_name: Option<String>,
+    /// The friend that held a sealed copy of it (their key, and their name
+    /// here), kept with `path` for this run: the receipt that follows says
+    /// "via" them.
+    pub via: Option<Holder>,
     pub finished: Option<Instant>,
     /// The history row that keeps it as not sent while it waits unsent
     /// (held by a pause or Lock v2, or unfinished when the node paused):
@@ -164,8 +165,9 @@ struct Observed {
     incoming: HashSet<String>,
     presence: HashMap<String, &'static str>,
     receipts: HashSet<String>,
-    /// Each message's friend that holds a copy (`via_name`), as last told.
-    holders: HashMap<String, String>,
+    /// Each message's friend that holds a copy (`via_name`, `via_friend`),
+    /// as last told.
+    holders: HashMap<String, (String, bool)>,
     /// Each friend's unread count, by key.
     unread: HashMap<String, usize>,
 }
@@ -230,6 +232,9 @@ pub(crate) struct View {
     /// A message of yours a friend holds (path `friend` or `handoff`): that
     /// friend's name on this computer (API.md's `via_name`).
     pub via_name: Option<String>,
+    /// With `via_name`: whether that friend is one you verified and have
+    /// not blocked, as they are now (API.md's `via_friend`).
+    pub via_friend: bool,
     /// When the engine saw its receipt (yours, delivered), when it did.
     pub delivered_at_ms: Option<u64>,
     pub attempts: Option<u32>,
@@ -267,6 +272,7 @@ impl View {
         }
         if let Some(via) = &self.via_name {
             m.insert("via_name".into(), via.clone().into());
+            m.insert("via_friend".into(), self.via_friend.into());
         }
         if let Some(at) = self.late_delivery() {
             m.insert("delivered_at_ms".into(), at.into());
@@ -449,7 +455,7 @@ fn listed_carrier_wrote_it(item: &OutboxItem) -> bool {
 
 /// A `state` event's fields (API.md): the state, its deadline while it
 /// waits, and how it travels once known (`path`, `path_kind`, and the
-/// friend that holds a copy, `via_name`).
+/// friend that holds a copy, `via_name` with `via_friend`).
 fn state_fields(v: &View) -> Value {
     let mut fields = json!({"id": v.id, "address": v.address, "state": v.state.as_str()});
     if let Some(until) = v.until_ms {
@@ -461,6 +467,7 @@ fn state_fields(v: &View) -> Value {
     }
     if let Some(via) = &v.via_name {
         fields["via_name"] = via.clone().into();
+        fields["via_friend"] = v.via_friend.into();
     }
     fields
 }
@@ -471,20 +478,47 @@ fn held_by_friend(path: &PathLabel) -> bool {
     matches!(path.kind, "friend" | "handoff")
 }
 
-/// The name on this computer of the first of `holders` (keys, hex) that is
-/// a saved friend: API.md's `via_name`. None when no holder is known, or
+/// A friend that holds a sealed copy of a message of yours (or held it):
+/// their key (hex, lower case) and their name on this computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Holder {
+    pub key: String,
+    pub name: String,
+}
+
+/// The first of `holders` (keys, hex) that is a saved friend, named as on
+/// this computer: API.md's `via_name`. None when no holder is known, or
 /// none is a saved friend.
+pub(crate) fn holder(holders: Option<&Vec<String>>, contacts: &[ContactView]) -> Option<Holder> {
+    holders?.iter().find_map(|key| {
+        contacts
+            .iter()
+            .find(|c| c.pub_hex.trim().eq_ignore_ascii_case(key.trim()))
+            .map(|c| safety::line(&c.label))
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| Holder {
+                key: key.trim().to_ascii_lowercase(),
+                name,
+            })
+    })
+}
+
+/// [`holder`]'s name.
 pub(crate) fn holder_name(
     holders: Option<&Vec<String>>,
     contacts: &[ContactView],
 ) -> Option<String> {
-    holders?.iter().find_map(|key| {
-        contacts
-            .iter()
-            .find(|c| c.pub_hex.trim().eq_ignore_ascii_case(key))
-            .map(|c| safety::line(&c.label))
-            .filter(|name| !name.trim().is_empty())
-    })
+    holder(holders, contacts).map(|h| h.name)
+}
+
+/// Whether the saved friend with the key `key` (hex) is one you verified
+/// and have not blocked, as they are now: API.md's `via_friend`. A name
+/// that is not such a friend's is never shown as one (APP-02).
+pub(crate) fn verified_friend(key: &str, contacts: &[ContactView]) -> bool {
+    contacts
+        .iter()
+        .find(|c| c.pub_hex.trim().eq_ignore_ascii_case(key.trim()))
+        .is_some_and(|c| c.pinned && !c.blocked)
 }
 
 /// The state of one message from what is known of it (strongest first).
@@ -634,6 +668,7 @@ fn views(
                 until_ms: None,
                 path: None,
                 via_name: None,
+                via_friend: false,
                 delivered_at_ms: None,
                 attempts: None,
                 history: Some(e.delivery.clone()),
@@ -670,10 +705,10 @@ fn views(
         };
         // The friend that holds a sealed copy, by name (raven-node's route
         // record names who took it).
-        let mut via_name = path
+        let mut via = path
             .as_ref()
             .filter(|l| held_by_friend(l))
-            .and_then(|_| holder_name(outbox.holders.get(&mid), contacts));
+            .and_then(|_| holder(outbox.holders.get(&mid), contacts));
         // A message of this session: friends carrying it is kept from when
         // it was seen; once raven-node's outbox delivered it, its last path
         // to the friend (a delivery after the message was written), read
@@ -694,8 +729,8 @@ fn views(
                 }
                 // Who held it is kept with the path: the record that names
                 // them is gone once it is delivered.
-                if send.via_name.is_none() {
-                    send.via_name.clone_from(&via_name);
+                if send.via.is_none() {
+                    send.via.clone_from(&via);
                 }
             }
             let kept = book.pendings.iter().find(|s| s.id == p.id);
@@ -703,13 +738,18 @@ fn views(
             if kept_path.is_some() && (state == State::Delivered || path.is_none()) {
                 path = kept_path;
             }
-            if via_name.is_none() {
-                via_name = kept.and_then(|s| s.via_name.clone());
+            if via.is_none() {
+                via = kept.and_then(|s| s.via.clone());
             }
         }
         if !path.as_ref().is_some_and(held_by_friend) {
-            via_name = None;
+            via = None;
         }
+        // Whether that friend is verified and not blocked, as now (also
+        // for a name kept from earlier in the run).
+        let via_friend = via
+            .as_ref()
+            .is_some_and(|h| verified_friend(&h.key, contacts));
         out.push(View {
             id: pending
                 .as_ref()
@@ -723,7 +763,8 @@ fn views(
             state,
             until_ms,
             path,
-            via_name,
+            via_name: via.map(|h| h.name),
+            via_friend,
             delivered_at_ms: None,
             attempts: item.as_ref().map(|i| i.attempts).filter(|n| *n > 0),
             history: Some(e.delivery.clone()),
@@ -749,6 +790,7 @@ fn views(
             until_ms,
             path,
             via_name: None,
+            via_friend: false,
             delivered_at_ms: None,
             attempts: None,
             history: None,
@@ -1041,11 +1083,13 @@ impl Inner {
             let before = observed
                 .states
                 .insert(v.id.clone(), (v.state, attempts, v.until_ms));
-            // Which friend holds it: a change is told with the state (the
+            // Which friend holds it, and whether they are a verified friend
+            // you have not blocked: a change is told with the state (the
             // name is kept once known, so it never goes back to none).
             let holder_new = match &v.via_name {
                 Some(name) => {
-                    observed.holders.insert(v.id.clone(), name.clone()).as_ref() != Some(name)
+                    let told = (name.clone(), v.via_friend);
+                    observed.holders.insert(v.id.clone(), told.clone()).as_ref() != Some(&told)
                 }
                 None => false,
             };
@@ -1102,6 +1146,7 @@ impl Inner {
                         }
                         if let Some(via) = &v.via_name {
                             receipt["via_name"] = via.clone().into();
+                            receipt["via_friend"] = v.via_friend.into();
                         }
                         self.emit("receipt", receipt);
                         touched.push(v.peer.clone());
@@ -1327,7 +1372,7 @@ impl Inner {
                 outcome: None,
                 raw: String::new(),
                 path: None,
-                via_name: None,
+                via: None,
                 finished: None,
                 kept: None,
             };
@@ -1360,6 +1405,7 @@ impl Inner {
             until_ms: None,
             path: None,
             via_name: None,
+            via_friend: false,
             delivered_at_ms: None,
             attempts: None,
             history: None,
@@ -2315,7 +2361,7 @@ mod tests {
             outcome,
             raw: String::new(),
             path: None,
-            via_name: None,
+            via: None,
             finished: None,
             kept: None,
         }
@@ -2334,6 +2380,7 @@ mod tests {
             until_ms,
             path: None,
             via_name: None,
+            via_friend: false,
             delivered_at_ms: None,
             attempts: None,
             history: None,
@@ -2508,6 +2555,153 @@ mod tests {
         // Nothing changed: nothing told.
         inner.observe_messages(&mut book, std::slice::from_ref(&waiting), 8);
         assert!(seen(&inner, b2.seq).events.is_empty());
+    }
+
+    fn max(verified: bool, blocked: bool) -> ContactView {
+        ContactView {
+            pub_hex: "cd".repeat(32),
+            address: "rvn1max".into(),
+            label: "Max".into(),
+            petname: "Max".into(),
+            pinned: verified,
+            blocked,
+            lan_dial: String::new(),
+            internet_dial: String::new(),
+            p2p: String::new(),
+        }
+    }
+
+    /// raven-node's outbox lists `ab` as written and held by Max (route
+    /// record live), or as delivered once the record that named Max is gone.
+    fn held_by_max(delivered: bool) -> OutboxSnap {
+        let item = if delivered {
+            item("delivered", 0)
+        } else {
+            OutboxItem {
+                in_custody: 1,
+                ..item("sent", 0)
+            }
+        };
+        OutboxSnap {
+            answered: true,
+            worker_running: true,
+            items: HashMap::from([("ab".to_owned(), item)]),
+            holders: if delivered {
+                HashMap::new()
+            } else {
+                HashMap::from([("ab".to_owned(), vec!["cd".repeat(32)])])
+            },
+            ..Default::default()
+        }
+    }
+
+    /// APP-02: a message of yours a friend holds names them (`via_name`),
+    /// and `via_friend` says whether they are a friend you verified and have
+    /// not blocked, on the message and on its `state` event, so an app
+    /// never shows that name as a friend's when it is not.
+    #[test]
+    fn a_holder_reads_as_a_friend_only_while_verified_and_not_blocked() {
+        let history = vec![entry("ab", "out", "hi", "queued")];
+        for (verified, blocked, friend) in [
+            (true, false, true),
+            (false, false, false),
+            (true, true, false),
+            (false, true, false),
+        ] {
+            let mut book = MessageBook::default();
+            let v = views(
+                &mut book,
+                &history,
+                &held_by_max(false),
+                &[max(verified, blocked)],
+                10,
+            );
+            let message = v[0].json();
+            assert_eq!(message["path_kind"], "friend", "{message}");
+            assert_eq!(message["via_name"], "Max", "{message}");
+            assert_eq!(
+                message["via_friend"], friend,
+                "verified {verified}, blocked {blocked}: {message}"
+            );
+            let told = state_fields(&v[0]);
+            assert_eq!(told["via_friend"], friend, "{told}");
+        }
+        // Nobody holds it: neither field.
+        let mut book = MessageBook::default();
+        let v = views(
+            &mut book,
+            &history,
+            &OutboxSnap::default(),
+            &[max(true, false)],
+            10,
+        );
+        let message = v[0].json();
+        assert!(message.get("via_name").is_none(), "{message}");
+        assert!(message.get("via_friend").is_none(), "{message}");
+    }
+
+    /// The name of the friend that held a message of this run is kept with
+    /// it once the record that named them is gone, and `via_friend` follows
+    /// that friend as they are now: a block is told with a `state` event,
+    /// and the receipt says it too.
+    #[test]
+    fn a_kept_holder_is_a_friend_as_they_are_now() {
+        let inner = Inner::new(Err("no profile in this test".into()));
+        let seen = |inner: &Inner, after: u64| inner.events.poll(after);
+        let mut book = MessageBook::default();
+        book.pendings.push(pending(Job::Done, Some(Outcome::Sent)));
+        let queued = vec![entry("ab", "out", "hi", "queued")];
+        let held = views(
+            &mut book,
+            &queued,
+            &held_by_max(false),
+            &[max(true, false)],
+            10,
+        );
+        assert_eq!(held[0].id, "pending-1");
+        assert_eq!(held[0].json()["via_friend"], true, "{:?}", held[0]);
+        // The first look only notes what is there.
+        inner.observe_messages(&mut book, &held, 10);
+        let start = seen(&inner, 0).seq;
+        // Max is blocked while Max holds it: the apps are told.
+        let blocked = views(
+            &mut book,
+            &queued,
+            &held_by_max(false),
+            &[max(true, true)],
+            11,
+        );
+        inner.observe_messages(&mut book, &blocked, 11);
+        let b = seen(&inner, start);
+        assert_eq!(b.events.len(), 1, "{:?}", b.events);
+        assert_eq!(b.events[0]["kind"], "state");
+        assert_eq!(b.events[0]["via_name"], "Max");
+        assert_eq!(b.events[0]["via_friend"], false, "{:?}", b.events);
+        // Delivered: the record that named Max is gone, the name kept.
+        let done = vec![entry("ab", "out", "hi", "delivered")];
+        let delivered = views(&mut book, &done, &held_by_max(true), &[max(true, true)], 12);
+        assert_eq!(delivered[0].state, State::Delivered);
+        let message = delivered[0].json();
+        assert_eq!(message["via_name"], "Max", "{message}");
+        assert_eq!(message["via_friend"], false, "{message}");
+        inner.observe_messages(&mut book, &delivered, 12);
+        let b2 = seen(&inner, b.seq);
+        let receipt = b2
+            .events
+            .iter()
+            .find(|e| e["kind"] == "receipt")
+            .unwrap_or_else(|| panic!("no receipt: {:?}", b2.events));
+        assert_eq!(receipt["via_name"], "Max", "{receipt}");
+        assert_eq!(receipt["via_friend"], false, "{receipt}");
+        // Unblocked and verified: true again, on the kept name too.
+        let again = views(
+            &mut book,
+            &done,
+            &held_by_max(true),
+            &[max(true, false)],
+            13,
+        );
+        assert_eq!(again[0].json()["via_friend"], true, "{:?}", again[0]);
     }
 
     #[test]
