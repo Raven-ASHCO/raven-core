@@ -228,6 +228,13 @@ features! {
     FEATURE_NEARBY = "feature/nearby" => nearby_gate::NEARBY_PRODUCTION_ENABLED,
     FEATURE_OFFLINE_LAN = "feature/offline-lan" => lan_gate::OFFLINE_LAN_PRODUCTION_ENABLED,
     FEATURE_ONION = "feature/onion" => onion_gate::ONION_PRODUCTION_ENABLED,
+    FEATURE_ONION_EARLY = "feature/onion-early" => onion_gate::ONION_EARLY_PRODUCTION_ENABLED,
+    FEATURE_ONION_HEDGE = "feature/onion-hedge" => onion_gate::ONION_HEDGE_PRODUCTION_ENABLED,
+    FEATURE_ONION_OPTIMISTIC =
+        "feature/onion-optimistic" => onion_gate::ONION_OPTIMISTIC_PRODUCTION_ENABLED,
+    FEATURE_ONION_WARM = "feature/onion-warm" => onion_gate::ONION_WARM_PRODUCTION_ENABLED,
+    FEATURE_ONION_WARM_LINK =
+        "feature/onion-warm-link" => onion_gate::ONION_WARM_LINK_PRODUCTION_ENABLED,
     FEATURE_P2P = "feature/p2p" => p2p_gate::P2P_PRODUCTION_ENABLED,
     FEATURE_PAIR_SEED = "feature/pair-seed" => security_gate::PAIR_SEED_PRODUCTION_ENABLED,
     FEATURE_PEER_ROTATION =

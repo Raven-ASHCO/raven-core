@@ -1946,6 +1946,27 @@ impl RouteRefusal {
 /// How long [`localize_lan_route`] waits for a name to resolve.
 pub const LOCALIZE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a send's race waits for a card's LAN name to resolve while
+/// another carrier's route races beside it (N3, security and speed report
+/// 2026-11-05): a name on the local network answers well within it, and one
+/// that has not by then fails that route alone. As long as Tor's head start
+/// ([`crate::onion::ONION_HEAD_START`]), so the name is never what Tor
+/// waits for.
+pub const LOCALIZE_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Would [`localize_lan_route`] ask the resolver for `route`: a LAN route
+/// the local-network rule applies to (`pinned` false) whose `host:port` is
+/// a name, not an address? Everything else it decides at once, without the
+/// network.
+pub fn localize_asks_resolver(route: &OutboxRoute, pinned: bool) -> bool {
+    let mut asked = false;
+    let _ = localize_lan_route_with(route, pinned, Duration::ZERO, false, |_, _, _| {
+        asked = true;
+        Err(RouteRefusal::Unresolved(String::new()))
+    });
+    asked
+}
+
 /// The LAN route to dial for a contact: unchanged for a verified contact (and
 /// for any non-LAN route); for an unverified one, `host:port` must be on the
 /// local network ([`is_local_network_ip`]): a literal as it is, a name by
@@ -1958,32 +1979,48 @@ pub fn localize_lan_route(
     pinned: bool,
     timeout: Duration,
 ) -> Result<OutboxRoute, RouteRefusal> {
+    localize_lan_route_by(route, pinned, timeout, system_lookup)
+}
+
+/// A blocking lookup of `name` on `port`: the system resolver's
+/// ([`system_lookup`]), or a test's that answers without the network.
+pub type Lookup = fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>;
+
+/// The system resolver's [`Lookup`] (it has no timeout of its own).
+pub fn system_lookup(name: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    (name, port).to_socket_addrs().map(|it| it.collect())
+}
+
+/// [`localize_lan_route`] with the `lookup` passed in.
+pub fn localize_lan_route_by(
+    route: &OutboxRoute,
+    pinned: bool,
+    timeout: Duration,
+    lookup: Lookup,
+) -> Result<OutboxRoute, RouteRefusal> {
     localize_lan_route_with(
         route,
         pinned,
         timeout,
         crate::lan_gate::offline_lan_live(),
-        resolve_within,
+        |name, port, timeout| resolve_within(name, port, timeout, lookup),
     )
 }
 
-/// What `name` resolves to on `port`, within `timeout` (on a thread of its
-/// own: the system resolver has no timeout).
+/// What `name` resolves to on `port` by `lookup`, within `timeout` (on a
+/// thread of its own: the system resolver has no timeout).
 fn resolve_within(
     name: &str,
     port: u16,
     timeout: Duration,
+    lookup: Lookup,
 ) -> Result<Vec<std::net::SocketAddr>, RouteRefusal> {
     let name = name.to_string();
     crate::lab_audit::dns();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        use std::net::ToSocketAddrs;
-        let _ = tx.send(
-            (name.as_str(), port)
-                .to_socket_addrs()
-                .map(|it| it.collect::<Vec<_>>()),
-        );
+        let _ = tx.send(lookup(&name, port));
     });
     match rx.recv_timeout(timeout) {
         Ok(Ok(addrs)) => Ok(addrs),
@@ -5446,6 +5483,69 @@ mod tests {
         );
         assert_eq!(
             localize_lan_route_with(&lan("203.0.113.5:7420"), false, t, true, never),
+            Err(RouteRefusal::NotLocal)
+        );
+    }
+
+    /// N3: only a LAN name the local-network rule applies to asks the
+    /// resolver; a literal, a malformed address, a verified contact's own
+    /// route and another carrier's are decided at once. A lookup that does
+    /// not answer is cut at the bound it is given (here the race's), never
+    /// later, and a lookup's answer goes through the same rule.
+    #[test]
+    fn only_a_lan_name_asks_the_resolver_and_a_slow_one_is_cut_at_its_bound() {
+        for (dial, pinned, asks) in [
+            ("bob-mac.local:7420", false, true),
+            ("bob-mac.local:7420", true, false),
+            ("192.168.1.5:7420", false, false),
+            ("[fe80::1%en0]:7420", false, false),
+            ("bob-mac.local:http", false, false),
+            ("bob-mac.local", false, false),
+        ] {
+            assert_eq!(
+                localize_asks_resolver(&lan(dial), pinned),
+                asks,
+                "{dial} {pinned}"
+            );
+        }
+        let tor = OutboxRoute {
+            carrier: OutboxCarrier::Onion,
+            dial: crate::onion::dial_for(&[7u8; 32]),
+        };
+        assert!(!localize_asks_resolver(&tor, false));
+        assert_eq!(LOCALIZE_RACE_TIMEOUT, crate::onion::ONION_HEAD_START);
+        fn never_answers(_: &str, _: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            std::thread::sleep(Duration::from_secs(6));
+            Ok(Vec::new())
+        }
+        let began = std::time::Instant::now();
+        let got = localize_lan_route_by(
+            &lan("bob-mac.local:7420"),
+            false,
+            LOCALIZE_RACE_TIMEOUT,
+            never_answers,
+        );
+        let took = began.elapsed();
+        assert_eq!(
+            got,
+            Err(RouteRefusal::Unresolved("resolution timed out".into()))
+        );
+        assert!(got.unwrap_err().is_unresolved_name());
+        assert!(
+            (LOCALIZE_RACE_TIMEOUT..LOCALIZE_RACE_TIMEOUT + Duration::from_millis(500))
+                .contains(&took),
+            "{took:?}"
+        );
+        fn answers_public(_: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::from(([203, 0, 113, 5], port))])
+        }
+        assert_eq!(
+            localize_lan_route_by(
+                &lan("bob-mac.local:7420"),
+                false,
+                LOCALIZE_RACE_TIMEOUT,
+                answers_public
+            ),
             Err(RouteRefusal::NotLocal)
         );
     }

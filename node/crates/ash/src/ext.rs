@@ -5019,7 +5019,11 @@ fn deliver_routes(
     {
         return Err(verified_only_text(&ctx.who(), &peer_pub));
     }
-    let (dial_routes, unresolved) = send_dial_routes(data_dir, routes, &peer_pub, ctx, lan_off)?;
+    let LocalDialRoutes {
+        routes: dial_routes,
+        known: unresolved,
+        in_race,
+    } = send_dial_routes(data_dir, routes, &peer_pub, ctx, lan_off)?;
     let (dial, carrier) = (first.dial.as_str(), first.carrier);
 
     let mut message_id = [0u8; 16];
@@ -5075,7 +5079,8 @@ fn deliver_routes(
     } else {
         super::pair_init_lab::ProbePlan::remembered(data_dir, &peer_pub, planned)
     }
-    .with_unresolved(unresolved);
+    .with_unresolved(unresolved)
+    .resolving_in_race(in_race);
     // The network part: on a terminal, say so when it takes more than a second.
     // It names the address tried first (the planned form, as before; while LAN
     // is off, the first one that is dialled).
@@ -5131,9 +5136,18 @@ fn local_dial_routes(
     local_dial_routes_with(data_dir, routes, peer, ctx, raven_core::offline_lan_live())
 }
 
-/// The routes to dial, and (route index, probe error) for each kept route
-/// whose name did not resolve ([`local_dial_routes`]).
-type LocalDialRoutes = (Vec<super::pair_init_lab::DialRoute>, Vec<(usize, String)>);
+/// What [`local_dial_routes`] found: the routes to dial, the probe error
+/// of each kept route that is not dialled, and the LAN names the send's
+/// race resolves itself.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LocalDialRoutes {
+    routes: Vec<super::pair_init_lab::DialRoute>,
+    /// (route index, probe error): kept, never dialled (cutoff F1: a name
+    /// that does not resolve now).
+    known: Vec<(usize, String)>,
+    /// Route indices whose LAN name the race resolves.
+    in_race: Vec<usize>,
+}
 
 /// [`local_dial_routes`] with the `OFFLINE_LAN` gate passed in: closed, an
 /// unresolved name refuses the send as before.
@@ -5144,13 +5158,49 @@ fn local_dial_routes_with(
     ctx: &SendCtx,
     offline_lan: bool,
 ) -> Result<LocalDialRoutes, String> {
-    use raven_core::outbox::{localize_lan_route, RouteRefusal, LOCALIZE_RESOLVE_TIMEOUT};
+    local_dial_routes_by(
+        data_dir,
+        routes,
+        peer,
+        ctx,
+        offline_lan,
+        raven_core::outbox::system_lookup,
+    )
+}
+
+/// [`local_dial_routes_with`] with the name `lookup` passed in.
+///
+/// N3 (security and speed report 2026-11-05): while another carrier's
+/// route can take the send (a verified friend's Tor, Internet, p2p or
+/// nearby route), a LAN name the local-network rule applies to (one from
+/// the friend's card) is not resolved here: it goes to the race whole
+/// ([`LocalDialRoutes::in_race`]), which resolves it within its short bound
+/// and dials the resolved address, so the name never holds the other routes
+/// back. And a LAN route that may not be dialled fails that route alone
+/// (its reason is its probe error), never the send. With no other carrier
+/// all is as before.
+fn local_dial_routes_by(
+    data_dir: &Path,
+    routes: &[super::pair_init_lab::DialRoute],
+    peer: &[u8; 32],
+    ctx: &SendCtx,
+    offline_lan: bool,
+    lookup: raven_core::outbox::Lookup,
+) -> Result<LocalDialRoutes, String> {
+    use raven_core::outbox::{
+        localize_asks_resolver, localize_lan_route_by, RouteRefusal, LOCALIZE_RESOLVE_TIMEOUT,
+    };
     let pinned = raven_core::contact_is_pinned(data_dir, peer)?;
     // A card's LAN route keeps the local-network rule for a verified contact
     // too (`raven_core::outbox::ContactRoutes::lan_local_only`).
     let book = raven_core::outbox::contact_routes(data_dir, peer)?;
+    let others = routes.iter().any(|r| {
+        r.carrier != super::pair_init_lab::DialCarrier::Lan
+            && raven_core::carrier_allowed_for_contact(r.carrier.outbox(), pinned)
+    });
     let mut out = Vec::with_capacity(routes.len());
     let mut unresolved = Vec::new();
+    let mut in_race = Vec::new();
     for (i, route) in routes.iter().enumerate() {
         let planned = raven_core::OutboxRoute {
             carrier: route.carrier.outbox(),
@@ -5158,7 +5208,15 @@ fn local_dial_routes_with(
         };
         let pinned_contact = pinned;
         let pinned = pinned && !book.as_ref().is_some_and(|c| c.lan_local_only(&planned));
-        let why = match localize_lan_route(&planned, pinned, LOCALIZE_RESOLVE_TIMEOUT) {
+        if others && localize_asks_resolver(&planned, pinned) {
+            in_race.push(i);
+            out.push(super::pair_init_lab::DialRoute {
+                carrier: route.carrier,
+                dial: planned.dial,
+            });
+            continue;
+        }
+        let why = match localize_lan_route_by(&planned, pinned, LOCALIZE_RESOLVE_TIMEOUT, lookup) {
             Ok(local) => {
                 out.push(super::pair_init_lab::DialRoute {
                     carrier: route.carrier,
@@ -5168,6 +5226,15 @@ fn local_dial_routes_with(
             }
             Err(why) => why,
         };
+        if others {
+            // N3: never dialled, and another carrier takes the send.
+            unresolved.push((i, card_lan_left_out(&why)));
+            out.push(super::pair_init_lab::DialRoute {
+                carrier: route.carrier,
+                dial: planned.dial,
+            });
+            continue;
+        }
         let shown = sanitize_terminal_line(route.dial.trim());
         let away = offline_lan && why.is_unresolved_name();
         let reason = match why {
@@ -5175,16 +5242,7 @@ fn local_dial_routes_with(
             // F1: kept as planned, in raven-node's words for a name it
             // cannot resolve. Nothing is dialled here either.
             RouteRefusal::Unresolved(e) if away => {
-                let host = planned.dial.rsplit_once(':').map_or("", |(host, _)| host);
-                let host = host.trim_start_matches('[').trim_end_matches(']');
-                unresolved.push((
-                    i,
-                    format!(
-                        "lan connect: cannot resolve {}: {}",
-                        sanitize_terminal_line(host),
-                        sanitize_terminal_line(&e)
-                    ),
-                ));
+                unresolved.push((i, cannot_resolve_text(&planned.dial, &e)));
                 out.push(super::pair_init_lab::DialRoute {
                     carrier: route.carrier,
                     dial: planned.dial,
@@ -5208,7 +5266,35 @@ fn local_dial_routes_with(
             &super::pair_init_lab::pin_command_hint(peer),
         ));
     }
-    Ok((out, unresolved))
+    Ok(LocalDialRoutes {
+        routes: out,
+        known: unresolved,
+        in_race,
+    })
+}
+
+/// The probe error of a LAN name `dial` that did not resolve (`e`), in
+/// raven-node's words for a name it cannot resolve (a name not found).
+pub(super) fn cannot_resolve_text(dial: &str, e: &str) -> String {
+    let host = dial.trim().rsplit_once(':').map_or("", |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    format!(
+        "lan connect: cannot resolve {}: {}",
+        sanitize_terminal_line(host),
+        sanitize_terminal_line(e)
+    )
+}
+
+/// The probe error of a card's LAN route that may not be dialled (`why`)
+/// while another carrier can take the send (N3): that route fails at once.
+pub(super) fn card_lan_left_out(why: &raven_core::outbox::RouteRefusal) -> String {
+    let what = match why {
+        raven_core::outbox::RouteRefusal::NotLocal => "not on your local network".to_string(),
+        raven_core::outbox::RouteRefusal::Unresolved(e) => {
+            format!("could not be resolved ({})", sanitize_terminal_line(e))
+        }
+    };
+    format!("{what}: a LAN address from a card is used only on your local network, so it was not dialled")
 }
 
 /// A send to a verified contact whose LAN address came from a card and is
@@ -5367,7 +5453,11 @@ fn send_dial_routes(
         })
         .collect();
     let picked: Vec<_> = checked.iter().map(|&i| routes[i].clone()).collect();
-    let (dialled, unresolved) = local_dial_routes(data_dir, &picked, peer, ctx)?;
+    let LocalDialRoutes {
+        routes: dialled,
+        known: unresolved,
+        ..
+    } = local_dial_routes(data_dir, &picked, peer, ctx)?;
     let mut out: Vec<_> = routes
         .iter()
         .map(|r| super::pair_init_lab::DialRoute {
@@ -5390,7 +5480,12 @@ fn send_dial_routes(
             .map(|(j, e)| (checked[j], e))
             .filter(|(i, _)| !lan(&routes[*i])),
     );
-    Ok((out, known))
+    Ok(LocalDialRoutes {
+        routes: out,
+        known,
+        // No LAN route is dialled now, so no name is resolved in the race.
+        in_race: Vec::new(),
+    })
 }
 
 /// The send path dials through the local raven-node service: refuse with the
@@ -15197,8 +15292,129 @@ mod local_route_tests {
         assert!(!err.contains("not verified"), "{err}");
         assert!(err.contains("Nothing was dialled"), "{err}");
         row(true);
-        let (kept, _) = local_dial_routes_with(dir.path(), &routes, &peer, &ctx, true).unwrap();
-        assert_eq!(dials(&kept), ["203.0.113.7:7420"]);
+        let kept = local_dial_routes_with(dir.path(), &routes, &peer, &ctx, true).unwrap();
+        assert_eq!(dials(&kept.routes), ["203.0.113.7:7420"]);
+    }
+
+    /// A verified friend's book row whose LAN address `lan_dial` came from
+    /// their card (it keeps the local-network rule).
+    fn card_row(dir: &Path, peer: &[u8; 32], lan_dial: &str) {
+        std::fs::write(
+            dir.join("contacts.json"),
+            format!(
+                r#"[{{"petname":"Bob","address":"","pub_hex":"{}","pinned":true,"lan_dial":"{lan_dial}","lan_dial_trusted":false}}]"#,
+                hex::encode(peer)
+            ),
+        )
+        .unwrap();
+    }
+
+    fn tor_route() -> DialRoute {
+        DialRoute {
+            carrier: DialCarrier::Onion,
+            dial: format!("onion:{}", "ab".repeat(32)),
+        }
+    }
+
+    /// How often [`away_name`] was asked.
+    static AWAY_ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A computer name that never answers (asks no network): the resolver
+    /// gives up after 5 s.
+    fn away_name(_: &str, _: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        AWAY_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_secs(6));
+        Err(std::io::Error::other("no answer"))
+    }
+
+    /// N3 (security and speed report 2026-11-05): a send to a verified
+    /// friend whose card gave a LAN name that does not answer, and who has
+    /// Tor too. The name is not resolved before the race (it was, serially,
+    /// for up to 5 s), and its failure is never the send's: the routes go to
+    /// the race whole, the name to be resolved there.
+    #[test]
+    fn a_card_lan_name_neither_holds_nor_fails_a_send_tor_can_carry() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = [0x5au8; 32];
+        card_row(dir.path(), &peer, "bob-mac.local:7420");
+        let ctx = SendCtx {
+            name: "Bob".into(),
+            ..SendCtx::default()
+        };
+        let routes = [lan("bob-mac.local:7420"), tor_route()];
+        let asked = AWAY_ASKED.load(std::sync::atomic::Ordering::SeqCst);
+        let began = std::time::Instant::now();
+        let got = local_dial_routes_by(dir.path(), &routes, &peer, &ctx, false, away_name);
+        let took = began.elapsed();
+        let got = got.expect("Tor can carry it: the send goes on");
+        assert!(
+            took < Duration::from_secs(1),
+            "held before the race: {took:?}"
+        );
+        assert_eq!(
+            AWAY_ASKED.load(std::sync::atomic::Ordering::SeqCst),
+            asked,
+            "nothing resolved before the race"
+        );
+        assert_eq!(dials(&got.routes), dials(&routes));
+        assert_eq!(got.known, Vec::new());
+        assert_eq!(got.in_race, [0], "the race resolves the name");
+    }
+
+    /// N3: a card LAN address off the local network beside Tor is never
+    /// dialled, and the send goes on over Tor (it was NOT SENT): the LAN
+    /// route fails at once with the reason as its probe error.
+    #[test]
+    fn a_refused_card_lan_address_leaves_the_send_to_tor() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = [0x59u8; 32];
+        card_row(dir.path(), &peer, "203.0.113.7:7420");
+        let ctx = SendCtx {
+            name: "Bob".into(),
+            ..SendCtx::default()
+        };
+        let routes = [lan("203.0.113.7:7420"), tor_route()];
+        let got = local_dial_routes_by(dir.path(), &routes, &peer, &ctx, false, away_name)
+            .expect("Tor can carry it: the send goes on");
+        assert_eq!(dials(&got.routes), dials(&routes));
+        assert_eq!(got.in_race, Vec::<usize>::new());
+        let [(0, why)] = &got.known[..] else {
+            panic!("the LAN route fails at once: {:?}", got.known);
+        };
+        assert!(why.contains("not on your local network"), "{why}");
+        assert!(why.contains("from a card"), "{why}");
+        assert_eq!(classify_cause(why), Cause::Other, "{why}");
+    }
+
+    /// N3: with no other carrier the send is today's: the name is resolved
+    /// first, and a refusal is the send's (NOT SENT, nothing dialled).
+    #[test]
+    fn a_card_lan_name_alone_is_resolved_first_as_before() {
+        fn not_found(_: &str, _: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Err(std::io::Error::other("no such name"))
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let peer = [0x58u8; 32];
+        card_row(dir.path(), &peer, "bob-mac.local:7420");
+        let ctx = SendCtx {
+            name: "Bob".into(),
+            ..SendCtx::default()
+        };
+        let err = local_dial_routes_by(
+            dir.path(),
+            &[lan("bob-mac.local:7420")],
+            &peer,
+            &ctx,
+            false,
+            not_found,
+        )
+        .unwrap_err();
+        assert!(err.contains("came from Bob's card"), "{err}");
+        assert!(
+            err.contains("could not be resolved (no such name)"),
+            "{err}"
+        );
+        assert!(err.contains("Nothing was dialled"), "{err}");
     }
 
     /// `raven outbox show` on a message held as CONTACT_NOT_VERIFIED: a
@@ -15345,7 +15561,11 @@ mod local_route_tests {
         };
         book(dir.path(), &peer, false);
 
-        let (ok, unresolved) = local_dial_routes(
+        let LocalDialRoutes {
+            routes: ok,
+            known: unresolved,
+            ..
+        } = local_dial_routes(
             dir.path(),
             &[
                 lan("192.168.1.20:7300"),
@@ -15362,8 +15582,9 @@ mod local_route_tests {
         );
         assert!(unresolved.is_empty());
 
-        let (named, _) =
-            local_dial_routes(dir.path(), &[lan("localhost:7300")], &peer, &ctx).unwrap();
+        let named = local_dial_routes(dir.path(), &[lan("localhost:7300")], &peer, &ctx)
+            .unwrap()
+            .routes;
         let addr: std::net::SocketAddr = named[0].dial.parse().expect("a resolved literal");
         assert!(addr.ip().is_loopback() && addr.port() == 7300, "{addr}");
 
@@ -15384,8 +15605,9 @@ mod local_route_tests {
         .is_err());
 
         book(dir.path(), &peer, true);
-        let (pinned, _) =
-            local_dial_routes(dir.path(), &[lan("203.0.113.5:7300")], &peer, &ctx).unwrap();
+        let pinned = local_dial_routes(dir.path(), &[lan("203.0.113.5:7300")], &peer, &ctx)
+            .unwrap()
+            .routes;
         assert_eq!(dials(&pinned), ["203.0.113.5:7300"]);
     }
 
@@ -15423,7 +15645,11 @@ mod local_route_tests {
             lan("no-such-host.invalid:7420"),
             internet.clone(),
         ];
-        let (kept, known) = send_dial_routes(dir.path(), &routes, &peer, &ctx, true).unwrap();
+        let LocalDialRoutes {
+            routes: kept,
+            known,
+            ..
+        } = send_dial_routes(dir.path(), &routes, &peer, &ctx, true).unwrap();
         assert_eq!(
             dials(&kept),
             [
@@ -15447,7 +15673,11 @@ mod local_route_tests {
         // network, no refusal), a local literal passes, a public one is
         // refused as before.
         book(dir.path(), &peer, false);
-        let (kept, known) = send_dial_routes(
+        let LocalDialRoutes {
+            routes: kept,
+            known,
+            ..
+        } = send_dial_routes(
             dir.path(),
             &[lan("no-such-host.invalid:7420"), lan("10.0.0.7:7420")],
             &peer,
@@ -15505,7 +15735,11 @@ mod local_route_tests {
     fn an_unresolved_name_is_kept_with_its_probe_error_under_the_switch() {
         let dir = tempfile::tempdir().unwrap();
         let (peer, ctx) = bob_unverified(dir.path());
-        let (kept, unresolved) = local_dial_routes_with(
+        let LocalDialRoutes {
+            routes: kept,
+            known: unresolved,
+            ..
+        } = local_dial_routes_with(
             dir.path(),
             &[lan(&format!(" {AWAY} ")), lan("192.168.1.20:7300")],
             &peer,
@@ -15593,8 +15827,11 @@ mod local_route_tests {
         // A verified contact's name is not resolved here at all.
         book(dir.path(), &peer, true);
         for live in [false, true] {
-            let (kept, unresolved) =
-                local_dial_routes_with(dir.path(), &[lan(AWAY)], &peer, &ctx, live).unwrap();
+            let LocalDialRoutes {
+                routes: kept,
+                known: unresolved,
+                ..
+            } = local_dial_routes_with(dir.path(), &[lan(AWAY)], &peer, &ctx, live).unwrap();
             assert_eq!(
                 (dials(&kept), unresolved.len()),
                 (vec![AWAY.to_string()], 0)

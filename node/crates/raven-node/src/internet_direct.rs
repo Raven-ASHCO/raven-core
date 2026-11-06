@@ -47,9 +47,15 @@
 //! device static the other links use. Anyone holding a card can open an
 //! onion link and read message 2; that key names nothing beyond the onion
 //! address the card shows, and no LAN or Internet listener answers with it.
-//! Noise pins are not read or written on onion links: Tor authenticates the
-//! onion service (whose key the identity signs) and the hello signs the
-//! static.
+//! Tor authenticates only the onion service key (which the identity signs),
+//! and nothing a dialer holds names this static, so a copy of that key could
+//! answer and read our static and signed hello. The onion link pins it
+//! instead ([`LinkPins::Onion`], always with the onion carrier; TOR-3):
+//! recorded after a verified onion link with the contact (either side
+//! dialled), checked between Noise messages 2 and 3 as a noise pin is, and
+//! pinned again after the contact's own verified onion link or a newer
+//! binding naming another onion service key. The device static's noise pins
+//! (M0) are not read or written on onion links.
 
 use std::convert::Infallible;
 use std::net::IpAddr;
@@ -74,6 +80,7 @@ use raven_core::lan_noise::{
     get_remote_static, handshake_hash, handshake_read, handshake_write, into_transport,
     noise_static_public, static_public, LinkStatic,
 };
+use raven_core::lan_noise_pin::{onion_pin_digest, PinKey};
 use raven_core::link_knock::DialerStep;
 use raven_core::link_padding::PadState;
 use raven_core::load_identity_required;
@@ -162,13 +169,100 @@ pub(crate) const ONION_LINK: RavenLink = RavenLink {
     wire: "ONION",
 };
 
+/// The pins a link checks and records ([`RavenLink::pins`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkPins {
+    /// The device static's noise pins (M0), live with their gate.
+    Device(crate::lan_direct::NoisePins),
+    /// The onion link static's pin (TOR-3, RAVEN_ONION_CARRIER_V1 §5.1):
+    /// always with the onion carrier, in the same store under a row of its
+    /// own ([`raven_core::lan_noise_pin::record_onion`]).
+    Onion,
+}
+
+impl LinkPins {
+    /// Blocking: the pin a dial to `contact` checks (one small file read).
+    /// An unreadable store ends the dial before connecting.
+    pub(crate) fn load(
+        self,
+        data_dir: &Path,
+        contact: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, String> {
+        match self {
+            Self::Device(pins) => pins.load(data_dir, contact),
+            Self::Onion => raven_core::lan_noise_pin::load_onion_pin(data_dir, contact)
+                .map_err(|e| format!("{}: {e}", crate::lan_direct::NOISE_PIN_UNAVAILABLE)),
+        }
+    }
+
+    /// Between Noise messages 2 and 3: with a pin for `expected`, the
+    /// responder's static must be the pinned one, or the dial ends with
+    /// [`crate::lan_direct::NOISE_PIN_MISMATCH`] before our static and our
+    /// signed hello go out.
+    pub(crate) fn check(
+        self,
+        identity: &Identity,
+        pinned: Option<&[u8; 32]>,
+        expected: &[u8; 32],
+        remote_static: &[u8; 32],
+    ) -> Result<(), String> {
+        match self {
+            Self::Device(_) => {
+                crate::lan_direct::check_noise_pin(identity, pinned, expected, remote_static)
+            }
+            Self::Onion => match pinned {
+                Some(pin)
+                    if *pin
+                        != onion_pin_digest(&PinKey::derive(identity), expected, remote_static) =>
+                {
+                    Err(crate::lan_direct::NOISE_PIN_MISMATCH.to_string())
+                }
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// A verified link authenticated `contact` with `noise_static`: pin it
+    /// under `identity`'s pin key on the blocking pool (best effort; a new
+    /// static replaces the pin). Nothing when `pinned` (the pin the dial
+    /// checked) already says so, or for the device static while M0 is off.
+    pub(crate) async fn record(
+        self,
+        data_dir: &Path,
+        identity: &Identity,
+        contact: [u8; 32],
+        noise_static: [u8; 32],
+        pinned: Option<[u8; 32]>,
+    ) {
+        match self {
+            Self::Device(pins) => {
+                pins.record(data_dir, identity, contact, noise_static, pinned)
+                    .await
+            }
+            Self::Onion => {
+                let key = PinKey::derive(identity);
+                if pinned == Some(onion_pin_digest(&key, &contact, &noise_static)) {
+                    return;
+                }
+                let dd = data_dir.to_path_buf();
+                let _ = blocking(move || {
+                    raven_core::lan_noise_pin::record_onion(&dd, &key, &contact, &noise_static)
+                        .map(drop)
+                })
+                .await;
+            }
+        }
+    }
+}
+
 impl RavenLink {
-    /// Noise pins (M0) on this link: the device static's links only. An
-    /// onion link's static is not the one a pin records.
-    pub(crate) fn noise_pins(&self) -> crate::lan_direct::NoisePins {
+    /// The pins this link checks and records: the device static's noise
+    /// pins (M0) on every link but onion, the onion link static's own pin
+    /// there (an onion link never shows the device static).
+    pub(crate) fn pins(&self) -> LinkPins {
         match self.noise_static {
-            LinkStatic::Device => crate::lan_direct::NoisePins::current(),
-            LinkStatic::Onion => crate::lan_direct::NoisePins { live: false },
+            LinkStatic::Device => LinkPins::Device(crate::lan_direct::NoisePins::current()),
+            LinkStatic::Onion => LinkPins::Onion,
         }
     }
 
@@ -361,7 +455,8 @@ async fn initiator_session<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Dialer side: XX, then exchange hellos bound to this handshake (ours
 /// carries the link features in `offers`: [`crate::link::offers`]). With
-/// `pinned` (M0) another responder static ends it before message 3. Returns
+/// `pinned` ([`RavenLink::pins`]: M0, or the onion link static's pin)
+/// another responder static ends it before message 3. Returns
 /// the peer's authenticated Ed25519 key (must equal `expected`), its hello
 /// caps, the link's cipher, its static and whether the link carried the
 /// knock. The cipher pads every frame after the hellos when both offered
@@ -400,10 +495,13 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
             write_raw(stream, &m1).await?;
             let m2 = read_raw(stream).await?;
             handshake_read(&mut hs, &m2).map_err(|e| e.to_string())?;
+            crate::onion::stages::mark(crate::onion::stages::Step::Noise);
             // As on LAN: neither our static (message 3) nor our signed hello
-            // goes to a key that is not the one pinned for this contact.
+            // goes to a key that is not the one pinned for this contact (on
+            // onion links, the onion link static's pin: TOR-3).
             let remote_static = get_remote_static(&hs).map_err(|e| e.to_string())?;
-            crate::lan_direct::check_noise_pin(identity, pinned, expected, &remote_static)
+            link.pins()
+                .check(identity, pinned, expected, &remote_static)
                 .inspect_err(|_| crate::security::address_impostor(expected, link.carrier, None))?;
             (hs, local_static, remote_static, None, Vec::new())
         }
@@ -412,6 +510,7 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
             write_raw(stream, dial.m1()).await?;
             let m2 = read_raw(stream).await.map_err(|e| knock.m2_error(e))?;
             let (remote_static, proof) = knock.read_m2(&mut dial, &m2)?;
+            crate::onion::stages::mark(crate::onion::stages::Step::Noise);
             let step = knock.step(proof, identity, pinned, expected, &remote_static);
             // A seeded knock without a proof: the caller knocks once more
             // with the pair's root (Phase 6b P6.38) before this is an
@@ -465,6 +564,7 @@ pub(crate) async fn initiator_session_on<S: AsyncRead + AsyncWrite + Unpin>(
         crate::security::address_impostor_by(expected, link.carrier, None, &pk);
         return Err("internet hello identity mismatch".into());
     }
+    crate::onion::stages::mark(crate::onion::stages::Step::Hello);
     // Both hellos through: PAD1 from the next frame on when both offered it.
     t.pad = pad_after_hellos(offers, caps);
     Ok((pk, caps, t, remote_static, knocked))
@@ -779,8 +879,10 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         slot.authenticated(remote_ed);
         // M0: its link authenticated its static (before the dial-back),
         // unless its knock matched: then it is a static for this link only.
+        // Over onion: its own verified onion link pins its onion link static
+        // (TOR-3), the way back when that static changed.
         if !knocked.fresh_dialer() {
-            link.noise_pins()
+            link.pins()
                 .record(&data_dir, &identity, remote_ed, remote_static, None)
                 .await;
         }
@@ -1030,10 +1132,128 @@ async fn serve_listener(
     .await
 }
 
-/// Send `frames` and collect the replies into `progress` (see
-/// `lan_direct::exchange_frames`). Our RRH1 goes first when the listener's
-/// hello asked for it; the listener's is consumed by `hints`, never
-/// collected as a reply.
+/// Where a dialer's batch writes and reads its frames ([`run_batch_on`]):
+/// the link's own stream. It counts the frames it wrote and notes when the
+/// link can carry no other batch (`spent`): a wait that ran out (a read
+/// may have stopped part way through a frame), a close or an unreadable
+/// frame, a failed write, or our own end of the link. (A kept link's later
+/// batches go through its own task instead: `crate::onion::warm`, W1, M8.)
+pub(crate) struct DialIo<'a, S> {
+    stream: &'a mut S,
+    written: u32,
+    spent: bool,
+}
+
+impl<'a, S: AsyncRead + AsyncWrite + Unpin> DialIo<'a, S> {
+    /// The link's own stream.
+    pub(crate) fn stream(stream: &'a mut S) -> Self {
+        Self {
+            stream,
+            written: 0,
+            spent: false,
+        }
+    }
+
+    /// One frame of ours ([`write_inet_frame`]).
+    async fn send(&mut self, cipher: &mut LinkCipher, payload: &[u8]) -> Result<(), String> {
+        let sent = write_inet_frame(&mut *self.stream, cipher, payload).await;
+        if sent.is_ok() {
+            self.written += 1;
+        } else {
+            self.spent = true;
+        }
+        sent
+    }
+
+    /// The next frame within `wait` ([`read_reply`]).
+    async fn reply(&mut self, cipher: &mut LinkCipher, wait: Duration) -> ReplyWait {
+        let got = read_reply(&mut *self.stream, cipher, wait).await;
+        if !matches!(got, ReplyWait::Frame(_)) {
+            self.spent = true;
+        }
+        got
+    }
+
+    /// Our side of the link ends (on Tor the stream's END).
+    async fn end(&mut self) {
+        self.spent = true;
+        let _ = self.stream.shutdown().await;
+    }
+
+    /// The link can carry no other batch.
+    pub(crate) fn spent(&self) -> bool {
+        self.spent
+    }
+
+    /// Frames written through it.
+    pub(crate) fn written(&self) -> u32 {
+        self.written
+    }
+}
+
+/// How many frames a warm link's reader holds before it waits for a batch
+/// to take them: a peer that floods the link fills nothing more.
+const WARM_READ_AHEAD: usize = 4;
+
+/// A warm link's stream (W1, `crate::onion::warm`), split in two: the
+/// link's own task writes on one half ([`Self::send`]), and a reader task
+/// reads the other, whole frames only and with no deadline, into a channel
+/// ([`Self::next_sealed`]). Waits then run out on the channel, never part
+/// way through a frame (a read under [`read_reply`]'s deadline can stop
+/// there, and the stream is lost for good). Dropping it stops the reader
+/// and closes the stream.
+pub(crate) struct WarmHalves {
+    write: tokio::net::tcp::OwnedWriteHalf,
+    frames: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl WarmHalves {
+    /// `stream`, after a batch that read every frame it waited for (no read
+    /// stopped part way).
+    pub(crate) fn split(stream: tokio::net::TcpStream) -> Self {
+        let (mut read, write) = stream.into_split();
+        let (tx, frames) = tokio::sync::mpsc::channel(WARM_READ_AHEAD);
+        let reader = tokio::spawn(async move {
+            loop {
+                let got = read_raw_untimed(&mut read).await;
+                let end = got.is_err();
+                if tx.send(got).await.is_err() || end {
+                    return;
+                }
+            }
+        });
+        Self {
+            write,
+            frames,
+            reader,
+        }
+    }
+
+    /// One frame of ours ([`write_inet_frame`]).
+    pub(crate) async fn send(
+        &mut self,
+        cipher: &mut LinkCipher,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        write_inet_frame(&mut self.write, cipher, payload).await
+    }
+
+    /// The next whole frame the reader read, still sealed (a Noise transport
+    /// message), or why the link ended; `None`: the reader is gone.
+    pub(crate) async fn next_sealed(&mut self) -> Option<Result<Vec<u8>, String>> {
+        self.frames.recv().await
+    }
+}
+
+impl Drop for WarmHalves {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// [`exchange_frames_on`] over the link's own `stream`.
+#[cfg(test)]
 async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     transport: &mut LinkCipher,
@@ -1041,31 +1261,52 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     hints: &mut crate::hints::LinkCtl,
     progress: &mut DialProgress,
 ) -> Result<(), String> {
+    exchange_frames_on(
+        &mut DialIo::stream(stream),
+        transport,
+        frames,
+        hints,
+        progress,
+    )
+    .await
+}
+
+/// Send `frames` and collect the replies into `progress` (see
+/// `lan_direct::exchange_frames`). Our RRH1 goes first when the listener's
+/// hello asked for it; the listener's is consumed by `hints`, never
+/// collected as a reply.
+async fn exchange_frames_on<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut DialIo<'_, S>,
+    transport: &mut LinkCipher,
+    frames: &[Vec<u8>],
+    hints: &mut crate::hints::LinkCtl,
+    progress: &mut DialProgress,
+) -> Result<(), String> {
     progress.stage = "sending frames";
     if let Some(ours) = hints.outgoing().await {
-        write_inet_frame(stream, transport, &ours).await?;
+        io.send(transport, &ours).await?;
         hints.written();
     }
     // RUP1 (P6.49): our HAVE after the hellos and RRH1, when the listener's
     // hello set bit 10; requests only once its HAVE came.
     if let Some(have) = hints.update().outgoing().await {
-        write_inet_frame(stream, transport, &have).await?;
+        io.send(transport, &have).await?;
     }
     if frames
         .iter()
         .any(|f| raven_core::update_exchange::is_rup1(f))
     {
-        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         crate::update_exchange::check_requests(frames, hints.update())?;
     }
     for frame in frames {
-        write_inet_frame(stream, transport, frame).await?;
+        io.send(transport, frame).await?;
     }
     if frames.is_empty() {
         // The listener's hello said it sends an RRH1 (or a HAVE, RUP1):
         // read them before closing (unread data at close can reset the
         // connection).
-        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         return Ok(());
     }
     progress.frames_sent = true;
@@ -1078,9 +1319,9 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
         // end; an RRH1 it may still send unasked is read to the end of its
         // side, as unread data at close would reset the link.
         progress.stage = "reading the listener's route hints";
-        read_peer_frames(stream, transport, hints, progress.collector.idle_wait()).await?;
+        read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         if hints.may_tell_unasked() {
-            read_to_the_end(stream, transport, hints, progress).await?;
+            read_to_the_end(io, transport, hints, progress).await?;
         }
         return Ok(());
     }
@@ -1088,12 +1329,12 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
     let wait = progress.collector.first_wait();
     let mut more = progress
         .collector
-        .first(read_reply_hints(stream, transport, wait, hints).await?)?;
+        .first(read_reply_hints(io, transport, wait, hints).await?)?;
     while more {
         let wait = progress.collector.idle_wait();
         more = progress
             .collector
-            .next(read_reply_hints(stream, transport, wait, hints).await?)?;
+            .next(read_reply_hints(io, transport, wait, hints).await?)?;
     }
     Ok(())
 }
@@ -1101,7 +1342,7 @@ async fn exchange_frames<S: AsyncRead + AsyncWrite + Unpin>(
 /// [`read_reply`] that consumes the peer's RRH1 within the same wait (see
 /// `lan_direct::read_reply_hints`).
 async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
+    io: &mut DialIo<'_, S>,
     transport: &mut LinkCipher,
     wait: Duration,
     hints: &mut crate::hints::LinkCtl,
@@ -1109,7 +1350,7 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
     let deadline = tokio::time::Instant::now() + wait;
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let got = read_reply(stream, transport, left).await;
+        let got = io.reply(transport, left).await;
         crate::security::dial_reply(&got, hints);
         let ReplyWait::Frame(frame) = &got else {
             return Ok(got);
@@ -1117,7 +1358,7 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
         // The listener's HAVE (RUP1, P6.49): taken, never a reply.
         if let Some(answer) = hints.update().dialer_take(frame).await {
             if let Some(ours) = answer {
-                write_inet_frame(stream, transport, &ours).await?;
+                io.send(transport, &ours).await?;
             }
             continue;
         }
@@ -1128,7 +1369,7 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
             return Ok(ReplyWait::Closed("too many route hint frames".into()));
         }
         if let Some(ours) = hints.outgoing().await {
-            write_inet_frame(stream, transport, &ours).await?;
+            io.send(transport, &ours).await?;
             hints.written();
         }
     }
@@ -1139,20 +1380,20 @@ async fn read_reply_hints<S: AsyncRead + AsyncWrite + Unpin>(
 /// HAVE) while either is still expected, each within `wait` (see
 /// `lan_direct::read_peer_frames`). Without either it reads nothing.
 async fn read_peer_frames<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
+    io: &mut DialIo<'_, S>,
     transport: &mut LinkCipher,
     hints: &mut crate::hints::LinkCtl,
     wait: Duration,
 ) -> Result<(), String> {
     while hints.expects_peer_frame() || hints.update().expects_have() {
-        let got = read_reply(stream, transport, wait).await;
+        let got = io.reply(transport, wait).await;
         crate::security::dial_reply(&got, hints);
         let ReplyWait::Frame(frame) = got else {
             break;
         };
         if let Some(answer) = hints.update().dialer_take(&frame).await {
             if let Some(ours) = answer {
-                write_inet_frame(stream, transport, &ours).await?;
+                io.send(transport, &ours).await?;
             }
         } else if !hints.take(&frame).await {
             break;
@@ -1169,16 +1410,16 @@ async fn read_peer_frames<S: AsyncRead + AsyncWrite + Unpin>(
 /// (Tor streams have no half close), and the helper then closes ours. A
 /// frame that is not a route hint is kept as a reply.
 async fn read_to_the_end<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
+    io: &mut DialIo<'_, S>,
     transport: &mut LinkCipher,
     hints: &mut crate::hints::LinkCtl,
     progress: &mut DialProgress,
 ) -> Result<(), String> {
-    let _ = stream.shutdown().await;
+    io.end().await;
     let deadline = tokio::time::Instant::now() + progress.collector.idle_wait();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let got = read_reply(stream, transport, left).await;
+        let got = io.reply(transport, left).await;
         crate::security::dial_reply(&got, hints);
         let ReplyWait::Frame(frame) = got else {
             return Ok(());
@@ -1225,10 +1466,13 @@ async fn dial_session(
 /// on a fresh stream while the peer sheds load), RLB1 exchange with the
 /// identity checks, then `frames` and their replies into `progress`.
 /// `link_peer_id`: the libp2p PeerId a p2p link's stream goes to.
+///
+/// [`open_link`], then one [`run_batch`] on it (speed design step 6): the
+/// same steps in the same order.
 pub(crate) async fn dial_session_on<S, C, CFut>(
     link: RavenLink,
     data_dir: &Path,
-    mut connect: C,
+    connect: C,
     expected: &[u8; 32],
     frames: &[Vec<u8>],
     link_peer_id: Option<String>,
@@ -1239,8 +1483,93 @@ where
     C: FnMut() -> CFut,
     CFut: std::future::Future<Output = Result<S, String>>,
 {
+    let mut open = open_link(
+        link,
+        data_dir,
+        connect,
+        expected,
+        frames,
+        link_peer_id,
+        progress,
+    )
+    .await?;
+    run_batch(&mut open, frames, progress).await
+}
+
+/// What a dialer holds of an authenticated link between its batches: the
+/// link's cipher, the contact's verified RLB1 offer (every batch's replies
+/// start with it) and the link's route hint and update exchange state.
+pub(crate) struct LinkState {
+    pub(crate) cipher: LinkCipher,
+    pub(crate) peer_offer: Vec<u8>,
+    pub(crate) hints: crate::hints::LinkCtl,
+    /// The link's own notes (a p2p link's PeerId proof, the contact's link
+    /// features) were taken: once per link, at its first batch.
+    noted: bool,
+}
+
+/// A dialer's authenticated link ([`open_link`]): its stream and its
+/// [`LinkState`]. Dropping it closes the link.
+pub(crate) struct OpenLink<S> {
+    pub(crate) stream: S,
+    pub(crate) state: LinkState,
+}
+
+/// One batch on an open link ([`open_link`]) over its own stream
+/// ([`run_batch_on`]).
+pub(crate) async fn run_batch<S: AsyncRead + AsyncWrite + Unpin>(
+    link: &mut OpenLink<S>,
+    frames: &[Vec<u8>],
+    progress: &mut DialProgress,
+) -> Result<(), String> {
+    let OpenLink { stream, state } = link;
+    run_batch_on(&mut DialIo::stream(stream), state, frames, progress).await
+}
+
+/// One batch on an open link ([`open_link`]), written and read through
+/// `io`: the contact's offer and `frames` go into `progress`'s collector (a
+/// dial in an outbox race claims it here, before any frame is written), the
+/// link's own notes are taken at its first batch, then `frames` and their
+/// replies. A link may carry another batch only when `io` is not
+/// [`DialIo::spent`] and every frame got its terminal reply
+/// ([`netutil::ReplyCollector::all_answered`]).
+pub(crate) async fn run_batch_on<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut DialIo<'_, S>,
+    state: &mut LinkState,
+    frames: &[Vec<u8>],
+    progress: &mut DialProgress,
+) -> Result<(), String> {
+    progress.collector.begin(state.peer_offer.clone(), frames)?;
+    if !state.noted {
+        state.noted = true;
+        state.hints.note_link().await;
+        // Its verified hello's link features: its capability floor (P6.29).
+        state.hints.note_features();
+    }
+    exchange_frames_on(io, &mut state.cipher, frames, &mut state.hints, progress).await
+}
+
+/// The dialer half of a link up to its first batch ([`dial_session_on`]):
+/// the handshake, the RLB1 exchange and its identity checks, the link's
+/// live-link notes and the outbox wake. `frames` are the first batch's:
+/// whether our hello asks for the contact's route hints and the purpose its
+/// hint log lines name depend on them.
+pub(crate) async fn open_link<S, C, CFut>(
+    link: RavenLink,
+    data_dir: &Path,
+    mut connect: C,
+    expected: &[u8; 32],
+    frames: &[Vec<u8>],
+    link_peer_id: Option<String>,
+    progress: &mut DialProgress,
+) -> Result<OpenLink<S>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    C: FnMut() -> CFut,
+    CFut: std::future::Future<Output = Result<S, String>>,
+{
     progress.stage = "loading the local identity";
-    let pins = link.noise_pins();
+    let pins = link.pins();
     // RLK1 (P6.35): Internet direct dials knock while it is live.
     let knock_live = link == INTERNET_LINK && crate::link_knock::live();
     let knock_seeds = crate::pair_seed::live();
@@ -1337,8 +1666,7 @@ where
     if !progress.send_check {
         wake_outbox_for(expected);
     }
-    progress.collector.begin(peer_offer, frames)?;
-    let mut hints = crate::hints::LinkCtl::inet(
+    let hints = crate::hints::LinkCtl::inet(
         data_dir,
         link.carrier,
         crate::hints::Role::Dialer,
@@ -1358,10 +1686,15 @@ where
         offers.contains(LinkFeatures::RUP1),
         peer_caps,
     ));
-    hints.note_link().await;
-    // Its verified hello's link features: its capability floor (P6.29).
-    hints.note_features();
-    exchange_frames(&mut stream, &mut transport, frames, &mut hints, progress).await
+    Ok(OpenLink {
+        stream,
+        state: LinkState {
+            cipher: transport,
+            peer_offer,
+            hints,
+            noted: false,
+        },
+    })
 }
 
 /// A contact's authenticated link that carried no frame wakes what waits
@@ -1440,7 +1773,7 @@ thread_local! {
 }
 
 /// What waits for `contact` goes now ([`crate::outbox::peer_back`]).
-fn wake_outbox_for(contact: &[u8; 32]) {
+pub(crate) fn wake_outbox_for(contact: &[u8; 32]) {
     #[cfg(test)]
     OUTBOX_WAKES.with(|n| n.set(n.get() + 1));
     crate::outbox::peer_back(contact);
@@ -1961,11 +2294,13 @@ mod tests {
         assert_eq!(dialer_static, onion(&alice()));
         assert_ne!(dialer_static, device(&alice()));
 
-        // The other links keep the device static (noise pins cover them).
+        // The other links keep the device static (noise pins cover them);
+        // the onion link pins its own static (TOR-3), never the device's.
         for link in [INTERNET_LINK, P2P_LINK, NEARBY_LINK] {
             assert_eq!(link.noise_static, LinkStatic::Device, "{link:?}");
+            assert!(matches!(link.pins(), LinkPins::Device(_)), "{link:?}");
         }
-        assert!(!ONION_LINK.noise_pins().live);
+        assert_eq!(ONION_LINK.pins(), LinkPins::Onion);
     }
 
     /// RNL1 §7: a nearby responder takes only the key its pipe was knocked
@@ -3970,6 +4305,12 @@ mod tests {
             seal(self.a.path(), &self.alice, &self.key_ab, text)
         }
 
+        /// [`Self::alice_seals`], handed to the outbox, so Alice can seal
+        /// her next message behind it ([`seal_as`]).
+        fn alice_seals_queued(&self, text: &str) -> Vec<u8> {
+            seal_as(self.a.path(), &self.alice, &self.key_ab, text, true)
+        }
+
         /// Alice's sealed ACK of a message Bob sealed to her (Bob's session
         /// takes it, and answers nothing).
         fn alice_acks_one_of_bobs(&self) -> Vec<u8> {
@@ -4055,6 +4396,19 @@ mod tests {
         key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
         text: &str,
     ) -> Vec<u8> {
+        seal_as(dir, identity, key, text, false)
+    }
+
+    /// [`seal`], and `queued`: handed to the outbox as `raven send` hands
+    /// it, so the session takes a next message behind it (one prepared
+    /// message per lane). Unqueued, the message stays prepared.
+    fn seal_as(
+        dir: &Path,
+        identity: &Identity,
+        key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
+        text: &str,
+        queued: bool,
+    ) -> Vec<u8> {
         use raven_core::indexed_session_store::{AuthorizedEndpointDevice, IndexedSessionStore};
         let now = raven_core::clock::now_ms();
         let (cert, registry) = raven_core::device_cert::ensure_local_device_certificate(
@@ -4075,9 +4429,13 @@ mod tests {
             (now + 3_600_000).min(end),
             now,
             &mut rand::rngs::OsRng,
-            &mut |_digest: &[u8; 32], bytes: &[u8]| {
+            &mut |digest: &[u8; 32], bytes: &[u8]| {
                 sealed = Some(bytes.to_vec());
-                Err(())
+                if queued {
+                    Ok(*digest)
+                } else {
+                    Err(())
+                }
             },
         );
         sealed.expect("sealed")
@@ -4128,6 +4486,98 @@ mod tests {
         );
     }
 
+    /// Speed design step 6: a link [`open_link`] opened carries a batch
+    /// through [`run_batch`] as [`dial_session_on`] carries it (the same
+    /// round trips, the contact's offer first, one ACK), and the same open
+    /// link carries a second batch in one round trip, its replies again
+    /// led by that offer and with their own ACK. Bob's listener then ends
+    /// cleanly when the link is dropped.
+    #[tokio::test(start_paused = true)]
+    async fn open_link_then_run_batch_matches_dial_session_on() {
+        let _live = crate::hints::LiveForTest::set(true);
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        let one_way = Duration::from_millis(300);
+        let bob = f.bob.public_key_bytes();
+        let (whole, replies) = f
+            .alice_dials(one_way, &[f.alice_seals_queued("in one go")])
+            .await;
+        assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
+
+        let (client, server_side) = latent_link(one_way);
+        let (b_dir, bob_id) = (f.b.path().to_path_buf(), f.bob.clone());
+        let server = tokio::spawn(async move {
+            let mut slot = test_slot();
+            serve_inbound_on(
+                ONION_LINK,
+                b_dir,
+                bob_id,
+                server_side,
+                PRODUCTION_LIMITS,
+                &mut slot,
+                None,
+                None,
+                None,
+            )
+            .await
+        });
+        let frames = [f.alice_seals_queued("in two steps")];
+        let mut stream = Some(client);
+        let mut progress = DialProgress::new("ONION", TOR_WAITS);
+        let began = tokio::time::Instant::now();
+        let mut link = open_link(
+            ONION_LINK,
+            f.a.path(),
+            || {
+                let s = stream.take();
+                async move { s.ok_or_else(|| "one stream only".to_string()) }
+            },
+            &bob,
+            &frames,
+            None,
+            &mut progress,
+        )
+        .await
+        .expect("the link opens");
+        run_batch(&mut link, &frames, &mut progress)
+            .await
+            .expect("the first batch");
+        let split = began.elapsed();
+        let first = progress.collector.into_replies();
+        assert_eq!(
+            round_trips(split, one_way),
+            round_trips(whole, one_way),
+            "split {split:?}, whole {whole:?}"
+        );
+        assert_eq!(first.len(), replies.len(), "the offer and one ACK");
+        assert_eq!(raven_core::outbox::ack_frames(&first).len(), 1);
+
+        let mut progress = DialProgress::new("ONION", TOR_WAITS);
+        let began = tokio::time::Instant::now();
+        run_batch(
+            &mut link,
+            &[f.alice_seals_queued("and again")],
+            &mut progress,
+        )
+        .await
+        .expect("a second batch on the same link");
+        let again = began.elapsed();
+        let second = progress.collector.into_replies();
+        assert_eq!(round_trips(again, one_way), 1, "{again:?}");
+        assert_eq!(second.first(), first.first(), "the link's offer leads");
+        assert_eq!(raven_core::outbox::ack_frames(&second).len(), 1);
+        assert_ne!(
+            raven_core::outbox::ack_frames(&second),
+            raven_core::outbox::ack_frames(&first),
+            "its own ACK"
+        );
+        drop(link);
+        listener_result(server)
+            .await
+            .expect("Bob's listener ends cleanly");
+    }
+
     /// T18: a dial whose frames get no reply (the outbox pushing owed ACKs)
     /// sat out Tor's whole reply wait, 5 s, for an answer that never comes,
     /// while the friend stayed "in flight" for the outbox. It now ends once
@@ -4168,5 +4618,302 @@ mod tests {
             3,
             "an ACK-only dial holding Bob's route hints took {unasked:?}"
         );
+    }
+
+    // ── The onion link's static pin (TOR-3, PRIV-2; KS-1) ──────────────
+
+    /// One onion dial (a send's check: no frames) from the node in `dir` to
+    /// its verified contact `contact`, over the stream `client`.
+    async fn onion_check(
+        dir: &Path,
+        contact: &[u8; 32],
+        client: tokio::io::DuplexStream,
+    ) -> Result<(), String> {
+        let mut stream = Some(client);
+        let mut progress = DialProgress::new("ONION", TOR_WAITS);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            dial_session_on(
+                ONION_LINK,
+                dir,
+                || {
+                    let s = stream.take();
+                    async move { s.ok_or_else(|| "one stream only".to_string()) }
+                },
+                contact,
+                &[],
+                None,
+                &mut progress,
+            ),
+        )
+        .await
+        .expect("the onion dial ends")
+    }
+
+    /// The real onion listener of `identity` in `dir` for one link.
+    fn onion_listener(
+        dir: &Path,
+        identity: Arc<Identity>,
+        server_side: tokio::io::DuplexStream,
+    ) -> tokio::task::JoinHandle<Result<(), String>> {
+        let dir = dir.to_path_buf();
+        tokio::spawn(async move {
+            let mut slot = test_slot();
+            serve_inbound_on(
+                ONION_LINK,
+                dir,
+                identity,
+                server_side,
+                PRODUCTION_LIMITS,
+                &mut slot,
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+    }
+
+    /// Whoever holds a copy of a contact's onion service key (KS-1) but not
+    /// its identity seed, answering at its onion address: a responder on the
+    /// onion link's prologue with another X25519 static (`secret`). The
+    /// identity the dialer's hello named, when its message 3 and its signed
+    /// hello reached this impostor; `None` when the dialer stopped after
+    /// message 2.
+    fn onion_impostor(
+        mut listener: tokio::io::DuplexStream,
+        secret: [u8; 32],
+    ) -> tokio::task::JoinHandle<Option<[u8; 32]>> {
+        tokio::spawn(async move {
+            let mut hs = build_responder_with_prologue(&secret, ONION_LINK.prologue).unwrap();
+            let m1 = read_raw(&mut listener).await.ok()?;
+            handshake_read(&mut hs, &m1).unwrap();
+            let m2 = handshake_write(&mut hs, &[]).unwrap();
+            write_raw(&mut listener, &m2).await.ok()?;
+            let m3 = read_raw(&mut listener).await.ok()?;
+            handshake_read(&mut hs, &m3).ok()?;
+            let theirs = HelloBinding {
+                role: HelloRole::Initiator,
+                handshake_hash: handshake_hash(&hs),
+                noise_static_pub: get_remote_static(&hs).ok()?,
+            };
+            let mut t = LinkCipher::new(into_transport(hs).ok()?);
+            let hello = read_inet_frame(&mut listener, &mut t).await.ok()?;
+            unpack_verify_hello(&hello, &theirs).ok().map(|(_, pk)| pk)
+        })
+    }
+
+    /// The contact's own computer at its onion address, answering with the
+    /// X25519 static `secret` instead of the one its seed gives (an install
+    /// whose onion link static differs) and proving `id` over it: Noise XX
+    /// and both hellos, then it closes. The dialer's verified key.
+    fn onion_contact_with_static(
+        mut listener: tokio::io::DuplexStream,
+        secret: [u8; 32],
+        id: Arc<Identity>,
+    ) -> tokio::task::JoinHandle<Result<[u8; 32], String>> {
+        tokio::spawn(async move {
+            let e = |e: raven_core::lan_noise::LanNoiseError| e.to_string();
+            let mut hs = build_responder_with_prologue(&secret, ONION_LINK.prologue).map_err(e)?;
+            handshake_read(&mut hs, &read_raw(&mut listener).await?).map_err(e)?;
+            let m2 = handshake_write(&mut hs, &[]).map_err(e)?;
+            write_raw(&mut listener, &m2).await?;
+            handshake_read(&mut hs, &read_raw(&mut listener).await?).map_err(e)?;
+            let hash = handshake_hash(&hs);
+            let theirs = HelloBinding {
+                role: HelloRole::Initiator,
+                handshake_hash: hash,
+                noise_static_pub: get_remote_static(&hs).map_err(e)?,
+            };
+            let mut t = LinkCipher::new(into_transport(hs).map_err(e)?);
+            let hello = read_inet_frame(&mut listener, &mut t).await?;
+            let (_, pk) = verify_peer_hello(&hello, &theirs)?;
+            let ours = HelloBinding {
+                role: HelloRole::Responder,
+                handshake_hash: hash,
+                noise_static_pub: noise_static_public(&secret),
+            };
+            let hello = pack_hello(&id, hello_caps(LinkFeatures::NONE), &ours);
+            write_inet_frame(&mut listener, &mut t, &hello).await?;
+            Ok(pk)
+        })
+    }
+
+    /// The X25519 static of an earlier install of Bob's (see
+    /// [`pin_an_earlier_static`]).
+    const EARLIER_ONION_STATIC: [u8; 32] = [0x5A; 32];
+
+    /// Alice's verified onion link to Bob's earlier install, whose onion
+    /// link static was [`EARLIER_ONION_STATIC`]: his hello signs it, so it is
+    /// his. Today's Bob answers with the one his seed gives.
+    async fn pin_an_earlier_static(f: &Friends) {
+        let (client, listener) = tokio::io::duplex(1 << 18);
+        let earlier = onion_contact_with_static(listener, EARLIER_ONION_STATIC, f.bob.clone());
+        // The link ends at the RLB1 exchange: that Bob closed after the hellos.
+        let _ = onion_check(f.a.path(), &f.bob.public_key_bytes(), client).await;
+        let alice = f.alice.public_key_bytes();
+        assert!(
+            matches!(earlier.await.unwrap(), Ok(k) if k == alice),
+            "Bob's earlier install verified Alice's hello"
+        );
+    }
+
+    /// Alice dials today's Bob over the onion link: the dial's result, and
+    /// whether Bob's listener ended cleanly (it got Noise message 3 and
+    /// Alice's hello only when the dial went on).
+    async fn alice_checks_bob_over_onion(f: &Friends) -> (Result<(), String>, bool) {
+        let (client, server_side) = tokio::io::duplex(1 << 18);
+        let server = onion_listener(f.b.path(), f.bob.clone(), server_side);
+        let dialled = onion_check(f.a.path(), &f.bob.public_key_bytes(), client).await;
+        (dialled, listener_result(server).await.is_ok())
+    }
+
+    /// Bob dials Alice over the onion link: his hello signs his onion link
+    /// static (the one his listener answers with).
+    async fn bob_checks_alice_over_onion(f: &Friends) {
+        let alice = Arc::new(Identity::from_seed(&f.alice.seed_bytes()));
+        let (client, server_side) = tokio::io::duplex(1 << 18);
+        let server = onion_listener(f.a.path(), alice, server_side);
+        onion_check(f.b.path(), &f.alice.public_key_bytes(), client)
+            .await
+            .expect("Bob's onion link to Alice");
+        listener_result(server)
+            .await
+            .expect("Alice's listener ends cleanly");
+    }
+
+    /// Alice dials an impostor at Bob's onion address (it holds his onion
+    /// service key, not his seed): whether the impostor learned who dialled,
+    /// and the dial's error.
+    async fn alice_meets_an_onion_impostor(f: &Friends) -> (bool, Option<String>) {
+        let (client, listener) = tokio::io::duplex(1 << 18);
+        let secret = *derive_onion_noise_static(&mallory()).unwrap();
+        let impostor = onion_impostor(listener, secret);
+        let err = onion_check(f.a.path(), &f.bob.public_key_bytes(), client)
+            .await
+            .err();
+        (impostor.await.unwrap().is_some(), err)
+    }
+
+    /// TOR-3, PRIV-2: whoever holds a copy of a friend's onion service key
+    /// can answer at the friend's onion address, but not with the friend's
+    /// onion link static (the friend's seed derives it). Alice's first
+    /// verified onion link to Bob pins his static; a later dial that meets
+    /// another static there ends after Noise message 2 with
+    /// NOISE_PIN_MISMATCH: no message 3 and no signed hello, so the impostor
+    /// never learns who dialled. Bob himself still links.
+    #[tokio::test]
+    async fn an_onion_dial_pins_its_first_verified_link_and_stops_an_impostor_before_message_3() {
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        let (first, clean) = alice_checks_bob_over_onion(&f).await;
+        first.expect("the first verified onion link");
+        assert!(clean, "Bob's listener ends cleanly");
+        let (learned, err) = alice_meets_an_onion_impostor(&f).await;
+        assert!(
+            !learned,
+            "the impostor read message 3 and the dialer's signed hello"
+        );
+        assert_eq!(err.as_deref(), Some(crate::lan_direct::NOISE_PIN_MISMATCH));
+        let (again, clean) = alice_checks_bob_over_onion(&f).await;
+        again.expect("Bob himself links with the pin");
+        assert!(clean);
+    }
+
+    /// The other direction pins too: Bob's verified onion link to Alice
+    /// records his onion link static at her end (his hello signed it), so
+    /// her first dial to his onion address is checked already.
+    #[tokio::test]
+    async fn a_contacts_verified_inbound_onion_link_pins_its_static() {
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        bob_checks_alice_over_onion(&f).await;
+        let (learned, err) = alice_meets_an_onion_impostor(&f).await;
+        assert!(
+            !learned,
+            "the impostor read message 3 and the dialer's signed hello"
+        );
+        assert_eq!(err.as_deref(), Some(crate::lan_direct::NOISE_PIN_MISMATCH));
+    }
+
+    /// The way back for a legitimate change: Alice pinned the onion link
+    /// static of Bob's earlier install, and Bob now answers with another one
+    /// (his hello still his). Her dials stop after message 2 until Bob's own
+    /// verified onion link to her shows his current static: that link pins
+    /// it again, and her dials go through.
+    #[tokio::test]
+    async fn a_contacts_own_onion_link_pins_a_changed_static_again() {
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        pin_an_earlier_static(&f).await;
+        let (stopped, clean) = alice_checks_bob_over_onion(&f).await;
+        assert_eq!(
+            stopped.err().as_deref(),
+            Some(crate::lan_direct::NOISE_PIN_MISMATCH),
+            "the pin holds"
+        );
+        assert!(!clean, "Bob's listener got no message 3");
+        bob_checks_alice_over_onion(&f).await;
+        let (linked, clean) = alice_checks_bob_over_onion(&f).await;
+        linked.expect("pinned again by Bob's own link");
+        assert!(clean);
+    }
+
+    /// The way back through a newer signed binding (a fresh card, or route
+    /// hints over any carrier): one naming another onion service key means
+    /// Bob's onion service is new (a reinstall, a new Tor state), which no
+    /// copy of his old key answers. His onion pin goes, and the next verified
+    /// onion link pins again. A newer binding of the same key (signed again)
+    /// leaves the pin as it was.
+    #[tokio::test]
+    async fn a_newer_binding_naming_another_onion_key_unpins_the_contact() {
+        use raven_core::onion::{now_s, store_contact_binding, OnionBinding};
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        let (a, bob) = (f.a.path(), f.bob.public_key_bytes());
+        let hs = |seed: u8| Identity::from_seed(&[seed; 32]).public_key_bytes();
+        let now = now_s();
+        let first = OnionBinding::sign(&f.bob, hs(1), now - 120);
+        assert!(store_contact_binding(a, &bob, &first).unwrap());
+        pin_an_earlier_static(&f).await;
+        let same_key = OnionBinding::sign(&f.bob, hs(1), now - 60);
+        assert!(store_contact_binding(a, &bob, &same_key).unwrap());
+        let (stopped, _) = alice_checks_bob_over_onion(&f).await;
+        assert_eq!(
+            stopped.err().as_deref(),
+            Some(crate::lan_direct::NOISE_PIN_MISMATCH),
+            "the same onion key signed again keeps the pin"
+        );
+        let new_key = OnionBinding::sign(&f.bob, hs(2), now);
+        assert!(store_contact_binding(a, &bob, &new_key).unwrap());
+        let (linked, clean) = alice_checks_bob_over_onion(&f).await;
+        linked.expect("a new onion key: pinned again on its first verified link");
+        assert!(clean);
+        let (learned, err) = alice_meets_an_onion_impostor(&f).await;
+        assert!(!learned, "pinned again");
+        assert_eq!(err.as_deref(), Some(crate::lan_direct::NOISE_PIN_MISMATCH));
+    }
+
+    /// `ash contact remove` (the explicit re-pin) forgets the contact's
+    /// onion link pin with its other pins: added again, it is pinned afresh.
+    #[tokio::test]
+    async fn forgetting_a_contacts_pins_forgets_its_onion_pin() {
+        let Some(f) = Friends::new() else {
+            return;
+        };
+        pin_an_earlier_static(&f).await;
+        let (stopped, _) = alice_checks_bob_over_onion(&f).await;
+        assert_eq!(
+            stopped.err().as_deref(),
+            Some(crate::lan_direct::NOISE_PIN_MISMATCH)
+        );
+        raven_core::lan_noise_pin::forget(f.a.path(), &f.bob.public_key_bytes()).unwrap();
+        let (linked, clean) = alice_checks_bob_over_onion(&f).await;
+        linked.expect("forgotten: pinned afresh");
+        assert!(clean);
     }
 }

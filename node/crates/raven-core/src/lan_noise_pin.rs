@@ -39,11 +39,22 @@
 //!   new [`NOISE_PIN_FILE`]; the next `privacy::migrate_all` merges those pins
 //!   only for contacts without a sealed pin, keeps the sealed pin where they
 //!   differ (counted), and deletes the plain file ([`merge_plain_into_sealed`]).
+//! - **Onion link pins (TOR-3, PRIV-2).** The onion link answers with a
+//!   static of its own (RAVEN_ONION_CARRIER_V1 §5.1), which nothing a dialer
+//!   holds names before the listener's hello, and Tor authenticates only the
+//!   onion service key, which a copy of the profile holds. Its pin lives in
+//!   the same store, sealed the same way: a digest of its own
+//!   ([`onion_pin_digest`], under the same [`PinKey`]) in a row of its own,
+//!   keyed by [`onion_row`] of the contact (never a contact key, so the
+//!   device static's lookups never meet it). [`record_onion`] writes it after
+//!   a verified onion link, [`load_onion_pin`] reads it for a dial,
+//!   [`forget_onion`] drops it (a newer binding naming another onion service
+//!   key), and [`forget`] drops it with the contact's device pin.
 //!
-//! Nothing here reads the gate: callers check
-//! [`crate::lan_gate::lan_noise_pin_live`] first, so with the gate closed
-//! nothing is read or written. All file I/O goes through `load_file` and
-//! `save_file`.
+//! Nothing here reads a gate: callers of the device static's pins check
+//! [`crate::lan_gate::lan_noise_pin_live`] first, so with that gate closed
+//! nothing of theirs is read or written; the onion link's pins go with the
+//! onion carrier. All file I/O goes through `load_file` and `save_file`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -72,6 +83,11 @@ pub const NOISE_PIN_CORRUPT_FILE: &str = "lan_noise_pins.json.corrupt";
 /// Its own data-dir lock: raven-node records and `ash contact remove` forgets.
 const NOISE_PIN_LOCK: &str = ".lan_noise_pins.lock.sqlite";
 const PIN_DOMAIN: &[u8] = b"rvn1/lan-noise-pin/v1";
+/// HMAC domain of an onion link pin ([`onion_pin_digest`]): never the device
+/// static's [`PIN_DOMAIN`], so neither digest stands for the other.
+const ONION_PIN_DOMAIN: &[u8] = b"rvn1/onion-link-pin/v1";
+/// SHA-256 domain of the row an onion link pin is kept under ([`onion_row`]).
+const ONION_ROW_DOMAIN: &[u8] = b"rvn1/onion-link-pin-row/v1";
 /// HKDF-SHA256 salt and info of [`PinKey`] (its own salt: never the Noise
 /// static's, `lan_noise::HKDF_SALT`).
 const PIN_KEY_SALT: &[u8] = b"rvn1/lan-noise-pin-key/v1";
@@ -140,11 +156,39 @@ impl std::fmt::Debug for PinKey {
 
 /// HMAC-SHA256(`key`, domain || contact Ed25519 || Noise static).
 pub fn pin_digest(key: &PinKey, contact: &[u8; 32], noise_static: &[u8; 32]) -> [u8; 32] {
+    keyed_digest(key, PIN_DOMAIN, contact, noise_static)
+}
+
+/// The onion link's pin (TOR-3): HMAC-SHA256(`key`, `rvn1/onion-link-pin/v1`
+/// || contact Ed25519 || the contact's onion link static).
+pub fn onion_pin_digest(key: &PinKey, contact: &[u8; 32], onion_static: &[u8; 32]) -> [u8; 32] {
+    keyed_digest(key, ONION_PIN_DOMAIN, contact, onion_static)
+}
+
+fn keyed_digest(
+    key: &PinKey,
+    domain: &[u8],
+    contact: &[u8; 32],
+    noise_static: &[u8; 32],
+) -> [u8; 32] {
     let mut mac = Hmac::<Sha256>::new_from_slice(key.0.as_slice()).expect("hmac takes any key");
-    mac.update(PIN_DOMAIN);
+    mac.update(domain);
     mac.update(contact);
     mac.update(noise_static);
     mac.finalize().into_bytes().into()
+}
+
+/// The row `contact`'s onion link pin is kept under: SHA-256 of
+/// `rvn1/onion-link-pin-row/v1` || its Ed25519 key. Never a contact key, so
+/// the device static's lookups ([`load_pin`]) never meet it, and computed
+/// from the contact key alone, so [`forget`] finds it. Like the device pin's
+/// row (the key in clear), it says only that the contact has one.
+fn onion_row(contact: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(ONION_ROW_DOMAIN);
+    h.update(contact);
+    h.finalize().into()
 }
 
 fn key32(text: &str) -> Option<[u8; 32]> {
@@ -305,10 +349,17 @@ fn load_pin_in(
     Ok(pins.into_iter().find(|(c, _)| c == contact).map(|(_, d)| d))
 }
 
-/// How many contacts are pinned (`ash doctor`): 0 for a missing file or one
-/// that does not parse, the rows that parse otherwise; `Err` when it exists
-/// but cannot be read, a newer Raven wrote it, or it is sealed and does not
-/// open (then no dial goes out).
+/// The onion link pin a dial to `contact` checks ([`onion_pin_digest`]),
+/// read as [`load_pin`] reads the device static's: `Err` (do not dial) only
+/// for a store that exists and cannot be read.
+pub fn load_onion_pin(data_dir: &Path, contact: &[u8; 32]) -> Result<Option<[u8; 32]>, String> {
+    load_pin(data_dir, &onion_row(contact))
+}
+
+/// How many pins the store holds (`ash doctor`), the onion link's included:
+/// 0 for a missing file or one that does not parse, the rows that parse
+/// otherwise; `Err` when it exists but cannot be read, a newer Raven wrote
+/// it, or it is sealed and does not open (then no dial goes out).
 pub fn pinned_count(data_dir: &Path) -> Result<usize, String> {
     load_file(data_dir, Store::of(data_dir)).map(|(pins, _)| pins.len())
 }
@@ -324,18 +375,38 @@ pub fn record(
     contact: &[u8; 32],
     noise_static: &[u8; 32],
 ) -> Result<bool, String> {
-    let digest = pin_digest(key, contact, noise_static);
+    record_row(data_dir, contact, pin_digest(key, contact, noise_static))
+}
+
+/// Pin the onion link static `onion_static` for `contact` after a verified
+/// onion link (TOR-3), as [`record`] pins the device static: a changed
+/// static replaces the pin (the contact's own link signed it).
+pub fn record_onion(
+    data_dir: &Path,
+    key: &PinKey,
+    contact: &[u8; 32],
+    onion_static: &[u8; 32],
+) -> Result<bool, String> {
+    record_row(
+        data_dir,
+        &onion_row(contact),
+        onion_pin_digest(key, contact, onion_static),
+    )
+}
+
+/// [`record`] of `digest` under the row `row`.
+fn record_row(data_dir: &Path, row: &[u8; 32], digest: [u8; 32]) -> Result<bool, String> {
     let store = Store::of(data_dir);
     // Lock-free look first: an unchanged pin costs one small read.
-    if load_pin_in(data_dir, store, contact)? == Some(digest) {
+    if load_pin_in(data_dir, store, row)? == Some(digest) {
         return Ok(false);
     }
     let _lock = DataDirLock::acquire_within(data_dir, NOISE_PIN_LOCK, RECORD_LOCK_WAIT)?;
     let (mut pins, corrupt) = load_file(data_dir, store)?;
-    match pins.iter_mut().find(|(c, _)| c == contact) {
+    match pins.iter_mut().find(|(c, _)| c == row) {
         Some((_, d)) if *d == digest => return Ok(false),
         Some((_, d)) => *d = digest,
-        None => pins.push((*contact, digest)),
+        None => pins.push((*row, digest)),
     }
     if pins.len() > MAX_PINS {
         let excess = pins.len() - MAX_PINS;
@@ -357,17 +428,36 @@ pub fn record(
     Ok(true)
 }
 
-/// Forget `contact`'s pin (its contact was removed). A missing file or entry
-/// is fine, and nothing is created then.
+/// Forget `contact`'s pins (its contact was removed): its device static's
+/// and its onion link's. A missing file or entry is fine, and nothing is
+/// created then.
 pub fn forget(data_dir: &Path, contact: &[u8; 32]) -> Result<(), String> {
+    forget_rows(data_dir, &[*contact, onion_row(contact)])
+}
+
+/// Forget `contact`'s onion link pin only (TOR-3): a newer binding names
+/// another onion service key of the contact's
+/// ([`crate::onion::store_contact_binding`]), so its next verified onion
+/// link pins again. Its device static's pin stays.
+pub fn forget_onion(data_dir: &Path, contact: &[u8; 32]) -> Result<(), String> {
+    forget_rows(data_dir, &[onion_row(contact)])
+}
+
+/// Drop the pins kept under `rows`, in one write.
+fn forget_rows(data_dir: &Path, rows: &[[u8; 32]]) -> Result<(), String> {
     let store = Store::of(data_dir);
-    if load_pin_in(data_dir, store, contact)?.is_none() {
+    // Lock-free look first: nothing pinned under them, nothing written.
+    if !load_file(data_dir, store)?
+        .0
+        .iter()
+        .any(|(c, _)| rows.contains(c))
+    {
         return Ok(());
     }
     let _lock = DataDirLock::acquire(data_dir, NOISE_PIN_LOCK)?;
     let (mut pins, corrupt) = load_file(data_dir, store)?;
     let before = pins.len();
-    pins.retain(|(c, _)| c != contact);
+    pins.retain(|(c, _)| !rows.contains(c));
     if pins.len() == before {
         return Ok(());
     }
@@ -877,6 +967,107 @@ mod tests {
         // their digests.
         assert!(text.contains(&hex::encode(ALICE)));
         assert!(text.contains(&hex::encode(digest(&ALICE, &STATIC_1))));
+    }
+
+    /// TOR-3: the onion link's pin has a digest and a row of its own, so
+    /// neither the device static's pin nor the onion link's stands for the
+    /// other, and both are keyed by this computer's identity.
+    #[test]
+    fn onion_pins_have_a_digest_and_a_row_of_their_own() {
+        let onion = |key: &PinKey, s: &[u8; 32]| onion_pin_digest(key, &ALICE, s);
+        assert_ne!(onion(&key(), &STATIC_1), digest(&ALICE, &STATIC_1));
+        let other = PinKey::derive(&Identity::from_seed(&[0xC1; 32]));
+        assert_ne!(onion(&key(), &STATIC_1), onion(&other, &STATIC_1));
+        assert_ne!(onion_row(&ALICE), ALICE);
+        assert_ne!(onion_row(&ALICE), onion_row(&BOB));
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        record(d, &ALICE, &STATIC_1).unwrap();
+        assert_eq!(load_onion_pin(d, &ALICE), Ok(None), "a device pin only");
+        assert_eq!(record_onion(d, &key(), &ALICE, &STATIC_2), Ok(true));
+        assert_eq!(
+            load_onion_pin(d, &ALICE),
+            Ok(Some(onion(&key(), &STATIC_2)))
+        );
+        assert_eq!(
+            load_pin(d, &ALICE),
+            Ok(Some(digest(&ALICE, &STATIC_1))),
+            "the onion pin is not the device static's"
+        );
+        assert_eq!(pinned_count(d), Ok(2));
+    }
+
+    /// A verified onion link's new static replaces the pin; `forget_onion`
+    /// (a binding of another onion service key) drops the onion pin only,
+    /// and `forget` (`ash contact remove`) both of a contact's pins.
+    #[test]
+    fn an_onion_pin_is_replaced_by_a_new_static_and_forgotten_with_its_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let onion = |s: &[u8; 32]| onion_pin_digest(&key(), &ALICE, s);
+        assert_eq!(record_onion(d, &key(), &ALICE, &STATIC_1), Ok(true));
+        assert_eq!(record_onion(d, &key(), &ALICE, &STATIC_1), Ok(false));
+        assert_eq!(record_onion(d, &key(), &ALICE, &STATIC_2), Ok(true));
+        assert_eq!(load_onion_pin(d, &ALICE), Ok(Some(onion(&STATIC_2))));
+        record(d, &ALICE, &STATIC_1).unwrap();
+        record_onion(d, &key(), &BOB, &STATIC_1).unwrap();
+        forget_onion(d, &ALICE).unwrap();
+        assert_eq!(load_onion_pin(d, &ALICE), Ok(None));
+        assert_eq!(load_pin(d, &ALICE), Ok(Some(digest(&ALICE, &STATIC_1))));
+        assert!(load_onion_pin(d, &BOB).unwrap().is_some(), "only Alice's");
+        record_onion(d, &key(), &ALICE, &STATIC_2).unwrap();
+        forget(d, &ALICE).unwrap();
+        assert_eq!(load_pin(d, &ALICE), Ok(None));
+        assert_eq!(load_onion_pin(d, &ALICE), Ok(None));
+        assert!(load_onion_pin(d, &BOB).unwrap().is_some(), "only Alice's");
+        // Nothing pinned: nothing written, nothing created.
+        let empty = tempfile::tempdir().unwrap();
+        forget_onion(empty.path(), &ALICE).unwrap();
+        assert_eq!(std::fs::read_dir(empty.path()).unwrap().count(), 0);
+    }
+
+    /// Neither the onion link static nor, for a contact pinned on the onion
+    /// link only, its key is in the file: a digest under a row of its own.
+    #[test]
+    fn the_onion_static_never_appears_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        record_onion(dir.path(), &key(), &ALICE, &STATIC_1).unwrap();
+        let raw = std::fs::read(dir.path().join(NOISE_PIN_FILE)).unwrap();
+        let text = String::from_utf8(raw.clone()).unwrap();
+        for secret in [STATIC_1, ALICE] {
+            assert!(!text.contains(&hex::encode(secret)), "{text}");
+            assert!(!raw.windows(32).any(|w| w == secret));
+        }
+        assert!(text.contains(&hex::encode(onion_row(&ALICE))));
+    }
+
+    /// A sealed profile keeps its onion link pins in the sealed file only
+    /// (RMS1 kind 16), as its device static's: the first sealing moves them,
+    /// later ones are written sealed.
+    #[test]
+    fn a_sealed_profile_keeps_its_onion_pins_sealed() {
+        use crate::contact_book::tests::{profile, seal};
+        let dir = profile();
+        let d = dir.path();
+        record_onion(d, &key(), &ALICE, &STATIC_1).unwrap();
+        seal(d);
+        assert!(!d.join(NOISE_PIN_FILE).exists(), "moved by the sealing");
+        assert_eq!(
+            load_onion_pin(d, &ALICE),
+            Ok(Some(onion_pin_digest(&key(), &ALICE, &STATIC_1)))
+        );
+        assert_eq!(record_onion(d, &key(), &BOB, &STATIC_2), Ok(true));
+        assert!(!d.join(NOISE_PIN_FILE).exists(), "written sealed");
+        let raw = std::fs::read(d.join(NOISE_PIN_SEALED_FILE)).unwrap();
+        assert!(at_rest::is_sealed(&raw));
+        for clear in [STATIC_1, STATIC_2, onion_row(&ALICE), onion_row(&BOB)] {
+            assert!(!raw.windows(32).any(|w| w == clear));
+            assert!(!raw.windows(64).any(|w| w == hex::encode(clear).as_bytes()));
+        }
+        assert_eq!(
+            load_onion_pin(d, &BOB),
+            Ok(Some(onion_pin_digest(&key(), &BOB, &STATIC_2)))
+        );
     }
 
     #[test]

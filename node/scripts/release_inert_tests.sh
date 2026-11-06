@@ -173,6 +173,15 @@ lab_switches() {
   sw RAVEN_TOR_HELPER '/tmp/raven-lab-no-tor-helper'
   sw RAVEN_LAB_TOR_LOOPBACK '/tmp/raven-lab-tor-loopback'
   sw RAVEN_LAB_TOR_HEAD_START_MS '1'
+  # Tor speed, Stage A (security and speed report 2026-11-05 §7): its
+  # five gates stay shut with their switches set (raven-core
+  # `onion_gate::tests::onion_{warm,hedge,early,optimistic,warm_link}_
+  # is_inert_in_release_builds` and `..._production_flag_is_off`).
+  sw RAVEN_LAB_TOR_WARM '1'
+  sw RAVEN_LAB_TOR_HEDGE '1'
+  sw RAVEN_LAB_TOR_EARLY '1'
+  sw RAVEN_LAB_TOR_OPTIMISTIC '1'
+  sw RAVEN_LAB_TOR_WARM_LINK '1'
   sw RAVEN_LAB_NET_AUDIT '/tmp/raven-lab-net-audit'
   # Phase 4 (P4.1): its six gates stay at their consts and its
   # harness values are never read.

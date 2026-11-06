@@ -144,6 +144,102 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, pipelined kept Tor links and the batch hedge, lab only)
+
+A behaviour change of the onion dialer behind gates that stay false, not of
+the wire format: no frame layout, entry type, caps bit, card field or vector
+changed, and the listener is unchanged. Security and speed report 2026-11-05
+§7 (speed design M8, and M5's batch hedge).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §10: with `onion_gate::ONION_WARM_PRODUCTION_ENABLED` open (false; lab
+  switch `RAVEN_LAB_TOR_WARM`), up to 3 batches ride one kept link at once:
+  each batch's frames are written behind those of the batches before it, and
+  the replies are taken first in, first out, as the listener answers frame
+  after frame. A batch whose wait runs out, whose link closes or whose dial
+  is cut closes the link, and the batches behind it go again on a fresh
+  link, so no reply is taken for another batch's. §9: with
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` open too (false; lab switch
+  `RAVEN_LAB_TOR_HEDGE`), a batch on a kept link with no reply within the
+  longer of 2 s and 3 times the link's last round trip closes the link and
+  goes again on a fresh one, fresh first; the contact answers the copy of a
+  message it holds as the same message, with the same ACK. §1: only W1 with
+  its pipelining, the connect hedge with fresh first and the batch hedge act
+  yet.
+
+## Freeze record changes (2026-11-06, Tor connect hedge and fresh first, lab only)
+
+A behaviour change of the onion dialer and its own Tor helper behind a gate
+that stays false, not of the wire format: no frame layout, entry type, caps
+bit, card field or vector changed. The local helper protocol (between
+raven-node and its helper on one computer, never on the network) is version
+3. Security and speed report 2026-11-05 §7 (speed design M5).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §6: a connect request ends with a flags byte (bit 0 fresh first, bit 3
+  hedge; bits 1 and 2 reserved; a helper refuses a bit it does not know with
+  `unknown connect flags`). A node sets them only while
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false; lab switch
+  `RAVEN_LAB_TOR_HEDGE`), else 0, version 2's request. §9: with it open, a
+  first try with no stream after 2 s gets a fresh try in a new isolation
+  group beside it (the first stream wins, the other try is ended), and after
+  a link to a contact failed where the helper cannot see it, the next
+  connect to that contact within 10 minutes goes fresh first. §1: only W1
+  and these act yet.
+
+## Freeze record changes (2026-11-06, W1 kept Tor links, lab only)
+
+A behaviour change of the onion dialer behind a gate that stays false, not of
+the wire format: no frame layout, entry type, caps bit, card field or vector
+changed, and the listener is unchanged. Security and speed report 2026-11-05
+§7 (speed design M1, W1).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §1 and §10: with `onion_gate::ONION_WARM_PRODUCTION_ENABLED` open (false;
+  lab switch `RAVEN_LAB_TOR_WARM`), a program's send over Tor keeps the
+  dialer's link after a batch that got every reply it waited for, for the
+  next batch to the same contact: within 20 s of that batch, 120 s of the
+  link's dial and 56 frames, at most 4 links (2 on the embedded node), one
+  per contact. The contact's listener then reads a later batch on a link it
+  already holds, one frame after another within its own limits (§5); no link
+  is opened with nothing to send. A link whose reply wait ran out is never
+  kept, the dial's checks run again before each batch, and a block, a hold,
+  a lock, a network change, the end of a Tor helper's life or the embedded
+  node's pause closes kept links.
+
+## Freeze record changes (2026-11-06, Tor speed Stage A gates)
+
+Five new gates, every one false, and their feature ids; no frame layout, entry
+type, caps bit, card field or vector changed. Security and speed report
+2026-11-05 §7 (speed design M1 to M10).
+
+- **Security Advisory V1 (draft).** [`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md)
+  §4.2: feature ids `feature/onion-warm`, `feature/onion-hedge`,
+  `feature/onion-early`, `feature/onion-optimistic` and
+  `feature/onion-warm-link` (`onion_gate::ONION_*_PRODUCTION_ENABLED`, all
+  false; lab switches `RAVEN_LAB_TOR_WARM`, `_HEDGE`, `_EARLY`, `_OPTIMISTIC`
+  and `_WARM_LINK` with `RAVEN_LAB_TEST_A=1`, debug builds only). Each opens
+  only while the onion carrier is live, and a notice can hold each.
+
+## Freeze record changes (2026-11-06, the onion link pin)
+
+A behaviour change of a frozen rule, not of the wire format: no frame layout,
+entry type, caps bit, card field or vector changed, and every gate stays as it
+was.
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §5.1: each node pins each contact's onion link static, trust on first use
+  (a keyed digest in its Noise pin store under a row of its own, sealed in a
+  sealed profile), records it after every verified onion link with that
+  contact, whichever side dialled, and ends an onion dial whose responder
+  shows another static after Noise message 2 (`NOISE_PIN_MISMATCH`), before
+  its message 3 and its signed hello. Before, onion links used no pin, so
+  whoever held a copy of the onion service key could answer at the onion
+  address and learn which friends dial and when. Pinned again by the
+  contact's own verified onion link, by a newer binding naming another onion
+  service key, or by removing the contact. Peers see no difference; the
+  first onion dial to a contact is still trust on first use.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: inbound admission, the Tor helper's circuits, a lab IPC op)
 
 Behaviour changes of the listeners' admission, of the Tor helper and of one local IPC op, not of

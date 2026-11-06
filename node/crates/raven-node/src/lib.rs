@@ -811,7 +811,7 @@ pub(crate) mod netutil {
     /// Does the responder answer this frame? A PairInit gets a PairResponse
     /// and a Message gets a sealed ACK; RLB1 offers, ACKs and PairResponses
     /// get nothing.
-    fn expects_reply(frame: &[u8]) -> bool {
+    pub(crate) fn expects_reply(frame: &[u8]) -> bool {
         // Session reset requests (RSR1 SESSION_QUERY / PREKEY_STALE).
         if raven_core::session_reset::frame_expects_reply(frame)
             || raven_core::friend_custody::frame_expects_reply(frame)
@@ -846,7 +846,7 @@ pub(crate) mod netutil {
     }
 
     /// Is this the reply a dial was waiting for (PairResponse or sealed ACK)?
-    fn is_terminal_reply(frame: &[u8]) -> bool {
+    pub(crate) fn is_terminal_reply(frame: &[u8]) -> bool {
         // Session reset replies (RSR1 SESSION_STATUS / PREKEY_STATUS).
         if raven_core::session_reset::frame_is_terminal_reply(frame)
             || raven_core::friend_custody::frame_is_terminal_reply(frame)
@@ -969,9 +969,27 @@ pub(crate) mod netutil {
             self.unanswered
         }
 
+        /// Frames that get a reply were sent, and each had its terminal
+        /// reply: nothing the batch waited for can still come (a warm link
+        /// may carry the next batch only then, `crate::onion::warm`).
+        pub(crate) fn all_answered(&self) -> bool {
+            self.expected > 0 && self.seen == self.expected
+        }
+
+        /// At least one terminal reply came.
+        pub(crate) fn answered_any(&self) -> bool {
+            self.seen > 0
+        }
+
+        /// The peer's offer was read: the link authenticated.
+        pub(crate) fn linked(&self) -> bool {
+            self.linked_at.is_some()
+        }
+
         pub(crate) fn mark_frames_sent(&mut self) {
             self.sent_at = Some(tokio::time::Instant::now());
             self.budget.mark_frames_sent();
+            crate::onion::stages::mark(crate::onion::stages::Step::Written);
         }
 
         /// How long to wait for the first reply.
@@ -998,6 +1016,7 @@ pub(crate) mod netutil {
             if is_terminal_reply(&frame) {
                 self.first_reply_at
                     .get_or_insert_with(tokio::time::Instant::now);
+                crate::onion::stages::mark(crate::onion::stages::Step::Receipt);
                 self.seen += 1;
             }
             self.replies.push(frame);

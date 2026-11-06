@@ -22,13 +22,15 @@ void  raven_free(char *response);             /* frees a string returned by rave
   `raven_free` exactly once (never to the app's own allocator).
 - One function keeps the boundary small, versioned and identical on every OS. There are no callbacks
   across the boundary: events are pulled with `events.poll` (cheap; the apps poll every 500 ms while a
-  window is open and every 5 s in the menu bar or tray).
+  window is open and every 5 s in the menu bar or tray), or waited for with `events.wait`, which
+  answers as soon as an event comes (no app uses it yet).
 - Secrets never cross the boundary. The engine refuses to put fields named like `seed`,
   `private_key`, `secret`, `plaintext` or `recovery` in a response (the same rule as raven-node's IPC).
 - All text returned for display is already sanitised (control characters, bidi overrides and
   zero-width characters removed), so a friend's name or message cannot draw over the UI.
 - `raven_call` is thread-safe and may block (`node.start` can take a few seconds), so apps call it
-  off the UI thread and post the result back. `events.poll` never blocks.
+  off the UI thread and post the result back. `events.poll` never blocks; `events.wait` blocks the
+  calling thread up to its `timeout_ms` (25 s at most), never the engine's other calls.
 
 ## Profile and raven-node
 
@@ -105,6 +107,7 @@ changes. Fields marked `?` may be missing.
 | `settings.get` | – | `Settings` |
 | `settings.set` | `{...partial Settings}` | `Settings` |
 | `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool, locked?: true}` (see Events) |
+| `events.wait` | `{after_seq, timeout_ms?}` | as `events.poll`; with nothing new it waits up to `timeout_ms` (at most and by default 25000) and answers as soon as an event comes (see Events) |
 | `privacy.state` | – | `{available: bool, encrypted: bool, locked: bool}` (`encrypted`: the privacy pack encrypts this profile; `locked`: `raven lock` stopped Raven; `available` is false until the apps offer the privacy actions, which they then show with the Preview label) |
 | `privacy.lock` / `privacy.unlock` | – | `{state}` (`unlock` clears a `raven lock` and answers as `profile.state`) |
 | `privacy.encrypt` | – | `{state}` (encrypts everything Raven stores on this computer) |
@@ -778,6 +781,15 @@ raven-node from the first poll on (about once a second) and stops watching after
 its first look only notes what is there, so old messages do not arrive as `incoming`. While Lock v2
 holds the profile the queue is empty and nothing is added: a poll answers no events and `locked:
 true`, and the first poll after the unlock says `reset: true` ("Security, Lock and updates").
+
+`events.wait {after_seq, timeout_ms?}` answers exactly as `events.poll`, but while there is nothing
+new after `after_seq` it waits for the next event, lock or unlock, up to `timeout_ms` (at most 25000,
+the default; more is refused with `BAD_REQUEST`), and answers within a few milliseconds of it: a
+receipt shows at once instead of at the next poll. With nothing in that time it answers no events,
+as a poll would have. Events already there, `reset` and `locked` are answered at once, so an app
+that waits in a loop goes back to its poll pace while `locked` holds. It keeps the watcher running,
+as a poll does (a wait again right after its answer is soon enough). Only the calling thread waits:
+call it off the UI thread.
 
 ```text
 Event     { seq, kind, at_ms, ... } kinds:

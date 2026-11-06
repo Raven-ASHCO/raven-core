@@ -32,9 +32,16 @@
 //!   BEGIN that gets no CONNECTED; a try in any other group works;
 //! - `RAVEN_LAB_TOR_LOOPBACK_COUNT=1`: the helper keeps its connect counts
 //!   in [`COUNT_FILE`] under its state directory ([`Counts`]).
+//!
+//! Tests only (no variable): [`Knobs::rendezvous`], the price of a fresh
+//! rendezvous, paid once per isolation group and onion key, and
+//! [`Knobs::kill`]: every circuit the helper built so far dies with no word
+//! when the test says so (`kill_circuits`), as one whose far end vanished
+//! (audit T6). With neither, a connect behaves as above.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,10 +79,23 @@ pub(crate) struct Knobs {
     /// [`READY_ENV`]: how long the bootstrap takes.
     pub(crate) ready: Duration,
     /// [`STALE_ENV`]: how long a try in the default isolation group waits
-    /// before it ends "tor timeout" (zero: that group works).
+    /// before it ends "tor timeout" (zero: that group works); a try in a
+    /// group whose circuit was killed ([`Self::kill`]) waits as long.
     pub(crate) stale: Duration,
     /// [`COUNT_ENV`].
     pub(crate) count: bool,
+    /// Tests only: what the first try in an isolation group to an onion
+    /// service pays before its connect (a fresh rendezvous: the descriptor,
+    /// the introduction and the rendezvous circuits); the tries after it in
+    /// that group ride the circuit it built and pay [`Self::delay`] alone
+    /// (Arti keeps a rendezvous circuit for 10 minutes after its last use;
+    /// a test is shorter). Zero: no rendezvous price.
+    pub(crate) rendezvous: Duration,
+    /// Tests only: the test's kill count (`kill_circuits`). A circuit
+    /// built before its last rise is dead: its streams carry nothing more
+    /// and never close, and a try in its group waits [`Self::stale`] and
+    /// ends "tor timeout". `None`: no circuit dies.
+    pub(crate) kill: Option<&'static AtomicU64>,
 }
 
 /// One helper life's connect counts ([`COUNT_ENV`]), kept in [`COUNT_FILE`]
@@ -165,7 +185,49 @@ impl Knobs {
             ready: ms(READY_ENV),
             stale: ms(STALE_ENV),
             count: on(COUNT_ENV),
+            rendezvous: Duration::ZERO,
+            kill: None,
         }
+    }
+}
+
+/// Tests: every circuit the helper whose [`Knobs::kill`] is `kill` built so
+/// far dies with no word (its far end vanished, no DESTROY came back; audit
+/// T6). A circuit it builds after this works.
+#[cfg(test)]
+pub(crate) fn kill_circuits(kill: &AtomicU64) {
+    kill.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The circuits one helper life built: per isolation group and onion key,
+/// the kill count when it was built ([`Life`]).
+type Circuits = std::collections::HashMap<(Option<u64>, [u8; 32]), u64>;
+
+/// When a circuit was built, against its helper's kill count
+/// ([`Knobs::kill`]).
+#[derive(Clone, Copy)]
+struct Life {
+    kill: Option<&'static AtomicU64>,
+    built: u64,
+}
+
+impl Life {
+    /// The kill count now (0 without one: no circuit dies).
+    fn now(kill: Option<&'static AtomicU64>) -> u64 {
+        kill.map_or(0, |k| k.load(Ordering::SeqCst))
+    }
+
+    /// A circuit built now.
+    fn new(kill: Option<&'static AtomicU64>) -> Self {
+        Self {
+            kill,
+            built: Self::now(kill),
+        }
+    }
+
+    /// It died since it was built.
+    fn dead(&self) -> bool {
+        self.built < Self::now(self.kill)
     }
 }
 
@@ -462,22 +524,29 @@ async fn accept_connects(
 ) {
     let (delay, latency, one_circuit) = (knobs.delay, knobs.latency, knobs.one_circuit);
     // Each friend's isolation group, for this helper life (as the Arti
-    // helper's).
+    // helper's), and the circuits built in them.
     let book = Arc::new(std::sync::Mutex::new(proto::IsolationBook::new(new_group)));
+    let circuits: Arc<std::sync::Mutex<Circuits>> = Arc::default();
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
             continue;
         };
         let (registry, counter, book) = (registry.clone(), counter.clone(), book.clone());
+        let circuits = circuits.clone();
         tokio::spawn(async move {
             let mut req = [0u8; proto::CONNECT_REQUEST_LEN];
             if stream.read_exact(&mut req).await.is_err() {
                 return;
             }
-            let Some((hs_id, asked)) = proto::decode_connect(&req, &token) else {
+            let Some((hs_id, asked, flags)) = proto::decode_connect(&req, &token) else {
                 // Not raven-node: closed without a word.
                 return;
             };
+            if proto::unknown_flags(flags) {
+                let refused = ConnectReply::Failed(proto::UNKNOWN_FLAGS.into());
+                let _ = stream.write_all(&refused.encode()).await;
+                return;
+            }
             if asked != port {
                 let _ = stream
                     .write_all(&ConnectReply::Unreachable("port refused".into()).encode())
@@ -488,38 +557,55 @@ async fn accept_connects(
             // As the Arti helper: the first try in the friend's isolation
             // group, one more in a new group after a failure worth it (here
             // the registry is read again, as Arti fetches the descriptor
-            // again).
-            let opened = proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, |group, _within| {
-                let (registry, counter) = (registry.clone(), counter.clone());
-                let dead = group.is_none() && !knobs.stale.is_zero();
-                async move {
-                    counter.add(|c| {
-                        c.tries += 1;
-                        c.stale += u64::from(dead);
+            // again); the flags as there (speed design M5).
+            let opened =
+                proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, flags, |group, _within| {
+                    let (registry, counter) = (registry.clone(), counter.clone());
+                    let circuits = circuits.clone();
+                    let built = lock(&circuits).get(&(group, hs_id)).map(|&built| Life {
+                        kill: knobs.kill,
+                        built,
                     });
-                    if dead {
-                        tokio::time::sleep(knobs.stale).await;
-                        return Err(ConnectReply::Timeout("tor timeout".into()));
-                    }
-                    tokio::time::sleep(delay).await;
-                    let target = std::fs::read_to_string(registry.join(hex::encode(hs_id)))
-                        .ok()
-                        .and_then(|t| t.trim().parse::<std::net::SocketAddr>().ok())
-                        .ok_or_else(|| ConnectReply::Unreachable("no descriptor".into()))?;
-                    let mut out = TcpStream::connect(target)
-                        .await
-                        .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))?;
-                    if let Some(client) = one_circuit {
-                        out.write_all(&client.to_be_bytes())
+                    let dead = (group.is_none() && !knobs.stale.is_zero())
+                        || built.is_some_and(|life| life.dead());
+                    async move {
+                        counter.add(|c| {
+                            c.tries += 1;
+                            c.stale += u64::from(dead);
+                        });
+                        if dead {
+                            tokio::time::sleep(knobs.stale).await;
+                            return Err(ConnectReply::Timeout("tor timeout".into()));
+                        }
+                        let built = match built {
+                            Some(life) => life,
+                            None => {
+                                tokio::time::sleep(knobs.rendezvous).await;
+                                let life = Life::new(knobs.kill);
+                                let built =
+                                    *lock(&circuits).entry((group, hs_id)).or_insert(life.built);
+                                Life { built, ..life }
+                            }
+                        };
+                        tokio::time::sleep(delay).await;
+                        let target = std::fs::read_to_string(registry.join(hex::encode(hs_id)))
+                            .ok()
+                            .and_then(|t| t.trim().parse::<std::net::SocketAddr>().ok())
+                            .ok_or_else(|| ConnectReply::Unreachable("no descriptor".into()))?;
+                        let mut out = TcpStream::connect(target)
                             .await
                             .map_err(|_| ConnectReply::Unreachable("rendezvous failed".into()))?;
+                        if let Some(client) = one_circuit {
+                            out.write_all(&client.to_be_bytes()).await.map_err(|_| {
+                                ConnectReply::Unreachable("rendezvous failed".into())
+                            })?;
+                        }
+                        Ok((out, built))
                     }
-                    Ok(out)
-                }
-            })
-            .await;
-            let out = match opened {
-                Ok(out) => out,
+                })
+                .await;
+            let (out, built) = match opened {
+                Ok(opened) => opened,
                 Err(reply) => {
                     let _ = stream.write_all(&reply.encode()).await;
                     return;
@@ -529,9 +615,15 @@ async fn accept_connects(
                 return;
             }
             let _ = out.set_nodelay(true);
-            relay(stream, out, latency).await;
+            relay(stream, out, latency, built).await;
         });
     }
+}
+
+fn lock(circuits: &std::sync::Mutex<Circuits>) -> std::sync::MutexGuard<'_, Circuits> {
+    circuits
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A loopback isolation group no connect used yet.
@@ -542,25 +634,28 @@ fn new_group() -> u64 {
 
 /// Both ways between `a` and `b`, each chunk arriving `latency` after it
 /// was read (a Tor circuit's one-way delay; [`LATENCY_ENV`]), an end of
-/// stream too; a plain copy without one.
-async fn relay(mut a: TcpStream, mut b: TcpStream, latency: Duration) {
-    if latency.is_zero() {
+/// stream too; a plain copy without one, unless its circuit (`built`) may
+/// die ([`Knobs::kill`]).
+async fn relay(mut a: TcpStream, mut b: TcpStream, latency: Duration, built: Life) {
+    if latency.is_zero() && built.kill.is_none() {
         let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
         return;
     }
     let (a_read, a_write) = a.into_split();
     let (b_read, b_write) = b.into_split();
     tokio::join!(
-        delayed_copy(a_read, b_write, latency),
-        delayed_copy(b_read, a_write, latency),
+        delayed_copy(a_read, b_write, latency, built),
+        delayed_copy(b_read, a_write, latency, built),
     );
 }
 
-/// One way of [`relay`].
+/// One way of [`relay`]: once its circuit is dead ([`Life::dead`]) nothing
+/// more arrives, not even the end of the stream.
 async fn delayed_copy(
     mut from: tokio::net::tcp::OwnedReadHalf,
     mut to: tokio::net::tcp::OwnedWriteHalf,
     latency: Duration,
+    built: Life,
 ) {
     // `None`: the end of stream, which travels as long as the bytes do.
     let (tx, mut rx) =
@@ -585,6 +680,9 @@ async fn delayed_copy(
     let write = async move {
         while let Some((at, bytes)) = rx.recv().await {
             tokio::time::sleep_until(at).await;
+            if built.dead() {
+                std::future::pending::<()>().await;
+            }
             match bytes {
                 Some(bytes) if to.write_all(&bytes).await.is_ok() => {}
                 _ => break,

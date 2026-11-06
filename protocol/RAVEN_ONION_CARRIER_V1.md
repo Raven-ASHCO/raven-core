@@ -46,6 +46,10 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
 - With the gate closed a node starts no Tor helper, publishes no onion service, makes no onion
   dial, prints no `onion=` card field and sends no RRH1 ONION entry. Its plans are exactly those
   of a build without the carrier.
+- The Tor speed Stage A gates (`onion_gate::ONION_WARM_PRODUCTION_ENABLED` and four more, all
+  false; lab switches `RAVEN_LAB_TOR_WARM` and so on with the Lab Test A unlock, debug builds
+  only; a hold each) open only while this one is. Only W1 with its pipelining (§10), the connect
+  hedge with fresh first and the batch hedge (§6, §9) act yet; none changes a frame.
 
 ## §2 Roles
 
@@ -148,7 +152,7 @@ Tor runs in a helper process (`raven-tor-helper`, Arti), never in the node. The 
 and talks to it over three channels:
 
 1. **Control (stdin/stdout, one JSON object per line, at most 4096 bytes).**
-   - Node to helper, first line: `{"v":2,"state_dir":"<profile>/tor","token":"<64 hex>",
+   - Node to helper, first line: `{"v":3,"state_dir":"<profile>/tor","token":"<64 hex>",
      "forward":"127.0.0.1:<port>","port":7422,"fresh_state":false}`.
    - Node to helper, later: `{"cmd":"ping","n":N}`, `{"cmd":"self_check","n":N}`,
      `{"cmd":"stop"}`.
@@ -196,9 +200,20 @@ and talks to it over three channels:
      trouble (not within 10 minutes of the last).
    - The helper exits when its stdin closes.
 2. **Outbound (loopback TCP to `connect`).** The node writes `token[32] || hs_id[32] ||
-   port (u16 BE)`; the helper answers `status u8 || reason_len u8 || reason` (status 0 open,
-   1 not ready, 2 unreachable, 3 timeout, 4 failed; reason printable ASCII, at most 120 bytes,
-   never an address), then the stream carries the bytes. A wrong token is closed without a byte.
+   port (u16 BE) || flags u8`; the helper answers `status u8 || reason_len u8 || reason`
+   (status 0 open, 1 not ready, 2 unreachable, 3 timeout, 4 failed; reason printable ASCII, at
+   most 120 bytes, never an address), then the stream carries the bytes. A wrong token is
+   closed without a byte.
+   - `flags`: bit 0 *fresh first*: the first try goes in a new isolation group, not the
+     contact's (the node's last link to that contact failed where the helper cannot see it,
+     §9); bit 3 *hedge*: a first try with no stream after 2 s gets a fresh try in a new group
+     beside it, the first stream wins and the other try is dropped (a stream it opened is
+     ended); with both, fresh first alone. Bits 1 and 2 are reserved (the keep-warm probe and
+     optimistic data). A helper answers a request with a bit it does not know with status 4,
+     `unknown connect flags`, and never serves it as if the bit were clear.
+   - A node sets flags only while `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false;
+     lab switch `RAVEN_LAB_TOR_HEDGE` with the Lab Test A unlock, debug builds only, hold
+     `feature/onion-hedge`); otherwise 0, which asks what version 2 asked.
 3. **Inbound (loopback TCP to `forward`).** For every accepted onion stream the helper connects
    to the node's forward listener and writes `token[32] || circuit (u64 BE)`; then the stream
    carries the bytes. `circuit` is an opaque number the helper gives each rendezvous circuit of
@@ -206,8 +221,9 @@ and talks to it over three channels:
    and it says nothing about who dialled. The node reads this header before it takes any
    admission slot (at most 32 connections may wait for it; one more closes the oldest), and
    closes a connection without the token within 10 s, before any Raven byte.
-   (Version 2 of this local protocol; version 1 sent `token[32]` alone. Node and helper ship
-   together and refuse each other's other version.)
+   (Version 3 of this local protocol. Version 2 had no flags byte in a connect request (item
+   2), and version 1 sent `token[32]` alone here. Node and helper ship together and refuse
+   each other's other version.)
 
 The token is 32 random bytes per helper life. Only ephemeral loopback ports are used.
 
@@ -272,6 +288,21 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   fetches the descriptor again and builds new circuits instead of using what it cached of the
   service before the friend's node restarted. Nothing else differs (same guards, same
   anonymity).
+- **Hedge and fresh first** (Tor speed Stage A; gate
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED = false`, lab switch `RAVEN_LAB_TOR_HEDGE`, §6
+  item 2 flags). A first try with no stream after 2 s gets the fresh try beside it, in a new
+  isolation group, when 12 s or more are left; the first stream wins and the other try is
+  ended. A first try in the contact's group on a dead rendezvous circuit then costs 2 s instead
+  of Arti's 6 s wait for CONNECTED, at the price of one more introduction (and maybe one more
+  descriptor fetch) at the contact's service when the hedge fires. Once a node's link to a
+  contact failed where the helper cannot see it (no link came up, a batch got no reply within
+  its wait, or a kept link died before any reply), the next connect to that contact within
+  10 minutes goes fresh first: its first try in a new isolation group, none in the contact's;
+  a link that works ends that. With W1's gate open too (§10), a batch on a kept link with no
+  reply within the longer of 2 s and 3 times that link's last round trip (the batch hedge)
+  closes the link and goes again on a fresh one, fresh first: the contact answers a copy of a
+  message it holds as the same message, with the same ACK. With the gate shut the node sends
+  no flags, keeps no such record and hedges no batch.
 - **Deadlines.** An onion dial of the outbox or of friend custody ends at
   `ONION_DIAL_DEADLINE` (75 s) plus 5 s, not at a direct dial's 45 s.
 - **Friend custody** (WAN custody only, `RAVEN_FRIEND_CUSTODY_V1.md`): a mail friend's onion
@@ -289,6 +320,19 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
 - A rendezvous circuit is kept by Arti for 10 minutes after its last use, then closed; the
   helper closes a rendezvous circuit of its service after 10 minutes without a stream (§5).
 - Channel padding `reduced`.
+- W1, kept links (Tor speed Stage A; gate `onion_gate::ONION_WARM_PRODUCTION_ENABLED = false`,
+  lab switch `RAVEN_LAB_TOR_WARM` with the Lab Test A unlock, debug builds only, hold
+  `feature/onion-warm`; open only while §1's gate is): a program's send keeps the dialer's link
+  after a batch that got every reply it waited for, for the next batch to the same contact,
+  within 20 s of that batch, 120 s of the link's dial and 56 frames, at most 4 links (2 on the
+  embedded node) and one per contact. No link is opened for it with nothing to send, and no
+  frame changes: the listener reads one frame after another on a link, as before, within its
+  own limits (§5). Up to 3 batches ride one kept link at once (pipelining): each batch's frames
+  are written behind those of the batches before it, and the replies are taken first in, first
+  out, as the listener answers frame after frame, each reply before it reads the next frame. A
+  batch whose wait runs out, whose link closes or whose dial is cut closes the link; the batches
+  behind it see it closed and go again on a fresh link, so no reply is taken for another
+  batch's. A frame that comes with no batch on the link closes it too.
 
 ### §5.1 The onion link's Noise static
 
@@ -307,10 +351,34 @@ onion_static = HKDF-SHA256(salt = "rvn1/onion-noise/v1", IKM = identity seed,
   direct, p2p and nearby links use. It is stable, and names nothing beyond the onion address
   the card already shows.
 - The RIH1 hello signs the static with the handshake hash (as on Internet direct), so a contact
-  still authenticates it; Tor authenticates the onion service, whose key the identity signs
-  (§3).
-- Noise pins (M0) are neither checked nor recorded on onion links: a pin records the device
-  static.
+  still authenticates it, but the dialer reads the listener's hello only after its own message 3
+  and its own signed hello. Tor authenticates only the onion service key, which the identity
+  signs (§3); the binding does not name this static. So whoever holds a copy of that key but not
+  the identity seed could answer at the onion address and read the dialer's static and signed
+  hello. The onion link pin (next) stops that after the first verified onion link.
+- **The onion link pin.** Each node pins each contact's onion link static, trust on first use,
+  and checks it as a Noise pin (M0) is checked:
+  - The pin is HMAC-SHA256 under the node's pin key (M0: HKDF of its identity seed), over the
+    domain `rvn1/onion-link-pin/v1`, the contact's identity key and the static; never the static
+    itself. It is kept with the node's Noise pins (`lan_noise_pins.json`; the sealed
+    `lan_noise_pins.rms` in a sealed profile) under a row of its own:
+    SHA-256(`rvn1/onion-link-pin-row/v1` || the contact's identity key).
+  - Recorded after each verified onion link with the contact, whichever side dialled (the
+    contact's hello signed the static). A new static replaces the pin.
+  - Checked by the dialer after message 2: another static ends the dial with
+    `NOISE_PIN_MISMATCH` before message 3, so that responder never sees the dialer's static or
+    hello. A pin store that exists but cannot be read dials nothing over Tor
+    (`NOISE_PIN_UNAVAILABLE`).
+  - Pinned again: the contact's own verified onion link to this node records its current
+    static; a newer binding (§3, from a fresh card or an RRH1 entry over any carrier) naming
+    another `hs_id` forgets the pin, so the next verified onion link pins again; removing the
+    contact forgets it. A binding of the same `hs_id` signed again keeps it. A contact restored
+    from its seed answers with the same static (it is derived from the seed), so it needs none of
+    these.
+  - Always on with the carrier (no gate of its own). Nothing new is sent: no wire change.
+  - The first onion dial before any verified onion link with that contact is still trust on
+    first use, as is the first after a binding naming another `hs_id`.
+- Noise pins (M0) of the device static are neither checked nor recorded on onion links.
 - Nodes from before this rule answered onion links with the device static. The carrier has
   never been on in a release build, so no deployed node does.
 

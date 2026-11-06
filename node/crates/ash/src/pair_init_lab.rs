@@ -1209,7 +1209,9 @@ pub fn run_pair_init_and_send_on(
 }
 
 /// [`run_pair_init_and_send_on`] over the first of `routes` (in order: LAN,
-/// then Internet) whose RLB1 probe answers, and returns the route it used.
+/// then Internet) whose RLB1 probe answers, and returns the route it used
+/// (as given: a LAN name the race resolved, [`ProbePlan::resolving_in_race`],
+/// is dialled at its resolved address but returned as the name).
 /// `probe_plan` may put the contact's remembered route first
 /// (`raven_core::route_memory`, lab only) and learns from the probes; a
 /// route whose error it already knows ([`ProbePlan::with_unresolved`]) is
@@ -1225,20 +1227,26 @@ pub fn run_pair_init_and_send_on(
 /// dial), owned so it can run on its own thread ([`probe_round`]).
 type Prober<B> = std::sync::Arc<dyn Fn(usize) -> Result<B, String> + Send + Sync>;
 
-/// [`Prober`] of `routes` for [`run_pair_init_and_send_routes`].
+/// [`Prober`] of `routes` for [`run_pair_init_and_send_routes`]: the route
+/// it dialled (a LAN name the race resolves is dialled at its resolved
+/// address, [`race_localized`]) and the friend's offer.
 fn route_prober(
     data_dir: &Path,
     routes: &[DialRoute],
     known: &ProbePlan,
     peer_pub_hex: &str,
     probe_timeout: Duration,
-) -> Prober<raven_core::LanBundle> {
+) -> Prober<(DialRoute, raven_core::LanBundle)> {
     let data_dir = data_dir.to_path_buf();
     let routes = routes.to_vec();
     let peer_pub_hex = peer_pub_hex.to_string();
-    let known: Vec<Option<String>> = (0..routes.len())
+    let known_errors: Vec<Option<String>> = (0..routes.len())
         .map(|i| known.known_error(i).map(str::to_string))
         .collect();
+    let in_race: Vec<bool> = (0..routes.len())
+        .map(|i| known.resolves_in_race(i))
+        .collect();
+    let known = known_errors;
     std::sync::Arc::new(move |i: usize| {
         // F1: an unverified contact's name that does not resolve now.
         // Nothing to ask raven-node: it fails as a name not found, and the
@@ -1247,6 +1255,14 @@ fn route_prober(
             return Err(e);
         }
         let route = routes.get(i).ok_or("no such route")?;
+        // N3: a card's LAN name, resolved here and not before the race.
+        let resolved;
+        let route = if in_race.get(i).copied().unwrap_or(false) {
+            resolved = race_localized(route, raven_core::outbox::system_lookup)?;
+            &resolved
+        } else {
+            route
+        };
         let check = |wait: Duration| {
             let req = dial_request(&data_dir, route.carrier, &route.dial, &peer_pub_hex, &[])?;
             retry_while_peer_sheds_load(PROBE_ATTEMPTS, PROBE_BACKOFF, std::thread::sleep, || {
@@ -1267,9 +1283,43 @@ fn route_prober(
             replies
                 .iter()
                 .find_map(|f| parse_peer_offer(f).ok())
+                .map(|offer| (route.clone(), offer))
                 .ok_or_else(|| "peer did not return an RLB1 bundle".to_string())
         })
     })
+}
+
+/// N3 (security and speed report 2026-11-05): a card's LAN name `route` as
+/// the race dials it. Resolved by `lookup` within
+/// [`raven_core::outbox::LOCALIZE_RACE_TIMEOUT`] under the local-network
+/// rule a card's LAN address keeps, and dialled at the resolved address
+/// (the probe, then the message: a later lookup cannot point it
+/// elsewhere). A name that does not answer in time fails this route alone,
+/// in raven-node's words for a name it cannot resolve; an address off the
+/// local network is never dialled.
+fn race_localized(
+    route: &DialRoute,
+    lookup: raven_core::outbox::Lookup,
+) -> Result<DialRoute, String> {
+    let planned = OutboxRoute {
+        carrier: route.carrier.outbox(),
+        dial: route.dial.trim().to_string(),
+    };
+    match raven_core::outbox::localize_lan_route_by(
+        &planned,
+        false,
+        raven_core::outbox::LOCALIZE_RACE_TIMEOUT,
+        lookup,
+    ) {
+        Ok(local) => Ok(DialRoute {
+            carrier: route.carrier,
+            dial: local.dial,
+        }),
+        Err(raven_core::outbox::RouteRefusal::Unresolved(e)) => {
+            Err(super::ext::cannot_resolve_text(&planned.dial, &e))
+        }
+        Err(why) => Err(super::ext::card_lan_left_out(&why)),
+    }
 }
 
 /// A send's Tor check that Tor answered "unreachable" this fast gets one
@@ -1859,7 +1909,8 @@ pub fn run_pair_init_and_send_routes(
     // (index into `routes`, reached the contact) per probe, for the memory.
     let mut probed: Vec<(usize, bool)> = Vec::new();
     let mut probe_errors: Vec<String> = Vec::new();
-    let mut answered: Option<(DialRoute, raven_core::LanBundle)> = None;
+    // (route index, the route dialled, the friend's offer).
+    let mut answered: Option<(usize, DialRoute, raven_core::LanBundle)> = None;
     // What raven-node saw of the contact lately (E2 r9 #1, #2): its LAN
     // sightings for Tor's head start, and the routes that just failed.
     let asked: Vec<(String, String)> = routes
@@ -1999,13 +2050,13 @@ pub fn run_pair_init_and_send_routes(
                 eprintln!("{C_DIM}{}{C_RESET}", race_line(route, started, what, took));
             }
             match probe {
-                Ok(bundle) => {
+                Ok((dialled, bundle)) => {
                     // Evidence only when it is the contact's own bundle (checked
                     // again below, where a mismatch refuses the send).
                     let ok = bundle.cert.user_ed_pub == peer_pub
                         || bundle.cert.device_ed_pub == peer_pub;
                     probed.push((i, ok));
-                    answered = Some((route.clone(), bundle));
+                    answered = Some((i, dialled, bundle));
                     break;
                 }
                 Err(mut e) => {
@@ -2042,8 +2093,10 @@ pub fn run_pair_init_and_send_routes(
         peer_pub,
         acquire_send_lock_noting(data_dir, &peer_pub, &ctx.display_name())?,
     );
-    let (route, peer_bundle) = match answered {
-        Some(hit) => hit,
+    // `used`: the route as planned (what the caller knows); `route`: the
+    // one dialled (a LAN name the race resolved, at its address).
+    let (used, route, peer_bundle) = match answered {
+        Some((i, dialled, bundle)) => (routes[i].clone(), dialled, bundle),
         // Peer asleep / unreachable on every route: the RLB1 probe is not needed
         // to stage a message into an already-confirmed session, so do that (on
         // the first route) instead of dropping the text.
@@ -2146,7 +2199,7 @@ pub fn run_pair_init_and_send_routes(
             Ok(response) => response,
             Err(e) => {
                 return pair_init_lost(data_dir, id, &peer_pub, text, carrier, &e, ctx, &handoff)
-                    .map(|()| route.clone())
+                    .map(|()| used.clone())
             }
         };
         let mut store = IndexedSessionStore::open(data_dir).map_err(|e| e.redacted_display())?;
@@ -2212,7 +2265,7 @@ pub fn run_pair_init_and_send_routes(
     );
     let error = match first {
         Err(error) if reset.restart => error,
-        other => return other.map(|()| route.clone()),
+        other => return other.map(|()| used.clone()),
     };
     // The contact said it no longer holds the session (design §11.3): set up a
     // new one and send again, once. Its waiting messages, possibly including
@@ -2254,12 +2307,12 @@ pub fn run_pair_init_and_send_routes(
                 &mut again,
             );
             match (result, reset.own_mid) {
-                (Ok(()), _) => Ok(route.clone()),
+                (Ok(()), _) => Ok(used.clone()),
                 // The user's own text is durably queued as its re-sealed copy
                 // (or already delivered): never "not sent, send it again".
                 (Err(error), Some(mid)) => {
                     own_message_outcome(data_dir, &peer_dev, &mid, &error, text, ctx, &handoff)
-                        .map(|()| route.clone())
+                        .map(|()| used.clone())
                 }
                 (Err(error), None) => Err(error),
             }
@@ -2364,6 +2417,10 @@ pub(crate) struct ProbePlan {
     /// about, because that error is already known (cutoff F1: an unverified
     /// contact's saved name that does not resolve now).
     unresolved: Vec<(usize, String)>,
+    /// Route indices whose LAN name the race resolves itself, within
+    /// [`raven_core::outbox::LOCALIZE_RACE_TIMEOUT`] (N3: a card's LAN
+    /// name beside another carrier's route).
+    in_race: Vec<usize>,
     /// The order is learning connectivity's (Phase 6a): the route memory is
     /// neither read nor taught (OD6a-10).
     learned: bool,
@@ -2404,6 +2461,7 @@ impl ProbePlan {
                 preferred: None,
                 net: None,
                 unresolved: Vec::new(),
+                in_race: Vec::new(),
                 learned: true,
             },
             None => Self::remembered_on(data_dir, peer, planned, net),
@@ -2425,6 +2483,7 @@ impl ProbePlan {
             preferred,
             net,
             unresolved: Vec::new(),
+            in_race: Vec::new(),
             learned: false,
         }
     }
@@ -2437,6 +2496,7 @@ impl ProbePlan {
             preferred: None,
             net: None,
             unresolved: Vec::new(),
+            in_race: Vec::new(),
             learned: false,
         }
     }
@@ -2450,6 +2510,7 @@ impl ProbePlan {
             preferred,
             net: net.map(str::to_string),
             unresolved: Vec::new(),
+            in_race: Vec::new(),
             learned: false,
         }
     }
@@ -2460,6 +2521,18 @@ impl ProbePlan {
     pub(crate) fn with_unresolved(mut self, unresolved: Vec<(usize, String)>) -> Self {
         self.unresolved = unresolved;
         self
+    }
+
+    /// This plan, with the routes whose LAN name the race resolves itself
+    /// ([`Self::in_race`]).
+    pub(crate) fn resolving_in_race(mut self, in_race: Vec<usize>) -> Self {
+        self.in_race = in_race;
+        self
+    }
+
+    /// Route `i`'s LAN name is resolved in the race.
+    fn resolves_in_race(&self, i: usize) -> bool {
+        self.in_race.contains(&i)
     }
 
     /// The known probe error of route `i`, when it is not to be probed.
@@ -2478,6 +2551,7 @@ impl ProbePlan {
             preferred: self.preferred.clone(),
             net: self.net.clone(),
             unresolved: self.unresolved.iter().cloned().chain(more).collect(),
+            in_race: self.in_race.clone(),
             learned: self.learned,
         }
     }
@@ -5395,6 +5469,106 @@ mod tests {
         // Past the head start: Tor's probe never started.
         std::thread::sleep(Duration::from_millis(600));
         assert_eq!(*started.lock().unwrap(), [0]);
+    }
+
+    /// A card LAN name for the N3 tests below.
+    fn card_name() -> DialRoute {
+        DialRoute {
+            carrier: DialCarrier::Lan,
+            dial: " bob-mac.local:7420 ".into(),
+        }
+    }
+
+    /// A computer name that never answers (asks no network).
+    fn never_answers(_: &str, _: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        std::thread::sleep(Duration::from_secs(6));
+        Err(std::io::Error::other("no answer"))
+    }
+
+    /// N3: the race resolves a card's LAN name itself, within its short
+    /// bound: one that does not answer fails at the bound (not after 5 s)
+    /// as a name not found; one that answers is dialled at its local
+    /// address; one off the local network is never dialled. A plan keeps
+    /// the routes it resolves in the race when more errors are added.
+    #[test]
+    fn the_race_resolves_a_card_lan_name_within_its_short_bound() {
+        fn answers_local(_: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::from(([192, 168, 1, 5], port))])
+        }
+        fn answers_public(_: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::from(([203, 0, 113, 5], port))])
+        }
+        let bound = raven_core::outbox::LOCALIZE_RACE_TIMEOUT;
+        let began = Instant::now();
+        let e = race_localized(&card_name(), never_answers).unwrap_err();
+        let took = began.elapsed();
+        assert!(
+            (bound..bound + Duration::from_millis(500)).contains(&took),
+            "{took:?}"
+        );
+        assert_eq!(
+            e,
+            "lan connect: cannot resolve bob-mac.local: resolution timed out"
+        );
+        assert_eq!(
+            super::super::ext::classify_cause(&e),
+            super::super::ext::Cause::NameNotFound
+        );
+        assert_eq!(
+            race_localized(&card_name(), answers_local),
+            Ok(DialRoute {
+                carrier: DialCarrier::Lan,
+                dial: "192.168.1.5:7420".into(),
+            })
+        );
+        let e = race_localized(&card_name(), answers_public).unwrap_err();
+        assert!(
+            e.starts_with("not on your local network: a LAN address from a card"),
+            "{e}"
+        );
+        let plan = ProbePlan::in_order(2)
+            .resolving_in_race(vec![0])
+            .with_known(vec![(1, "down".into())]);
+        assert!(plan.resolves_in_race(0) && !plan.resolves_in_race(1));
+    }
+
+    /// N3 in the race: a card LAN name that never answers beside Tor. Tor
+    /// starts when the name fails, at its bound, and carries the send; the
+    /// send waited for nothing before the race (it waited 5 s, then failed).
+    #[test]
+    fn a_card_lan_name_that_never_answers_does_not_hold_tor() {
+        let tor = DialRoute {
+            carrier: DialCarrier::Onion,
+            dial: format!("onion:{}", "ab".repeat(32)),
+        };
+        let carried = tor.clone();
+        let probe: Prober<DialRoute> = std::sync::Arc::new(move |i: usize| {
+            if i == 0 {
+                race_localized(&card_name(), never_answers)
+            } else {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(carried.clone())
+            }
+        });
+        let began = Instant::now();
+        let outcome = probe_round(
+            &[0, 1],
+            Some(1),
+            raven_core::onion::ONION_HEAD_START,
+            DIRECT_STAGGER,
+            probe,
+        );
+        let took = began.elapsed();
+        assert!(
+            matches!(&outcome.done[..], [(0, Err(_), _), (1, Ok(r), _)] if *r == tor),
+            "{:?}",
+            outcome
+                .done
+                .iter()
+                .map(|(i, r, _)| (i, r.is_ok()))
+                .collect::<Vec<_>>()
+        );
+        assert!(took < Duration::from_millis(2_300), "{took:?}");
     }
 
     /// Field test S15 (mac-b): a stale LAN address takes 8 s to fail. Tor

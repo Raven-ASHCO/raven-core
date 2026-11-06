@@ -33,7 +33,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// 2: an inbound stream's header carries its circuit number after the token
 /// ([`encode_forward`]).
-pub const PROTO_VERSION: u32 = 2;
+/// 3: a connect request ends with a flags byte ([`encode_connect`],
+/// [`CONNECT_FLAGS`]; Tor speed Stage A, speed design M5).
+pub const PROTO_VERSION: u32 = 3;
 
 /// The shared secret of one helper's life: 32 random bytes, hex in
 /// [`Config::token`], raw on the loopback streams.
@@ -42,8 +44,40 @@ pub const TOKEN_LEN: usize = 32;
 /// The longest control line either side accepts.
 pub const MAX_LINE: usize = 4096;
 
-/// A connect request: token, onion key, port.
-pub const CONNECT_REQUEST_LEN: usize = TOKEN_LEN + 32 + 2;
+/// A connect request: token, onion key, port, flags.
+pub const CONNECT_REQUEST_LEN: usize = TOKEN_LEN + 32 + 2 + 1;
+
+/// Connect flag: fresh first (speed design M5, W4). The first try goes in a
+/// new isolation group (fresh circuits; Arti fetches the descriptor again),
+/// not in the friend's: raven-node's last link to that friend failed a
+/// moment ago, past a point the helper did not see (the stream opened, and
+/// then the link died or went silent). Hedge gate only
+/// (`onion_gate::onion_hedge_live`).
+pub const CONNECT_FRESH_FIRST: u8 = 1 << 0;
+/// Connect flag: hedge (speed design M5). A first try in the friend's group
+/// that has no stream after [`CONNECT_HEDGE_AFTER`] gets a fresh try in a
+/// new group beside it; the first stream wins, and the other try is dropped
+/// (Arti ends its stream). Hedge gate only.
+pub const CONNECT_HEDGE: u8 = 1 << 3;
+/// The flags this version knows. Bits 1 and 2 are kept for the keep-warm
+/// probe and optimistic data (speed design M2, M6); a helper refuses a
+/// request with a bit it does not know ([`unknown_flags`]).
+pub const CONNECT_FLAGS: u8 = CONNECT_FRESH_FIRST | CONNECT_HEDGE;
+/// How long a hedged connect waits for a stream in the friend's group before
+/// a fresh try starts beside it: a healthy BEGIN is one onion round trip
+/// (under a second, typically), and Arti gives up one on a dead circuit only
+/// after 6 s (the Arti helper's `STREAM_CONNECT_TIMEOUT`).
+pub const CONNECT_HEDGE_AFTER: Duration = Duration::from_secs(2);
+/// The reason a helper gives for a request with flags it does not know.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub const UNKNOWN_FLAGS: &str = "unknown connect flags";
+
+/// Bits of `flags` this version does not know ([`CONNECT_FLAGS`]): such a
+/// request is refused, never served as if the bit were clear.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub fn unknown_flags(flags: u8) -> bool {
+    flags & !CONNECT_FLAGS != 0
+}
 
 /// An inbound stream's header: token, circuit number (u64 BE).
 pub const FORWARD_HEADER_LEN: usize = TOKEN_LEN + 8;
@@ -223,7 +257,7 @@ where
     F: FnMut(bool, Duration) -> Fut,
     Fut: Future<Output = Result<T, ConnectReply>>,
 {
-    tries(budget, connect).await.got
+    tries(budget, None, connect).await.got
 }
 
 /// How [`tries`] went.
@@ -241,8 +275,13 @@ struct Tries<T> {
 /// (audit T6) the first message to a friend already paid Arti's BEGIN
 /// timeout. One that failed otherwise is followed after
 /// [`CONNECT_RETRY_PAUSE`]: a quick failure is not tried again at once.
+///
+/// With `hedge` (speed design M5, [`CONNECT_HEDGE`]): a first try with no
+/// stream after that long gets the fresh try beside it, when
+/// [`CONNECT_RETRY_MIN_LEFT`] is left for it ([`hedged`]); a first try that
+/// ends before then goes on as without a hedge.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
-async fn tries<T, F, Fut>(budget: Duration, mut connect: F) -> Tries<T>
+async fn tries<T, F, Fut>(budget: Duration, hedge: Option<Duration>, mut connect: F) -> Tries<T>
 where
     F: FnMut(bool, Duration) -> Fut,
     Fut: Future<Output = Result<T, ConnectReply>>,
@@ -253,7 +292,23 @@ where
             .await
             .unwrap_or_else(|_| Err(ConnectReply::Timeout("no circuit in time".into())))
     };
-    let err = match bounded(budget, connect(false, budget)).await {
+    let first = bounded(budget, connect(false, budget));
+    tokio::pin!(first);
+    let got = match hedge {
+        None => first.await,
+        Some(after) => match tokio::time::timeout(after, &mut first).await {
+            Ok(got) => got,
+            // No time for a fresh try: the first alone, as without a hedge.
+            Err(_) if budget.saturating_sub(start.elapsed()) < CONNECT_RETRY_MIN_LEFT => {
+                first.await
+            }
+            Err(_) => {
+                let left = budget.saturating_sub(start.elapsed());
+                return hedged(first, bounded(left, connect(true, left))).await;
+            }
+        },
+    };
+    let err = match got {
         Ok(t) => {
             return Tries {
                 got: Ok(t),
@@ -284,6 +339,52 @@ where
         got: bounded(left, connect(true, left)).await,
         first: Some(err),
         fresh: true,
+    }
+}
+
+/// A hedged connect's two tries side by side ([`tries`]): the first try in
+/// the friend's group, still without a stream, and the fresh one. The first
+/// stream wins, and the other try is dropped (a stream it opened ends, END).
+/// A try that fails leaves the other to finish: a slow circuit may still
+/// answer, and a dead one times out. Both failed: the fresh try's error.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+async fn hedged<T, A, B>(mut first: std::pin::Pin<&mut A>, second: B) -> Tries<T>
+where
+    A: Future<Output = Result<T, ConnectReply>>,
+    B: Future<Output = Result<T, ConnectReply>>,
+{
+    tokio::pin!(second);
+    let (mut first_err, mut second_err) = (None, None);
+    loop {
+        tokio::select! {
+            got = &mut first, if first_err.is_none() => match got {
+                Ok(t) => {
+                    return Tries {
+                        got: Ok(t),
+                        first: None,
+                        fresh: false,
+                    }
+                }
+                Err(e) => first_err = Some(e),
+            },
+            got = &mut second, if second_err.is_none() => match got {
+                Ok(t) => {
+                    return Tries {
+                        got: Ok(t),
+                        first: first_err,
+                        fresh: true,
+                    }
+                }
+                Err(e) => second_err = Some(e),
+            },
+        }
+        if let (Some(_), Some(e)) = (&first_err, &second_err) {
+            return Tries {
+                got: Err(e.clone()),
+                first: first_err,
+                fresh: true,
+            };
+        }
     }
 }
 
@@ -364,11 +465,18 @@ impl<G: Clone + PartialEq> IsolationBook<G> {
 /// a first try that timed out moves the friend to a new group whatever
 /// happens next. The book is shared by the helper's connects (its lock is
 /// never held across a try).
+///
+/// `flags` (version 3, speed design M5; 0 is the above): with
+/// [`CONNECT_FRESH_FIRST`] the first try goes in a new group too, which
+/// becomes the friend's when it works; with [`CONNECT_HEDGE`] (and not
+/// fresh first) a first try with no stream after [`CONNECT_HEDGE_AFTER`]
+/// gets the fresh try beside it ([`tries`]).
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub async fn connect_in_groups<G, T, F, Fut>(
     budget: Duration,
     book: &std::sync::Mutex<IsolationBook<G>>,
     key: [u8; 32],
+    flags: u8,
     mut connect: F,
 ) -> Result<T, ConnectReply>
 where
@@ -380,11 +488,20 @@ where
         book.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
+    let fresh_first = flags & CONNECT_FRESH_FIRST != 0;
     let (first, fresh) = {
         let mut book = lock();
-        (book.first_try(&key), book.new_group())
+        let kept = book.first_try(&key);
+        // Fresh first (W4): a new group instead of the friend's.
+        let first = if fresh_first {
+            Some(book.new_group())
+        } else {
+            kept
+        };
+        (first, book.new_group())
     };
-    let tried = tries(budget, |is_fresh, within| {
+    let hedge = (flags & CONNECT_HEDGE != 0 && !fresh_first).then_some(CONNECT_HEDGE_AFTER);
+    let tried = tries(budget, hedge, |is_fresh, within| {
         let group = if is_fresh {
             Some(fresh.clone())
         } else {
@@ -395,10 +512,14 @@ where
     .await;
     let mut book = lock();
     if matches!(tried.first, Some(ConnectReply::Timeout(_))) {
-        book.first_timed_out(key, first);
+        book.first_timed_out(key, first.clone());
     }
-    if tried.fresh && tried.got.is_ok() {
-        book.fresh_succeeded(key, fresh);
+    if tried.got.is_ok() {
+        if tried.fresh {
+            book.fresh_succeeded(key, fresh);
+        } else if let Some(group) = first.filter(|_| fresh_first) {
+            book.fresh_succeeded(key, group);
+        }
     }
     tried.got
 }
@@ -558,33 +679,37 @@ impl ConnectReply {
     }
 }
 
-/// A connect request's bytes: token, onion key, port (u16 BE).
+/// A connect request's bytes: token, onion key, port (u16 BE), flags
+/// ([`CONNECT_FLAGS`]; 0 asks what version 2 asked).
 pub fn encode_connect(
     token: &[u8; TOKEN_LEN],
     hs_id: &[u8; 32],
     port: u16,
+    flags: u8,
 ) -> [u8; CONNECT_REQUEST_LEN] {
     let mut out = [0u8; CONNECT_REQUEST_LEN];
     out[..TOKEN_LEN].copy_from_slice(token);
     out[TOKEN_LEN..TOKEN_LEN + 32].copy_from_slice(hs_id);
-    out[TOKEN_LEN + 32..].copy_from_slice(&port.to_be_bytes());
+    out[TOKEN_LEN + 32..TOKEN_LEN + 34].copy_from_slice(&port.to_be_bytes());
+    out[TOKEN_LEN + 34] = flags;
     out
 }
 
-/// A connect request's parts, the token checked against `token` first
-/// ([`token_eq`]); `None` on a wrong token.
+/// A connect request's parts (onion key, port, flags), the token checked
+/// against `token` first ([`token_eq`]); `None` on a wrong token. Flags this
+/// version does not know are the caller's to refuse ([`unknown_flags`]).
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn decode_connect(
     req: &[u8; CONNECT_REQUEST_LEN],
     token: &[u8; TOKEN_LEN],
-) -> Option<([u8; 32], u16)> {
+) -> Option<([u8; 32], u16, u8)> {
     let got: [u8; TOKEN_LEN] = req[..TOKEN_LEN].try_into().ok()?;
     if !token_eq(&got, token) {
         return None;
     }
     let hs_id: [u8; 32] = req[TOKEN_LEN..TOKEN_LEN + 32].try_into().ok()?;
-    let port = u16::from_be_bytes(req[TOKEN_LEN + 32..].try_into().ok()?);
-    Some((hs_id, port))
+    let port = u16::from_be_bytes(req[TOKEN_LEN + 32..TOKEN_LEN + 34].try_into().ok()?);
+    Some((hs_id, port, req[TOKEN_LEN + 34]))
 }
 
 /// An inbound stream's header: the token, then `circuit`, an opaque number
@@ -818,8 +943,8 @@ mod tests {
     fn connect_requests_need_the_token() {
         let token = [7u8; TOKEN_LEN];
         let hs = [9u8; 32];
-        let req = encode_connect(&token, &hs, 7422);
-        assert_eq!(decode_connect(&req, &token), Some((hs, 7422)));
+        let req = encode_connect(&token, &hs, 7422, 0);
+        assert_eq!(decode_connect(&req, &token), Some((hs, 7422, 0)));
         let mut wrong = token;
         wrong[31] ^= 1;
         assert_eq!(decode_connect(&req, &wrong), None);
@@ -1059,6 +1184,7 @@ mod tests {
                 Duration::from_secs(44),
                 &book,
                 key,
+                0,
                 move |group, _within| {
                     tries.lock().unwrap().push(group);
                     async move {
@@ -1107,17 +1233,24 @@ mod tests {
         let timeout = ConnectReply::Timeout("tor timeout".into());
         let gone = ConnectReply::Unreachable("rendezvous failed".into());
         // Timed out after 35 s: no fresh try, but a new group next time.
-        let got = connect_in_groups(Duration::from_secs(44), &book, key, fail(timeout, 35)).await;
+        let got =
+            connect_in_groups(Duration::from_secs(44), &book, key, 0, fail(timeout, 35)).await;
         assert!(matches!(got, Err(ConnectReply::Timeout(_))));
         let moved = book.lock().unwrap().first_try(&key);
         assert!(moved.is_some());
         // Unreachable, and the fresh try failed too: the group stays.
-        let got =
-            connect_in_groups(Duration::from_secs(44), &book, key, fail(gone.clone(), 1)).await;
+        let got = connect_in_groups(
+            Duration::from_secs(44),
+            &book,
+            key,
+            0,
+            fail(gone.clone(), 1),
+        )
+        .await;
         assert_eq!(got, Err(gone.clone()));
         assert_eq!(book.lock().unwrap().first_try(&key), moved);
         // Unreachable, then the fresh try worked: its group is the friend's.
-        let got = connect_in_groups(Duration::from_secs(44), &book, key, |group, _| {
+        let got = connect_in_groups(Duration::from_secs(44), &book, key, 0, |group, _| {
             let gone = gone.clone();
             async move {
                 if group == moved {
@@ -1131,6 +1264,209 @@ mod tests {
         let fresh = got.expect("the fresh try");
         assert!(fresh.is_some() && fresh != moved);
         assert_eq!(book.lock().unwrap().first_try(&key), fresh);
+    }
+
+    /// Version 3: the flags byte rides after the port, both ways; a bit this
+    /// version does not know is refused (bits 1 and 2 are kept for the probe
+    /// and optimistic data), and 0 asks what version 2 asked.
+    #[test]
+    fn connect_request_v3_round_trips_flags() {
+        assert_eq!(PROTO_VERSION, 3);
+        assert_eq!(CONNECT_REQUEST_LEN, TOKEN_LEN + 32 + 2 + 1);
+        let (token, hs) = ([3u8; TOKEN_LEN], [4u8; 32]);
+        for flags in [0, CONNECT_FRESH_FIRST, CONNECT_HEDGE, CONNECT_FLAGS] {
+            let req = encode_connect(&token, &hs, 7422, flags);
+            assert_eq!(req[CONNECT_REQUEST_LEN - 1], flags);
+            assert_eq!(decode_connect(&req, &token), Some((hs, 7422, flags)));
+            assert!(!unknown_flags(flags), "{flags:#x}");
+        }
+        for bit in [1u8 << 1, 1 << 2, 1 << 4, 1 << 7] {
+            assert!(unknown_flags(bit), "{bit:#x}");
+            assert!(unknown_flags(bit | CONNECT_HEDGE), "{bit:#x}");
+        }
+    }
+
+    /// One planned try of the hedge tests: where it went, how long it takes,
+    /// what it gives, and whether it ran to its end (a dropped try did not).
+    type Plan = Arc<std::sync::Mutex<Vec<(Option<u32>, u64, bool)>>>;
+
+    use std::sync::Arc;
+
+    /// A try that takes `secs` in `group` and gives `got`, logged in `plan`
+    /// (its last field set once it ran to its end).
+    fn planned<T>(
+        plan: &Plan,
+        group: Option<u32>,
+        secs: u64,
+        got: Result<T, ConnectReply>,
+    ) -> impl Future<Output = Result<T, ConnectReply>> {
+        let plan = plan.clone();
+        let at = {
+            let mut p = plan.lock().unwrap();
+            p.push((group, secs, false));
+            p.len() - 1
+        };
+        async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            plan.lock().unwrap()[at].2 = true;
+            got
+        }
+    }
+
+    /// Speed design M5: the friend's kept circuit is dead (a try in it
+    /// times out after 6 s, as Arti gives up a BEGIN that gets no
+    /// CONNECTED), a fresh group connects in 1 s. Hedged, the fresh try
+    /// starts after 2 s without a stream and the connect takes 3 s, not 7;
+    /// the dead try is dropped, and the fresh group is the friend's from
+    /// then on (the next connect takes 1 s, with no hedge). Unhedged (flags
+    /// 0) it is as before: 6 s, then the fresh try.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_kept_circuit_is_hedged_after_two_seconds() {
+        for (flags, took_first, ran_out) in [(CONNECT_HEDGE, 3, false), (0, 7, true)] {
+            let book = std::sync::Mutex::new(IsolationBook::new(next_group));
+            let key = [11u8; 32];
+            let plan: Plan = Arc::default();
+            let mut took = Vec::new();
+            for _ in 0..2 {
+                let t = tokio::time::Instant::now();
+                let got = connect_in_groups(Duration::from_secs(44), &book, key, flags, |g, _| {
+                    let dead = g.is_none();
+                    planned(
+                        &plan,
+                        g,
+                        if dead { 6 } else { 1 },
+                        if dead {
+                            Err(ConnectReply::Timeout("tor timeout".into()))
+                        } else {
+                            Ok(g)
+                        },
+                    )
+                })
+                .await;
+                assert!(got.expect("connected").is_some(), "{flags}");
+                took.push(t.elapsed().as_secs());
+            }
+            assert_eq!(took, [took_first, 1], "flags {flags}");
+            let plan = plan.lock().unwrap().clone();
+            assert_eq!(plan.len(), 3, "{plan:?}");
+            assert_eq!((plan[0].0, plan[0].2), (None, ran_out), "{plan:?}");
+            let fresh = plan[1].0;
+            assert!(fresh.is_some(), "{plan:?}");
+            assert_eq!(plan[2].0, fresh, "the next connect in the fresh group");
+        }
+    }
+
+    /// The hedge's two tries: the first stream wins and the other try is
+    /// dropped before its end. A slow but working first try that connects
+    /// before the fresh one keeps the friend's group; a fresh try that
+    /// wins makes its group the friend's. A first try that fails after the
+    /// hedge started starts no third try: the fresh one's answer counts. A
+    /// first try that ends before the hedge goes on as before (a quick
+    /// failure: the fresh try 2 s later), and with too little budget left
+    /// there is no hedge.
+    #[tokio::test(start_paused = true)]
+    async fn the_hedge_loser_is_ended() {
+        let key = [12u8; 32];
+        let gone = || Err::<Option<u32>, _>(ConnectReply::Unreachable("rendezvous failed".into()));
+        let timeout = || Err::<Option<u32>, _>(ConnectReply::Timeout("tor timeout".into()));
+        // (first try: secs, result; fresh try: secs, result) -> took, winner,
+        // whether each ran to its end, the friend's group after.
+        let run = |first: (u64, bool), fresh: (u64, Result<(), ConnectReply>), budget: u64| {
+            let book = std::sync::Mutex::new(IsolationBook::new(next_group));
+            async move {
+                let plan: Plan = Arc::default();
+                let t = tokio::time::Instant::now();
+                let got = connect_in_groups(
+                    Duration::from_secs(budget),
+                    &book,
+                    key,
+                    CONNECT_HEDGE,
+                    |g, _| {
+                        let (secs, got) = if g.is_none() {
+                            (first.0, if first.1 { Ok(g) } else { timeout() })
+                        } else {
+                            (fresh.0, fresh.1.clone().map(|()| g))
+                        };
+                        planned(&plan, g, secs, got)
+                    },
+                )
+                .await;
+                let took = t.elapsed().as_secs();
+                let plan = plan.lock().unwrap().clone();
+                let after = book.lock().unwrap().first_try(&key);
+                (got, took, plan, after)
+            }
+        };
+        // The first connects at 4 s, the fresh one (from 2 s) at 3 s: the
+        // fresh one wins, the first is dropped.
+        let (got, took, plan, after) = run((4, true), (1, Ok(())), 44).await;
+        assert_eq!((took, plan.len()), (3, 2), "{plan:?}");
+        assert_eq!(got.unwrap(), plan[1].0);
+        assert!(!plan[0].2 && plan[1].2, "{plan:?}");
+        assert_eq!(after, plan[1].0, "the fresh group is the friend's");
+        // The first connects at 3 s, the fresh one (from 2 s) would at 5 s:
+        // the first wins, the fresh try is dropped, the group stays.
+        let (got, took, plan, after) = run((3, true), (3, Ok(())), 44).await;
+        assert_eq!((got, took), (Ok(None), 3), "{plan:?}");
+        assert!(plan[0].2 && !plan[1].2, "{plan:?}");
+        assert_eq!(after, None, "the friend's group stays");
+        // The first times out at 6 s while the fresh one (from 2 s) takes 5:
+        // no third try; the fresh one connects at 7 s and is the friend's.
+        let (got, took, plan, after) = run((6, false), (5, Ok(())), 44).await;
+        assert_eq!((took, plan.len()), (7, 2), "{plan:?}");
+        assert_eq!(got.unwrap(), plan[1].0);
+        assert_eq!(after, plan[1].0);
+        // Both fail: the fresh one's error, no third try.
+        let (got, _, plan, _) = run((6, false), (1, gone().map(|_| ())), 44).await;
+        assert_eq!((got, plan.len()), (gone(), 2), "{plan:?}");
+        // Too little budget left at 2 s for a fresh try (12 s): no hedge.
+        let (got, took, plan, _) = run((4, true), (1, Ok(())), 13).await;
+        assert_eq!((got, took, plan.len()), (Ok(None), 4, 1), "{plan:?}");
+    }
+
+    /// Fresh first (W4): raven-node's last link to the friend failed past
+    /// the stream, so the first try goes in a new group and never in the
+    /// friend's kept one (whose circuit may be the dead one), with no hedge
+    /// beside it; the group that worked is the friend's from then on.
+    #[tokio::test(start_paused = true)]
+    async fn fresh_first_skips_the_kept_group() {
+        let book = std::sync::Mutex::new(IsolationBook::new(next_group));
+        let key = [13u8; 32];
+        let kept = book.lock().unwrap().new_group();
+        book.lock().unwrap().fresh_succeeded(key, kept);
+        let plan: Plan = Arc::default();
+        let got = connect_in_groups(
+            Duration::from_secs(44),
+            &book,
+            key,
+            CONNECT_FRESH_FIRST | CONNECT_HEDGE,
+            |g, _| {
+                let stale = g == Some(kept);
+                planned(
+                    &plan,
+                    g,
+                    if stale { 6 } else { 3 },
+                    if stale {
+                        Err(ConnectReply::Timeout("tor timeout".into()))
+                    } else {
+                        Ok(g)
+                    },
+                )
+            },
+        )
+        .await;
+        let plan = plan.lock().unwrap().clone();
+        assert_eq!(plan.len(), 1, "one try, no hedge: {plan:?}");
+        let used = got.expect("connected");
+        assert!(used.is_some() && used != Some(kept), "{plan:?}");
+        assert_eq!(book.lock().unwrap().first_try(&key), used);
+        // Without it, the first try goes in the friend's group.
+        let plan: Plan = Arc::default();
+        let got = connect_in_groups(Duration::from_secs(44), &book, key, 0, |g, _| {
+            planned(&plan, g, 1, Ok(g))
+        })
+        .await;
+        assert_eq!(got, Ok(used));
     }
 
     #[test]

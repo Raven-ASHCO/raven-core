@@ -261,6 +261,13 @@ pub fn own_for_card(data_dir: &std::path::Path, own_pub: &[u8; 32]) -> Option<On
 /// under the book's writer lock; fields this build does not know are kept.
 /// `Ok(true)` when a row changed; `Ok(false)` when nothing did (no such
 /// contact, an older or equal binding, or one that does not verify).
+///
+/// One that replaces a binding of another onion service key also forgets
+/// the contact's onion link pin ([`crate::lan_noise_pin::forget_onion`];
+/// RAVEN_ONION_CARRIER_V1 §5.1): the contact's onion service is new (a
+/// reinstall, a new Tor state), no copy of its old key answers at the new
+/// address, and the next verified onion link pins again. A binding that
+/// names the same key keeps the pin.
 pub fn store_contact_binding(
     data_dir: &std::path::Path,
     peer: &[u8; 32],
@@ -279,6 +286,7 @@ pub fn store_contact_binding(
     };
     let key = hex::encode(peer);
     let mut changed = false;
+    let mut new_service = false;
     for row in rows.iter_mut().filter(|r| {
         r.get("pub_hex")
             .and_then(serde_json::Value::as_str)
@@ -293,11 +301,20 @@ pub fn store_contact_binding(
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("onion".into(), binding.to_text().into());
                 changed = true;
+                new_service |= held.is_some_and(|h| h.hs_id != binding.hs_id);
             }
         }
     }
     if changed {
         lock.write_rows(&rows).map_err(|e| e.to_string())?;
+    }
+    // The pin store's lock is never taken under the book's.
+    drop(lock);
+    if new_service {
+        // Best effort: a forget that fails leaves the pin, which only keeps
+        // checking (and a pin store that cannot be read dials nothing over
+        // Tor); the contact's own verified onion link pins again anyway.
+        let _ = crate::lan_noise_pin::forget_onion(data_dir, peer);
     }
     Ok(changed)
 }
@@ -520,6 +537,49 @@ mod tests {
         let carol = Identity::from_seed(&[3; 32]);
         let theirs = OnionBinding::sign(&carol, hs(5), now);
         assert!(!store_contact_binding(dir.path(), &carol.public_key_bytes(), &theirs).unwrap());
+    }
+
+    /// TOR-3 (spec §5.1): a newer binding naming another onion service key
+    /// forgets the contact's onion link pin, so its next verified onion link
+    /// pins again. The same key signed again, an older or a foreign binding
+    /// (neither is taken), and a first binding keep it; another contact's
+    /// pin is never touched.
+    #[test]
+    fn a_binding_naming_another_onion_key_forgets_the_onion_link_pin() {
+        use crate::lan_noise_pin::{load_onion_pin, record_onion, PinKey};
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (bob, carol) = (bob(), Identity::from_seed(&[3; 32]));
+        let (peer, other) = (bob.public_key_bytes(), carol.public_key_bytes());
+        let rows: Vec<String> = [peer, other]
+            .iter()
+            .map(|k| format!(r#"{{"pub_hex":"{}","pinned":true}}"#, hex::encode(k)))
+            .collect();
+        std::fs::write(
+            d.join(crate::contact_book::CONTACTS_FILE),
+            format!("[{}]", rows.join(",")),
+        )
+        .unwrap();
+        let key = PinKey::derive(&alice());
+        record_onion(d, &key, &peer, &[0x51; 32]).unwrap();
+        record_onion(d, &key, &other, &[0x52; 32]).unwrap();
+        let pinned = |who: &[u8; 32]| load_onion_pin(d, who).unwrap().is_some();
+        let now = now_s();
+        let binding = |hs_seed: u8, at: u64| OnionBinding::sign(&bob, hs(hs_seed), at);
+        assert!(store_contact_binding(d, &peer, &binding(1, now - 30)).unwrap());
+        assert!(pinned(&peer), "a first binding keeps the pin");
+        assert!(store_contact_binding(d, &peer, &binding(1, now - 20)).unwrap());
+        assert!(pinned(&peer), "the same key signed again keeps it");
+        assert!(!store_contact_binding(d, &peer, &binding(2, now - 40)).unwrap());
+        let foreign = OnionBinding::sign(&alice(), hs(2), now);
+        assert!(!store_contact_binding(d, &peer, &foreign).unwrap());
+        assert!(pinned(&peer), "neither an older nor a foreign one is taken");
+        assert!(store_contact_binding(d, &peer, &binding(2, now - 10)).unwrap());
+        assert!(
+            !pinned(&peer),
+            "another onion service key: pinned again later"
+        );
+        assert!(pinned(&other), "only Bob's");
     }
 
     /// `shared-vectors/rvn1/onion/binding_001.json` (spec §11): written only

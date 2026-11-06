@@ -763,10 +763,17 @@ async fn accept_connects(
                 return;
             }
             // Not raven-node: closed without a word.
-            let Some((hs_id, port)) = proto::decode_connect(&req, &token) else {
+            let Some((hs_id, port, flags)) = proto::decode_connect(&req, &token) else {
                 return;
             };
             let _ = stream.set_nodelay(true);
+            // A flag this version does not know: refused, never served as
+            // if it were clear.
+            if proto::unknown_flags(flags) {
+                let refused = ConnectReply::Failed(proto::UNKNOWN_FLAGS.into());
+                let _ = stream.write_all(&refused.encode()).await;
+                return;
+            }
             let target = tor_hscrypto::pk::HsId::from(hs_id);
             let addr = onion_text(&target);
             // The first try in the friend's isolation group (the default
@@ -775,22 +782,26 @@ async fn accept_connects(
             // descriptor again) after a failure worth it, within the same
             // wait (field test round 8: a friend's node had just restarted).
             // Arti hands every connect of one group the same rendezvous
-            // circuit while it looks open, a dead one too (audit T6).
-            let opened = proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, |group, _within| {
-                let (client, addr) = (client.clone(), addr.clone());
-                async move {
-                    let mut prefs = StreamPrefs::new();
-                    prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
-                    if let Some(group) = group {
-                        prefs.set_isolation(group);
+            // circuit while it looks open, a dead one too (audit T6). The
+            // flags (speed design M5, hedge gate only): a first try in a new
+            // group, or a fresh try beside a first one with no stream after
+            // 2 s.
+            let opened =
+                proto::connect_in_groups(CONNECT_WAIT, &book, hs_id, flags, |group, _within| {
+                    let (client, addr) = (client.clone(), addr.clone());
+                    async move {
+                        let mut prefs = StreamPrefs::new();
+                        prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
+                        if let Some(group) = group {
+                            prefs.set_isolation(group);
+                        }
+                        client
+                            .connect_with_prefs((addr.as_str(), port), &prefs)
+                            .await
+                            .map_err(|e| connect_reply(e.kind()))
                     }
-                    client
-                        .connect_with_prefs((addr.as_str(), port), &prefs)
-                        .await
-                        .map_err(|e| connect_reply(e.kind()))
-                }
-            })
-            .await;
+                })
+                .await;
             match opened {
                 Ok(mut tor) => {
                     if stream.write_all(&ConnectReply::Ok.encode()).await.is_err() {

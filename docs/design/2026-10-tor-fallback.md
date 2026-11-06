@@ -55,6 +55,22 @@ nothing for Raven; the Raven handshake authenticates the friend.
    other one closes without writing a frame.
 4. Custody (a friend holds the mail) and waiting come after both, as today.
 
+**A card's LAN name races too** (N3, security and speed report 2026-11-05;
+`raven send`). A LAN name from a friend's card keeps the local-network
+rule, so it must be resolved before it is dialled. While the send has a
+route on another carrier (Tor, for a verified friend), the name is not
+resolved before the race (that took up to 5 s, one name after the other):
+its own probe in the race resolves it within
+`raven_core::outbox::LOCALIZE_RACE_TIMEOUT` (1.5 s, as long as Tor's head
+start) and dials the resolved local address, for the probe and then the
+message. A name that does not answer in time fails that route alone, as a
+name not found. A card's LAN address that may not be dialled (off the local
+network, or not a usable `host:port`) fails that route alone too, never
+dialled; before, both cases ended the whole send as NOT SENT though Tor
+could carry it. With no other carrier (an unverified contact, or LAN only)
+the send is as before: names resolved first, within 5 s, and a refusal is
+the send's.
+
 **Moving off Tor.** Raven links are per dial (a dial connects, sends,
 collects the receipts and closes). Every send runs the race again with the
 head start for the direct paths, so as soon as a direct path works it wins,
@@ -130,6 +146,19 @@ Only ephemeral loopback ports are bound; no Raven port, no public port.
   its `experimental-api` feature, which has no stability promise. Owner
   decision OD-T3 lists the trade-off (a restored profile gets a new onion
   address).
+- **The onion link pin** (protocol §5.1). The binding names the onion
+  service key, not the onion link's Noise static, and Tor authenticates only
+  that key. So whoever copies the key (it is in `<profile>/tor/`) could answer
+  at the address and read the dialer's static and signed hello before the
+  dialer reads the listener's hello. Each node therefore pins each contact's
+  onion link static after the first verified onion link (either side
+  dialled), as a keyed digest in its Noise pin store (sealed in a sealed
+  profile), and a dial that meets another static stops after Noise message 2
+  (`NOISE_PIN_MISMATCH`). It is pinned again by the contact's own verified
+  onion link, by a newer binding naming another onion key (a fresh card, or
+  route hints on any link), and by removing the contact. The static comes from
+  the identity seed, so a friend restored from its seed (new onion address,
+  same static) is never stopped. No wire change.
 
 ### 3.3 Where friends learn it
 
@@ -213,7 +242,7 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
 | Wait | Direct (today) | Onion |
 |---|---|---|
 | Head start of the direct paths | - | 1.5 s (`ONION_HEAD_START`) |
-| Connect (Tor circuit to the service, rendezvous) | 5 s per address, 20 s per dial | 45 s (`ONION_CONNECT_BUDGET`); first contact is typically 10-30 s. Within it the helper tries once more, at once after a timeout (once Arti has the rendezvous circuit, it waits 6 s for the stream's CONNECTED, not its default 10 s) and 2 s after any other failure (no descriptor, not running, introduction or rendezvous failed), with 12 s or more left for it, in a new isolation group (fresh descriptor, fresh circuits): field test round 8, the first sends to a friend whose node had just restarted failed on the client's cached view of the old service. A fresh try that works makes its group the friend's for the connects that follow in that helper life, and a first try that timed out is never made in its group again (audit T6: Arti hands every connect of one group the same rendezvous circuit while it looks open, a dead one too, so each dial paid the timeout, the pause and a new rendezvous); a friend unused for 10 min is back in the default group |
+| Connect (Tor circuit to the service, rendezvous) | 5 s per address, 20 s per dial | 45 s (`ONION_CONNECT_BUDGET`); first contact is typically 10-30 s. Within it the helper tries once more, at once after a timeout (once Arti has the rendezvous circuit, it waits 6 s for the stream's CONNECTED, not its default 10 s) and 2 s after any other failure (no descriptor, not running, introduction or rendezvous failed), with 12 s or more left for it, in a new isolation group (fresh descriptor, fresh circuits): field test round 8, the first sends to a friend whose node had just restarted failed on the client's cached view of the old service. A fresh try that works makes its group the friend's for the connects that follow in that helper life, and a first try that timed out is never made in its group again (audit T6: Arti hands every connect of one group the same rendezvous circuit while it looks open, a dead one too, so each dial paid the timeout, the pause and a new rendezvous); a friend unused for 10 min is back in the default group. With the hedge gate open (§3.6, lab only) a first try with no stream after 2 s gets the fresh try beside it, and after a failed link the first try goes in a new group |
 | Whole dial | 40-45 s | 75 s (`ONION_DIAL_DEADLINE`) |
 | Frame I/O | 30 s | 30 s |
 | First reply / idle reply | 30 s / 2 s | 30 s / 5 s |
@@ -244,6 +273,57 @@ deduplicates by object, and conformance §10.3 allows small direct hedging.
   new rendezvous), and an idle friend costs nothing after that.
 - Channel padding is set to `reduced` (laptops on battery; research §3.4:
   padding is most of Tor's idle cost on 4G).
+- **W1, kept links** (Tor speed Stage A, security and speed report
+  2026-11-05 §7, speed design M1; gate `ONION_WARM_PRODUCTION_ENABLED =
+  false`, lab only, §4). With the warm gate open, a program's send over Tor
+  (`raven send`, an app's engine, over IPC) keeps its link open after a
+  batch that got every reply it waited for, for the next batch to the same
+  friend: within 20 s of the last batch (`WARM_IDLE`, below the listener's
+  30 s read deadline), 120 s of the link's dial (`WARM_AGE`, below the onion
+  listener's 180 s lifetime) and 56 frames (`WARM_FRAMES`, below its 64); 4
+  links at most, 2 on the embedded node, one per friend. The message then
+  rides its check's link (a first send costs 4 round trips instead of 7),
+  and a send within 20 s costs one, its check answered from the kept link
+  with the friend's offer and no traffic. Nothing is opened with nothing to
+  send. A kept link is written and read by a task of its own, so no wait
+  stops part way through a frame, and a link whose wait ran out is never
+  kept. Up to 3 batches ride one kept link at once (pipelining, speed design
+  M8, `PIPELINE_DEPTH`): the task writes each batch's frames behind those
+  of the batches before it and hands the replies out first in, first out
+  (the listener answers frame after frame, each reply before it reads the
+  next frame), so a burst of k messages costs about one round trip each
+  from its own write, not k round trips for the last. A batch that ends any
+  other way (its wait ran out, the link closed, its dial was cut) closes the
+  link, and the batches behind it go again on a fresh link: a reply is
+  never taken for another batch's, and an ACK is only ever counted for the
+  message it names. The dial's
+  checks run again before every batch; a keeper closes the link of a friend
+  blocked, removed or no longer verified within a second, and all of them
+  once the gate is shut (a hold); a lock, a network change, the end of a
+  Tor helper's life and the embedded node's pause close them all. The
+  listener is unchanged (`raven-node/src/onion/warm.rs`).
+- **Hedge and fresh first** (speed design M5; gate
+  `ONION_HEDGE_PRODUCTION_ENABLED = false`, lab only, §4). With the hedge
+  gate open the dialer asks the helper for flags with each connect (the
+  local helper protocol's version 3, `RAVEN_ONION_CARRIER_V1.md` §6): a
+  hedge, so a first try in the friend's isolation group that has no stream
+  after 2 s (`CONNECT_HEDGE_AFTER`; a healthy BEGIN takes one round trip)
+  gets a fresh try in a new group beside it, the first stream winning and
+  the other try dropped; and fresh first, after a link to that friend failed
+  where the helper cannot see it (no link came up, a batch got no reply in
+  its wait, a kept link died before any reply) within 10 minutes: the first
+  try then goes in a new group at once. On the loopback model (one round
+  trip r, a rendezvous R, Arti's 6 s wait for CONNECTED on a dead circuit)
+  a send past a dead circuit costs 2 s + R + 4r with W1 instead of
+  6 s + R + 7r, and R + 4r after a failed link. With the warm gate open
+  too, a batch on a kept link with no reply within the longer of 2 s
+  (`BATCH_HEDGE_FLOOR`) and 3 times that link's last round trip (the batch
+  hedge) closes the link and goes again on a fresh one, fresh first; the
+  friend answers the copy of a message it holds as the same message, with
+  the same ACK. On the loopback model a message on a kept link whose
+  circuit died with no word then costs 3r + R + 4r (with a 1r trip) instead
+  of its whole reply wait and no ACK. The price: one more introduction (and
+  maybe a descriptor fetch) at the friend's service when a hedge fires.
 
 ### 3.7 Robustness around Arti's known gaps
 
@@ -351,6 +431,8 @@ Shown by `raven status --explain tor` and in the docs:
 | Helper path | Next to `raven-node`; debug builds may override it with `RAVEN_TOR_HELPER=<path>`. |
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. |
 | Head start | `RAVEN_LAB_TOR_HEAD_START_MS` (debug only, tests) overrides 1.5 s. |
+| Stage record | Debug builds only (speed groundwork for the D1 measurement, security and speed report 2026-11-05 §7): every onion dial's step times in memory, as durations only (`prep`, `connect` with its `circuit` and `begin` parts, `noise`, `hello`, `write`, `receipt`, `total`; never a key, an onion id, an address or a message). `RAVEN_LAB_TOR_STAGES=<absolute path>` with `RAVEN_LAB_TEST_A=1` appends one JSON line per dial for the D1 harness. Arti gets the circuit and opens the stream in one call, so `circuit` and `begin` split the helper's connect by the one round trip rule (BEGIN to CONNECTED takes as long as the Noise round trip that follows on the same circuit). Release builds keep nothing. |
+| Tor speed, Stage A | Five more gates, every one false, each open only while the onion carrier is, with its lab switch (with `RAVEN_LAB_TEST_A=1`, debug builds only) and a hold of its own in the suite registry: `ONION_WARM_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM`, `feature/onion-warm`: W1 kept links and their pipelining, §3.6), `ONION_HEDGE_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_HEDGE`, `feature/onion-hedge`: the connect hedge, fresh first and, with the warm gate, the batch hedge, §3.6), `ONION_EARLY_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_EARLY`, `feature/onion-early`), `ONION_OPTIMISTIC_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_OPTIMISTIC`, `feature/onion-optimistic`) and `ONION_WARM_LINK_PRODUCTION_ENABLED` (`RAVEN_LAB_TOR_WARM_LINK`, `feature/onion-warm-link`: W2, a wire change). Only W1 with its pipelining, the connect hedge with fresh first and the batch hedge (§3.6) act yet. |
 
 ## 5. Tests
 
@@ -429,6 +511,13 @@ within 10 s each; steps 7-9 deliver without a manual restart.
 - **Presence.** Anyone holding a card can tell when its owner is online
   (descriptor and intro point answers). Same class as an Internet direct
   address today, without the IP.
+- **A copy of the onion service key.** It is kept in the clear under
+  `<profile>/tor/` (sealing it waits on OD-T3). With the onion link pin
+  (§3.2) a copy answers no pinned dial; still open: the first onion dial
+  to a contact before any verified onion link, and the first after a binding
+  naming another onion key, can be answered by a copy holder, who then reads
+  the dialer's identity (a binding that also names the static would close
+  this; it changes the wire).
 - **Resource use.** One published service keeps intro circuits up; desktop
   CPU and memory for this are unmeasured (field test step 10 adds them).
 - **Duplicates.** Possible only when both paths complete the handshake at

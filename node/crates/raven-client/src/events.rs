@@ -13,9 +13,14 @@
 //! `incoming` event carries a message's text), every event meanwhile is
 //! dropped, and a poll says `locked: true` with no events. The first poll
 //! after the unlock says `reset: true`.
+//!
+//! `events.wait` ([`EventHub::wait`], speed design M9) answers as a poll,
+//! but while there is nothing to say it waits for the next event, a lock
+//! or an unlock, up to its timeout.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
@@ -48,6 +53,8 @@ pub struct Batch {
 #[derive(Default)]
 pub struct EventHub {
     queue: Mutex<Queue>,
+    /// Woken at every event, lock and unlock ([`Self::wait`]).
+    news: Condvar,
 }
 
 impl EventHub {
@@ -58,7 +65,7 @@ impl EventHub {
     /// Adds one event of `kind` with `fields`, at `at_ms`; returns its seq.
     /// While locked nothing is added (the newest seq so far is returned).
     pub fn emit(&self, kind: &str, fields: Map<String, Value>, at_ms: u64) -> u64 {
-        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = self.lock();
         if q.locked {
             return q.seq;
         }
@@ -81,6 +88,7 @@ impl EventHub {
                 q.dropped_through = dropped;
             }
         }
+        self.news.notify_all();
         seq
     }
 
@@ -89,7 +97,7 @@ impl EventHub {
     /// every poll from before it says `reset: true` (what the app showed
     /// before the lock is reloaded). No change: nothing happens.
     pub fn set_locked(&self, locked: bool) {
-        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = self.lock();
         if q.locked == locked {
             return;
         }
@@ -100,12 +108,42 @@ impl EventHub {
             q.seq += 1;
         }
         q.dropped_through = q.seq;
+        self.news.notify_all();
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// What came after `after_seq`. Never blocks beyond the queue's lock.
     /// While locked: no events, `locked`.
     pub fn poll(&self, after_seq: u64) -> Batch {
-        let q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        Self::batch(&self.lock(), after_seq)
+    }
+
+    /// [`Self::poll`], but while it would say nothing (no event after
+    /// `after_seq`, no reset, not locked) it waits up to `timeout` for the
+    /// next event, lock or unlock, and answers as soon as one comes. Only
+    /// the calling thread waits: the queue's lock is let go meanwhile.
+    pub fn wait(&self, after_seq: u64, timeout: Duration) -> Batch {
+        let deadline = Instant::now() + timeout;
+        let mut q = self.lock();
+        loop {
+            let batch = Self::batch(&q, after_seq);
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !batch.events.is_empty() || batch.reset || batch.locked || left.is_zero() {
+                return batch;
+            }
+            q = self
+                .news
+                .wait_timeout(q, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// What `q` holds after `after_seq`.
+    fn batch(q: &Queue, after_seq: u64) -> Batch {
         if q.locked {
             return Batch {
                 seq: q.seq,
@@ -135,7 +173,7 @@ impl EventHub {
     /// The newest seq so far.
     #[cfg(test)]
     pub fn seq(&self) -> u64 {
-        self.queue.lock().unwrap_or_else(|e| e.into_inner()).seq
+        self.lock().seq
     }
 }
 

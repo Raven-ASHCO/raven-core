@@ -103,7 +103,8 @@ pub fn global() -> &'static Client {
 
 /// `raven_call` for Rust: one request envelope in, one response out, on the
 /// process's engine. Thread-safe; it may block (a start of raven-node takes
-/// a few seconds), except `events.poll`, which never does.
+/// a few seconds), except `events.poll`, which never does (`events.wait`
+/// blocks up to its `timeout_ms`, 25 s at most).
 pub fn call(request_json: &str) -> String {
     global().call(request_json)
 }
