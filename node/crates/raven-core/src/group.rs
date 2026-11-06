@@ -914,7 +914,10 @@ pub fn deliver(
 }
 
 /// Apply one received frame from the carrier peer `peer` to the group store
-/// (protocol §4.2). Asks raven-node for a scan when it left work.
+/// (protocol §4.2). Asks raven-node for a scan when it left work. A frame
+/// the store has no room for (its byte budget, after shedding held frames,
+/// done markers and intents) is dropped and counted, and still `Ok`, so it
+/// is ACKed rather than sent again until its horizon.
 pub fn ingest(
     data_dir: &Path,
     peer: &Key,
@@ -923,7 +926,7 @@ pub fn ingest(
 ) -> Result<(), GroupError> {
     let me = local_identity_key(data_dir).ok_or(GroupError::NoIdentity)?;
     let friends = friend_keys(data_dir);
-    let work = store::edit(data_dir, |file| {
+    let work = store::edit_received(data_dir, false, |file| {
         file.note_me(&me);
         Ok(rules::apply(file, &me, peer, frame, &friends, now_ms).work)
     })?;

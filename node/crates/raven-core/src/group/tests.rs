@@ -1452,11 +1452,7 @@ fn an_old_message_replayed_later_is_refused() {
     assert_eq!(group(&file).messages.len(), 1);
     // Its message pushed out (as the caps would): its key stays.
     let gone = file.groups[0].messages.remove(0);
-    file.groups[0].seen.push(format!(
-        "{}@{}",
-        store::seen_key(&gone.from, &gone.id),
-        gone.sent_ms
-    ));
+    file.groups[0].seen.push(&gone.from, &gone.id, gone.sent_ms);
     let within = NOW + store::REPLAY_HORIZON_MS - 1;
     apply(
         &mut file,
@@ -1496,7 +1492,7 @@ fn a_full_seen_list_refuses_new_messages_until_keys_expire() {
     let none = HashSet::new();
     let mut file = joined(3, &roster(1, &[2, 3], 1));
     for i in 0..store::MAX_SEEN_PER_GROUP {
-        file.groups[0].seen.push(format!("k{i}@{NOW}"));
+        file.groups[0].seen.push(&format!("k{i}"), "", NOW);
     }
     let m = msg_with_id(1, 1, "hello", [0x01; 16], &[]);
     apply(
@@ -1508,7 +1504,7 @@ fn a_full_seen_list_refuses_new_messages_until_keys_expire() {
         NOW,
     );
     assert!(group(&file).messages.is_empty());
-    file.groups[0].seen.truncate(10);
+    file.groups[0].seen.trim_front(10);
     apply(&mut file, &me, &key(1), &GroupFrame::Msg(m), &none, NOW);
     assert_eq!(group(&file).messages.len(), 1);
 }
@@ -1703,4 +1699,868 @@ fn an_old_leave_after_a_readd_is_refused() {
         intents_of(&admin, INTENT_LEAVER).is_empty(),
         "the old leave is not acted on again"
     );
+}
+
+// ------------------------------------------------------------------ store bytes
+
+/// The largest `msg` frame a friend can send: a body that JSON escapes to
+/// twice its size (every byte a quote), the largest numbers and a full relay
+/// list. The group store escapes it once more.
+fn largest_msg_frame(group: GroupId) -> String {
+    let m = GroupMsg {
+        group,
+        id: [0x5a; 16],
+        epoch: u32::MAX,
+        from: [0xf0; 32],
+        sent_ms: (1 << 53) - 1,
+        body: "\"".repeat(MAX_GROUP_BODY_BYTES),
+        sig: [0xab; 64],
+        relay: (1..MAX_GROUP_MEMBERS as u8).map(|i| [i; 32]).collect(),
+    };
+    let text = GroupFrame::Msg(m).encode();
+    assert!(text.len() <= MAX_GROUP_FRAME_BYTES, "{}", text.len());
+    text
+}
+
+/// Admin `admin`'s roster for a group of its own salt, signed.
+fn roster_salted(admin: u8, members: &[u8], salt: [u8; 16]) -> GroupState {
+    let mut s = roster(admin, members, 1);
+    s.salt = salt;
+    s.group = super::group_id_for(&key(admin), &salt);
+    s.sign(&id(admin));
+    s
+}
+
+/// The largest roster: 16 members, every name and label 64 four byte
+/// characters, the largest numbers.
+fn largest_roster(admin: Key, me: Key, salt: [u8; 16]) -> GroupState {
+    let label = "\u{1d11e}".repeat(MAX_MEMBER_LABEL_CHARS);
+    let mut members = vec![
+        Member {
+            key: admin,
+            label: label.clone(),
+        },
+        Member {
+            key: me,
+            label: label.clone(),
+        },
+    ];
+    for i in 0..MAX_GROUP_MEMBERS - 2 {
+        members.push(Member {
+            key: [0x40 + i as u8; 32],
+            label: label.clone(),
+        });
+    }
+    GroupState {
+        group: super::group_id_for(&admin, &salt),
+        salt,
+        epoch: u32::MAX,
+        name: "\u{1d11e}".repeat(MAX_GROUP_NAME_CHARS),
+        admin,
+        issued_ms: (1 << 53) - 1,
+        members,
+        sig: [0xcd; 64],
+    }
+}
+
+/// A received message as the store keeps it.
+fn stored_msg(n: usize, from: &Key, body: &str, received_ms: u64) -> store::StoredMsg {
+    store::StoredMsg {
+        id: format!("{n:032x}"),
+        from: hex::encode(from),
+        epoch: 1,
+        sent_ms: NOW,
+        received_ms,
+        body: body.into(),
+        sig: String::new(),
+        mine: false,
+        via: String::new(),
+        lines: Vec::new(),
+        path: String::new(),
+    }
+}
+
+/// `file` as the older layout (1) writes it, with `seen` keys as one
+/// `<author>/<id>@<sent_ms>` string each for the groups listed.
+fn older_layout(file: &GroupsFile, seen: &[(usize, Vec<String>)]) -> serde_json::Value {
+    let mut value = serde_json::to_value(file).unwrap();
+    value["v"] = serde_json::json!(1);
+    for (g, keys) in seen {
+        value["groups"][*g]["seen"] = serde_json::json!(keys);
+    }
+    value
+}
+
+/// [`older_layout`] as this build reads it.
+fn with_seen(file: &GroupsFile, seen: &[(usize, Vec<String>)]) -> GroupsFile {
+    serde_json::from_value(older_layout(file, seen)).unwrap()
+}
+
+/// The store `value` as an older build could have left it: its first
+/// group's held list (empty in `value`) padded with the largest frames past
+/// the at-rest read cap.
+fn oversize(value: &serde_json::Value) -> Vec<u8> {
+    let held = serde_json::to_string(&store::Held {
+        frame: largest_msg_frame([0x77; 16]),
+        peer: hex::encode(key(1)),
+        at_ms: NOW,
+    })
+    .unwrap();
+    let n = crate::at_rest::MAX_SEALED_FILE_BYTES as usize / held.len() + 1;
+    let list = format!("\"held\":[{}]", vec![held.as_str(); n].join(","));
+    let text = serde_json::to_string(value)
+        .unwrap()
+        .replacen("\"held\":[]", &list, 1);
+    assert!(text.len() as u64 > crate::at_rest::MAX_SEALED_FILE_BYTES);
+    text.into_bytes()
+}
+
+/// A lower store budget on this test's thread, while it lives.
+struct Budget;
+
+impl Budget {
+    fn set(bytes: u64) -> Budget {
+        store::set_budget_for_tests(Some(bytes));
+        Budget
+    }
+}
+
+impl Drop for Budget {
+    fn drop(&mut self) {
+        store::set_budget_for_tests(None);
+    }
+}
+
+/// What the store at `d` takes on disk, sealed.
+fn on_disk(d: &Path) -> u64 {
+    let plain = std::fs::metadata(store::groups_path(d)).unwrap().len();
+    plain + crate::at_rest::SEALED_OVERHEAD
+}
+
+/// The bytes the held frames of `file` take in the store.
+fn held_bytes(file: &GroupsFile) -> usize {
+    file.unknown_held
+        .iter()
+        .chain(file.groups.iter().flat_map(|g| g.held.iter()))
+        .map(store::Held::stored_bytes)
+        .sum()
+}
+
+fn sealed_size(file: &GroupsFile) -> u64 {
+    serde_json::to_vec_pretty(file).unwrap().len() as u64 + crate::at_rest::SEALED_OVERHEAD
+}
+
+/// A store with every count bound full and the largest entries: 64 groups
+/// of the largest roster, 64 of the largest held frames each (32 more for
+/// groups not known yet), every intent, done marker, answer, removal and
+/// copy, 8,192 seen keys a group (the older layout), and more of the
+/// largest messages than the count bound.
+fn full_store() -> GroupsFile {
+    let me = key(3);
+    let admin = key(1);
+    let mut file = GroupsFile {
+        me: hex::encode(me),
+        ..GroupsFile::default()
+    };
+    for g in 0..store::MAX_GROUPS {
+        let state = largest_roster(admin, me, [g as u8; 16]);
+        file.groups.push(store::GroupRecord::new(&state, NOW));
+    }
+    let author = "ab".repeat(32);
+    let seen: Vec<(usize, Vec<String>)> = (0..store::MAX_GROUPS)
+        .map(|g| {
+            let keys = (0..store::MAX_SEEN_PER_GROUP)
+                .map(|i| format!("{author}/{i:032x}@{NOW}"))
+                .collect();
+            (g, keys)
+        })
+        .collect();
+    let mut file = with_seen(&file, &seen);
+    drop(seen);
+    let frame = largest_msg_frame([0x77; 16]);
+    let wide = |n: usize| format!("{n:064x}");
+    let mut receipt = GroupReceipt {
+        group: [0x77; 16],
+        of: [0x11; 16],
+        epoch: u32::MAX,
+        from: key(2),
+        to: admin,
+        at_ms: (1 << 53) - 1,
+        sig: [0xee; 64],
+        relay: vec![admin],
+    };
+    receipt.sign(&id(2));
+    let receipt = GroupFrame::Receipt(receipt).encode();
+    let line = |n: usize| store::Line {
+        member: wide(n),
+        device: wide(n + 1),
+        copy: format!("{n:032x}"),
+        via: store::VIA_DIRECT.into(),
+        state: LINE_DELIVERED.into(),
+    };
+    for (g, rec) in file.groups.iter_mut().enumerate() {
+        rec.held = (0..store::MAX_HELD_PER_GROUP)
+            .map(|i| store::Held {
+                frame: frame.clone(),
+                peer: hex::encode(admin),
+                at_ms: NOW + i as u64,
+            })
+            .collect();
+        rec.done = (0..store::MAX_DONE_PER_GROUP)
+            .map(|i| format!("r:{}/{i:032x}:{}", wide(g), wide(i)))
+            .collect();
+        rec.intents = (0..store::MAX_INTENTS_PER_GROUP)
+            .map(|i| store::Intent {
+                id: format!("{i:016x}"),
+                kind: INTENT_SEND.into(),
+                to: wide(i),
+                frame: if i < store::MAX_FORWARDS_PER_AUTHOR {
+                    frame.clone()
+                } else {
+                    receipt.clone()
+                },
+                of: format!("{i:032x}"),
+                via: wide(i + 1),
+                line_of: format!("{i:032x}"),
+                made_ms: NOW,
+                tries: u32::MAX,
+                author: if i < store::MAX_FORWARDS_PER_AUTHOR {
+                    wide(i + 2)
+                } else {
+                    String::new()
+                },
+            })
+            .collect();
+        rec.answered = (0..MAX_GROUP_MEMBERS * 4)
+            .map(|i| store::Answered {
+                key: wide(i),
+                at_ms: u64::MAX,
+            })
+            .collect();
+        rec.removed = (0..MAX_GROUP_MEMBERS * 8).map(wide).collect();
+        // More messages than the count bound, the largest bodies, half of
+        // them this profile's own with a line per member.
+        for i in 0..store::MAX_MESSAGES_TOTAL / store::MAX_GROUPS + 1 {
+            let mut m = stored_msg(i, &admin, &"\"".repeat(MAX_GROUP_BODY_BYTES), NOW);
+            m.sig = "ef".repeat(64);
+            m.via = wide(i);
+            m.path = "keeper".into();
+            if i % 2 == 0 {
+                m.mine = true;
+                m.lines = (0..MAX_GROUP_MEMBERS - 1).map(line).collect();
+            }
+            rec.messages.push(m);
+        }
+    }
+    file.unknown_held = (0..store::MAX_UNKNOWN_HELD)
+        .map(|i| store::Held {
+            frame: frame.clone(),
+            peer: wide(i),
+            at_ms: NOW,
+        })
+        .collect();
+    file.copies = (0..store::MAX_COPIES)
+        .map(|i| format!("{i:032x}"))
+        .collect();
+    file
+}
+
+/// G1: every count bound full, the largest frames held everywhere: the
+/// store, sealed, still fits the at-rest read cap, so it can always be read
+/// back (and sealed again by a key rotation).
+#[test]
+fn a_store_at_every_count_cap_fits_the_read_cap() {
+    let mut file = full_store();
+    file.enforce_caps();
+    let size = sealed_size(&file);
+    assert!(
+        size <= crate::at_rest::MAX_SEALED_FILE_BYTES,
+        "{size} bytes sealed, over the read cap"
+    );
+    // By the bounds alone, under the budget (nothing had to be shed).
+    assert!(size <= store::STORE_BUDGET_BYTES, "{size} bytes sealed");
+    let held = held_bytes(&file);
+    assert!(held <= store::MAX_HELD_BYTES_TOTAL, "{held}");
+}
+
+/// G1 on disk: the edit that writes a store with every count bound full
+/// (as above) leaves a store that reads back within the budget, and the
+/// store still takes frames.
+#[test]
+fn a_store_at_every_count_cap_reads_back_after_the_edit() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    let full = full_store();
+    store::edit(d, move |f| {
+        *f = full;
+        Ok(())
+    })
+    .unwrap();
+    let file = store::load(d).expect("the store reads back");
+    assert_eq!(file.groups.len(), store::MAX_GROUPS);
+    assert!(on_disk(d) <= store::STORE_BUDGET_BYTES, "{}", on_disk(d));
+    // A message from the admin: its group has no room for another key
+    // yet, so it is dropped and counted, and `ingest` is Ok (ACKed).
+    let mut m = msg(1, 1, "after the edit", &[]);
+    m.group = super::group_id_for(&key(1), &[0; 16]);
+    m.sign(&id(1));
+    ingest(d, &key(1), &GroupFrame::Msg(m), NOW + 1).unwrap();
+    assert_eq!(store::load(d).unwrap().dropped, file.dropped + 1);
+}
+
+/// G1 on disk: an edit that would grow the store past the read cap leaves a
+/// store that reads back, and frames still go in (so they are ACKed).
+#[test]
+fn the_store_on_disk_stays_readable_after_any_edit() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    let frame = largest_msg_frame([0x77; 16]);
+    let mut big = GroupsFile::default();
+    for g in 0..31u8 {
+        let mut rec = store::GroupRecord::new(&roster_salted(1, &[3], [g; 16]), NOW);
+        rec.held = (0..store::MAX_HELD_PER_GROUP)
+            .map(|i| store::Held {
+                frame: frame.clone(),
+                peer: hex::encode(key(1)),
+                at_ms: NOW + i as u64,
+            })
+            .collect();
+        big.groups.push(rec);
+    }
+    store::edit(d, |f| {
+        *f = big;
+        Ok(())
+    })
+    .unwrap();
+    let file = store::load(d).expect("the store reads back");
+    assert_eq!(file.groups.len(), 31);
+    let size = std::fs::metadata(store::groups_path(d)).unwrap().len();
+    assert!(size <= crate::at_rest::MAX_SEALED_FILE_BYTES, "{size}");
+    // A roster for one more group goes in.
+    ingest(
+        d,
+        &key(1),
+        &GroupFrame::State(roster_salted(1, &[3], [0xf0; 16])),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(store::load(d).unwrap().groups.len(), 32);
+}
+
+/// G1 repair: a `groups.json` an older build let grow past the read cap
+/// (held frames, the older layout) is read once with a higher cap and
+/// repaired: the rosters, the messages, the seen keys and the done markers
+/// stay, the held frames are cut to their bounds, it is written back within
+/// the budget, and the store works again.
+#[test]
+fn an_oversize_store_from_an_older_build_is_recovered_once() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    let mut old = GroupsFile {
+        me: hex::encode(key(3)),
+        ..GroupsFile::default()
+    };
+    for g in 0..31u8 {
+        let rec = store::GroupRecord::new(&roster_salted(1, &[3], [g; 16]), NOW);
+        old.groups.push(rec);
+    }
+    old.groups[0]
+        .messages
+        .push(stored_msg(1, &key(1), "still here", NOW));
+    old.groups[1].done.push(format!("r:{}", "ab".repeat(80)));
+    let author = hex::encode(key(1));
+    let seen_id = "11".repeat(16);
+    let value = older_layout(&old, &[(0, vec![format!("{author}/{seen_id}@{NOW}")])]);
+    std::fs::write(store::groups_path(d), oversize(&value)).unwrap();
+    let back = store::load(d).expect("an oversize store is recovered");
+    assert_eq!(back.groups.len(), 31);
+    for (back, old) in back.groups.iter().zip(&old.groups) {
+        assert_eq!(back.roster(), old.roster());
+        assert_eq!(back.status, old.status);
+    }
+    assert_eq!(back.groups[0].messages, old.groups[0].messages);
+    assert!(back.groups[0].has_seen(&author, &seen_id));
+    assert_eq!(back.groups[1].done, old.groups[1].done);
+    let held = held_bytes(&back);
+    assert!(
+        !back.groups[0].held.is_empty(),
+        "the newest held frames stay"
+    );
+    assert!(held <= store::MAX_HELD_BYTES_PER_GROUP, "{held}");
+    assert!(on_disk(d) <= store::STORE_BUDGET_BYTES, "{}", on_disk(d));
+    // Once: the store on disk is the repaired one.
+    assert_eq!(store::load(d).unwrap(), back);
+    // The store works as before: a message from the admin goes in.
+    let mut m = msg(1, 1, "after the repair", &[]);
+    m.group = old.groups[0].roster().unwrap().group;
+    m.sign(&id(1));
+    ingest(d, &key(1), &GroupFrame::Msg(m), NOW + 1).unwrap();
+    assert_eq!(store::load(d).unwrap().groups[0].messages.len(), 2);
+}
+
+/// G1 repair within the budget: when the rosters, messages and seen keys
+/// alone are over it, the oldest messages go (their keys stay seen); no
+/// roster and no seen key goes.
+#[test]
+fn a_repair_sheds_the_oldest_messages_last_and_keeps_rosters_and_seen_keys() {
+    let dir = profile(3);
+    let d = dir.path();
+    let mut old = GroupsFile {
+        me: hex::encode(key(3)),
+        ..GroupsFile::default()
+    };
+    for g in 0..4u8 {
+        let rec = store::GroupRecord::new(&roster_salted(1, &[3], [g; 16]), NOW);
+        old.groups.push(rec);
+    }
+    let body = "m".repeat(2_000);
+    for i in 0..400 {
+        let m = stored_msg(i, &key(1), &body, NOW + i as u64);
+        old.groups[i % 4].messages.push(m);
+    }
+    let author = hex::encode(key(1));
+    let seen_id = "11".repeat(16);
+    let value = older_layout(&old, &[(0, vec![format!("{author}/{seen_id}@{NOW}")])]);
+    std::fs::write(store::groups_path(d), oversize(&value)).unwrap();
+    let budget = 256 * 1024;
+    let back = {
+        let _budget = Budget::set(budget);
+        store::load(d).expect("repaired")
+    };
+    assert!(on_disk(d) <= budget, "{}", on_disk(d));
+    assert_eq!(held_bytes(&back), 0, "held frames go before history");
+    assert_eq!(back.groups.len(), 4);
+    for (back, old) in back.groups.iter().zip(&old.groups) {
+        assert_eq!(back.roster(), old.roster());
+    }
+    assert!(back.groups[0].has_seen(&author, &seen_id));
+    let kept: usize = back.groups.iter().map(|g| g.messages.len()).sum();
+    assert!(kept > 0 && kept < 400, "{kept}");
+    // The oldest went, and each is still known (a copy again is a duplicate).
+    for (i, g) in back.groups.iter().enumerate() {
+        assert!(g.has_seen(&author, &format!("{i:032x}")));
+        let newest = format!("{:032x}", 396 + i);
+        assert_eq!(
+            g.messages.last().map(|m| m.id.as_str()),
+            Some(newest.as_str())
+        );
+    }
+}
+
+/// G1: a frame is held (author not in the roster yet, or the group not
+/// known yet) only when its author's signature verifies.
+#[test]
+fn a_frame_is_held_only_with_its_authors_signature() {
+    let me = key(2);
+    let none = HashSet::new();
+    let mut file = joined(2, &roster(1, &[2, 3], 1));
+    let mut forged = msg(4, 2, "signed by 4", &[]);
+    forged.body = "changed by the carrier".into();
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::Msg(forged),
+        &none,
+        NOW,
+    );
+    assert!(group(&file).held.is_empty(), "{:?}", group(&file).held);
+    assert_eq!(file.dropped, 1);
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::Msg(msg(4, 2, "signed by 4", &[])),
+        &none,
+        NOW,
+    );
+    assert_eq!(group(&file).held.len(), 1);
+    // A group not known yet: the same.
+    let mut fresh = GroupsFile::default();
+    let mut forged = msg(3, 1, "early", &[]);
+    forged.body = "changed".into();
+    apply(
+        &mut fresh,
+        &me,
+        &key(3),
+        &GroupFrame::Msg(forged),
+        &none,
+        NOW,
+    );
+    assert!(fresh.unknown_held.is_empty());
+    apply(
+        &mut fresh,
+        &me,
+        &key(3),
+        &GroupFrame::Msg(msg(3, 1, "early", &[])),
+        &none,
+        NOW,
+    );
+    assert_eq!(fresh.unknown_held.len(), 1);
+}
+
+/// G1: one carrier filling a group's held frames (the largest frames, as
+/// many as the bounds take) does not push out a frame another carrier
+/// brought earlier.
+#[test]
+fn one_carriers_held_frames_cannot_push_out_anothers() {
+    let mut file = joined(2, &roster(1, &[2, 3], 1));
+    let early = GroupFrame::Msg(msg(4, 2, "from a new member", &[])).encode();
+    file.groups[0].held.push(store::Held {
+        frame: early.clone(),
+        peer: hex::encode(key(3)),
+        at_ms: NOW,
+    });
+    let big = largest_msg_frame(gid());
+    for i in 0..store::MAX_HELD_PER_GROUP {
+        file.groups[0].held.push(store::Held {
+            frame: big.clone(),
+            peer: hex::encode(key(9)),
+            at_ms: NOW + 1 + i as u64,
+        });
+    }
+    // And for groups not known yet.
+    file.unknown_held.push(store::Held {
+        frame: early.clone(),
+        peer: hex::encode(key(3)),
+        at_ms: NOW,
+    });
+    for i in 0..store::MAX_UNKNOWN_HELD {
+        file.unknown_held.push(store::Held {
+            frame: big.clone(),
+            peer: hex::encode(key(9)),
+            at_ms: NOW + 1 + i as u64,
+        });
+    }
+    file.enforce_caps();
+    let kept = |list: &[store::Held]| list.iter().any(|h| h.frame == early);
+    assert!(
+        kept(&file.groups[0].held),
+        "the other carrier's frame stays"
+    );
+    assert!(kept(&file.unknown_held), "the other carrier's frame stays");
+}
+
+/// G3: one admin's groups (here 30 of them, full of the largest messages)
+/// do not push most of another admin's group's history out.
+#[test]
+fn one_admins_groups_cannot_push_out_another_groups_history() {
+    let mut file = GroupsFile::default();
+    let mut ours = store::GroupRecord::new(&roster_salted(2, &[3], [0xa0; 16]), NOW);
+    for i in 0..1_500 {
+        ours.messages
+            .push(stored_msg(i, &key(2), "ok", NOW + i as u64));
+    }
+    file.groups.push(ours);
+    let large = "x".repeat(MAX_GROUP_BODY_BYTES);
+    for g in 0..30u8 {
+        let mut rec = store::GroupRecord::new(&roster_salted(1, &[3], [g; 16]), NOW);
+        for i in 0..33 {
+            rec.messages
+                .push(stored_msg(i, &key(1), &large, NOW + 2_000 + i as u64));
+        }
+        file.groups.push(rec);
+    }
+    file.enforce_caps();
+    let kept = file.groups[0].messages.len();
+    assert!(kept >= 1_000, "group kept {kept} of 1500");
+    let total: usize = file.groups.iter().map(|g| g.messages.len()).sum();
+    assert!(total <= store::MAX_MESSAGES_TOTAL);
+}
+
+/// G3 by count: one admin's 63 groups of 32 short messages each do not cut
+/// another admin's group down to their size.
+#[test]
+fn one_admins_many_groups_cannot_cut_another_groups_history_by_count() {
+    let mut file = GroupsFile::default();
+    let mut ours = store::GroupRecord::new(&roster_salted(2, &[3], [0xa0; 16]), NOW);
+    for i in 0..1_000 {
+        ours.messages
+            .push(stored_msg(i, &key(2), "ok", NOW + i as u64));
+    }
+    file.groups.push(ours);
+    for g in 0..63u8 {
+        let mut rec = store::GroupRecord::new(&roster_salted(1, &[3], [g; 16]), NOW);
+        for i in 0..32 {
+            rec.messages
+                .push(stored_msg(i, &key(1), "spam", NOW + 2_000 + i as u64));
+        }
+        file.groups.push(rec);
+    }
+    file.enforce_caps();
+    let kept = file.groups[0].messages.len();
+    assert!(kept >= 900, "group kept {kept} of 1000");
+}
+
+/// G1: seen keys take a few bytes each when written, and keys in the older
+/// layout (`<author>/<id>@<sent_ms>`, one string each) are read.
+#[test]
+fn seen_keys_are_written_compactly_and_read_from_the_older_layout() {
+    let file = joined(3, &roster(1, &[2, 3], 1));
+    let base = serde_json::to_vec_pretty(&file).unwrap().len();
+    let from = hex::encode(key(2));
+    let keys: Vec<String> = (0..store::MAX_SEEN_PER_GROUP)
+        .map(|i| format!("{from}/{i:032x}@{NOW}"))
+        .collect();
+    let file = with_seen(&file, &[(0, keys)]);
+    let g = &file.groups[0];
+    assert!(g.has_seen(&from, &format!("{:032x}", 0)));
+    assert!(g.has_seen(&from, &format!("{:032x}", store::MAX_SEEN_PER_GROUP - 1)));
+    assert!(!g.has_seen(&from, &format!("{:032x}", store::MAX_SEEN_PER_GROUP)));
+    assert!(!g.has_seen(&hex::encode(key(4)), &format!("{:032x}", 0)));
+    assert!(g.seen_full());
+    let bytes = serde_json::to_vec_pretty(&file).unwrap();
+    let per_key = (bytes.len() - base) / store::MAX_SEEN_PER_GROUP;
+    assert!(per_key <= 24, "{per_key} bytes per seen key");
+    let back: GroupsFile = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(back, file);
+    assert!(back.groups[0].has_seen(&from, &format!("{:032x}", 7)));
+}
+
+/// G1 budget: a change that would leave the store over its budget after
+/// held frames, done markers and intents were shed is refused, and the
+/// store stays as it was: a received frame is dropped and counted (and
+/// ACKed: `ingest` is `Ok`), a local send fails with `GROUP_STORE`.
+#[test]
+fn a_full_store_drops_a_received_message_and_refuses_a_local_send() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    ingest(d, &key(1), &GroupFrame::State(roster(1, &[3], 1)), NOW).unwrap();
+    let budget = on_disk(d) + 2_048;
+    let _budget = Budget::set(budget);
+    let big = "x".repeat(MAX_GROUP_BODY_BYTES);
+    let before = store::load(d).unwrap();
+    ingest(d, &key(1), &GroupFrame::Msg(msg(1, 1, &big, &[])), NOW).unwrap();
+    let after = store::load(d).unwrap();
+    assert!(after.groups[0].messages.is_empty());
+    assert_eq!(after.dropped, before.dropped + 1);
+    let err = send(d, &id(3), &gid(), &big, NOW).unwrap_err();
+    assert_eq!(err.code(), "GROUP_STORE", "{err:?}");
+    assert_eq!(store::load(d).unwrap(), after, "nothing written");
+    // What fits still goes in.
+    let mut short = msg(1, 1, "short", &[]);
+    short.id = [9; 16];
+    short.sign(&id(1));
+    ingest(d, &key(1), &GroupFrame::Msg(short), NOW).unwrap();
+    assert_eq!(store::load(d).unwrap().groups[0].messages.len(), 1);
+    assert!(on_disk(d) <= budget, "{}", on_disk(d));
+}
+
+/// G1 budget: held frames give way before a message is refused.
+#[test]
+fn held_frames_give_way_before_a_message_is_refused() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    ingest(d, &key(1), &GroupFrame::State(roster(1, &[3], 1)), NOW).unwrap();
+    // A message from an author only a newer roster names: held.
+    let early = msg(4, 2, &"y".repeat(4_000), &[]);
+    ingest(d, &key(1), &GroupFrame::Msg(early), NOW).unwrap();
+    assert_eq!(store::load(d).unwrap().groups[0].held.len(), 1);
+    let _budget = Budget::set(on_disk(d) + 1_024);
+    let later = msg(1, 1, &"z".repeat(3_000), &[]);
+    ingest(d, &key(1), &GroupFrame::Msg(later), NOW).unwrap();
+    let after = store::load(d).unwrap();
+    assert_eq!(after.groups[0].messages.len(), 1, "the message went in");
+    assert!(after.groups[0].held.is_empty(), "the held frame gave way");
+    assert_eq!(after.dropped, 0);
+}
+
+/// How many bytes `change` adds to the store `base` as written.
+fn grown(base: &GroupsFile, change: impl FnOnce(&mut GroupsFile)) -> usize {
+    let size = |f: &GroupsFile| serde_json::to_vec_pretty(f).unwrap().len();
+    let mut file = base.clone();
+    change(&mut file);
+    size(&file) - size(base)
+}
+
+/// The byte measures the bounds use are upper bounds of what entries take
+/// in the store as written (every escape, the widest numbers, a list of
+/// one), so the bounds hold for the file itself.
+#[test]
+fn the_byte_measures_bound_what_entries_take_in_the_file() {
+    let base = joined(3, &roster(1, &[2, 3], 1));
+    let odd = "\"\\\n\u{1}\u{1f}\u{e9}\u{1d11e}x".repeat(40);
+    let wide = |n: usize| format!("{n:064x}");
+    let mut m = stored_msg(1, &key(1), &odd, u64::MAX);
+    m.epoch = u32::MAX;
+    m.sent_ms = u64::MAX;
+    m.sig = "ef".repeat(64);
+    m.via = odd.clone();
+    m.path = odd.clone();
+    m.lines = (0..MAX_GROUP_MEMBERS - 1)
+        .map(|n| store::Line {
+            member: wide(n),
+            device: odd.clone(),
+            copy: odd.clone(),
+            via: store::VIA_RELAY.into(),
+            state: LINE_DELIVERED.into(),
+        })
+        .collect();
+    let mut one_line = m.clone();
+    one_line.lines.truncate(1);
+    let plain = stored_msg(2, &key(1), "", 0);
+    for list in [
+        vec![m.clone()],
+        vec![one_line],
+        vec![plain.clone()],
+        vec![m, plain],
+    ] {
+        let measured: usize = list.iter().map(store::StoredMsg::stored_bytes).sum();
+        let added = grown(&base, |f| f.groups[0].messages = list);
+        assert!(added <= measured, "messages: {added} over {measured}");
+    }
+    let held = store::Held {
+        frame: odd.clone(),
+        peer: odd.clone(),
+        at_ms: u64::MAX,
+    };
+    let bare_held = store::Held {
+        frame: String::new(),
+        peer: String::new(),
+        at_ms: 0,
+    };
+    for list in [
+        vec![held.clone()],
+        vec![bare_held.clone()],
+        vec![held.clone(), bare_held],
+    ] {
+        let measured: usize = list.iter().map(store::Held::stored_bytes).sum();
+        let added = grown(&base, |f| f.groups[0].held = list.clone());
+        assert!(added <= measured, "held: {added} over {measured}");
+        let added = grown(&base, |f| f.unknown_held = list);
+        assert!(added <= measured, "unknown held: {added} over {measured}");
+    }
+    let intent = store::Intent {
+        id: odd.clone(),
+        kind: odd.clone(),
+        to: odd.clone(),
+        frame: odd.clone(),
+        of: odd.clone(),
+        via: odd.clone(),
+        line_of: odd.clone(),
+        made_ms: u64::MAX,
+        tries: u32::MAX,
+        author: odd.clone(),
+    };
+    let bare = store::Intent {
+        id: String::new(),
+        kind: String::new(),
+        to: String::new(),
+        frame: String::new(),
+        of: String::new(),
+        via: String::new(),
+        line_of: String::new(),
+        made_ms: 0,
+        tries: 0,
+        author: String::new(),
+    };
+    for list in [vec![intent.clone()], vec![bare.clone()], vec![intent, bare]] {
+        let measured: usize = list.iter().map(store::Intent::stored_bytes).sum();
+        let added = grown(&base, |f| f.groups[0].intents = list);
+        assert!(added <= measured, "intents: {added} over {measured}");
+    }
+    for list in [
+        vec![odd.clone()],
+        vec![String::new()],
+        vec![odd, String::new()],
+    ] {
+        let measured: usize = list.iter().map(|d| store::mark_bytes(d)).sum();
+        let added = grown(&base, |f| f.groups[0].done = list);
+        assert!(added <= measured, "done: {added} over {measured}");
+    }
+}
+
+/// G1 layout: a store of the older layout on disk is read as it is, and
+/// its next edit writes layout 2 (seen keys compact) with every key kept.
+/// `seen` stays a list of strings, so an older build still reads the file.
+#[test]
+fn an_older_store_on_disk_is_converted_on_its_next_edit() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    let file = joined(3, &roster(1, &[3], 1));
+    let author = hex::encode(key(1));
+    let keys: Vec<String> = (0..300)
+        .map(|i| format!("{author}/{i:032x}@{NOW}"))
+        .collect();
+    let value = older_layout(&file, &[(0, keys)]);
+    let text = serde_json::to_vec_pretty(&value).unwrap();
+    std::fs::write(store::groups_path(d), &text).unwrap();
+    let read = store::load(d).unwrap();
+    assert!(read.groups[0].has_seen(&author, &format!("{:032x}", 299)));
+    assert_eq!(
+        std::fs::read(store::groups_path(d)).unwrap(),
+        text,
+        "a read writes nothing"
+    );
+    // A copy of a key seen in the older layout is still a duplicate.
+    let mut again = msg(1, 1, "again", &[]);
+    again.id = [0; 16];
+    again.id[15] = 7;
+    again.sign(&id(1));
+    ingest(d, &key(1), &GroupFrame::Msg(again), NOW).unwrap();
+    assert!(store::load(d).unwrap().groups[0].messages.is_empty());
+    // An edit converts it.
+    ingest(d, &key(1), &GroupFrame::Msg(msg(1, 1, "hi", &[])), NOW).unwrap();
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store::groups_path(d)).unwrap()).unwrap();
+    assert_eq!(raw["v"], serde_json::json!(store::STORE_VERSION));
+    let older: Vec<String> = serde_json::from_value(raw["groups"][0]["seen"].clone()).unwrap();
+    assert_eq!(older.len(), 2, "300 keys in two strings");
+    assert!(older.iter().all(|s| s.starts_with("v2:")));
+    let back = store::load(d).unwrap();
+    assert_eq!(back.groups[0].messages.len(), 1);
+    assert_eq!(back.groups[0].seen.len(), 300);
+    for i in [0, 7, 299] {
+        assert!(back.groups[0].has_seen(&author, &format!("{i:032x}")));
+    }
+}
+
+/// G1 repair in a sealed profile: an RMS1 store past the read cap is opened
+/// with the loaded keys, repaired and written back sealed within the budget.
+#[test]
+fn an_oversize_sealed_store_is_recovered_sealed() {
+    use crate::at_rest::Kind;
+    let dir = crate::contact_book::tests::profile();
+    let d = dir.path();
+    crate::contact_book::tests::seal(d);
+    let mut old = GroupsFile::default();
+    for g in 0..4u8 {
+        let rec = store::GroupRecord::new(&roster_salted(1, &[3], [g; 16]), NOW);
+        old.groups.push(rec);
+    }
+    old.groups[0]
+        .messages
+        .push(stored_msg(1, &key(1), "still here", NOW));
+    let plain = oversize(&older_layout(&old, &[]));
+    let keys = crate::at_rest::keys_cached(d).unwrap();
+    let sealed = crate::at_rest::seal(&keys, Kind::Groups, &plain);
+    drop(plain);
+    std::fs::write(store::groups_path(d), &sealed).unwrap();
+    drop(sealed);
+    let back = store::load(d).expect("an oversize sealed store is recovered");
+    assert_eq!(back.groups.len(), 4);
+    assert_eq!(back.groups[0].messages, old.groups[0].messages);
+    let held = held_bytes(&back);
+    assert!(held <= store::MAX_HELD_BYTES_PER_GROUP, "{held}");
+    let raw = std::fs::read(store::groups_path(d)).unwrap();
+    assert!(
+        crate::at_rest::is_sealed_as(Kind::Groups, &raw),
+        "written back sealed"
+    );
+    assert!(
+        raw.len() as u64 <= store::STORE_BUDGET_BYTES,
+        "{}",
+        raw.len()
+    );
+    assert_eq!(store::load(d).unwrap(), back);
 }

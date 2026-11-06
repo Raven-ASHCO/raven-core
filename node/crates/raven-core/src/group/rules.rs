@@ -84,6 +84,10 @@ fn dropped(file: &mut GroupsFile) -> Applied {
     }
 }
 
+/// Hold `frame` from the carrier `peer` (once per text; only a frame its
+/// author signed). The store's bounds keep held frames to 256 KiB a group
+/// and 1 MiB in all, the carrier holding the most losing its oldest first
+/// ([`store::MAX_HELD_BYTES_TOTAL`]).
 fn hold(list: &mut Vec<Held>, frame: &GroupFrame, peer: &Key, now_ms: u64) {
     let text = frame.encode();
     if list.iter().any(|h| h.frame == text) {
@@ -217,7 +221,10 @@ fn apply_msg(
         return dropped(file);
     }
     let Some(g) = file.group_mut(&msg.group) else {
-        // The roster may come later.
+        // The roster may come later: a frame its author signed waits for it.
+        if !msg.verify() {
+            return dropped(file);
+        }
         hold(&mut file.unknown_held, frame, peer, now_ms);
         return Applied {
             changed: true,
@@ -235,11 +242,12 @@ fn apply_msg(
         return dropped(file);
     };
     if !roster.has(&msg.from) {
-        if g.was_removed(&msg.from) || msg.epoch <= roster.epoch {
+        if g.was_removed(&msg.from) || msg.epoch <= roster.epoch || !msg.verify() {
             return dropped(file);
         }
-        // A newer roster than this one names the author: hold, and ask the
-        // admin for it.
+        // A newer roster than this one names the author: hold (its author
+        // signed it; the roster will say whether the author is a member),
+        // and ask the admin for it.
         hold(&mut g.held, frame, peer, now_ms);
         let mut done = Applied {
             changed: true,

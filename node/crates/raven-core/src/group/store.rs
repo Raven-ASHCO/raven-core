@@ -4,11 +4,21 @@
 //! profile, plain JSON before, always written under its writer lock
 //! ([`GROUPS_LOCK`]). The lock is a leaf: nothing else is taken while it is
 //! held (callers read the contact book and park copies outside it).
+//!
+//! The file never grows past [`STORE_BUDGET_BYTES`], half the at-rest read
+//! cap: every part has a bound in bytes or keys ([`GroupsFile::enforce_caps`]),
+//! and a write that would pass the budget anyway sheds held frames, done
+//! markers and intents first, else is refused ([`edit`], [`edit_received`]).
+//! A store an older build let grow past the read cap is repaired once when
+//! it is next read ([`load`], [`edit`]).
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::wire::{hex_n, StateWire};
 use super::{GroupError, GroupId, GroupState, Key};
@@ -19,8 +29,27 @@ pub const GROUPS_FILE: &str = "groups.json";
 /// Its writer lock (`at_rest::FILES` names it).
 pub const GROUPS_LOCK: &str = ".at_rest.groups.lock.sqlite";
 
+/// The most the store may take when written, sealed (its JSON plus
+/// [`at_rest::SEALED_OVERHEAD`]): half the at-rest read cap
+/// ([`at_rest::MAX_SEALED_FILE_BYTES`]), so the store always reads back and
+/// a key rotation can always seal it again. The bounds below together stay
+/// under it; a write that would pass it anyway sheds held frames, done
+/// markers and intents first, and is refused when that is not enough.
+pub const STORE_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
+/// The layout written: 2 keeps seen keys compactly ([`SeenKeys`]); a store
+/// of layout 1 is read and converted.
+pub const STORE_VERSION: u32 = 2;
+/// A store over the read cap (only an older build could write one) is read
+/// once with this cap and repaired ([`load`]).
+const REPAIR_READ_CAP: u64 = 2 * at_rest::MAX_SEALED_FILE_BYTES;
+
 pub const MAX_GROUPS: usize = 64;
 pub const MAX_MESSAGES_TOTAL: usize = 2_000;
+/// Messages kept across groups, by the bytes they take in the store
+/// ([`StoredMsg::stored_bytes`]). Over this or [`MAX_MESSAGES_TOTAL`], the
+/// admin whose groups hold the most (every group of one admin together;
+/// by count while over the count, else by bytes) loses the oldest message of
+/// its group holding the most.
 pub const MAX_MESSAGE_BYTES_TOTAL: usize = 8 * 1024 * 1024;
 /// Message keys kept per group after their messages left `messages`
 /// ([`GroupRecord::seen`]): each until its message is older than
@@ -36,12 +65,26 @@ pub const REPLAY_HORIZON_MS: u64 = crate::horizon::MESSAGE_HORIZON_MS;
 pub const MAX_FUTURE_SKEW_MS: u64 = 24 * 3_600_000;
 pub const MAX_HELD_PER_GROUP: usize = 64;
 pub const MAX_UNKNOWN_HELD: usize = 32;
+/// Held frames by the bytes they take in the store: per group, for groups
+/// not known yet, and in all. Over a bound, the carrier (the friend that
+/// brought them) holding the most loses its oldest frame first, so one
+/// carrier's frames never push out another's.
+pub const MAX_HELD_BYTES_PER_GROUP: usize = 256 * 1024;
+pub const MAX_UNKNOWN_HELD_BYTES: usize = 256 * 1024;
+pub const MAX_HELD_BYTES_TOTAL: usize = 1024 * 1024;
 pub const MAX_INTENTS_PER_GROUP: usize = 512;
+/// Intents across groups, by the bytes they take in the store. Over it, the
+/// admin whose groups hold the most loses first: forwards first, then the
+/// oldest (a copy of an own message that goes fails its line).
+pub const MAX_INTENT_BYTES_TOTAL: usize = 4 * 1024 * 1024;
 /// Forwards of one author's messages that may wait per group (one member's
 /// forward requests cannot evict every other pending intent): 15 authors at
 /// most use under half of [`MAX_INTENTS_PER_GROUP`].
 pub const MAX_FORWARDS_PER_AUTHOR: usize = 16;
 pub const MAX_DONE_PER_GROUP: usize = 4_096;
+/// Done markers across groups, by bytes: over it, the admin whose groups
+/// hold the most loses its oldest markers first.
+pub const MAX_DONE_BYTES_TOTAL: usize = 2 * 1024 * 1024;
 pub const MAX_COPIES: usize = 8_192;
 /// Held frames and intents end after the message horizon.
 pub const WORK_TTL_MS: u64 = crate::horizon::MESSAGE_HORIZON_MS;
@@ -104,9 +147,9 @@ pub struct GroupRecord {
     pub removed: Vec<String>,
     #[serde(default)]
     pub messages: Vec<StoredMsg>,
-    /// Ids of messages that left `messages` (duplicate drop).
+    /// Keys of messages that left `messages` (duplicate drop), compact.
     #[serde(default)]
-    pub seen: Vec<String>,
+    pub seen: SeenKeys,
     #[serde(default)]
     pub held: Vec<Held>,
     #[serde(default)]
@@ -218,11 +261,20 @@ fn store_err(e: impl std::fmt::Display) -> GroupError {
     GroupError::Store(e.to_string())
 }
 
-/// The store as it is (empty without a file). Never written.
+fn full_err() -> GroupError {
+    GroupError::Store(format!("{GROUPS_FILE} is full"))
+}
+
+/// The store as it is (empty without a file). Never written, except once to
+/// repair a store an older build let grow past the read cap.
 pub fn load(data_dir: &Path) -> Result<GroupsFile, GroupError> {
     let path = groups_path(data_dir);
     match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_file() => {}
+        Ok(meta) if meta.is_file() => {
+            if meta.len() > at_rest::MAX_SEALED_FILE_BYTES {
+                return repair(data_dir);
+            }
+        }
         Ok(_) => {
             return Err(GroupError::Store(format!(
                 "{GROUPS_FILE} is not a regular file"
@@ -237,35 +289,199 @@ pub fn load(data_dir: &Path) -> Result<GroupsFile, GroupError> {
     Ok(file)
 }
 
+/// What a change does that leaves the store over its budget even after
+/// held frames, done markers and intents were shed.
+enum WhenFull<T> {
+    /// A local operation is refused ([`GroupError::Store`]).
+    Refuse,
+    /// A received frame is dropped (counted in `dropped`) with this answer,
+    /// so it is ACKed and not sent again for ever.
+    Drop(T),
+}
+
 /// Read, change and write the store under its writer lock. A store that
-/// cannot be read is never written over.
+/// cannot be read is never written over. A change that leaves the store
+/// over [`STORE_BUDGET_BYTES`] after shedding held frames, done markers and
+/// intents is refused ([`GroupError::Store`]).
 pub fn edit<T>(
     data_dir: &Path,
     change: impl FnOnce(&mut GroupsFile) -> Result<T, GroupError>,
 ) -> Result<T, GroupError> {
+    edit_with(data_dir, WhenFull::Refuse, change)
+}
+
+/// [`edit`] for a received frame: when the store has no room for the
+/// change, the frame is dropped instead (counted in `dropped`) and
+/// `dropped_answer` returned, so the frame is ACKed rather than sent again
+/// until its horizon.
+pub fn edit_received<T>(
+    data_dir: &Path,
+    dropped_answer: T,
+    change: impl FnOnce(&mut GroupsFile) -> Result<T, GroupError>,
+) -> Result<T, GroupError> {
+    edit_with(data_dir, WhenFull::Drop(dropped_answer), change)
+}
+
+fn edit_with<T>(
+    data_dir: &Path,
+    when_full: WhenFull<T>,
+    change: impl FnOnce(&mut GroupsFile) -> Result<T, GroupError>,
+) -> Result<T, GroupError> {
     let path = groups_path(data_dir);
     let lock = at_rest::lock_file(data_dir, &path, Kind::Groups).map_err(store_err)?;
-    let mut file = match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_file() => lock
-            .load_json::<GroupsFile>()
-            .map_err(store_err)?
-            .unwrap_or_default(),
-        Ok(_) => {
-            return Err(GroupError::Store(format!(
-                "{GROUPS_FILE} is not a regular file"
-            )))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GroupsFile::default(),
-        Err(e) => return Err(store_err(e)),
-    };
+    let (mut file, repaired) = read_locked(data_dir, &lock, &path)?;
     let before = file.clone();
-    let out = change(&mut file)?;
-    if file != before {
-        file.v = 1;
-        file.enforce_caps();
-        lock.store_json(&file).map_err(store_err)?;
+    let write = |file: &mut GroupsFile| -> Result<(), GroupError> {
+        let bytes = fitted(file, repaired)?.ok_or_else(full_err)?;
+        lock.store_bytes(&bytes).map_err(store_err)
+    };
+    let out = match change(&mut file) {
+        Ok(out) => out,
+        Err(e) => {
+            if repaired {
+                write(&mut before.clone())?;
+            }
+            return Err(e);
+        }
+    };
+    if file == before && !repaired {
+        return Ok(out);
     }
-    Ok(out)
+    if let Some(bytes) = fitted(&mut file, repaired)? {
+        lock.store_bytes(&bytes).map_err(store_err)?;
+        return Ok(out);
+    }
+    match when_full {
+        WhenFull::Refuse => {
+            if repaired {
+                write(&mut before.clone())?;
+            }
+            Err(full_err())
+        }
+        WhenFull::Drop(answer) => {
+            // The frame is dropped in any case; it is counted when the
+            // store as it was has room for the count.
+            let mut kept = before;
+            kept.dropped = kept.dropped.saturating_add(1);
+            if let Some(bytes) = fitted(&mut kept, repaired)? {
+                lock.store_bytes(&bytes).map_err(store_err)?;
+            }
+            Ok(answer)
+        }
+    }
+}
+
+/// [`load`] of a store over the read cap: repaired under its writer lock
+/// and written back within the budget.
+fn repair(data_dir: &Path) -> Result<GroupsFile, GroupError> {
+    let path = groups_path(data_dir);
+    let lock = at_rest::lock_file(data_dir, &path, Kind::Groups).map_err(store_err)?;
+    let (mut file, repaired) = read_locked(data_dir, &lock, &path)?;
+    if repaired {
+        let bytes = fitted(&mut file, true)?.ok_or_else(full_err)?;
+        lock.store_bytes(&bytes).map_err(store_err)?;
+    }
+    Ok(file)
+}
+
+/// The store, read under its writer lock, and whether it must be written
+/// even without a change: one over the read cap (only an older build could
+/// write it) is read once with [`REPAIR_READ_CAP`], and writing it back
+/// repairs it ([`fitted`]: its bounds, then the budget). A store of the
+/// older layout is converted as it is read.
+fn read_locked(
+    data_dir: &Path,
+    lock: &at_rest::FileLock,
+    path: &Path,
+) -> Result<(GroupsFile, bool), GroupError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            if meta.len() > at_rest::MAX_SEALED_FILE_BYTES {
+                return Ok((read_oversize(data_dir, path)?, true));
+            }
+            let file = lock
+                .load_json::<GroupsFile>()
+                .map_err(store_err)?
+                .unwrap_or_default();
+            Ok((file, false))
+        }
+        Ok(_) => Err(GroupError::Store(format!(
+            "{GROUPS_FILE} is not a regular file"
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((GroupsFile::default(), false)),
+        Err(e) => Err(store_err(e)),
+    }
+}
+
+/// A store over the read cap, read with [`REPAIR_READ_CAP`]: RMS1 opened
+/// with the loaded keys, plain JSON as it is.
+fn read_oversize(data_dir: &Path, path: &Path) -> Result<GroupsFile, GroupError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(store_err)?;
+    let mut raw = Zeroizing::new(Vec::new());
+    file.take(REPAIR_READ_CAP + 1)
+        .read_to_end(&mut raw)
+        .map_err(store_err)?;
+    if raw.len() as u64 > REPAIR_READ_CAP {
+        return Err(GroupError::Store(format!(
+            "{GROUPS_FILE} is too large to repair"
+        )));
+    }
+    let plain = if at_rest::is_sealed_as(Kind::Groups, &raw) {
+        let keys = at_rest::keys_cached(data_dir).map_err(store_err)?;
+        at_rest::open(&keys, Kind::Groups, &raw).map_err(store_err)?
+    } else {
+        raw
+    };
+    serde_json::from_slice(&plain)
+        .map_err(|e| GroupError::Store(format!("{GROUPS_FILE} corrupt: {e}")))
+}
+
+/// The store's bytes as written: its bounds applied, then, while it is over
+/// the budget sealed, held frames, done markers and intents shed (and, when
+/// `repairing`, the oldest messages, whose keys stay seen). `None` when it
+/// still does not fit.
+fn fitted(
+    file: &mut GroupsFile,
+    repairing: bool,
+) -> Result<Option<Zeroizing<Vec<u8>>>, GroupError> {
+    file.v = STORE_VERSION;
+    file.enforce_caps();
+    let budget = store_budget();
+    loop {
+        let bytes = Zeroizing::new(serde_json::to_vec_pretty(file).map_err(store_err)?);
+        let sealed = bytes.len() as u64 + at_rest::SEALED_OVERHEAD;
+        if sealed <= budget {
+            return Ok(Some(bytes));
+        }
+        let over = usize::try_from(sealed - budget).unwrap_or(usize::MAX);
+        let mut shed = file.shed_work(over);
+        if shed < over && repairing {
+            shed += file.shed_history(over - shed);
+        }
+        if shed == 0 {
+            return Ok(None);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BUDGET_FOR_TESTS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The group tests lower the budget on their thread (`None`: the real one).
+#[cfg(test)]
+pub(crate) fn set_budget_for_tests(budget: Option<u64>) {
+    BUDGET_FOR_TESTS.with(|b| b.set(budget));
+}
+
+fn store_budget() -> u64 {
+    #[cfg(test)]
+    if let Some(budget) = BUDGET_FOR_TESTS.with(std::cell::Cell::get) {
+        return budget;
+    }
+    STORE_BUDGET_BYTES
 }
 
 pub(crate) fn hex_key(s: &str) -> Option<Key> {
@@ -314,45 +530,161 @@ impl GroupsFile {
         true
     }
 
-    /// Every bound of design §6: messages across groups (the oldest of the
-    /// largest group first, its id remembered), ids seen, held frames,
-    /// intents and markers.
+    /// Every bound of design §6, each with its unit of fairness, so one
+    /// friend's groups or frames only push out their own: messages across
+    /// groups (by admin, the oldest first, its key remembered), held frames
+    /// (by carrier), intents and done markers (by admin), ids seen, rosters'
+    /// side lists. Together they keep the store under
+    /// [`STORE_BUDGET_BYTES`].
     pub fn enforce_caps(&mut self) {
-        let size = |m: &StoredMsg| m.body.len() + 256 + m.lines.len() * 200;
-        let mut total: usize = self.groups.iter().map(|g| g.messages.len()).sum();
-        let mut bytes: usize = self
-            .groups
-            .iter()
-            .flat_map(|g| g.messages.iter())
-            .map(size)
-            .sum();
-        while total > MAX_MESSAGES_TOTAL || bytes > MAX_MESSAGE_BYTES_TOTAL {
-            let Some(g) = self
-                .groups
-                .iter_mut()
-                .filter(|g| !g.messages.is_empty())
-                .max_by_key(|g| g.messages.len())
-            else {
-                break;
-            };
-            let gone = g.messages.remove(0);
-            bytes = bytes.saturating_sub(size(&gone));
-            total -= 1;
-            g.seen.push(format!(
-                "{}@{}",
-                seen_key(&gone.from, &gone.id),
-                gone.sent_ms
-            ));
-        }
+        self.trim_messages(MAX_MESSAGES_TOTAL, MAX_MESSAGE_BYTES_TOTAL);
         for g in &mut self.groups {
-            trim_front(&mut g.held, MAX_HELD_PER_GROUP);
+            trim_held(
+                &mut [&mut g.held],
+                MAX_HELD_PER_GROUP,
+                MAX_HELD_BYTES_PER_GROUP,
+            );
             trim_intents(g);
             trim_front(&mut g.done, MAX_DONE_PER_GROUP);
             trim_front(&mut g.answered, super::MAX_GROUP_MEMBERS * 4);
             trim_front(&mut g.removed, super::MAX_GROUP_MEMBERS * 8);
         }
-        trim_front(&mut self.unknown_held, MAX_UNKNOWN_HELD);
+        trim_held(
+            &mut [&mut self.unknown_held],
+            MAX_UNKNOWN_HELD,
+            MAX_UNKNOWN_HELD_BYTES,
+        );
+        self.trim_all_held(MAX_HELD_BYTES_TOTAL);
+        self.trim_done(MAX_DONE_BYTES_TOTAL);
+        self.trim_all_intents(MAX_INTENT_BYTES_TOTAL);
         trim_front(&mut self.copies, MAX_COPIES);
+    }
+
+    /// Messages over `max_count` or `max_bytes` go: the admin whose groups
+    /// hold the most (by count while over the count, else by bytes) loses
+    /// the oldest message of its group holding the most; each key is
+    /// remembered ([`GroupRecord::seen`]). Returns the bytes that went.
+    fn trim_messages(&mut self, max_count: usize, max_bytes: usize) -> usize {
+        let units = admin_units(&self.groups);
+        let sizes: Vec<Vec<usize>> = self
+            .groups
+            .iter()
+            .map(|g| g.messages.iter().map(StoredMsg::stored_bytes).collect())
+            .collect();
+        let gone = water_fill(&sizes, &units, max_count, max_bytes);
+        let mut shed = 0;
+        for ((g, n), sizes) in self.groups.iter_mut().zip(gone).zip(&sizes) {
+            shed += sizes[..n].iter().sum::<usize>();
+            for m in g.messages.drain(..n) {
+                g.seen.push(&m.from, &m.id, m.sent_ms);
+            }
+        }
+        shed
+    }
+
+    /// Every held frame (each group's and the unknown groups') over
+    /// `max_bytes` in all: the carrier holding the most loses its oldest
+    /// frame first. Returns the bytes that went.
+    fn trim_all_held(&mut self, max_bytes: usize) -> usize {
+        let mut lists: Vec<&mut Vec<Held>> = Vec::with_capacity(self.groups.len() + 1);
+        lists.push(&mut self.unknown_held);
+        lists.extend(self.groups.iter_mut().map(|g| &mut g.held));
+        trim_held(&mut lists, usize::MAX, max_bytes)
+    }
+
+    /// Done markers over `max_bytes` in all: the admin whose groups hold
+    /// the most loses its oldest first. Returns the bytes that went.
+    fn trim_done(&mut self, max_bytes: usize) -> usize {
+        let units = admin_units(&self.groups);
+        let sizes: Vec<Vec<usize>> = self
+            .groups
+            .iter()
+            .map(|g| g.done.iter().map(|d| mark_bytes(d)).collect())
+            .collect();
+        let gone = water_fill(&sizes, &units, usize::MAX, max_bytes);
+        let mut shed = 0;
+        for ((g, n), sizes) in self.groups.iter_mut().zip(gone).zip(&sizes) {
+            shed += sizes[..n].iter().sum::<usize>();
+            g.done.drain(..n);
+        }
+        shed
+    }
+
+    /// Intents over `max_bytes` in all: the admin whose groups hold the
+    /// most loses first, forwards first, then the oldest; a copy of an own
+    /// message that goes fails its line. Returns the bytes that went.
+    fn trim_all_intents(&mut self, max_bytes: usize) -> usize {
+        let units = admin_units(&self.groups);
+        let orders: Vec<Vec<usize>> = self.groups.iter().map(intent_order).collect();
+        let sizes: Vec<Vec<usize>> = self
+            .groups
+            .iter()
+            .zip(&orders)
+            .map(|(g, order)| order.iter().map(|&i| g.intents[i].stored_bytes()).collect())
+            .collect();
+        let gone = water_fill(&sizes, &units, usize::MAX, max_bytes);
+        let mut shed = 0;
+        for (((g, n), order), sizes) in self.groups.iter_mut().zip(gone).zip(&orders).zip(&sizes) {
+            shed += sizes[..n].iter().sum::<usize>();
+            drop_intents(g, &order[..n]);
+        }
+        shed
+    }
+
+    fn held_bytes(&self) -> usize {
+        self.unknown_held
+            .iter()
+            .chain(self.groups.iter().flat_map(|g| g.held.iter()))
+            .map(Held::stored_bytes)
+            .sum()
+    }
+
+    fn done_bytes(&self) -> usize {
+        self.groups
+            .iter()
+            .flat_map(|g| g.done.iter())
+            .map(|d| mark_bytes(d))
+            .sum()
+    }
+
+    fn intent_bytes(&self) -> usize {
+        self.groups
+            .iter()
+            .flat_map(|g| g.intents.iter())
+            .map(Intent::stored_bytes)
+            .sum()
+    }
+
+    /// A store over its budget sheds what it can lose, at least `over`
+    /// bytes when it holds that much: held frames, then done markers, then
+    /// intents, each with its unit of fairness. Returns the bytes that went.
+    fn shed_work(&mut self, over: usize) -> usize {
+        let mut shed = 0;
+        if shed < over {
+            let held = self.held_bytes();
+            shed += self.trim_all_held(held.saturating_sub(over - shed));
+        }
+        if shed < over {
+            let done = self.done_bytes();
+            shed += self.trim_done(done.saturating_sub(over - shed));
+        }
+        if shed < over {
+            let intents = self.intent_bytes();
+            shed += self.trim_all_intents(intents.saturating_sub(over - shed));
+        }
+        shed
+    }
+
+    /// Only for a repair: the oldest messages go too, as [`MAX_MESSAGE_BYTES_TOTAL`]
+    /// chooses them (their keys stay seen). Returns the bytes that went.
+    fn shed_history(&mut self, over: usize) -> usize {
+        let bytes: usize = self
+            .groups
+            .iter()
+            .flat_map(|g| g.messages.iter())
+            .map(StoredMsg::stored_bytes)
+            .sum();
+        self.trim_messages(usize::MAX, bytes.saturating_sub(over))
     }
 
     /// Held frames and intents past [`WORK_TTL_MS`] go.
@@ -362,13 +694,8 @@ impl GroupsFile {
         for g in &mut self.groups {
             g.held.retain(|h| fresh(h.at_ms));
             // A message key goes once its message could no longer be taken
-            // (older than the replay horizon); an entry without its time
-            // (an older store) goes too.
-            g.seen.retain(|s| {
-                s.rsplit_once('@')
-                    .and_then(|(_, at)| at.parse::<u64>().ok())
-                    .is_some_and(|sent| now_ms < sent.saturating_add(REPLAY_HORIZON_MS))
-            });
+            // (older than the replay horizon).
+            g.seen.retain_fresh(now_ms);
             let mut gone = Vec::new();
             g.intents.retain(|i| {
                 let keep = fresh(i.made_ms);
@@ -392,27 +719,378 @@ impl GroupsFile {
 /// first), then the oldest others; a copy of this profile's own message
 /// that goes fails its line (it does not stay "waiting" for ever).
 fn trim_intents(g: &mut GroupRecord) {
-    while g.intents.len() > MAX_INTENTS_PER_GROUP {
-        let at = g
-            .intents
-            .iter()
-            .position(|i| !i.author.is_empty())
-            .unwrap_or(0);
-        let gone = g.intents.remove(at);
-        if !gone.line_of.is_empty() {
-            g.set_line(&gone.line_of, &gone.to, |line| {
-                if line.state != LINE_DELIVERED {
-                    line.state = LINE_FAILED.into();
-                }
+    if g.intents.len() > MAX_INTENTS_PER_GROUP {
+        let over = g.intents.len() - MAX_INTENTS_PER_GROUP;
+        let order = intent_order(g);
+        drop_intents(g, &order[..over]);
+    }
+}
+
+/// The order a group's intents go in: forwards (they carry another
+/// author's message) first, then the others, each oldest first.
+fn intent_order(g: &GroupRecord) -> Vec<usize> {
+    let (forwards, others): (Vec<usize>, Vec<usize>) =
+        (0..g.intents.len()).partition(|&i| !g.intents[i].author.is_empty());
+    forwards.into_iter().chain(others).collect()
+}
+
+/// Remove the intents at `gone` (indexes); a copy of this profile's own
+/// message that goes fails its line.
+fn drop_intents(g: &mut GroupRecord, gone: &[usize]) {
+    if gone.is_empty() {
+        return;
+    }
+    let mut out = vec![false; g.intents.len()];
+    for &i in gone {
+        out[i] = true;
+    }
+    let lines: Vec<(String, String)> = gone
+        .iter()
+        .map(|&i| &g.intents[i])
+        .filter(|i| !i.line_of.is_empty())
+        .map(|i| (i.line_of.clone(), i.to.clone()))
+        .collect();
+    let mut at = 0;
+    g.intents.retain(|_| {
+        at += 1;
+        !out[at - 1]
+    });
+    for (of, to) in lines {
+        g.set_line(&of, &to, |line| {
+            if line.state != LINE_DELIVERED {
+                line.state = LINE_FAILED.into();
+            }
+        });
+    }
+}
+
+/// Held frames of `lists` over `max_count` or `max_bytes` in all go: the
+/// carrier holding the most (frames while over the count, else bytes)
+/// loses its oldest frame, from the list where it holds the most. Returns
+/// the bytes that went.
+fn trim_held(lists: &mut [&mut Vec<Held>], max_count: usize, max_bytes: usize) -> usize {
+    let mut carriers: HashMap<&str, usize> = HashMap::new();
+    let mut slot_of: HashMap<(usize, usize), usize> = HashMap::new();
+    // Per slot (one carrier in one list): its frames oldest first, their
+    // sizes, its list and its carrier.
+    let mut frames: Vec<Vec<usize>> = Vec::new();
+    let mut sizes: Vec<Vec<usize>> = Vec::new();
+    let mut list_of: Vec<usize> = Vec::new();
+    let mut units: Vec<usize> = Vec::new();
+    for (l, list) in lists.iter().enumerate() {
+        let mut order: Vec<usize> = (0..list.len()).collect();
+        order.sort_by_key(|&i| (list[i].at_ms, i));
+        for i in order {
+            let next = carriers.len();
+            let carrier = *carriers.entry(list[i].peer.as_str()).or_insert(next);
+            let slot = *slot_of.entry((l, carrier)).or_insert_with(|| {
+                frames.push(Vec::new());
+                sizes.push(Vec::new());
+                list_of.push(l);
+                units.push(carrier);
+                frames.len() - 1
             });
+            frames[slot].push(i);
+            sizes[slot].push(list[i].stored_bytes());
         }
     }
+    let gone = water_fill(&sizes, &units, max_count, max_bytes);
+    let mut out: Vec<Vec<bool>> = lists.iter().map(|l| vec![false; l.len()]).collect();
+    let mut shed = 0;
+    for (slot, n) in gone.into_iter().enumerate() {
+        for k in 0..n {
+            out[list_of[slot]][frames[slot][k]] = true;
+            shed += sizes[slot][k];
+        }
+    }
+    for (list, out) in lists.iter_mut().zip(out) {
+        let mut at = 0;
+        list.retain(|_| {
+            at += 1;
+            !out[at - 1]
+        });
+    }
+    shed
+}
+
+/// Each group's unit of fairness: its admin, so all the groups one friend
+/// made count together (a friend can make many groups, but is one admin).
+fn admin_units(groups: &[GroupRecord]) -> Vec<usize> {
+    let mut admins: HashMap<&str, usize> = HashMap::new();
+    groups
+        .iter()
+        .map(|g| {
+            let next = admins.len();
+            *admins.entry(g.state.admin.as_str()).or_insert(next)
+        })
+        .collect()
+}
+
+/// Water filling over `slots` (each slot's item sizes, in the order they
+/// may go) owned by `units` (one per slot): while more than `max_count`
+/// items or `max_bytes` bytes remain, the unit holding the most (items
+/// while over the count, else bytes) gives up the next item of its slot
+/// holding the most; equal sizes: the earlier unit and slot. Returns how
+/// many items of each slot go.
+fn water_fill(
+    slots: &[Vec<usize>],
+    units: &[usize],
+    max_count: usize,
+    max_bytes: usize,
+) -> Vec<usize> {
+    let n_units = units.iter().copied().max().map_or(0, |u| u + 1);
+    let mut gone = vec![0; slots.len()];
+    let mut slot_count: Vec<usize> = slots.iter().map(Vec::len).collect();
+    let mut slot_bytes: Vec<usize> = slots.iter().map(|s| s.iter().sum()).collect();
+    let mut unit_count = vec![0usize; n_units];
+    let mut unit_bytes = vec![0usize; n_units];
+    for (slot, &unit) in units.iter().enumerate() {
+        unit_count[unit] += slot_count[slot];
+        unit_bytes[unit] += slot_bytes[slot];
+    }
+    let mut count: usize = slot_count.iter().sum();
+    let mut bytes: usize = slot_bytes.iter().sum();
+    while count > max_count || bytes > max_bytes {
+        let by_bytes = count <= max_count;
+        let size = |n: usize, b: usize| if by_bytes { b } else { n };
+        let Some(unit) = (0..n_units)
+            .filter(|&u| unit_count[u] > 0)
+            .max_by_key(|&u| (size(unit_count[u], unit_bytes[u]), Reverse(u)))
+        else {
+            break;
+        };
+        let Some(slot) = (0..slots.len())
+            .filter(|&s| units[s] == unit && slot_count[s] > 0)
+            .max_by_key(|&s| (size(slot_count[s], slot_bytes[s]), Reverse(s)))
+        else {
+            break;
+        };
+        let item = slots[slot][gone[slot]];
+        gone[slot] += 1;
+        slot_count[slot] -= 1;
+        slot_bytes[slot] -= item;
+        unit_count[unit] -= 1;
+        unit_bytes[unit] -= item;
+        count -= 1;
+        bytes -= item;
+    }
+    gone
 }
 
 fn trim_front<T>(list: &mut Vec<T>, max: usize) {
     if list.len() > max {
         let over = list.len() - max;
         list.drain(..over);
+    }
+}
+
+// ------------------------------------------------------------------ sizes
+
+/// The bytes an entry takes in the store as written beyond its strings
+/// (pretty JSON at the depth it sits, numbers at their widest, its share of
+/// the list around it even as the only entry): upper bounds, so the bounds
+/// above hold for the file itself.
+const MSG_FIXED: usize = 320;
+const LINE_FIXED: usize = 160;
+const HELD_FIXED: usize = 112;
+const INTENT_FIXED: usize = 264;
+const MARK_FIXED: usize = 16;
+
+/// The length of `s` written as a JSON string, quotes included
+/// (serde_json's escapes).
+fn json_len(s: &str) -> usize {
+    2 + s
+        .bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0..=0x1f => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
+}
+
+/// The bytes a done marker takes in the store (an upper bound).
+pub(crate) fn mark_bytes(marker: &str) -> usize {
+    MARK_FIXED + json_len(marker)
+}
+
+impl StoredMsg {
+    /// The bytes it takes in the store (an upper bound).
+    pub fn stored_bytes(&self) -> usize {
+        MSG_FIXED
+            + [
+                &self.id, &self.from, &self.body, &self.sig, &self.via, &self.path,
+            ]
+            .into_iter()
+            .map(|s| json_len(s))
+            .sum::<usize>()
+            + self
+                .lines
+                .iter()
+                .map(|l| {
+                    LINE_FIXED
+                        + [&l.member, &l.device, &l.copy, &l.via, &l.state]
+                            .into_iter()
+                            .map(|s| json_len(s))
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+}
+
+impl Held {
+    /// The bytes it takes in the store (an upper bound).
+    pub fn stored_bytes(&self) -> usize {
+        HELD_FIXED + json_len(&self.frame) + json_len(&self.peer)
+    }
+}
+
+impl Intent {
+    /// The bytes it takes in the store (an upper bound).
+    pub fn stored_bytes(&self) -> usize {
+        INTENT_FIXED
+            + [
+                &self.id,
+                &self.kind,
+                &self.to,
+                &self.frame,
+                &self.of,
+                &self.via,
+                &self.line_of,
+                &self.author,
+            ]
+            .into_iter()
+            .map(|s| json_len(s))
+            .sum::<usize>()
+    }
+}
+
+// ------------------------------------------------------------------ seen keys
+
+/// One seen key: 12 bytes of its digest, then the second its message was
+/// sent (rounded up, big endian).
+const SEEN_KEY_BYTES: usize = 16;
+const SEEN_DIGEST_BYTES: usize = 12;
+/// Keys per written string.
+const SEEN_CHUNK: usize = 256;
+/// What starts a written string of keys (a key in the older layout holds
+/// no `:`).
+const SEEN_CHUNK_PREFIX: &str = "v2:";
+const SEEN_DOMAIN: &[u8] = b"rvn1/group-seen";
+
+/// [`GroupRecord::seen`]: the messages that left `messages`, oldest first,
+/// each kept until it is older than [`REPLAY_HORIZON_MS`]. A key is 16
+/// bytes: the first 12 of SHA-256 over a domain and [`seen_key`] (its author
+/// and id), then the second it was sent, rounded up. Written as strings of
+/// up to [`SEEN_CHUNK`] keys in base64 after `v2:` (about 21 bytes a key);
+/// strings of the older layout (`<author>/<id>@<sent_ms>`, one key each,
+/// about 120 bytes) are read and converted. An older build reading this
+/// layout drops the `v2:` strings as keys without a time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeenKeys(Vec<[u8; SEEN_KEY_BYTES]>);
+
+impl SeenKeys {
+    fn key(key: &str, sent_ms: u64) -> [u8; SEEN_KEY_BYTES] {
+        let mut h = Sha256::new();
+        h.update((SEEN_DOMAIN.len() as u16).to_be_bytes());
+        h.update(SEEN_DOMAIN);
+        h.update(key.as_bytes());
+        let digest = h.finalize();
+        let second = u32::try_from(sent_ms.div_ceil(1000)).unwrap_or(u32::MAX);
+        let mut out = [0u8; SEEN_KEY_BYTES];
+        out[..SEEN_DIGEST_BYTES].copy_from_slice(&digest[..SEEN_DIGEST_BYTES]);
+        out[SEEN_DIGEST_BYTES..].copy_from_slice(&second.to_be_bytes());
+        out
+    }
+
+    fn sent_ms(key: &[u8; SEEN_KEY_BYTES]) -> u64 {
+        let mut second = [0u8; 4];
+        second.copy_from_slice(&key[SEEN_DIGEST_BYTES..]);
+        u64::from(u32::from_be_bytes(second)) * 1000
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Note message `id` by `from` (both hex), sent at `sent_ms`.
+    pub fn push(&mut self, from: &str, id: &str, sent_ms: u64) {
+        self.0.push(Self::key(&seen_key(from, id), sent_ms));
+    }
+
+    /// Whether message `id` by `from` (both hex) is noted.
+    pub fn contains(&self, from: &str, id: &str) -> bool {
+        let digest = Self::key(&seen_key(from, id), 0);
+        self.0
+            .iter()
+            .any(|k| k[..SEEN_DIGEST_BYTES] == digest[..SEEN_DIGEST_BYTES])
+    }
+
+    /// Keys of messages that could still be taken stay: sent less than
+    /// [`REPLAY_HORIZON_MS`] before `now_ms`.
+    pub fn retain_fresh(&mut self, now_ms: u64) {
+        self.0
+            .retain(|k| now_ms < Self::sent_ms(k).saturating_add(REPLAY_HORIZON_MS));
+    }
+
+    /// The newest `max` keys stay.
+    pub fn trim_front(&mut self, max: usize) {
+        trim_front(&mut self.0, max);
+    }
+
+    /// A key of the older layout, `<author>/<id>@<sent_ms>`; `None` without
+    /// a time (an older store's entry, which expiry dropped).
+    fn parse_older(entry: &str) -> Option<[u8; SEEN_KEY_BYTES]> {
+        let (key, at) = entry.rsplit_once('@')?;
+        Some(Self::key(key, at.parse::<u64>().ok()?))
+    }
+}
+
+impl Serialize for SeenKeys {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use base64::Engine;
+        let chunks: Vec<String> = self
+            .0
+            .chunks(SEEN_CHUNK)
+            .map(|chunk| {
+                let bytes: Vec<u8> = chunk.iter().flatten().copied().collect();
+                format!(
+                    "{SEEN_CHUNK_PREFIX}{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            })
+            .collect();
+        chunks.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SeenKeys {
+    /// Strings of either layout; one that is neither is left out (a lost
+    /// key only lets its message be taken as new, while a store that does
+    /// not read stops every group).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use base64::Engine;
+        let entries = Vec::<String>::deserialize(deserializer)?;
+        let mut keys = Vec::new();
+        for entry in &entries {
+            if let Some(chunk) = entry.strip_prefix(SEEN_CHUNK_PREFIX) {
+                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(chunk) else {
+                    continue;
+                };
+                let (whole, rest) = bytes.as_chunks::<SEEN_KEY_BYTES>();
+                if !rest.is_empty() {
+                    continue;
+                }
+                keys.extend_from_slice(whole);
+            } else if let Some(key) = Self::parse_older(entry) {
+                keys.push(key);
+            }
+        }
+        Ok(SeenKeys(keys))
     }
 }
 
@@ -445,7 +1123,7 @@ impl GroupRecord {
             updated_ms: now_ms,
             removed: Vec::new(),
             messages: Vec::new(),
-            seen: Vec::new(),
+            seen: SeenKeys::default(),
             held: Vec::new(),
             intents: Vec::new(),
             done: Vec::new(),
@@ -469,10 +1147,7 @@ impl GroupRecord {
     /// message id first cannot have the real message dropped as a duplicate
     /// (and ACKed).
     pub fn has_seen(&self, from: &str, id: &str) -> bool {
-        let key = seen_key(from, id);
-        let at = format!("{key}@");
-        self.messages.iter().any(|m| m.id == id && m.from == from)
-            || self.seen.iter().any(|s| s.starts_with(&at))
+        self.messages.iter().any(|m| m.id == id && m.from == from) || self.seen.contains(from, id)
     }
 
     /// No room for another message key ([`MAX_SEEN_PER_GROUP`]).
@@ -516,10 +1191,9 @@ impl GroupRecord {
                 .retain(|i| !(i.kind == INTENT_SEND && mine.contains(i.line_of.as_str())));
         }
         for m in &gone {
-            self.seen
-                .push(format!("{}@{}", seen_key(&m.from, &m.id), m.sent_ms));
+            self.seen.push(&m.from, &m.id, m.sent_ms);
         }
-        trim_front(&mut self.seen, MAX_SEEN_PER_GROUP);
+        self.seen.trim_front(MAX_SEEN_PER_GROUP);
         let counts = (gone.len(), kept.len());
         self.messages = kept;
         counts
@@ -543,7 +1217,8 @@ impl GroupRecord {
     }
 }
 
-/// A message's entry in [`GroupRecord::seen`]: its author and id (hex).
+/// What a message is known by in [`GroupRecord::seen`] (as a digest there):
+/// its author and id (hex).
 pub fn seen_key(from: &str, id: &str) -> String {
     format!("{from}/{id}")
 }
@@ -783,7 +1458,7 @@ pub fn mark_read(data_dir: &Path, id: &GroupId, now_ms: u64) -> Result<usize, Gr
 
 /// Clear group `id`'s chat on this device (0.1.1 chat controls; the other
 /// members are not told): its messages go, each remembered as seen
-/// (`<author>:<id>@<sent_ms>`, as the caps drop them) so a copy that comes
+/// (by its author and id, as the caps drop them) so a copy that comes
 /// again is a duplicate, never shown again. This profile's own messages
 /// still on their way to a member (a line neither delivered nor failed) stay
 /// unless `include_pending`; with it they go too, and so do the intents

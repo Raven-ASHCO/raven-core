@@ -122,7 +122,9 @@ bytes. A committed group frame never reaches chat history or a chat view.
 The *carrier peer* `P` is the identity of the session-bound certificate of
 the session the copy arrived on. Ingest is idempotent: a frame seen again
 changes nothing and is still ACKed. An invalid frame (a bad signature, a
-stranger, a removed member) is ACKed and dropped, never shown.
+stranger, a removed member) is ACKed and dropped, never shown. So is a
+frame the receiver has no room to store (§4.3): it is counted, not taken
+later.
 
 **`state`**: verified under `admin`, with `group` the id of `admin` and
 `salt` (§1). For an unknown group it is accepted
@@ -141,7 +143,9 @@ day ahead of the receiver's clock. A receiver keeps the (`from`, `id`) of
 every message it took until its `sent_ms` is 7 days old (at most 8,192 per
 group; a group at that many takes no new message until some expire), so a
 message cannot be replayed as new. When `from` is not in the roster but `epoch` is newer than the
-roster, the frame is held (§4.3). A frame for an unknown group is held too.
+roster and the signature verifies under `from`, the frame is held (§4.3). A
+frame for an unknown group is held too, also only when its signature
+verifies under `from`.
 
 - **Forward** (only when `P` = `from`): for each key `T` in `relay` that is
   in the roster, is not the receiver and is one of the receiver's friends,
@@ -174,10 +178,17 @@ minutes.
 
 ### 4.3 Held frames
 
-A held frame waits for a newer roster: at most 64 per group and 32 for
-groups not known yet, each for at most 7 days. A receiver holding one asks
-the admin with `sync` (at most once per group per hour). Every newer roster
-stored retries the held frames.
+A held frame (only one whose signature verifies under its `from`) waits
+for a newer roster: at most 64 and 256 KiB per group, 32 and 256 KiB for
+groups not known yet, and 1 MiB in all, each for at most 7 days. Over a
+bound, the carrier peer holding the most loses its oldest held frame first,
+so one carrier's frames never push out another's. A receiver holding one
+asks the admin with `sync` (at most once per group per hour). Every newer
+roster stored retries the held frames.
+
+The receiver's group store has a byte budget (32 MiB sealed); held frames
+are the first to go when a frame would pass it, and a frame that still does
+not fit is ACKed and dropped (§4.2).
 
 ## 5. Sender
 
