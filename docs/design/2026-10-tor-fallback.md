@@ -55,6 +55,22 @@ nothing for Raven; the Raven handshake authenticates the friend.
    other one closes without writing a frame.
 4. Custody (a friend holds the mail) and waiting come after both, as today.
 
+**A card's LAN name races too** (N3, security and speed report 2026-11-05;
+`raven send`). A LAN name from a friend's card keeps the local-network
+rule, so it must be resolved before it is dialled. While the send has a
+route on another carrier (Tor, for a verified friend), the name is not
+resolved before the race (that took up to 5 s, one name after the other):
+its own probe in the race resolves it within
+`raven_core::outbox::LOCALIZE_RACE_TIMEOUT` (1.5 s, as long as Tor's head
+start) and dials the resolved local address, for the probe and then the
+message. A name that does not answer in time fails that route alone, as a
+name not found. A card's LAN address that may not be dialled (off the local
+network, or not a usable `host:port`) fails that route alone too, never
+dialled; before, both cases ended the whole send as NOT SENT though Tor
+could carry it. With no other carrier (an unverified contact, or LAN only)
+the send is as before: names resolved first, within 5 s, and a refusal is
+the send's.
+
 **Moving off Tor.** Raven links are per dial (a dial connects, sends,
 collects the receipts and closes). Every send runs the race again with the
 head start for the direct paths, so as soon as a direct path works it wins,
