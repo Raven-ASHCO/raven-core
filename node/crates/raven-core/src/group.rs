@@ -733,7 +733,13 @@ pub enum GroupError {
     NotAdmin,
     /// This profile left the group or was removed.
     NotMember,
+    /// More than [`MAX_GROUP_MEMBERS`] members.
     TooMany,
+    /// No place for another group ([`store::MAX_GROUPS`]): a group left or
+    /// removed from can be forgotten ([`forget`]).
+    TooManyGroups,
+    /// [`forget`] of a group this profile is still in.
+    StillMember,
     /// A member to add is not a current, unblocked friend.
     NotAFriend(Key),
     AlreadyMember(Key),
@@ -758,7 +764,8 @@ impl GroupError {
             GroupError::Ambiguous => "GROUP_AMBIGUOUS",
             GroupError::NotAdmin => "GROUP_NOT_ADMIN",
             GroupError::NotMember => "GROUP_NOT_MEMBER",
-            GroupError::TooMany => "GROUP_TOO_LARGE",
+            GroupError::TooMany | GroupError::TooManyGroups => "GROUP_TOO_LARGE",
+            GroupError::StillMember => "GROUP_STILL_MEMBER",
             GroupError::NotAFriend(_) => "GROUP_NOT_A_FRIEND",
             GroupError::AlreadyMember(_) => "GROUP_ALREADY_MEMBER",
             GroupError::BadName => "GROUP_BAD_NAME",
@@ -787,6 +794,14 @@ impl GroupError {
             GroupError::TooMany => {
                 format!("A group has at most {MAX_GROUP_MEMBERS} members, you included.")
             }
+            GroupError::TooManyGroups => format!(
+                "You are in {} groups already: forget one you left (raven group forget) to make \
+                 room.",
+                store::MAX_GROUPS
+            ),
+            GroupError::StillMember => "Only a group you left or were removed from can be \
+                                        forgotten: leave it first (raven group leave)."
+                .into(),
             GroupError::NotAFriend(_) => {
                 "Only your friends can be added (a saved contact you have not blocked).".into()
             }
@@ -891,8 +906,9 @@ pub fn friend_names(data_dir: &Path) -> std::collections::HashMap<Key, String> {
 /// friend's device `sender_device`. The carrier peer is the session-bound
 /// certificate's user key, never a link bundle. `Ok(true)`: handled (stored,
 /// held, or dropped as invalid: ACK it); `Ok(false)`: the store could not
-/// take it now (no ACK; the endpoint row stays and a retry or the archive
-/// brings it back).
+/// take it now, or refused it for lack of room ([`ingest`]): no ACK; the
+/// endpoint row stays, and the copy sent again (or the archive) brings it
+/// back.
 pub fn deliver(
     data_dir: &Path,
     sessions: &mut crate::indexed_session_store::IndexedSessionStore,
@@ -910,36 +926,100 @@ pub fn deliver(
     else {
         return Ok(false);
     };
-    Ok(ingest(data_dir, &cert.user_ed_pub, frame, now_ms).is_ok())
+    Ok(matches!(
+        ingest(data_dir, &cert.user_ed_pub, frame, now_ms),
+        Ok(true)
+    ))
 }
 
 /// Apply one received frame from the carrier peer `peer` to the group store
-/// (protocol §4.2). Asks raven-node for a scan when it left work. A frame
-/// the store has no room for (its byte budget, after shedding held frames,
-/// done markers and intents) is dropped and counted, and still `Ok`, so it
-/// is ACKed rather than sent again until its horizon.
+/// (protocol §4.2). Asks raven-node for a scan when it left work.
+/// `Ok(true)`: handled (stored, held, a duplicate, or dropped as invalid),
+/// so it is ACKed. `Ok(false)`: a verified frame refused for lack of room
+/// (its author's share of the group's seen keys, its admin's active groups,
+/// the places for groups; [`rules::Applied::refused`]): not stored and not
+/// ACKed, so its sender sends it again later. A frame the store has no room
+/// for in bytes (its budget, after shedding held frames, done markers and
+/// intents) is dropped and counted, and `Ok(true)`, so it is ACKed rather
+/// than sent again until its horizon.
 pub fn ingest(
     data_dir: &Path,
     peer: &Key,
     frame: &GroupFrame,
     now_ms: u64,
-) -> Result<(), GroupError> {
+) -> Result<bool, GroupError> {
     let me = local_identity_key(data_dir).ok_or(GroupError::NoIdentity)?;
     let friends = friend_keys(data_dir);
-    let work = store::edit_received(data_dir, false, |file| {
+    let done = store::edit_received(data_dir, rules::Applied::default(), |file| {
         file.note_me(&me);
-        Ok(rules::apply(file, &me, peer, frame, &friends, now_ms).work)
+        Ok(rules::apply(file, &me, peer, frame, &friends, now_ms))
+    })?;
+    if done.work {
+        notify_work();
+    }
+    Ok(!done.refused)
+}
+
+/// A committed group frame still behind its ACK intent: the session it came
+/// on, the friend's device, the frame and the time its row was received.
+pub struct PendingFrame {
+    pub key: crate::indexed_session_store::IndexedSessionRecordKey,
+    pub sender_device: [u8; 32],
+    pub frame: GroupFrame,
+    pub at_ms: u64,
+}
+
+/// [`deliver`] for the committed frames still behind their ACK intents
+/// ([`crate::app_channel::ingest_pending_committed`], at every prune pass),
+/// all in one read and write of the group store ([`ingest_all`]). A frame
+/// refused for lack of room stays pending until its sender sends it again,
+/// so a read of the store each would let one member's flood past its share
+/// cost a read of the store per frame at every pass. Returns how many were
+/// handled.
+pub fn deliver_pending(
+    data_dir: &Path,
+    sessions: &mut crate::indexed_session_store::IndexedSessionStore,
+    rows: &[PendingFrame],
+) -> Result<usize, String> {
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(cert) = crate::lan_dispatch::session_bound_peer_certificate(
+            data_dir,
+            sessions,
+            &row.key,
+            &row.sender_device,
+        )? {
+            items.push((cert.user_ed_pub, &row.frame, row.at_ms));
+        }
+    }
+    Ok(ingest_all(data_dir, &items).unwrap_or(0))
+}
+
+/// [`ingest`] for several frames, each from its carrier peer at its own
+/// time, in one read and write of the group store ([`rules::apply_all`]):
+/// how many were handled (each one [`ingest`] answers `Ok(true)` for). When
+/// the store has no room in bytes for the change, the frames are dropped and
+/// counted as handled, as [`ingest`] drops one.
+pub fn ingest_all(data_dir: &Path, items: &[(Key, &GroupFrame, u64)]) -> Result<usize, GroupError> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let me = local_identity_key(data_dir).ok_or(GroupError::NoIdentity)?;
+    let friends = friend_keys(data_dir);
+    let (handled, work) = store::edit_received(data_dir, (items.len(), false), |file| {
+        file.note_me(&me);
+        Ok(rules::apply_all(file, &me, items, &friends))
     })?;
     if work {
         notify_work();
     }
-    Ok(())
+    Ok(handled)
 }
 
 pub use park::{process_intents, refresh_deliveries, run_pending, Pending};
 pub use rules::{add_members, create, leave, remove_members, send, SendReport};
 pub use store::{
-    find, history, list, mark_read, view, GroupSummary, GroupView, MemberView, MessageView,
+    find, forget, history, list, mark_read, view, GroupSummary, GroupView, MemberView, MessageView,
 };
 
 /// A copy this profile parked (its own message's, a forward, a receipt, a

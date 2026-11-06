@@ -73,6 +73,14 @@ pub(crate) fn group_error(e: GroupError) -> ApiError {
             "GROUP_TOO_LARGE",
             "A group has at most 16 members, you included.",
         ),
+        GroupError::TooManyGroups => (
+            "GROUP_TOO_LARGE",
+            "You are in 64 groups already. Forget a group you left to make room.",
+        ),
+        GroupError::StillMember => (
+            "GROUP_STILL_MEMBER",
+            "Leave the group first, then forget it.",
+        ),
         GroupError::NotAFriend(_) => (code::NOT_A_CONTACT, ""),
         GroupError::AlreadyMember(_) => (
             "GROUP_ALREADY_MEMBER",
@@ -480,6 +488,17 @@ impl Inner {
         Ok(json!({"group": out["group"].clone()}))
     }
 
+    /// `groups.forget {group}`: a group this profile left or was removed
+    /// from goes from this device (raven-core `group::forget`): out of
+    /// `groups.list`, its place free for another group; its old frames do
+    /// not bring it back.
+    pub(crate) fn groups_forget(&self, args: &Args) -> OpResult {
+        gate()?;
+        let id = group_arg(args)?;
+        group::forget(self.data_dir()?, &id, now_ms()).map_err(group_error)?;
+        Ok(json!({"group": hex::encode(id), "forgotten": true}))
+    }
+
     pub(crate) fn groups_history(&self, args: &Args) -> OpResult {
         gate()?;
         let id = group_arg(args)?;
@@ -704,6 +723,8 @@ mod tests {
             GroupError::NotAdmin,
             GroupError::NotMember,
             GroupError::TooMany,
+            GroupError::TooManyGroups,
+            GroupError::StillMember,
             GroupError::NotAFriend([0; 32]),
             GroupError::AlreadyMember([0; 32]),
             GroupError::BadName,

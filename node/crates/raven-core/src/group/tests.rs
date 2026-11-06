@@ -9,8 +9,8 @@ use std::path::Path;
 use super::rules::{apply, SYNC_SPACING_MS};
 use super::store::{
     self, find_in, line_after, GroupsFile, INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND,
-    LINE_DELIVERED, LINE_FAILED, LINE_SENT, LINE_WAITING, STATUS_ACTIVE, STATUS_LEFT,
-    STATUS_REMOVED,
+    LINE_DELIVERED, LINE_FAILED, LINE_SENT, LINE_WAITING, STATUS_ACTIVE, STATUS_FORGOTTEN,
+    STATUS_LEFT, STATUS_REMOVED,
 };
 use super::*;
 
@@ -436,6 +436,227 @@ fn a_leaver_stays_out_until_a_roster_without_it_then_one_with_it() {
         NOW,
     );
     assert_eq!(group(&file).status, STATUS_ACTIVE);
+}
+
+/// G2: one admin holds at most 8 active groups here: its 64 invitations
+/// join 8 times and are refused after (not stored, not counted as dropped,
+/// so they are not ACKed and come again), and another admin's invitation
+/// still joins. A group left frees its admin's share; a roster that would
+/// make a group of a full admin active again is refused too.
+#[test]
+fn one_admin_cannot_take_every_group_place() {
+    let me = key(3);
+    let none = HashSet::new();
+    let mut file = GroupsFile::default();
+    let mut refused = 0;
+    for n in 0..store::MAX_GROUPS {
+        let state = roster_salted(1, &[3], [n as u8; 16]);
+        let done = apply(
+            &mut file,
+            &me,
+            &key(1),
+            &GroupFrame::State(state),
+            &none,
+            NOW,
+        );
+        refused += usize::from(done.refused);
+    }
+    let other = roster_salted(2, &[3], [0xaa; 16]);
+    let done = apply(
+        &mut file,
+        &me,
+        &key(2),
+        &GroupFrame::State(other.clone()),
+        &none,
+        NOW,
+    );
+    assert!(
+        file.group(&other.group).is_some_and(|g| g.is_active()),
+        "another admin's group joins"
+    );
+    assert!(!done.refused);
+    let of_one = |file: &GroupsFile| {
+        file.groups
+            .iter()
+            .filter(|g| g.state.admin == hex::encode(key(1)))
+            .count()
+    };
+    assert_eq!(of_one(&file), store::MAX_GROUPS_PER_ADMIN);
+    assert_eq!(refused, store::MAX_GROUPS - store::MAX_GROUPS_PER_ADMIN);
+    assert_eq!(file.dropped, 0, "refused, not dropped");
+    // A group left no longer counts: the next invitation joins.
+    file.groups[0].status = STATUS_LEFT.into();
+    let ninth = roster_salted(1, &[3], [0xb0; 16]);
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::State(ninth.clone()),
+        &none,
+        NOW,
+    );
+    assert!(file.group(&ninth.group).is_some_and(|g| g.is_active()));
+    assert_eq!(file.active_of(&key(1)), store::MAX_GROUPS_PER_ADMIN);
+    // Removed from one group, then added back while the admin is full:
+    // refused, the group stays removed.
+    let removed = file.groups[1].roster().unwrap();
+    let mut out = roster_salted(1, &[], removed.salt);
+    out.epoch = 2;
+    out.sign(&id(1));
+    apply(&mut file, &me, &key(1), &GroupFrame::State(out), &none, NOW);
+    assert_eq!(file.groups[1].status, STATUS_REMOVED);
+    let tenth = roster_salted(1, &[3], [0xb1; 16]);
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::State(tenth),
+        &none,
+        NOW,
+    );
+    let mut back = roster_salted(1, &[3], removed.salt);
+    back.epoch = 3;
+    back.sign(&id(1));
+    let done = apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::State(back),
+        &none,
+        NOW,
+    );
+    assert!(done.refused);
+    assert_eq!(file.groups[1].status, STATUS_REMOVED);
+    assert_eq!(file.groups[1].roster().unwrap().epoch, 2);
+}
+
+/// G2: a forgotten group leaves every list and operation, keeps its id,
+/// epoch and seen keys, and its old frames do not bring it back: its old
+/// roster is ignored, its old message dropped. A roster without this
+/// profile and then one with it is a new invitation, and the old message
+/// is still a duplicate there.
+#[test]
+fn a_forgotten_groups_old_frames_do_not_bring_it_back() {
+    let me = key(3);
+    let none = HashSet::new();
+    let first = roster(1, &[2, 3], 1);
+    let mut file = joined(3, &first);
+    let old = msg(2, 1, "before the leave", &[]);
+    apply(
+        &mut file,
+        &me,
+        &key(2),
+        &GroupFrame::Msg(old.clone()),
+        &none,
+        NOW,
+    );
+    assert_eq!(group(&file).messages.len(), 1);
+    file.groups[0].status = STATUS_LEFT.into();
+    file.forget(&gid(), NOW + 1).unwrap();
+    assert_eq!(find_in(&file, "team"), Err(GroupError::NotFound));
+    assert!(file.shown(&gid()).is_none());
+    assert_eq!(file.places_used(), 0);
+    let g = group(&file);
+    assert_eq!(g.status, STATUS_FORGOTTEN);
+    assert!(g.messages.is_empty());
+    assert!(g.has_seen(&hex::encode(key(2)), &hex::encode(old.id)));
+    assert_ne!(g.state.name, "Team", "its name goes");
+    // Its old roster, and its old message again: nothing comes back.
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::State(first),
+        &none,
+        NOW + 2,
+    );
+    apply(
+        &mut file,
+        &me,
+        &key(2),
+        &GroupFrame::Msg(old.clone()),
+        &none,
+        NOW + 2,
+    );
+    assert_eq!(group(&file).status, STATUS_FORGOTTEN);
+    assert!(group(&file).messages.is_empty());
+    assert_eq!(file.conflicts, 0);
+    assert_eq!(find_in(&file, "team"), Err(GroupError::NotFound));
+    // A receipt from its admin (the one member the record keeps) changes
+    // nothing either, not even when it was forgotten (which goes first).
+    let mut receipt = GroupReceipt {
+        group: gid(),
+        of: old.id,
+        epoch: 1,
+        from: key(1),
+        to: me,
+        at_ms: NOW + 2,
+        sig: [0; 64],
+        relay: vec![],
+    };
+    receipt.sign(&id(1));
+    let before = file.clone();
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::Receipt(receipt),
+        &none,
+        NOW + 2,
+    );
+    assert_eq!(file, before, "a forgotten group takes no receipt");
+    // Forgetting it again: no such group.
+    assert_eq!(file.forget(&gid(), NOW + 3), Err(GroupError::NotFound));
+    // The admin takes the leave (a roster without this profile), then adds
+    // it again: a new invitation, and the old message is a duplicate.
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::State(roster(1, &[2], 2)),
+        &none,
+        NOW + 4,
+    );
+    assert_eq!(group(&file).status, STATUS_FORGOTTEN);
+    apply(
+        &mut file,
+        &me,
+        &key(1),
+        &GroupFrame::State(roster(1, &[2, 3], 3)),
+        &none,
+        NOW + 5,
+    );
+    assert_eq!(group(&file).status, STATUS_ACTIVE);
+    assert_eq!(find_in(&file, "team"), Ok(gid()));
+    apply(
+        &mut file,
+        &me,
+        &key(2),
+        &GroupFrame::Msg(old),
+        &none,
+        NOW + 6,
+    );
+    assert!(group(&file).messages.is_empty(), "still a duplicate");
+}
+
+/// G2: only a group this profile left or was removed from (or a dead one)
+/// can be forgotten; one it is still in is `GROUP_STILL_MEMBER`.
+#[test]
+fn only_a_group_left_removed_or_dead_can_be_forgotten() {
+    let mut file = joined(3, &roster(1, &[2, 3], 1));
+    assert_eq!(file.forget(&gid(), NOW), Err(GroupError::StillMember));
+    assert_eq!(GroupError::StillMember.code(), "GROUP_STILL_MEMBER");
+    assert_eq!(file.groups[0].status, STATUS_ACTIVE);
+    file.groups[0].status = STATUS_REMOVED.into();
+    file.forget(&gid(), NOW).unwrap();
+    assert!(
+        file.groups[0].left_seen_out,
+        "a removal was a roster without it"
+    );
+    // The admin's own group with nobody else in it is dead.
+    let mut own = joined(1, &roster(1, &[], 1));
+    own.forget(&gid(), NOW).unwrap();
+    assert!(own.groups[0].is_forgotten());
 }
 
 // ------------------------------------------------------------------ messages
@@ -1208,6 +1429,54 @@ fn ingest_reads_this_profiles_key_and_asks_raven_node_for_work() {
     assert_eq!(list(d).unwrap()[0].unread, 0);
 }
 
+/// G2 on disk: with every place taken (8 admins' 8 groups each), a new
+/// group of this profile is refused, still after it left one of them (a
+/// group left keeps its history and its place), and made once it forgot
+/// that group; the forgotten group is in no list and no operation, and its
+/// invitation again does not bring it back.
+#[test]
+fn create_succeeds_after_leave_and_forget() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann")]);
+    let mut groups = Vec::new();
+    for admin in 10..10 + store::MAX_GROUPS / store::MAX_GROUPS_PER_ADMIN {
+        for n in 0..store::MAX_GROUPS_PER_ADMIN {
+            let state = roster_salted(admin as u8, &[3], [n as u8; 16]);
+            let frame = GroupFrame::State(state.clone());
+            assert!(ingest(d, &key(admin as u8), &frame, NOW).unwrap());
+            groups.push(state);
+        }
+    }
+    assert_eq!(list(d).unwrap().len(), store::MAX_GROUPS);
+    let members = [(key(1), "Ann".to_owned())];
+    let full = create(d, &id(3), "Mine", &members, NOW).unwrap_err();
+    assert_eq!(full.code(), "GROUP_TOO_LARGE", "{full:?}");
+    let left = groups[0].group;
+    leave(d, &id(3), &left, NOW + 1).unwrap();
+    assert!(
+        create(d, &id(3), "Mine", &members, NOW + 2).is_err(),
+        "a group left still holds its place"
+    );
+    forget(d, &left, NOW + 3).unwrap();
+    let mine = create(d, &id(3), "Mine", &members, NOW + 4).unwrap();
+    assert!(view(d, &mine).unwrap().summary.i_am_admin);
+    assert_eq!(list(d).unwrap().len(), store::MAX_GROUPS);
+    assert_eq!(view(d, &left), Err(GroupError::NotFound));
+    assert_eq!(history(d, &left, None, 10), Err(GroupError::NotFound));
+    assert_eq!(send(d, &id(3), &left, "x", NOW), Err(GroupError::NotFound));
+    assert_eq!(forget(d, &left, NOW + 5), Err(GroupError::NotFound));
+    // Its invitation again (an old frame): it stays forgotten.
+    let again = GroupFrame::State(groups[0].clone());
+    assert!(ingest(d, &key(10), &again, NOW + 6).unwrap());
+    assert_eq!(view(d, &left), Err(GroupError::NotFound));
+    assert_eq!(list(d).unwrap().len(), store::MAX_GROUPS);
+}
+
 // ------------------------------------------------------------------ vector
 
 /// `shared-vectors/rvn1/group/group_v1_001.json`: a roster and a message
@@ -1484,29 +1753,185 @@ fn an_old_message_replayed_later_is_refused() {
     assert!(group(&file).messages.is_empty());
 }
 
-/// A group whose `seen` is full of keys still inside the horizon takes no
-/// new message (never forget one that could be replayed).
+/// G4: a group's room for message keys is shared by author (512 each, its
+/// messages kept and its keys seen): with `seen` full of one author's keys,
+/// another author's message is still stored, while the full author's next
+/// message is refused (`refused`: not stored, not counted as dropped, so it
+/// is not ACKed and comes again) until its keys expire.
 #[test]
-fn a_full_seen_list_refuses_new_messages_until_keys_expire() {
+fn an_authors_full_share_refuses_only_its_messages_until_its_keys_expire() {
     let me = key(3);
     let none = HashSet::new();
-    let mut file = joined(3, &roster(1, &[2, 3], 1));
+    let mut file = joined(3, &roster(1, &[2, 3, 4], 1));
+    let flooder = hex::encode(key(2));
     for i in 0..store::MAX_SEEN_PER_GROUP {
-        file.groups[0].seen.push(&format!("k{i}"), "", NOW);
+        file.groups[0]
+            .seen
+            .push(&flooder, &format!("{i:032x}"), NOW);
     }
-    let m = msg_with_id(1, 1, "hello", [0x01; 16], &[]);
-    apply(
+    let other = msg_with_id(4, 1, "from 4", [0x04; 16], &[]);
+    let done = apply(&mut file, &me, &key(4), &GroupFrame::Msg(other), &none, NOW);
+    assert_eq!(
+        group(&file).messages.len(),
+        1,
+        "another author's message is stored"
+    );
+    assert!(!done.refused);
+    let dropped = file.dropped;
+    let full = msg_with_id(2, 1, "from 2", [0x02; 16], &[]);
+    let done = apply(
         &mut file,
         &me,
-        &key(1),
-        &GroupFrame::Msg(m.clone()),
+        &key(2),
+        &GroupFrame::Msg(full.clone()),
         &none,
         NOW,
     );
-    assert!(group(&file).messages.is_empty());
-    file.groups[0].seen.trim_front(10);
-    apply(&mut file, &me, &key(1), &GroupFrame::Msg(m), &none, NOW);
-    assert_eq!(group(&file).messages.len(), 1);
+    assert!(done.refused, "the full author's message is not handled");
+    assert_eq!(group(&file).messages.len(), 1, "and not stored");
+    assert_eq!(file.dropped, dropped, "nor dropped (it comes again)");
+    // Its share counts its messages kept too: an author with 512 messages
+    // in the group and no key seen is full as well.
+    let mut kept = joined(3, &roster(1, &[2, 3, 4], 1));
+    for n in 0..store::MAX_SEEN_PER_AUTHOR {
+        kept.groups[0]
+            .messages
+            .push(stored_msg(n, &key(2), "kept", NOW));
+    }
+    let done = apply(
+        &mut kept,
+        &me,
+        &key(2),
+        &GroupFrame::Msg(full.clone()),
+        &none,
+        NOW,
+    );
+    assert!(done.refused);
+    // Once its keys expire, the author's new message is taken.
+    let later = NOW + store::REPLAY_HORIZON_MS + 1_000;
+    let mut fresh = msg_with_id(2, 1, "from 2 later", [0x22; 16], &[]);
+    fresh.sent_ms = later;
+    fresh.sign(&id(2));
+    let done = apply(
+        &mut file,
+        &me,
+        &key(2),
+        &GroupFrame::Msg(fresh),
+        &none,
+        later,
+    );
+    assert!(!done.refused);
+    assert_eq!(group(&file).messages.len(), 2);
+}
+
+/// G4 on disk: with `seen` full of one author's keys, another author's
+/// message is stored and handled (`ingest` is `Ok(true)`: ACKed), and the
+/// full author's message is refused: not stored, not counted, and not
+/// reported handled (`Ok(false)`: no ACK, so its sender sends it again).
+#[test]
+fn a_flood_of_one_authors_keys_refuses_only_that_author_and_sends_no_ack() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    assert!(ingest(
+        d,
+        &key(1),
+        &GroupFrame::State(roster(1, &[2, 3, 4], 1)),
+        NOW
+    )
+    .unwrap());
+    let flooder = hex::encode(key(2));
+    store::edit(d, |f| {
+        for i in 0..store::MAX_SEEN_PER_GROUP {
+            f.groups[0].seen.push(&flooder, &format!("{i:032x}"), NOW);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let other = msg_with_id(4, 1, "from 4", [0x04; 16], &[]);
+    let handled = ingest(d, &key(4), &GroupFrame::Msg(other), NOW + 1).unwrap();
+    let after = store::load(d).unwrap();
+    assert_eq!(
+        after.groups[0].messages.len(),
+        1,
+        "another author's message is stored"
+    );
+    assert!(handled, "and handled (ACKed)");
+    let full = msg_with_id(2, 1, "from 2", [0x02; 16], &[]);
+    let handled = ingest(d, &key(2), &GroupFrame::Msg(full), NOW + 2).unwrap();
+    assert!(
+        !handled,
+        "the full author's message is not reported handled"
+    );
+    let last = store::load(d).unwrap();
+    assert_eq!(last.groups[0].messages.len(), 1, "and not stored");
+    assert_eq!(last.dropped, after.dropped);
+}
+
+/// G4 pending: frames refused for lack of room stay behind their ACK
+/// intents, and every prune pass takes them again
+/// (`app_channel::ingest_pending_committed`, through [`deliver_pending`]):
+/// all of them in one read of the store, whatever their number, so one
+/// member's flood past its share cannot make each pass read the store once
+/// per frame. Only the other author's message is handled.
+#[test]
+fn pending_frames_are_taken_again_in_one_read_of_the_store() {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Admin")]);
+    let state = GroupFrame::State(roster(1, &[2, 3, 4], 1));
+    assert!(ingest(d, &key(1), &state, NOW).unwrap());
+    let flooder = hex::encode(key(2));
+    store::edit(d, |f| {
+        for i in 0..store::MAX_SEEN_PER_AUTHOR {
+            f.groups[0].seen.push(&flooder, &format!("{i:032x}"), NOW);
+        }
+        Ok(())
+    })
+    .unwrap();
+    // Ids none of the keys above has (those are 0 to 511 in hex).
+    let flood: Vec<GroupFrame> = (1..=40u8)
+        .map(|n| GroupFrame::Msg(msg_with_id(2, 1, "again", [n; 16], &[])))
+        .collect();
+    let other = GroupFrame::Msg(msg_with_id(4, 1, "from 4", [0xee; 16], &[]));
+    let mut items: Vec<(Key, &GroupFrame, u64)> =
+        flood.iter().map(|f| (key(2), f, NOW + 1)).collect();
+    items.push((key(4), &other, NOW + 1));
+    let reads = store::reads_for_tests();
+    let handled = ingest_all(d, &items).unwrap();
+    assert_eq!(store::reads_for_tests() - reads, 1, "one read of the store");
+    assert_eq!(handled, 1, "only the other author's message is handled");
+    let file = store::load(d).unwrap();
+    assert_eq!(file.groups[0].messages.len(), 1);
+    assert_eq!(file.dropped, 0);
+    assert_eq!(ingest_all(d, &[]).unwrap(), 0);
+}
+
+/// G4 bound: a group's `seen` over its size loses the keys of authors who
+/// are no member first (here a former member's), then the author holding
+/// the most loses the key sent first; a member's key still inside the
+/// horizon stays.
+#[test]
+fn a_full_seen_list_loses_former_members_keys_first() {
+    let mut file = joined(3, &roster(1, &[2, 3, 4], 1));
+    let g = &mut file.groups[0];
+    let member = hex::encode(key(2));
+    let former = hex::encode(key(9));
+    for i in 0..store::MAX_SEEN_PER_AUTHOR {
+        g.seen.push(&member, &format!("{i:032x}"), NOW);
+    }
+    for i in 0..store::MAX_SEEN_PER_GROUP {
+        g.seen
+            .push(&former, &format!("{i:032x}"), NOW + i as u64 * 1_000);
+    }
+    file.enforce_caps();
+    let g = &file.groups[0];
+    assert_eq!(g.seen.len(), store::MAX_SEEN_PER_GROUP);
+    assert_eq!(g.seen.count_by(&member, NOW), store::MAX_SEEN_PER_AUTHOR);
+    assert!(g.has_seen(&member, &format!("{:032x}", 0)));
+    // The former member's keys sent first went.
+    assert!(!g.has_seen(&former, &format!("{:032x}", 0)));
+    assert!(g.has_seen(&former, &format!("{:032x}", store::MAX_SEEN_PER_GROUP - 1)));
 }
 
 /// One author's waiting forwards are bounded and the 512-intent cap drops
@@ -1853,8 +2278,9 @@ fn sealed_size(file: &GroupsFile) -> u64 {
 /// A store with every count bound full and the largest entries: 64 groups
 /// of the largest roster, 64 of the largest held frames each (32 more for
 /// groups not known yet), every intent, done marker, answer, removal and
-/// copy, 8,192 seen keys a group (the older layout), and more of the
-/// largest messages than the count bound.
+/// copy, 8,192 seen keys a group (the older layout), more of the largest
+/// messages than the count bound, and every forgotten group kept with all
+/// the seen keys they keep.
 fn full_store() -> GroupsFile {
     let me = key(3);
     let admin = key(1);
@@ -1866,12 +2292,23 @@ fn full_store() -> GroupsFile {
         let state = largest_roster(admin, me, [g as u8; 16]);
         file.groups.push(store::GroupRecord::new(&state, NOW));
     }
+    for g in 0..store::MAX_FORGOTTEN {
+        let state = largest_roster(admin, me, [(store::MAX_GROUPS + g) as u8; 16]);
+        let mut rec = store::GroupRecord::new(&state, NOW);
+        rec.status = STATUS_LEFT.into();
+        rec.forget(NOW + g as u64);
+        file.groups.push(rec);
+    }
     let author = "ab".repeat(32);
-    let seen: Vec<(usize, Vec<String>)> = (0..store::MAX_GROUPS)
+    let forgotten_keys = store::MAX_FORGOTTEN_SEEN / store::MAX_FORGOTTEN;
+    let seen: Vec<(usize, Vec<String>)> = (0..store::MAX_GROUPS + store::MAX_FORGOTTEN)
         .map(|g| {
-            let keys = (0..store::MAX_SEEN_PER_GROUP)
-                .map(|i| format!("{author}/{i:032x}@{NOW}"))
-                .collect();
+            let n = if g < store::MAX_GROUPS {
+                store::MAX_SEEN_PER_GROUP
+            } else {
+                forgotten_keys
+            };
+            let keys = (0..n).map(|i| format!("{author}/{i:032x}@{NOW}")).collect();
             (g, keys)
         })
         .collect();
@@ -1898,7 +2335,7 @@ fn full_store() -> GroupsFile {
         via: store::VIA_DIRECT.into(),
         state: LINE_DELIVERED.into(),
     };
-    for (g, rec) in file.groups.iter_mut().enumerate() {
+    for (g, rec) in file.groups.iter_mut().take(store::MAX_GROUPS).enumerate() {
         rec.held = (0..store::MAX_HELD_PER_GROUP)
             .map(|i| store::Held {
                 frame: frame.clone(),
@@ -1998,15 +2435,21 @@ fn a_store_at_every_count_cap_reads_back_after_the_edit() {
     })
     .unwrap();
     let file = store::load(d).expect("the store reads back");
-    assert_eq!(file.groups.len(), store::MAX_GROUPS);
+    assert_eq!(file.groups.len(), store::MAX_GROUPS + store::MAX_FORGOTTEN);
     assert!(on_disk(d) <= store::STORE_BUDGET_BYTES, "{}", on_disk(d));
-    // A message from the admin: its group has no room for another key
-    // yet, so it is dropped and counted, and `ingest` is Ok (ACKed).
+    // A message from the admin goes in: its group's seen keys are another
+    // author's, and the bounds make room for it in the store.
     let mut m = msg(1, 1, "after the edit", &[]);
     m.group = super::group_id_for(&key(1), &[0; 16]);
     m.sign(&id(1));
-    ingest(d, &key(1), &GroupFrame::Msg(m), NOW + 1).unwrap();
-    assert_eq!(store::load(d).unwrap().dropped, file.dropped + 1);
+    assert!(ingest(d, &key(1), &GroupFrame::Msg(m), NOW + 1).unwrap());
+    let after = store::load(d).unwrap();
+    assert_eq!(after.dropped, file.dropped);
+    assert!(after.groups[0]
+        .messages
+        .iter()
+        .any(|m| m.body == "after the edit"));
+    assert!(on_disk(d) <= store::STORE_BUDGET_BYTES, "{}", on_disk(d));
 }
 
 /// G1 on disk: an edit that would grow the store past the read cap leaves a
@@ -2038,11 +2481,12 @@ fn the_store_on_disk_stays_readable_after_any_edit() {
     assert_eq!(file.groups.len(), 31);
     let size = std::fs::metadata(store::groups_path(d)).unwrap().len();
     assert!(size <= crate::at_rest::MAX_SEALED_FILE_BYTES, "{size}");
-    // A roster for one more group goes in.
+    // A roster for one more group goes in (another admin's: admin 1 holds
+    // more active groups than its share already).
     ingest(
         d,
-        &key(1),
-        &GroupFrame::State(roster_salted(1, &[3], [0xf0; 16])),
+        &key(2),
+        &GroupFrame::State(roster_salted(2, &[3], [0xf0; 16])),
         NOW,
     )
     .unwrap();
@@ -2311,12 +2755,60 @@ fn seen_keys_are_written_compactly_and_read_from_the_older_layout() {
     assert!(g.has_seen(&from, &format!("{:032x}", store::MAX_SEEN_PER_GROUP - 1)));
     assert!(!g.has_seen(&from, &format!("{:032x}", store::MAX_SEEN_PER_GROUP)));
     assert!(!g.has_seen(&hex::encode(key(4)), &format!("{:032x}", 0)));
-    assert!(g.seen_full());
+    // Read with their author: they are that author's share.
+    assert_eq!(g.seen.count_by(&from, NOW), store::MAX_SEEN_PER_GROUP);
+    assert_eq!(g.seen.count_by(&hex::encode(key(4)), NOW), 0);
     let bytes = serde_json::to_vec_pretty(&file).unwrap();
     let per_key = (bytes.len() - base) / store::MAX_SEEN_PER_GROUP;
     assert!(per_key <= 24, "{per_key} bytes per seen key");
     let back: GroupsFile = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(back, file);
+    assert!(back.groups[0].has_seen(&from, &format!("{:032x}", 7)));
+}
+
+/// A seen key as layout 2 wrote it: the first 12 bytes of SHA-256 over the
+/// domain and `<from>/<id>`, then the second it was sent.
+fn layout_2_key(from: &str, id: &str, sent_ms: u64) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let domain = b"rvn1/group-seen";
+    let mut h = Sha256::new();
+    h.update((domain.len() as u16).to_be_bytes());
+    h.update(domain);
+    h.update(format!("{from}/{id}").as_bytes());
+    let digest = h.finalize();
+    let mut key = [0u8; 16];
+    key[..12].copy_from_slice(&digest[..12]);
+    key[12..].copy_from_slice(&u32::try_from(sent_ms.div_ceil(1000)).unwrap().to_be_bytes());
+    key
+}
+
+/// G4 layout: seen keys of layout 2 (no author kept) are read: each is
+/// still known by its author and id, counts for no author's share, and is
+/// written back in the current layout, still known.
+#[test]
+fn seen_keys_of_layout_2_are_read_and_still_known() {
+    use base64::Engine;
+    let file = joined(3, &roster(1, &[2, 3], 1));
+    let from = hex::encode(key(2));
+    let keys: Vec<u8> = (0..300)
+        .flat_map(|i| layout_2_key(&from, &format!("{i:032x}"), NOW))
+        .collect();
+    let chunk = format!(
+        "v2:{}",
+        base64::engine::general_purpose::STANDARD.encode(keys)
+    );
+    let mut value = serde_json::to_value(&file).unwrap();
+    value["v"] = serde_json::json!(2);
+    value["groups"][0]["seen"] = serde_json::json!([chunk]);
+    let read: GroupsFile = serde_json::from_value(value).unwrap();
+    let g = &read.groups[0];
+    assert_eq!(g.seen.len(), 300);
+    assert!(g.has_seen(&from, &format!("{:032x}", 299)));
+    assert!(!g.has_seen(&from, &format!("{:032x}", 300)));
+    assert_eq!(g.seen.count_by(&from, NOW), 0, "no author kept");
+    let text = serde_json::to_string(&read).unwrap();
+    assert!(text.contains("\"v3:"), "written in the current layout");
+    let back: GroupsFile = serde_json::from_str(&text).unwrap();
     assert!(back.groups[0].has_seen(&from, &format!("{:032x}", 7)));
 }
 
@@ -2480,8 +2972,9 @@ fn the_byte_measures_bound_what_entries_take_in_the_file() {
 }
 
 /// G1 layout: a store of the older layout on disk is read as it is, and
-/// its next edit writes layout 2 (seen keys compact) with every key kept.
-/// `seen` stays a list of strings, so an older build still reads the file.
+/// its next edit writes the current layout (seen keys compact, with their
+/// author) with every key kept. `seen` stays a list of strings, so an older
+/// build still reads the file.
 #[test]
 fn an_older_store_on_disk_is_converted_on_its_next_edit() {
     let dir = profile(3);
@@ -2516,13 +3009,14 @@ fn an_older_store_on_disk_is_converted_on_its_next_edit() {
     assert_eq!(raw["v"], serde_json::json!(store::STORE_VERSION));
     let older: Vec<String> = serde_json::from_value(raw["groups"][0]["seen"].clone()).unwrap();
     assert_eq!(older.len(), 2, "300 keys in two strings");
-    assert!(older.iter().all(|s| s.starts_with("v2:")));
+    assert!(older.iter().all(|s| s.starts_with("v3:")));
     let back = store::load(d).unwrap();
     assert_eq!(back.groups[0].messages.len(), 1);
     assert_eq!(back.groups[0].seen.len(), 300);
     for i in [0, 7, 299] {
         assert!(back.groups[0].has_seen(&author, &format!("{i:032x}")));
     }
+    assert_eq!(back.groups[0].seen.count_by(&author, NOW), 300);
 }
 
 /// G1 repair in a sealed profile: an RMS1 store past the read cap is opened

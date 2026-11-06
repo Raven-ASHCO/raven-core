@@ -123,8 +123,16 @@ The *carrier peer* `P` is the identity of the session-bound certificate of
 the session the copy arrived on. Ingest is idempotent: a frame seen again
 changes nothing and is still ACKed. An invalid frame (a bad signature, a
 stranger, a removed member) is ACKed and dropped, never shown. So is a
-frame the receiver has no room to store (§4.3): it is counted, not taken
-later.
+frame the receiver has no room to store in bytes (§4.3): it is counted, not
+taken later.
+
+**Refused, not ACKed.** A verified frame refused only for lack of room by
+the limits below (a `state` past its admin's share of active groups or the
+receiver's 64 groups; a `msg` past its author's share of the group's
+remembered ids) is not stored and **not ACKed**: the receiver does not
+count it as handled, its endpoint row stays, and the sender's copy keeps
+waiting and is sent again until its horizon, so it is taken once there is
+room. Its author sees that copy as not delivered meanwhile (§5).
 
 **`state`**: verified under `admin`, with `group` the id of `admin` and
 `salt` (§1). For an unknown group it is accepted
@@ -132,7 +140,13 @@ only when `P` is `admin` and the receiver is in `members`. For a known group
 `admin` must equal the group's admin and `epoch` must be newer than the
 roster held; then it replaces it. A receiver not in the new `members` stops
 taking and sending messages for the group. An equal epoch with other bytes
-is ignored.
+is ignored. A receiver holds at most 8 active groups of one admin and 64
+groups in all (active, left or removed); an invitation past either, or a
+roster that would make a group of an admin at 8 active again, is refused
+(not ACKed, above). A group the receiver forgot keeps its id, epoch and
+remembered ids: an older or equal epoch is ignored, and only a roster
+naming the receiver after one that did not is a new invitation (as for a
+group it left).
 
 **`msg`**: accepted when the group is known and active, `from` is in the
 roster held, the signature verifies under `from` and the pair (`from`,
@@ -140,9 +154,13 @@ roster held, the signature verifies under `from` and the pair (`from`,
 another author's message with the same `id` is a different message), and
 `sent_ms` is within the last 7 days (the message horizon) and at most one
 day ahead of the receiver's clock. A receiver keeps the (`from`, `id`) of
-every message it took until its `sent_ms` is 7 days old (at most 8,192 per
-group; a group at that many takes no new message until some expire), so a
-message cannot be replayed as new. When `from` is not in the roster but `epoch` is newer than the
+every message it took until its `sent_ms` is 7 days old, so a message
+cannot be replayed as new. Each author has a share of 512 per group (its
+messages kept and its ids remembered, while their `sent_ms` is within the 7
+days): a `msg` from an author at its share is refused (not ACKed, above)
+until some of its ids expire, and every other author's messages are still
+taken. A group remembers at most 8,192 ids (16 authors' shares); over it,
+the ids of authors who are no member go first. When `from` is not in the roster but `epoch` is newer than the
 roster and the signature verifies under `from`, the frame is held (§4.3). A
 frame for an unknown group is held too, also only when its signature
 verifies under `from`.
@@ -197,7 +215,10 @@ not fit is ACKed and dropped (§4.2).
   those friends, else in every copy.
 - Only the admin sends `state`; it adds only its own friends.
 - Every copy is an ordinary indexed-session Message with the 7-day message
-  horizon; the pairwise ACK of a copy is that member's delivery receipt.
+  horizon; the pairwise ACK of a copy is that member's delivery receipt. A
+  receiver that refuses a copy for lack of room (§4.2) sends no ACK, so the
+  copy stays waiting and is sent again; it is never shown as delivered
+  before the receiver took it.
 
 ## 6. Compatibility
 
@@ -205,6 +226,9 @@ not fit is ACKed and dropped (§4.2).
   `RVNGRP/1`. Groups are lab-only.
 - Chat text that starts with `RVNGRP/` is refused by the composers.
 - `RVNGRP/2` and later are reserved (deferred by v1 receivers).
+- The frames and their bytes are unchanged by the limits of §4.2: a
+  receiver that refuses a copy for lack of room leaves it un-ACKed, and a
+  sender of any version sends it again as it does any copy not ACKed.
 
 ## 7. Error codes
 

@@ -376,8 +376,14 @@ fn the_older_messages_hint_names_the_group_by_its_whole_id() {
         return;
     }
     let _lab = Lab::on();
-    let admin = Identity::from_seed(&[0xA1; 32]);
-    let (dir, me) = profile(&[("Ana", &admin)]);
+    // One admin's active groups here are capped
+    // (`raven_core::group::store::MAX_GROUPS_PER_ADMIN`, 8), so the names
+    // go to two admins.
+    let admins = [
+        Identity::from_seed(&[0xA1; 32]),
+        Identity::from_seed(&[0xA2; 32]),
+    ];
+    let (dir, me) = profile(&[("Ana", &admins[0]), ("Bo", &admins[1])]);
     let d = dir.path();
     let names = [
         "Book club $(touch pwned)",
@@ -397,8 +403,9 @@ fn the_older_messages_hint_names_the_group_by_its_whole_id() {
     ];
     for (n, name) in names.into_iter().enumerate() {
         let tag = n as u8 + 1;
-        let id = admin_group(d, &admin, &me, [tag; 16], name);
-        admin_says(d, &admin, &id, tag, 21);
+        let admin = &admins[n % admins.len()];
+        let id = admin_group(d, admin, &me, [tag; 16], name);
+        admin_says(d, admin, &id, tag, 21);
         let shown = plain(
             &cmd_group(
                 d,
@@ -520,4 +527,67 @@ fn show_all_lists_every_message() {
     let every = show(true);
     assert!(every.contains("messages (23):"), "{every}");
     assert!(every.contains("you: walk 0 (sent "), "{every}");
+}
+
+/// G2: `raven group forget` parses, refuses a group you are still in, and
+/// takes a group you left off this computer: it leaves the list and every
+/// command, and its old roster coming again does not bring it back.
+#[test]
+fn forget_takes_a_group_you_left_off_this_computer() {
+    use clap::Parser as _;
+    for argv in [
+        &["raven", "group", "forget", "Hikers"][..],
+        &["raven", "group", "forget", "Hikers", "--yes"],
+    ] {
+        assert!(super::super::Cli::try_parse_from(argv).is_ok(), "{argv:?}");
+    }
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let admin = Identity::from_seed(&[0xA7; 32]);
+    let (dir, me) = profile(&[("Ana", &admin)]);
+    let d = dir.path();
+    admin_group(d, &admin, &me, [0x61; 16], "Hikers");
+    let forget = |yes: bool| {
+        cmd_group(
+            d,
+            GroupArg::Forget {
+                group: "hikers".into(),
+                yes,
+            },
+        )
+    };
+    let err = forget(true).unwrap_err();
+    assert!(err.contains("GROUP_STILL_MEMBER"), "{err}");
+    assert!(err.contains("raven group leave"), "{err}");
+    cmd_group(
+        d,
+        GroupArg::Leave {
+            group: "hikers".into(),
+            yes: true,
+        },
+    )
+    .unwrap();
+    let out = plain(&forget(true).unwrap());
+    assert_eq!(
+        out,
+        "ok Hikers is forgotten on this computer; the other members are not told"
+    );
+    let listed = plain(&cmd_group(d, GroupArg::List).unwrap());
+    assert!(!listed.contains("Hikers"), "{listed}");
+    let err = cmd_group(
+        d,
+        GroupArg::Show {
+            group: "hikers".into(),
+            all: false,
+        },
+    )
+    .unwrap_err();
+    assert!(err.contains("GROUP_NOT_FOUND"), "{err}");
+    assert!(forget(true).unwrap_err().contains("GROUP_NOT_FOUND"));
+    // The admin's old roster again: it stays forgotten.
+    admin_group(d, &admin, &me, [0x61; 16], "Hikers");
+    let listed = plain(&cmd_group(d, GroupArg::List).unwrap());
+    assert!(!listed.contains("Hikers"), "{listed}");
 }

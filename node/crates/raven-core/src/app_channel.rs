@@ -539,13 +539,16 @@ pub fn generation() -> u64 {
 
 /// §7.3: every committed app row reaches the app inbox. Ingests the app rows
 /// behind pending ACK intents (normally none: the receive path ACKs only after
-/// ingest). Chat rows are left to their own paths. Returns rows stored.
+/// ingest), and the group rows, all in one read of the group store (a group
+/// frame refused for lack of room stays pending until its sender sends it
+/// again). Chat rows are left to their own paths. Returns rows stored.
 pub fn ingest_pending_committed(data_dir: &Path, now_ms: u64) -> Result<usize, String> {
     let mut sessions = IndexedSessionStore::open(data_dir).map_err(|e| e.redacted_display())?;
     let intents = sessions
         .pending_endpoint_ack_intents()
         .map_err(|e| e.redacted_display())?;
     let mut stored = 0;
+    let mut groups = Vec::new();
     for intent in intents {
         let Some(key) = sessions
             .record_key_for_session_id(&intent.session_id)
@@ -564,16 +567,12 @@ pub fn ingest_pending_committed(data_dir: &Path, now_ms: u64) -> Result<usize, S
             now_ms
         };
         if let PayloadClass::Group(frame) = classify(&row.plaintext) {
-            if crate::group::deliver(
-                data_dir,
-                &mut sessions,
-                &key,
-                &row.sender_device,
-                &frame,
-                received,
-            )? {
-                stored += 1;
-            }
+            groups.push(crate::group::PendingFrame {
+                key,
+                sender_device: row.sender_device,
+                frame: *frame,
+                at_ms: received,
+            });
             continue;
         }
         if let PayloadClass::App(frame) = classify(&row.plaintext) {
@@ -591,6 +590,7 @@ pub fn ingest_pending_committed(data_dir: &Path, now_ms: u64) -> Result<usize, S
             }
         }
     }
+    stored += crate::group::deliver_pending(data_dir, &mut sessions, &groups)?;
     Ok(stored)
 }
 

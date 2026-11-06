@@ -188,3 +188,66 @@ fn a_blocked_friends_message_never_arrives_and_clear_empties_the_chat() {
         "{history}"
     );
 }
+
+/// G2: `groups.forget` takes a group this profile left off this device: it
+/// leaves `groups.list`, `groups.get` is GROUP_NOT_FOUND, and its old roster
+/// coming again does not bring it back; a group still joined is
+/// GROUP_STILL_MEMBER. No raven-node needed.
+#[test]
+fn a_left_group_is_forgotten_and_its_old_roster_does_not_bring_it_back() {
+    use raven_core::group::{self, GroupFrame, GroupState, Member};
+    let a = Peer::new("Fgt A");
+    let me = group::local_identity_key(&a.path).expect("a device certificate");
+    let admin = raven_core::identity::Identity::from_seed(&[0x5a; 32]);
+    let salt = [0x21; 16];
+    let now = raven_core::clock::now_ms();
+    let mut state = GroupState {
+        group: group::group_id_for(&admin.public_key_bytes(), &salt),
+        salt,
+        epoch: 1,
+        name: "Trail".into(),
+        admin: admin.public_key_bytes(),
+        issued_ms: now,
+        members: vec![
+            Member {
+                key: admin.public_key_bytes(),
+                label: String::new(),
+            },
+            Member {
+                key: me,
+                label: String::new(),
+            },
+        ],
+        sig: [0; 64],
+    };
+    state.sign(&admin);
+    let frame = GroupFrame::State(state.clone());
+    assert!(group::ingest(&a.path, &admin.public_key_bytes(), &frame, now).unwrap());
+    let id = hex::encode(state.group);
+    let listed = |p: &Peer| -> Vec<String> {
+        p.ok("groups.list", json!({}))["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g["id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(listed(&a), std::slice::from_ref(&id));
+    let still = a.err("groups.forget", json!({"group": id}));
+    assert_eq!(still, "GROUP_STILL_MEMBER");
+    // Left as `groups.leave` leaves it (without the kick that would start a
+    // raven-node).
+    let (identity, _) = raven_core::load_or_create_profile_identity(&a.path).unwrap();
+    group::leave(&a.path, &identity, &state.group, now + 1).unwrap();
+    let forgot = a.ok("groups.forget", json!({"group": id}));
+    assert_eq!(forgot, json!({"group": id, "forgotten": true}));
+    assert!(listed(&a).is_empty());
+    assert_eq!(a.err("groups.get", json!({"group": id})), "GROUP_NOT_FOUND");
+    assert_eq!(
+        a.err("groups.forget", json!({"group": id})),
+        "GROUP_NOT_FOUND"
+    );
+    // Its roster again: it stays forgotten.
+    assert!(group::ingest(&a.path, &admin.public_key_bytes(), &frame, now + 2).unwrap());
+    assert!(listed(&a).is_empty());
+}

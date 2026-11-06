@@ -34,6 +34,7 @@ fn groups_are_not_available_while_their_gate_is_closed() {
         ("groups.add", json!({"group": group, "members": []})),
         ("groups.remove", json!({"group": group, "member": "rvn1x"})),
         ("groups.leave", json!({"group": group})),
+        ("groups.forget", json!({"group": group})),
         ("groups.history", json!({"group": group})),
         ("groups.send", json!({"group": group, "text": "hi"})),
         ("groups.mark_read", json!({"group": group})),

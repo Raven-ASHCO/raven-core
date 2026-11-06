@@ -271,6 +271,7 @@ impl Inner {
             "groups.add" => |me, args| me.groups_add(args),
             "groups.remove" => |me, args| me.groups_remove(args),
             "groups.leave" => |me, args| me.groups_leave(args),
+            "groups.forget" => |me, args| me.groups_forget(args),
             "groups.history" => |me, args| me.groups_history(args),
             "groups.send" => |me, args| me.groups_send(args),
             "groups.mark_read" => |me, args| me.groups_mark_read(args),

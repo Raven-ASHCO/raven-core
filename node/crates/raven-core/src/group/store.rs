@@ -20,7 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::wire::{hex_n, StateWire};
+use super::wire::{hex_n, MemberWire, StateWire};
 use super::{GroupError, GroupId, GroupState, Key};
 use crate::at_rest::{self, Kind};
 
@@ -36,14 +36,30 @@ pub const GROUPS_LOCK: &str = ".at_rest.groups.lock.sqlite";
 /// under it; a write that would pass it anyway sheds held frames, done
 /// markers and intents first, and is refused when that is not enough.
 pub const STORE_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
-/// The layout written: 2 keeps seen keys compactly ([`SeenKeys`]); a store
-/// of layout 1 is read and converted.
-pub const STORE_VERSION: u32 = 2;
+/// The layout written: 3 keeps seen keys compactly, each with a tag of its
+/// author ([`SeenKeys`]); a store of layout 1 or 2 is read and converted.
+pub const STORE_VERSION: u32 = 3;
 /// A store over the read cap (only an older build could write one) is read
 /// once with this cap and repaired ([`load`]).
 const REPAIR_READ_CAP: u64 = 2 * at_rest::MAX_SEALED_FILE_BYTES;
 
+/// Groups kept here, active, left or removed (a forgotten one holds no
+/// place): an invitation past it is refused (not ACKed, so it comes
+/// again), and so is a new group of this profile ([`GroupError::TooManyGroups`]).
+/// [`forget`] frees a place.
 pub const MAX_GROUPS: usize = 64;
+/// Active groups of one admin: its next invitation (or a roster that would
+/// make one of its groups active again) is refused, not ACKed, until one of
+/// them is left; so one friend cannot take every place. Other admins'
+/// invitations are not affected.
+pub const MAX_GROUPS_PER_ADMIN: usize = 8;
+/// Forgotten groups kept ([`forget`]): their ids, epochs and seen keys, so
+/// their old frames do not bring them back. Over it, the one forgotten
+/// first goes for good.
+pub const MAX_FORGOTTEN: usize = 64;
+/// Seen keys the forgotten groups keep in all (8 groups' worth): over it,
+/// the group forgotten first loses its keys first.
+pub const MAX_FORGOTTEN_SEEN: usize = 8 * MAX_SEEN_PER_GROUP;
 pub const MAX_MESSAGES_TOTAL: usize = 2_000;
 /// Messages kept across groups, by the bytes they take in the store
 /// ([`StoredMsg::stored_bytes`]). Over this or [`MAX_MESSAGES_TOTAL`], the
@@ -53,9 +69,19 @@ pub const MAX_MESSAGES_TOTAL: usize = 2_000;
 pub const MAX_MESSAGE_BYTES_TOTAL: usize = 8 * 1024 * 1024;
 /// Message keys kept per group after their messages left `messages`
 /// ([`GroupRecord::seen`]): each until its message is older than
-/// [`REPLAY_HORIZON_MS`]. A group at this many takes no new message until
-/// some expire: a message that could still be replayed is never forgotten.
+/// [`REPLAY_HORIZON_MS`]. Every member's share ([`MAX_SEEN_PER_AUTHOR`])
+/// fits; over it, the keys of authors who are no member go first (this
+/// profile's own, former members'), so a message a member could still
+/// replay is not forgotten ([`SeenKeys::trim_to`]).
 pub const MAX_SEEN_PER_GROUP: usize = 8_192;
+/// One author's share of a group's room for message keys: its messages kept
+/// here and its keys seen, each until its message is older than
+/// [`REPLAY_HORIZON_MS`]. An author at its share has its next message
+/// refused (not stored and not ACKed, so its sender sends it again later)
+/// until some of its keys expire; every other author's messages are still
+/// taken.
+pub const MAX_SEEN_PER_AUTHOR: usize = 512;
+const _: () = assert!(MAX_SEEN_PER_AUTHOR * super::MAX_GROUP_MEMBERS <= MAX_SEEN_PER_GROUP);
 /// A message whose `sent_ms` is older than this is refused (an old signed
 /// message replayed after its id was forgotten is not taken as new); the
 /// message horizon (7 days).
@@ -92,6 +118,13 @@ pub const WORK_TTL_MS: u64 = crate::horizon::MESSAGE_HORIZON_MS;
 pub const STATUS_ACTIVE: &str = "active";
 pub const STATUS_REMOVED: &str = "removed";
 pub const STATUS_LEFT: &str = "left";
+/// Forgotten on this device ([`forget`]): in no list and no operation,
+/// holding no place; what tells its frames apart stays (its id, admin,
+/// epoch, seen keys). Like a group left, a roster naming this profile after
+/// one that did not is a new invitation.
+pub const STATUS_FORGOTTEN: &str = "forgotten";
+/// The name a forgotten group's roster keeps (its own goes).
+const FORGOTTEN_NAME: &str = "forgotten";
 
 pub const LINE_WAITING: &str = "waiting";
 pub const LINE_SENT: &str = "sent";
@@ -394,6 +427,8 @@ fn read_locked(
     lock: &at_rest::FileLock,
     path: &Path,
 ) -> Result<(GroupsFile, bool), GroupError> {
+    #[cfg(test)]
+    READS_FOR_TESTS.with(|n| n.set(n.get() + 1));
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => {
             if meta.len() > at_rest::MAX_SEALED_FILE_BYTES {
@@ -468,6 +503,14 @@ fn fitted(
 #[cfg(test)]
 thread_local! {
     static BUDGET_FOR_TESTS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static READS_FOR_TESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How often this thread read the store to change it (the group tests count
+/// the reads an ingest makes).
+#[cfg(test)]
+pub(crate) fn reads_for_tests() -> usize {
+    READS_FOR_TESTS.with(std::cell::Cell::get)
 }
 
 /// The group tests lower the budget on their thread (`None`: the real one).
@@ -506,6 +549,41 @@ impl GroupsFile {
         self.groups.iter_mut().find(|g| g.id == hex)
     }
 
+    /// Group `id` as this profile's own operations and views see it: a
+    /// forgotten group is not there (the receive rules still see it).
+    pub fn shown(&self, id: &GroupId) -> Option<&GroupRecord> {
+        self.group(id).filter(|g| !g.is_forgotten())
+    }
+
+    /// [`GroupsFile::shown`], to change.
+    pub fn shown_mut(&mut self, id: &GroupId) -> Option<&mut GroupRecord> {
+        self.group_mut(id).filter(|g| !g.is_forgotten())
+    }
+
+    /// The places taken ([`MAX_GROUPS`]): every group but the forgotten.
+    pub fn places_used(&self) -> usize {
+        self.groups.iter().filter(|g| !g.is_forgotten()).count()
+    }
+
+    /// The active groups of `admin` here ([`MAX_GROUPS_PER_ADMIN`]).
+    pub fn active_of(&self, admin: &Key) -> usize {
+        let hex = hex::encode(admin);
+        self.groups
+            .iter()
+            .filter(|g| g.is_active() && g.state.admin == hex)
+            .count()
+    }
+
+    /// [`forget`] on the file.
+    pub fn forget(&mut self, id: &GroupId, now_ms: u64) -> Result<(), GroupError> {
+        let g = self.shown_mut(id).ok_or(GroupError::NotFound)?;
+        if !g.can_forget() {
+            return Err(GroupError::StillMember);
+        }
+        g.forget(now_ms);
+        Ok(())
+    }
+
     /// A copy parked by this profile.
     pub fn note_copy(&mut self, mid: &str) {
         self.copies.push(mid.to_owned());
@@ -533,12 +611,17 @@ impl GroupsFile {
     /// Every bound of design §6, each with its unit of fairness, so one
     /// friend's groups or frames only push out their own: messages across
     /// groups (by admin, the oldest first, its key remembered), held frames
-    /// (by carrier), intents and done markers (by admin), ids seen, rosters'
-    /// side lists. Together they keep the store under
-    /// [`STORE_BUDGET_BYTES`].
+    /// (by carrier), intents and done markers (by admin), ids seen (by
+    /// author, members last), rosters' side lists, forgotten groups. Together
+    /// they keep the store under [`STORE_BUDGET_BYTES`].
     pub fn enforce_caps(&mut self) {
         self.trim_messages(MAX_MESSAGES_TOTAL, MAX_MESSAGE_BYTES_TOTAL);
+        self.trim_forgotten(MAX_FORGOTTEN, MAX_FORGOTTEN_SEEN);
         for g in &mut self.groups {
+            if g.seen.len() > MAX_SEEN_PER_GROUP {
+                let members = g.member_tags(&self.me);
+                g.seen.trim_to(MAX_SEEN_PER_GROUP, &members);
+            }
             trim_held(
                 &mut [&mut g.held],
                 MAX_HELD_PER_GROUP,
@@ -629,6 +712,32 @@ impl GroupsFile {
             drop_intents(g, &order[..n]);
         }
         shed
+    }
+
+    /// Forgotten groups over `max` go for good, the one forgotten first
+    /// first; while they keep more than `max_seen` keys in all, the group
+    /// forgotten first loses its keys first.
+    fn trim_forgotten(&mut self, max: usize, max_seen: usize) {
+        let order = forgotten_order(&self.groups);
+        if order.len() > max {
+            let gone: HashSet<usize> = order[..order.len() - max].iter().copied().collect();
+            let mut at = 0;
+            self.groups.retain(|_| {
+                at += 1;
+                !gone.contains(&(at - 1))
+            });
+        }
+        let order = forgotten_order(&self.groups);
+        let mut kept: usize = order.iter().map(|&i| self.groups[i].seen.len()).sum();
+        for i in order {
+            if kept <= max_seen {
+                break;
+            }
+            let seen = &mut self.groups[i].seen;
+            let n = (kept - max_seen).min(seen.len());
+            seen.drop_first(n);
+            kept -= n;
+        }
     }
 
     fn held_bytes(&self) -> usize {
@@ -813,6 +922,15 @@ fn trim_held(lists: &mut [&mut Vec<Held>], max_count: usize, max_bytes: usize) -
     shed
 }
 
+/// The forgotten groups' indexes, the one forgotten first first.
+fn forgotten_order(groups: &[GroupRecord]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..groups.len())
+        .filter(|&i| groups[i].is_forgotten())
+        .collect();
+    order.sort_by_key(|&i| (groups[i].updated_ms, i));
+    order
+}
+
 /// Each group's unit of fairness: its admin, so all the groups one friend
 /// made count together (a friend can make many groups, but is one admin).
 fn admin_units(groups: &[GroupRecord]) -> Vec<usize> {
@@ -967,46 +1085,94 @@ impl Intent {
 
 // ------------------------------------------------------------------ seen keys
 
-/// One seen key: 12 bytes of its digest, then the second its message was
-/// sent (rounded up, big endian).
+/// One seen key (layout 3): its author's tag, a digest of its author and
+/// id, then the second its message was sent (rounded up, big endian).
 const SEEN_KEY_BYTES: usize = 16;
-const SEEN_DIGEST_BYTES: usize = 12;
+const SEEN_TAG_BYTES: usize = 6;
+/// Where the digest ends and the second starts.
+const SEEN_TIME_AT: usize = 12;
 /// Keys per written string.
 const SEEN_CHUNK: usize = 256;
-/// What starts a written string of keys (a key in the older layout holds
-/// no `:`).
-const SEEN_CHUNK_PREFIX: &str = "v2:";
+/// What starts a written string of keys (a key of layout 1 holds no `:`).
+const SEEN_CHUNK_PREFIX: &str = "v3:";
+/// What starts a string of layout 2 (12 bytes of the digest a key, no
+/// author).
+const SEEN_CHUNK_PREFIX_2: &str = "v2:";
 const SEEN_DOMAIN: &[u8] = b"rvn1/group-seen";
+const SEEN_AUTHOR_DOMAIN: &[u8] = b"rvn1/group-seen-author";
+/// The tag of a key read from layout 2, which kept no author: it counts for
+/// no author's share and matches its digest whoever the author.
+const NO_AUTHOR: AuthorTag = [0; SEEN_TAG_BYTES];
+
+/// An author's tag in [`SeenKeys`].
+pub(crate) type AuthorTag = [u8; SEEN_TAG_BYTES];
+
+fn seen_hash(domain: &[u8], text: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update((domain.len() as u16).to_be_bytes());
+    h.update(domain);
+    h.update(text.as_bytes());
+    h.finalize().into()
+}
+
+/// The tag of author `from` (hex) in [`SeenKeys`]: the first 6 bytes of
+/// SHA-256 over a domain and the author, never [`NO_AUTHOR`].
+pub(crate) fn author_tag(from: &str) -> AuthorTag {
+    let mut tag = NO_AUTHOR;
+    tag.copy_from_slice(&seen_hash(SEEN_AUTHOR_DOMAIN, from)[..SEEN_TAG_BYTES]);
+    if tag == NO_AUTHOR {
+        tag[SEEN_TAG_BYTES - 1] = 1;
+    }
+    tag
+}
 
 /// [`GroupRecord::seen`]: the messages that left `messages`, oldest first,
 /// each kept until it is older than [`REPLAY_HORIZON_MS`]. A key is 16
-/// bytes: the first 12 of SHA-256 over a domain and [`seen_key`] (its author
-/// and id), then the second it was sent, rounded up. Written as strings of
-/// up to [`SEEN_CHUNK`] keys in base64 after `v2:` (about 21 bytes a key);
-/// strings of the older layout (`<author>/<id>@<sent_ms>`, one key each,
-/// about 120 bytes) are read and converted. An older build reading this
-/// layout drops the `v2:` strings as keys without a time.
+/// bytes: its author's tag ([`author_tag`]), the first 6 bytes of SHA-256
+/// over a domain and [`seen_key`] (its author and id), then the second it
+/// was sent, rounded up. A message is known by its author's tag and its
+/// digest, and an author's keys count toward its share
+/// ([`MAX_SEEN_PER_AUTHOR`]). Written as strings of up to [`SEEN_CHUNK`]
+/// keys in base64 after `v3:` (about 21 bytes a key). Strings of layout 2
+/// (`v2:`, keys of 12 digest bytes and no author) are read as keys of no
+/// author, which match their digest whoever the author; strings of layout 1
+/// (`<author>/<id>@<sent_ms>`, one key each, about 120 bytes) are read with
+/// their author; both are converted. An older build reading this layout
+/// drops the `v3:` strings as keys it cannot read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SeenKeys(Vec<[u8; SEEN_KEY_BYTES]>);
 
 impl SeenKeys {
-    fn key(key: &str, sent_ms: u64) -> [u8; SEEN_KEY_BYTES] {
-        let mut h = Sha256::new();
-        h.update((SEEN_DOMAIN.len() as u16).to_be_bytes());
-        h.update(SEEN_DOMAIN);
-        h.update(key.as_bytes());
-        let digest = h.finalize();
+    fn key(from: &str, id: &str, sent_ms: u64) -> [u8; SEEN_KEY_BYTES] {
+        let digest = seen_hash(SEEN_DOMAIN, &seen_key(from, id));
+        Self::compose(&author_tag(from), &digest, sent_ms)
+    }
+
+    fn compose(tag: &AuthorTag, digest: &[u8], sent_ms: u64) -> [u8; SEEN_KEY_BYTES] {
         let second = u32::try_from(sent_ms.div_ceil(1000)).unwrap_or(u32::MAX);
         let mut out = [0u8; SEEN_KEY_BYTES];
-        out[..SEEN_DIGEST_BYTES].copy_from_slice(&digest[..SEEN_DIGEST_BYTES]);
-        out[SEEN_DIGEST_BYTES..].copy_from_slice(&second.to_be_bytes());
+        out[..SEEN_TAG_BYTES].copy_from_slice(tag);
+        out[SEEN_TAG_BYTES..SEEN_TIME_AT].copy_from_slice(&digest[..SEEN_TIME_AT - SEEN_TAG_BYTES]);
+        out[SEEN_TIME_AT..].copy_from_slice(&second.to_be_bytes());
         out
+    }
+
+    fn tag(key: &[u8; SEEN_KEY_BYTES]) -> AuthorTag {
+        let mut tag = NO_AUTHOR;
+        tag.copy_from_slice(&key[..SEEN_TAG_BYTES]);
+        tag
     }
 
     fn sent_ms(key: &[u8; SEEN_KEY_BYTES]) -> u64 {
         let mut second = [0u8; 4];
-        second.copy_from_slice(&key[SEEN_DIGEST_BYTES..]);
+        second.copy_from_slice(&key[SEEN_TIME_AT..]);
         u64::from(u32::from_be_bytes(second)) * 1000
+    }
+
+    /// Its message could still be taken: sent less than
+    /// [`REPLAY_HORIZON_MS`] before `now_ms`.
+    fn fresh(key: &[u8; SEEN_KEY_BYTES], now_ms: u64) -> bool {
+        now_ms < Self::sent_ms(key).saturating_add(REPLAY_HORIZON_MS)
     }
 
     pub fn len(&self) -> usize {
@@ -1019,34 +1185,117 @@ impl SeenKeys {
 
     /// Note message `id` by `from` (both hex), sent at `sent_ms`.
     pub fn push(&mut self, from: &str, id: &str, sent_ms: u64) {
-        self.0.push(Self::key(&seen_key(from, id), sent_ms));
+        self.0.push(Self::key(from, id, sent_ms));
     }
 
     /// Whether message `id` by `from` (both hex) is noted.
     pub fn contains(&self, from: &str, id: &str) -> bool {
-        let digest = Self::key(&seen_key(from, id), 0);
+        let want = Self::key(from, id, 0);
+        self.0.iter().any(|k| {
+            k[SEEN_TAG_BYTES..SEEN_TIME_AT] == want[SEEN_TAG_BYTES..SEEN_TIME_AT]
+                && (k[..SEEN_TAG_BYTES] == want[..SEEN_TAG_BYTES]
+                    || k[..SEEN_TAG_BYTES] == NO_AUTHOR)
+        })
+    }
+
+    /// The keys of author `from` (hex) whose messages could still be taken.
+    pub fn count_by(&self, from: &str, now_ms: u64) -> usize {
+        let tag = author_tag(from);
         self.0
             .iter()
-            .any(|k| k[..SEEN_DIGEST_BYTES] == digest[..SEEN_DIGEST_BYTES])
+            .filter(|k| k[..SEEN_TAG_BYTES] == tag && Self::fresh(k, now_ms))
+            .count()
     }
 
     /// Keys of messages that could still be taken stay: sent less than
     /// [`REPLAY_HORIZON_MS`] before `now_ms`.
     pub fn retain_fresh(&mut self, now_ms: u64) {
-        self.0
-            .retain(|k| now_ms < Self::sent_ms(k).saturating_add(REPLAY_HORIZON_MS));
+        self.0.retain(|k| Self::fresh(k, now_ms));
     }
 
-    /// The newest `max` keys stay.
-    pub fn trim_front(&mut self, max: usize) {
-        trim_front(&mut self.0, max);
+    /// The first `n` keys noted go.
+    pub(crate) fn drop_first(&mut self, n: usize) {
+        self.0.drain(..n.min(self.0.len()));
     }
 
-    /// A key of the older layout, `<author>/<id>@<sent_ms>`; `None` without
-    /// a time (an older store's entry, which expiry dropped).
+    /// Keys over `max` go: first those of authors `members` does not name
+    /// (this profile's own messages, former members', keys of layout 2),
+    /// then any; each time, the author holding the most loses the key whose
+    /// message was sent first. Every member's share fits in
+    /// [`MAX_SEEN_PER_GROUP`], so a member's key goes only from a group
+    /// holding more than its members' shares.
+    pub(crate) fn trim_to(&mut self, max: usize, members: &HashSet<AuthorTag>) {
+        if self.0.len() <= max {
+            return;
+        }
+        let over = self.0.len() - max;
+        let gone = self.trim_where(over, |tag| !members.contains(tag));
+        if gone < over {
+            self.trim_where(over - gone, |_| true);
+        }
+    }
+
+    /// `over` keys of the authors `which` takes go, by water filling over
+    /// those authors (the one holding the most loses the key sent first).
+    /// Returns how many went.
+    fn trim_where(&mut self, over: usize, which: impl Fn(&AuthorTag) -> bool) -> usize {
+        let mut unit_of: HashMap<AuthorTag, usize> = HashMap::new();
+        let mut slots: Vec<Vec<usize>> = Vec::new();
+        for (i, k) in self.0.iter().enumerate() {
+            let tag = Self::tag(k);
+            if !which(&tag) {
+                continue;
+            }
+            let unit = *unit_of.entry(tag).or_insert_with(|| {
+                slots.push(Vec::new());
+                slots.len() - 1
+            });
+            slots[unit].push(i);
+        }
+        for slot in &mut slots {
+            slot.sort_by_key(|&i| (Self::sent_ms(&self.0[i]), i));
+        }
+        let held: usize = slots.iter().map(Vec::len).sum();
+        let sizes: Vec<Vec<usize>> = slots
+            .iter()
+            .map(|s| vec![SEEN_KEY_BYTES; s.len()])
+            .collect();
+        let units: Vec<usize> = (0..slots.len()).collect();
+        let gone = water_fill(&sizes, &units, held.saturating_sub(over), usize::MAX);
+        let mut out = vec![false; self.0.len()];
+        let mut n = 0;
+        for (slot, count) in slots.iter().zip(gone) {
+            for &i in &slot[..count] {
+                out[i] = true;
+                n += 1;
+            }
+        }
+        let mut at = 0;
+        self.0.retain(|_| {
+            at += 1;
+            !out[at - 1]
+        });
+        n
+    }
+
+    /// A key of layout 2 (12 bytes of the digest, then the second), kept as
+    /// a key of no author.
+    fn from_layout_2(key: &[u8; SEEN_KEY_BYTES]) -> [u8; SEEN_KEY_BYTES] {
+        let mut out = [0u8; SEEN_KEY_BYTES];
+        out[SEEN_TAG_BYTES..SEEN_TIME_AT].copy_from_slice(&key[..SEEN_TIME_AT - SEEN_TAG_BYTES]);
+        out[SEEN_TIME_AT..].copy_from_slice(&key[SEEN_TIME_AT..]);
+        out
+    }
+
+    /// A key of layout 1, `<author>/<id>@<sent_ms>`; `None` without a time
+    /// (an older store's entry, which expiry dropped).
     fn parse_older(entry: &str) -> Option<[u8; SEEN_KEY_BYTES]> {
         let (key, at) = entry.rsplit_once('@')?;
-        Some(Self::key(key, at.parse::<u64>().ok()?))
+        let sent_ms = at.parse::<u64>().ok()?;
+        Some(match key.split_once('/') {
+            Some((from, id)) => Self::key(from, id, sent_ms),
+            None => Self::compose(&NO_AUTHOR, &seen_hash(SEEN_DOMAIN, key), sent_ms),
+        })
     }
 }
 
@@ -1069,25 +1318,33 @@ impl Serialize for SeenKeys {
 }
 
 impl<'de> Deserialize<'de> for SeenKeys {
-    /// Strings of either layout; one that is neither is left out (a lost
-    /// key only lets its message be taken as new, while a store that does
-    /// not read stops every group).
+    /// Strings of any layout; one that is none is left out (a lost key only
+    /// lets its message be taken as new, while a store that does not read
+    /// stops every group).
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use base64::Engine;
         let entries = Vec::<String>::deserialize(deserializer)?;
         let mut keys = Vec::new();
         for entry in &entries {
-            if let Some(chunk) = entry.strip_prefix(SEEN_CHUNK_PREFIX) {
-                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(chunk) else {
-                    continue;
-                };
-                let (whole, rest) = bytes.as_chunks::<SEEN_KEY_BYTES>();
-                if !rest.is_empty() {
-                    continue;
-                }
+            let (chunk, layout_2) = if let Some(chunk) = entry.strip_prefix(SEEN_CHUNK_PREFIX) {
+                (chunk, false)
+            } else if let Some(chunk) = entry.strip_prefix(SEEN_CHUNK_PREFIX_2) {
+                (chunk, true)
+            } else {
+                keys.extend(Self::parse_older(entry));
+                continue;
+            };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(chunk) else {
+                continue;
+            };
+            let (whole, rest) = bytes.as_chunks::<SEEN_KEY_BYTES>();
+            if !rest.is_empty() {
+                continue;
+            }
+            if layout_2 {
+                keys.extend(whole.iter().map(Self::from_layout_2));
+            } else {
                 keys.extend_from_slice(whole);
-            } else if let Some(key) = Self::parse_older(entry) {
-                keys.push(key);
             }
         }
         Ok(SeenKeys(keys))
@@ -1142,6 +1399,10 @@ impl GroupRecord {
         self.status == STATUS_ACTIVE
     }
 
+    pub fn is_forgotten(&self) -> bool {
+        self.status == STATUS_FORGOTTEN
+    }
+
     /// Whether message `id` by `from` (both hex) is known here: a message is
     /// known by its author and its id, so a member who sends another author's
     /// message id first cannot have the real message dropped as a duplicate
@@ -1150,9 +1411,71 @@ impl GroupRecord {
         self.messages.iter().any(|m| m.id == id && m.from == from) || self.seen.contains(from, id)
     }
 
-    /// No room for another message key ([`MAX_SEEN_PER_GROUP`]).
-    pub fn seen_full(&self) -> bool {
-        self.seen.len() >= MAX_SEEN_PER_GROUP
+    /// What author `from` (hex) holds of this group's room for message keys
+    /// ([`MAX_SEEN_PER_AUTHOR`]): its messages kept here and its keys seen,
+    /// each while its message could still be taken (sent less than
+    /// [`REPLAY_HORIZON_MS`] before `now_ms`). A message that leaves
+    /// `messages` leaves its key in `seen`, so the share stays the same.
+    pub fn author_share(&self, from: &str, now_ms: u64) -> usize {
+        let fresh = |sent_ms: u64| now_ms < sent_ms.saturating_add(REPLAY_HORIZON_MS);
+        self.messages
+            .iter()
+            .filter(|m| m.from == from && fresh(m.sent_ms))
+            .count()
+            + self.seen.count_by(from, now_ms)
+    }
+
+    /// The seen-key tags of the roster's members but `me` (hex): the keys
+    /// [`SeenKeys::trim_to`] keeps longest.
+    fn member_tags(&self, me: &str) -> HashSet<AuthorTag> {
+        self.roster()
+            .map(|r| {
+                r.members
+                    .iter()
+                    .map(|m| hex::encode(m.key))
+                    .filter(|k| k != me)
+                    .map(|k| author_tag(&k))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// [`forget`] takes it: this profile left it or was removed, or it is
+    /// dead (its roster unreadable, or no member but its admin).
+    pub fn can_forget(&self) -> bool {
+        !self.is_active() || self.roster().is_none_or(|r| r.members.len() <= 1)
+    }
+
+    /// [`forget`]'s change: its messages go (their keys stay seen), and so
+    /// do its held frames, done markers, answers and removals; its roster
+    /// keeps only what tells its frames apart (id, salt, admin, epoch, time).
+    /// Intents still waiting stay (a leave still reaches the admin). A group
+    /// this profile was removed from had a roster without it, so the next
+    /// one with it is a new invitation.
+    pub(crate) fn forget(&mut self, now_ms: u64) {
+        for m in std::mem::take(&mut self.messages) {
+            self.seen.push(&m.from, &m.id, m.sent_ms);
+        }
+        self.held.clear();
+        self.done.clear();
+        self.answered.clear();
+        self.removed.clear();
+        if self.status == STATUS_REMOVED {
+            self.left_seen_out = true;
+        }
+        self.status = STATUS_FORGOTTEN.into();
+        self.state = forgotten_roster(&self.state);
+        self.updated_ms = now_ms;
+        self.read_ms = now_ms;
+        self.sync_ms = 0;
+    }
+
+    /// A newer roster `state` that leaves a forgotten group forgotten: only
+    /// what tells its frames apart moves on, and whether a roster without
+    /// this profile came.
+    pub(crate) fn keep_forgotten(&mut self, state: &GroupState, left_seen_out: bool) {
+        self.state = forgotten_roster(&StateWire::from(state));
+        self.left_seen_out = left_seen_out;
     }
 
     pub fn was_removed(&self, key: &Key) -> bool {
@@ -1190,10 +1513,11 @@ impl GroupRecord {
             self.intents
                 .retain(|i| !(i.kind == INTENT_SEND && mine.contains(i.line_of.as_str())));
         }
+        // Their keys stay seen (the store's bounds keep `seen` to its size
+        // when it is written).
         for m in &gone {
             self.seen.push(&m.from, &m.id, m.sent_ms);
         }
-        self.seen.trim_front(MAX_SEEN_PER_GROUP);
         let counts = (gone.len(), kept.len());
         self.messages = kept;
         counts
@@ -1214,6 +1538,25 @@ impl GroupRecord {
         {
             change(line);
         }
+    }
+}
+
+/// What a forgotten group keeps of its roster `state`: what tells its
+/// frames apart (its id, salt, admin, epoch and time), no name, no label,
+/// no member but the admin, no signature (it is never sent).
+fn forgotten_roster(state: &StateWire) -> StateWire {
+    StateWire {
+        group: state.group.clone(),
+        salt: state.salt.clone(),
+        epoch: state.epoch,
+        name: FORGOTTEN_NAME.into(),
+        admin: state.admin.clone(),
+        issued_ms: state.issued_ms,
+        members: vec![MemberWire {
+            key: state.admin.clone(),
+            label: String::new(),
+        }],
+        sig: hex::encode([0u8; 64]),
     }
 }
 
@@ -1358,6 +1701,7 @@ pub fn list(data_dir: &Path) -> Result<Vec<GroupSummary>, GroupError> {
     let mut out: Vec<GroupSummary> = file
         .groups
         .iter()
+        .filter(|g| !g.is_forgotten())
         .filter_map(|g| summary(g, me.as_ref()))
         .collect();
     out.sort_by(|a, b| b.last_ms.cmp(&a.last_ms).then_with(|| a.name.cmp(&b.name)));
@@ -1368,7 +1712,7 @@ pub fn list(data_dir: &Path) -> Result<Vec<GroupSummary>, GroupError> {
 pub fn view(data_dir: &Path, id: &GroupId) -> Result<GroupView, GroupError> {
     let file = load(data_dir)?;
     let me = me_of(&file, data_dir);
-    let g = file.group(id).ok_or(GroupError::NotFound)?;
+    let g = file.shown(id).ok_or(GroupError::NotFound)?;
     let roster = g.roster().ok_or(GroupError::NotFound)?;
     let names = super::friend_names(data_dir);
     let friends = super::friend_keys(data_dir);
@@ -1401,7 +1745,7 @@ pub fn history(
     limit: usize,
 ) -> Result<Vec<MessageView>, GroupError> {
     let file = load(data_dir)?;
-    let g = file.group(id).ok_or(GroupError::NotFound)?;
+    let g = file.shown(id).ok_or(GroupError::NotFound)?;
     let rows: Vec<&StoredMsg> = g
         .messages
         .iter()
@@ -1441,7 +1785,7 @@ pub fn history(
 /// Every message received up to `now_ms` is read.
 pub fn mark_read(data_dir: &Path, id: &GroupId, now_ms: u64) -> Result<usize, GroupError> {
     edit(data_dir, |file| {
-        let g = file.group_mut(id).ok_or(GroupError::NotFound)?;
+        let g = file.shown_mut(id).ok_or(GroupError::NotFound)?;
         let newest = g
             .messages
             .iter()
@@ -1469,9 +1813,23 @@ pub fn clear(
     include_pending: bool,
 ) -> Result<(usize, usize), GroupError> {
     edit(data_dir, |file| {
-        let g = file.group_mut(id).ok_or(GroupError::NotFound)?;
+        let g = file.shown_mut(id).ok_or(GroupError::NotFound)?;
         Ok(g.clear_messages(include_pending))
     })
+}
+
+/// Forget group `id` on this device: one this profile left or was
+/// removed from, or a dead one (its roster unreadable, or no member but its
+/// admin); a group this profile is still in is [`GroupError::StillMember`].
+/// It leaves every list and operation and frees its place
+/// ([`MAX_GROUPS`]); its messages go, their keys stay seen until they
+/// expire, and its id and epoch stay ([`STATUS_FORGOTTEN`]), so its old
+/// frames (a roster again, a message again) do not bring it back. As for a
+/// group left, a newer roster that names this profile after one that did
+/// not is a new invitation. Copies still on their way (a leave to the
+/// admin) go on. The other members are not told.
+pub fn forget(data_dir: &Path, id: &GroupId, now_ms: u64) -> Result<(), GroupError> {
+    edit(data_dir, |file| file.forget(id, now_ms))
 }
 
 /// The group `query` names: its whole id, the start of its id (at least 4
@@ -1488,17 +1846,12 @@ pub(crate) fn find_in(file: &GroupsFile, query: &str) -> Result<GroupId, GroupEr
         return Err(GroupError::NotFound);
     }
     let lower = q.to_ascii_lowercase();
-    let ids: Vec<GroupId> = file
-        .groups
-        .iter()
-        .filter_map(|g| hex_n::<16>(&g.id))
-        .collect();
+    let shown = || file.groups.iter().filter(|g| !g.is_forgotten());
+    let ids: Vec<GroupId> = shown().filter_map(|g| hex_n::<16>(&g.id)).collect();
     if let Some(id) = ids.iter().find(|id| hex::encode(id) == lower) {
         return Ok(*id);
     }
-    let by_name: Vec<GroupId> = file
-        .groups
-        .iter()
+    let by_name: Vec<GroupId> = shown()
         .filter(|g| g.state.name.to_lowercase() == q.to_lowercase())
         .filter_map(|g| hex_n::<16>(&g.id))
         .collect();

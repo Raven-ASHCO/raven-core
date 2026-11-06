@@ -9,7 +9,7 @@ use std::path::Path;
 use super::store::{
     self, hex_key, new_intent_id, Answered, GroupRecord, GroupsFile, Held, Intent, Line, StoredMsg,
     INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND, LINE_DELIVERED, LINE_FAILED, LINE_WAITING,
-    STATUS_ACTIVE, STATUS_LEFT, STATUS_REMOVED, VIA_DIRECT, VIA_RELAY,
+    STATUS_ACTIVE, STATUS_FORGOTTEN, STATUS_LEFT, STATUS_REMOVED, VIA_DIRECT, VIA_RELAY,
 };
 use super::{
     body_ok, group_live_enabled, name_ok, GroupError, GroupFrame, GroupId, GroupLeave, GroupMsg,
@@ -29,12 +29,36 @@ pub struct Applied {
     pub changed: bool,
     /// Intents were recorded (raven-node should scan).
     pub work: bool,
+    /// A verified frame there is no room for now (its author's share of the
+    /// group's seen keys, its admin's active groups, the places for groups):
+    /// not stored and not handled, so it is not ACKed and its sender sends
+    /// it again later (protocol §4.2).
+    pub refused: bool,
 }
 
 impl Applied {
+    /// The store changed; `work`: intents were recorded.
+    fn change(work: bool) -> Applied {
+        Applied {
+            changed: true,
+            work,
+            refused: false,
+        }
+    }
+
+    /// The other frames a frame brought in (held frames tried again) add
+    /// their change and work; whether they were refused is their own.
     fn merge(&mut self, other: Applied) {
         self.changed |= other.changed;
         self.work |= other.work;
+    }
+}
+
+/// A verified frame there is no room for now ([`Applied::refused`]).
+fn refused() -> Applied {
+    Applied {
+        refused: true,
+        ..Applied::default()
     }
 }
 
@@ -64,24 +88,55 @@ pub fn apply(
     now_ms: u64,
 ) -> Applied {
     file.expire(now_ms);
-    let mut done = match frame {
-        GroupFrame::State(s) => apply_state(file, me, peer, s, friends, now_ms),
-        GroupFrame::Msg(m) => apply_msg(file, me, peer, m, frame, friends, now_ms),
-        GroupFrame::Receipt(r) => apply_receipt(file, me, peer, r, friends, now_ms),
-        GroupFrame::Leave(l) => apply_leave(file, me, peer, l, now_ms),
-        GroupFrame::Sync(s) => apply_sync(file, me, peer, s, now_ms),
-    };
+    let mut done = apply_frame(file, me, peer, frame, friends, now_ms);
     // Expiry alone is a change worth saving too.
     done.changed = true;
     done
 }
 
+/// [`apply`] for several frames, each from its carrier peer at its own
+/// time: the store expires once (at the latest of those times), then each
+/// frame applies. Returns how many were handled (not refused) and whether
+/// intents were recorded.
+pub fn apply_all(
+    file: &mut GroupsFile,
+    me: &Key,
+    items: &[(Key, &GroupFrame, u64)],
+    friends: &HashSet<Key>,
+) -> (usize, bool) {
+    if let Some(latest) = items.iter().map(|(_, _, at_ms)| *at_ms).max() {
+        file.expire(latest);
+    }
+    let mut handled = 0;
+    let mut work = false;
+    for (peer, frame, now_ms) in items {
+        let done = apply_frame(file, me, peer, frame, friends, *now_ms);
+        handled += usize::from(!done.refused);
+        work |= done.work;
+    }
+    (handled, work)
+}
+
+fn apply_frame(
+    file: &mut GroupsFile,
+    me: &Key,
+    peer: &Key,
+    frame: &GroupFrame,
+    friends: &HashSet<Key>,
+    now_ms: u64,
+) -> Applied {
+    match frame {
+        GroupFrame::State(s) => apply_state(file, me, peer, s, friends, now_ms),
+        GroupFrame::Msg(m) => apply_msg(file, me, peer, m, frame, friends, now_ms),
+        GroupFrame::Receipt(r) => apply_receipt(file, me, peer, r, friends, now_ms),
+        GroupFrame::Leave(l) => apply_leave(file, me, peer, l, now_ms),
+        GroupFrame::Sync(s) => apply_sync(file, me, peer, s, now_ms),
+    }
+}
+
 fn dropped(file: &mut GroupsFile) -> Applied {
     file.dropped = file.dropped.saturating_add(1);
-    Applied {
-        changed: true,
-        work: false,
-    }
+    Applied::change(false)
 }
 
 /// Hold `frame` from the carrier `peer` (once per text; only a frame its
@@ -100,6 +155,25 @@ fn hold(list: &mut Vec<Held>, frame: &GroupFrame, peer: &Key, now_ms: u64) {
     });
 }
 
+/// A group's status after a newer roster that names this profile (`in_it`)
+/// or does not, and whether a roster without it came since it left (or
+/// forgot) the group: only then is a roster with it a new invitation.
+fn status_after(status: &str, left_seen_out: bool, in_it: bool) -> (&'static str, bool) {
+    let out = match status {
+        STATUS_LEFT => STATUS_LEFT,
+        STATUS_FORGOTTEN => STATUS_FORGOTTEN,
+        _ if in_it => return (STATUS_ACTIVE, left_seen_out),
+        _ => return (STATUS_REMOVED, left_seen_out),
+    };
+    if !in_it {
+        (out, true)
+    } else if left_seen_out {
+        (STATUS_ACTIVE, left_seen_out)
+    } else {
+        (out, false)
+    }
+}
+
 fn apply_state(
     file: &mut GroupsFile,
     me: &Key,
@@ -111,12 +185,21 @@ fn apply_state(
     if !state.verify() {
         return dropped(file);
     }
+    // Joining (an invitation, or a group this profile is not active in
+    // turning active again) is bounded by the admin's active groups and by
+    // the places: a roster past either is refused, so it is not ACKed
+    // and joins when it comes again once there is room.
+    let admin_full = file.active_of(&state.admin) >= store::MAX_GROUPS_PER_ADMIN;
+    let places_full = file.places_used() >= store::MAX_GROUPS;
     let mut done = Applied::default();
     match file.group_mut(&state.group) {
         None => {
             // An invitation comes from the admin itself, to a member.
-            if state.admin != *peer || !state.has(me) || file.groups.len() >= store::MAX_GROUPS {
+            if state.admin != *peer || !state.has(me) {
                 return dropped(file);
+            }
+            if admin_full || places_full {
+                return refused();
             }
             file.groups.push(GroupRecord::new(state, now_ms));
             done.changed = true;
@@ -128,14 +211,31 @@ fn apply_state(
             if state.admin != held.admin {
                 return dropped(file);
             }
+            let forgotten = g.is_forgotten();
             if state.epoch <= held.epoch {
-                if state.epoch == held.epoch && *state != held {
+                // A forgotten group keeps no roster to compare with.
+                if state.epoch == held.epoch && *state != held && !forgotten {
                     file.conflicts = file.conflicts.saturating_add(1);
                 }
-                return Applied {
-                    changed: true,
-                    work: false,
-                };
+                return Applied::change(false);
+            }
+            let in_it = state.has(me);
+            let (status, left_seen_out) = status_after(&g.status, g.left_seen_out, in_it);
+            if status == STATUS_ACTIVE
+                && !g.is_active()
+                && (admin_full || (forgotten && places_full))
+            {
+                return refused();
+            }
+            if status == STATUS_FORGOTTEN {
+                // Still forgotten: only what tells its frames apart moves on.
+                g.keep_forgotten(state, left_seen_out);
+                return Applied::change(false);
+            }
+            if forgotten {
+                // Back from forgotten: a new invitation.
+                g.joined_ms = now_ms;
+                g.read_ms = now_ms;
             }
             for gone in held.members.iter().filter(|m| !state.has(&m.key)) {
                 let hex = hex::encode(gone.key);
@@ -148,18 +248,8 @@ fn apply_state(
                 .retain(|k| hex_key(k).is_none_or(|k| !state.has(&k)));
             g.state = (state).into();
             g.updated_ms = now_ms;
-            let in_it = state.has(me);
-            g.status = match g.status.as_str() {
-                STATUS_LEFT if !in_it => {
-                    g.left_seen_out = true;
-                    STATUS_LEFT
-                }
-                STATUS_LEFT if g.left_seen_out => STATUS_ACTIVE,
-                STATUS_LEFT => STATUS_LEFT,
-                _ if in_it => STATUS_ACTIVE,
-                _ => STATUS_REMOVED,
-            }
-            .into();
+            g.status = status.into();
+            g.left_seen_out = left_seen_out;
             done.changed = true;
         }
     }
@@ -195,6 +285,13 @@ fn retry_held(
         };
         if let GroupFrame::Msg(m) = &frame {
             let mut d = apply_msg(file, me, &peer, m, &frame, friends, now_ms);
+            if d.refused {
+                // No room for its author yet: it waits again (it was ACKed
+                // when it was held).
+                if let Some(g) = file.group_mut(group) {
+                    hold(&mut g.held, &frame, &peer, now_ms);
+                }
+            }
             // Keep the original hold time, so a frame never outlives 7 days.
             if let Some(g) = file.group_mut(group) {
                 for again in g.held.iter_mut().filter(|x| x.frame == h.frame) {
@@ -226,10 +323,7 @@ fn apply_msg(
             return dropped(file);
         }
         hold(&mut file.unknown_held, frame, peer, now_ms);
-        return Applied {
-            changed: true,
-            work: false,
-        };
+        return Applied::change(false);
     };
     if !g.is_active() {
         return dropped(file);
@@ -249,10 +343,7 @@ fn apply_msg(
         // signed it; the roster will say whether the author is a member),
         // and ask the admin for it.
         hold(&mut g.held, frame, peer, now_ms);
-        let mut done = Applied {
-            changed: true,
-            work: false,
-        };
+        let mut done = Applied::change(false);
         if roster.admin != *me && now_ms >= g.sync_ms.saturating_add(SYNC_SPACING_MS) {
             g.sync_ms = now_ms;
             let sync = GroupFrame::Sync(GroupSync {
@@ -272,9 +363,14 @@ fn apply_msg(
     // cannot come back as new.
     if msg.sent_ms.saturating_add(store::REPLAY_HORIZON_MS) <= now_ms
         || msg.sent_ms > now_ms.saturating_add(store::MAX_FUTURE_SKEW_MS)
-        || g.seen_full()
     {
         return dropped(file);
+    }
+    // Its author's share of the group's room for message keys is full:
+    // refused, not ACKed, so it comes again once some of the author's keys
+    // expire; every other author's messages are still taken.
+    if g.author_share(&hex::encode(msg.from), now_ms) >= store::MAX_SEEN_PER_AUTHOR {
+        return refused();
     }
     let forwarded = *peer != msg.from;
     g.messages.push(StoredMsg {
@@ -297,10 +393,7 @@ fn apply_msg(
         path: crate::arrivals::current().map_or(String::new(), |v| v.token().to_owned()),
     });
     g.updated_ms = now_ms;
-    let mut done = Applied {
-        changed: true,
-        work: false,
-    };
+    let mut done = Applied::change(false);
     // A signed receipt goes only to a carrier that is a member (never a
     // membership oracle for anyone else holding an old message).
     if forwarded && roster.has(peer) {
@@ -366,6 +459,10 @@ fn apply_receipt(
     let Some(g) = file.group_mut(&r.group) else {
         return dropped(file);
     };
+    if g.is_forgotten() {
+        // Nothing of it is left to mark, and it stays as it was forgotten.
+        return Applied::default();
+    }
     let Some(roster) = g.roster() else {
         return dropped(file);
     };
@@ -377,10 +474,7 @@ fn apply_receipt(
         let member = hex::encode(r.from);
         g.set_line(&of, &member, |line| line.state = LINE_DELIVERED.into());
         g.updated_ms = now_ms;
-        return Applied {
-            changed: true,
-            work: false,
-        };
+        return Applied::change(false);
     }
     // Pass it on: only for its signer, to the author it names, once.
     if *peer != r.from
@@ -404,10 +498,7 @@ fn apply_receipt(
     let mut copy = r.clone();
     copy.relay.clear();
     g.push_intent(send_intent(&r.to, &GroupFrame::Receipt(copy), None, now_ms));
-    Applied {
-        changed: true,
-        work: true,
-    }
+    Applied::change(true)
 }
 
 fn apply_leave(
@@ -455,10 +546,7 @@ fn apply_leave(
         tries: 0,
         author: String::new(),
     });
-    Applied {
-        changed: true,
-        work: true,
-    }
+    Applied::change(true)
 }
 
 fn apply_sync(file: &mut GroupsFile, me: &Key, peer: &Key, s: &GroupSync, now_ms: u64) -> Applied {
@@ -483,10 +571,7 @@ fn apply_sync(file: &mut GroupsFile, me: &Key, peer: &Key, s: &GroupSync, now_ms
     g.answered.retain(|a| a.key != key);
     g.answered.push(Answered { key, at_ms: now_ms });
     g.push_intent(send_intent(peer, &GroupFrame::State(roster), None, now_ms));
-    Applied {
-        changed: true,
-        work: true,
-    }
+    Applied::change(true)
 }
 
 // ------------------------------------------------------------------ this profile's operations
@@ -571,8 +656,8 @@ pub fn create(
     let id = state.group;
     store::edit(data_dir, |file| {
         file.note_me(&me);
-        if file.groups.len() >= store::MAX_GROUPS {
-            return Err(GroupError::TooMany);
+        if file.places_used() >= store::MAX_GROUPS {
+            return Err(GroupError::TooManyGroups);
         }
         let mut g = GroupRecord::new(&state, now_ms);
         let to: Vec<Key> = state.members.iter().map(|m| m.key).collect();
@@ -597,7 +682,7 @@ fn change_roster(
     let me = identity.public_key_bytes();
     let state = store::edit(data_dir, |file| {
         file.note_me(&me);
-        let g = file.group_mut(group).ok_or(GroupError::NotFound)?;
+        let g = file.shown_mut(group).ok_or(GroupError::NotFound)?;
         let held = g.roster().ok_or(GroupError::NotFound)?;
         if held.admin != me {
             return Err(GroupError::NotAdmin);
@@ -741,7 +826,7 @@ pub fn leave(
     let me = identity.public_key_bytes();
     store::edit(data_dir, |file| {
         file.note_me(&me);
-        let g = file.group_mut(group).ok_or(GroupError::NotFound)?;
+        let g = file.shown_mut(group).ok_or(GroupError::NotFound)?;
         let held = g.roster().ok_or(GroupError::NotFound)?;
         if held.admin == me {
             return Err(GroupError::AdminCannotLeave);
@@ -808,7 +893,7 @@ pub fn send(
         .map_err(|e| GroupError::Store(e.to_string()))?;
     let (id, direct_n, relay_n) = store::edit(data_dir, |file| {
         file.note_me(&me);
-        let g = file.group_mut(group).ok_or(GroupError::NotFound)?;
+        let g = file.shown_mut(group).ok_or(GroupError::NotFound)?;
         let roster = g.roster().ok_or(GroupError::NotFound)?;
         if !g.is_active() || !roster.has(&me) {
             return Err(GroupError::NotMember);

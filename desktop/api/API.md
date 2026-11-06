@@ -132,6 +132,7 @@ changes. Fields marked `?` may be missing.
 | `groups.add` | `{group, members: [address]}` | `{group, members}` (admin only) |
 | `groups.remove` | `{group, member: address}` | `{group, members}` (admin only) |
 | `groups.leave` | `{group}` | `{group}` (not the admin) |
+| `groups.forget` | `{group}` | `{group, forgotten: true}` (a group you left or were removed from; see Groups) |
 | `groups.history` | `{group, before?: id, limit?}` | `{messages: [GroupMessage]}` (oldest first; `limit` default 100, at most 500) |
 | `groups.send` | `{group, text}` | `{message: GroupMessage, note?}` (returns at once; raven-node delivers each copy, started first when none runs; `note`: why it could not be asked to now, the copies wait) |
 | `groups.mark_read` | `{group}` | `{group: id, unread: 0}` |
@@ -229,7 +230,10 @@ raven-node).
 - **Members.** A group has at most 16 members, you included, and one admin (its creator) who alone
   adds and removes; the admin can't leave. Only your friends (`contacts.list`, not blocked) can be
   added. Joining is automatic: a group a friend adds you to appears in `groups.list` (with a
-  `group_changed` event); you can leave it.
+  `group_changed` event); you can leave it. You are in at most 8 groups of one admin at a time and
+  64 groups in all (left and removed ones count until forgotten): an invitation past either waits
+  on the admin's side and joins when it comes again once there is room; other admins' invitations
+  are not affected.
 - **Names.** `GroupMember.name` is your name for a member who is your friend, else the name the
   admin gave them (`label`); `friend: false` members are shown as "not your friend" and are never
   added to your friends by the group. You are `me: true` (name: your display name, else "You").
@@ -237,9 +241,17 @@ raven-node).
   `waiting` (still on this computer, or passed on by another member and not confirmed yet), `sent`
   (left this computer, no receipt yet), `delivered` (that member's Raven confirmed it: a signed
   receipt) or `failed` (given up). `delivered`/`total` give "Delivered to 3 of 5". `via: "relay"`
-  marks a member reached through another member.
+  marks a member reached through another member. A member's Raven takes at most 512 of one
+  author's messages a group within 7 days; past that it does not confirm the next copy, which
+  stays `sent` and is sent again until it is taken or its 7 days pass.
 - **Leaving and removal.** `status` is `left` after `groups.leave` and `removed` when the admin
   removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`.
+- **Forget** (`groups.forget`): a group you left or were removed from (or one with no other
+  member) goes from this computer: it leaves `groups.list`, its messages go, and its place is free
+  for another group; every op on it is then `GROUP_NOT_FOUND`. A group you are still in is
+  `GROUP_STILL_MEMBER` (leave it first). Its old messages and rosters do not bring it back; a newer
+  roster from its admin that adds you again is a new invitation. The other members are not told.
+  `raven group forget GROUP`.
 - **Read and unread.** `Group.unread` counts others' messages received after the group was last read
   on this computer (`groups.mark_read`, or `raven group show`). Local only.
 
@@ -759,7 +771,8 @@ Event     { seq, kind, at_ms, ... } kinds:
             "group_message" {group, message: GroupMessage}  a member's message came (after the
                                        first look)                                -> bubble in the group chat
             "group_changed" {group}  the group's members, status, unread count or a receipt changed
-                                       (also a group that appeared)               -> reload it (groups.get,
+                                       (also a group that appeared, and one forgotten: groups.get is
+                                       then GROUP_NOT_FOUND, drop it)             -> reload it (groups.get,
                                        and groups.history when it is open)
 ```
 
@@ -781,8 +794,9 @@ plain-English `message` that names one next step, never a terminal command (no a
 `raven`); the technical text, with the CLI's command where one helps, goes in `detail`.
 
 Groups add `GROUP_NOT_FOUND`, `GROUP_NOT_ADMIN` (only the admin adds and removes),
-`GROUP_NOT_MEMBER` (you left or were removed), `GROUP_TOO_LARGE` (more than 16 members),
-`GROUP_ADMIN_CANNOT_LEAVE`, `GROUP_ALREADY_MEMBER`, `GROUP_BAD_NAME`, `GROUP_QUEUE_FULL` (too many group
+`GROUP_NOT_MEMBER` (you left or were removed), `GROUP_TOO_LARGE` (more than 16 members, or 64
+groups: forget one you left), `GROUP_STILL_MEMBER` (only a group you left or were removed from can
+be forgotten), `GROUP_ADMIN_CANNOT_LEAVE`, `GROUP_ALREADY_MEMBER`, `GROUP_BAD_NAME`, `GROUP_QUEUE_FULL` (too many group
 copies still wait; try again once some are delivered) and `GROUP_NO_ROUTE` (none of the other members
 is your friend); a member who is not a friend is `NOT_A_CONTACT`, a message over 8,192 bytes
 `MESSAGE_TOO_LONG`.

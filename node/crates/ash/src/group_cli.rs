@@ -1,6 +1,6 @@
 //! Groups in the CLI (docs/design/2026-10-groups.md §8): `raven group
-//! create|add|remove|leave|clear|list|show|send`, and the group section of
-//! `raven inbox`.
+//! create|add|remove|leave|forget|clear|list|show|send`, and the group
+//! section of `raven inbox`.
 //!
 //! - **Held** by [`raven_core::group::GROUPS_PRODUCTION_ENABLED`] (false; a
 //!   debug build opens it with `RAVEN_LAB_TEST_A=1 RAVEN_LAB_HORIZON=1
@@ -40,6 +40,11 @@ pub(super) enum GroupArg {
         members: Vec<String>,
     },
     Leave {
+        group: String,
+        yes: bool,
+    },
+    /// Take a group you left (or were removed from) off this computer.
+    Forget {
         group: String,
         yes: bool,
     },
@@ -242,6 +247,32 @@ pub(super) fn cmd_group(data_dir: &Path, arg: GroupArg) -> Result<Vec<String>, S
             let mut lines = vec![format!("ok you left {name}; its admin is told")];
             lines.extend(kick(data_dir));
             Ok(lines)
+        }
+        GroupArg::Forget { group: g, yes } => {
+            let id = find(data_dir, &g)?;
+            let name = group::view(data_dir, &id).map_or_else(
+                |_| short(&id),
+                |view| sanitize_terminal_line(&view.summary.name),
+            );
+            if !yes {
+                if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+                    return Err(
+                        "forgetting a group needs --yes when stdin is not a terminal".into(),
+                    );
+                }
+                let question = format!(
+                    "Forget {name}? It goes from this computer with its messages, and its place \
+                     is free for another group. Copies of its old messages are still known, so \
+                     they do not bring it back. [y/N] "
+                );
+                if !super::custody_cli::said_yes(super::custody_cli::ask_on_terminal(&question)) {
+                    return Ok(vec!["nothing changed".into()]);
+                }
+            }
+            group::forget(data_dir, &id, now_ms()).map_err(|e| err_text(&e))?;
+            Ok(vec![format!(
+                "ok {name} is forgotten on this computer; the other members are not told"
+            )])
         }
         GroupArg::Clear { group: g, yes } => {
             let id = find(data_dir, &g)?;

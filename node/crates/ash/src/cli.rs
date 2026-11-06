@@ -675,7 +675,7 @@ enum Commands {
     ///
     ///   raven group remove "Book club" --member dan
     ///
-    ///   raven group leave "Book club"
+    ///   raven group leave "Book club"       raven group forget "Book club"
     Group {
         #[command(subcommand)]
         cmd: Option<GroupCommands>,
@@ -802,6 +802,19 @@ enum GroupCommands {
         /// The group's name or the start of its id.
         group: String,
         /// Leave without the question (scripts; stdin need not be a terminal).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Forget a group you left or were removed from: it goes from this
+    /// computer with its messages, and its place is free for another group.
+    /// Copies of its old messages are still known, so they do not bring it
+    /// back; the other members are not told.
+    ///
+    ///   raven group forget "Book club"
+    Forget {
+        /// The group name or the start of its id.
+        group: String,
+        /// Skip the question (scripts).
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
@@ -16928,6 +16941,7 @@ pub fn run() {
                     group_cli::GroupArg::Remove { group, members }
                 }
                 GroupCommands::Leave { group, yes } => group_cli::GroupArg::Leave { group, yes },
+                GroupCommands::Forget { group, yes } => group_cli::GroupArg::Forget { group, yes },
                 GroupCommands::List => group_cli::GroupArg::List,
                 GroupCommands::Show { group, all } => group_cli::GroupArg::Show { group, all },
                 GroupCommands::Send { group } => group_cli::GroupArg::Send { group },
