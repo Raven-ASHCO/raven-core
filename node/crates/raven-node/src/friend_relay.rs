@@ -662,12 +662,21 @@ fn externals(
     out
 }
 
+/// Did a contact or one of this node's relays see this computer at the IP
+/// ([`crate::autoreach::seen_ip`]; `local_ok`: the loopback lab stands in)?
+/// The `seen` of what the friend relay names, offers and confirms from a
+/// UPnP mapping ([`upnp_vouched`]).
+fn seen_from_outside(local_ok: bool) -> impl Fn(Ipv4Addr) -> bool {
+    move |ip| crate::autoreach::seen_ip(ip, local_ok)
+}
+
 /// What UPnP mapped for the relay's ports (`relay_status.json`
 /// `upnp_addrs`) at an IPv4 address a contact or one of this node's relays
-/// saw this computer at (`seen`, [`crate::autoreach::seen_ip`];
-/// STRANGER-UPNP-2). Whoever answers the gateway search first, anyone on
-/// this network, names a mapping's external address, so nothing else
-/// counts: no other IPv4 address, no IPv6 one. The relay's swarm holds such
+/// saw this computer at (`seen`, [`seen_from_outside`]; STRANGER-UPNP-2).
+/// Whoever answers the gateway search first from the router's address,
+/// which a host on this network can forge, names a mapping's external
+/// address, so nothing else counts: no other IPv4 address, no IPv6 one.
+/// The relay's swarm holds such
 /// a mapping back already ([`crate::autoreach::upnp_check`]); this asks
 /// again at the moment the address is named.
 fn upnp_vouched(relay: &RelayStatusFile, seen: &dyn Fn(Ipv4Addr) -> bool) -> Vec<Multiaddr> {
@@ -1086,7 +1095,7 @@ impl FriendRelay {
             crate::autoreach::forward_ip().map(IpAddr::V4),
             settings.key.also_443,
             local_ok,
-            &|ip| crate::autoreach::seen_ip(ip, local_ok),
+            &seen_from_outside(local_ok),
         );
         self.ext_tx.send_if_modified(|held| {
             if *held == names {
@@ -1121,7 +1130,7 @@ impl FriendRelay {
             crate::autoreach::forward_ip().is_some(),
             now_ms,
             local_ok,
-            &|ip| crate::autoreach::seen_ip(ip, local_ok),
+            &seen_from_outside(local_ok),
         )
     }
 
@@ -1218,8 +1227,7 @@ impl FriendRelay {
             (None, _) => "starting",
         };
         let names = self.ext_tx.borrow().clone();
-        let local_ok = raven_core::p2p_local_candidates_enabled();
-        let seen = |ip| crate::autoreach::seen_ip(ip, local_ok);
+        let seen = seen_from_outside(raven_core::p2p_local_candidates_enabled());
         let is_confirmed = relay.as_ref().is_some_and(|r| confirmed(r, now_ms, &seen));
         let listen: Vec<Multiaddr> = relay
             .iter()
@@ -2671,6 +2679,34 @@ mod tests {
         assert_eq!(r.flags, FLAG_AUTONAT | FLAG_CONFIRMED);
         // The state alone, with nothing mapped: not CONFIRMED.
         assert!(!confirmed(&status("mapped 7427", &[]), now, &seen));
+    }
+
+    /// The friend relay counts a UPnP mapping (named, CONFIRMED) only at an
+    /// IP a contact or relay saw this computer at, through the path Identify
+    /// takes: the check it uses is the sightings, not a stand in.
+    #[test]
+    fn the_friend_relay_counts_a_upnp_mapping_only_at_an_ip_seen_from_outside() {
+        let status = RelayStatusFile {
+            version: 1,
+            peer_id: peer(0x64),
+            upnp: "mapped 4001".into(),
+            upnp_addrs: vec!["/ip4/203.0.113.65/tcp/4001".into()],
+            ..RelayStatusFile::default()
+        };
+        let other = RelayStatusFile {
+            upnp_addrs: vec!["/ip4/203.0.113.66/tcp/4001".into()],
+            ..status.clone()
+        };
+        let seen = seen_from_outside(false);
+        assert!(
+            crate::autoreach::vouched_after_a_sighting(Ipv4Addr::new(203, 0, 113, 65), || {
+                confirmed(&status, 0, &seen)
+                    && texts(&upnp_vouched(&status, &seen)) == ["/ip4/203.0.113.65/tcp/4001"]
+            }),
+            "a sighting at the IP did not count its mapping"
+        );
+        assert!(upnp_vouched(&other, &seen).is_empty());
+        assert!(!confirmed(&other, 0, &seen));
     }
 
     /// Auto-reach: a host behind NAT (private listen addresses only, no

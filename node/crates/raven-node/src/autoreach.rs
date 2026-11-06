@@ -610,6 +610,21 @@ pub(crate) fn upnp_check() -> PublicIpCheck {
     PublicIpCheck::new(move |ip| seen_ip(ip, lab_local))
 }
 
+/// Tests of the UPnP check and of what rests on it: does `vouched` hold
+/// once a contact saw this computer at `ip`, through the path Identify
+/// takes ([`observed`]; `lab_local`, so that a documentation address
+/// counts)? Another test may forget the network meanwhile (a host it
+/// starts turns discovery off), so the sighting is made again, up to 50
+/// times.
+#[cfg(test)]
+pub(crate) fn vouched_after_a_sighting(ip: Ipv4Addr, vouched: impl Fn() -> bool) -> bool {
+    (0..50).any(|_| {
+        let at = SocketAddr::from((ip, 52_000));
+        observed(Sighting { at, quic: false }, true);
+        vouched()
+    })
+}
+
 /// Where a contact or one of this node's relays saw this computer
 /// ([`observed`]): Identify's observed address (canonical), and whether the
 /// connection is a QUIC dial that reused the listen port (libp2p's
@@ -1684,6 +1699,26 @@ mod tests {
         });
         assert!(moved(&s));
         assert_eq!(best_ip(&s, t1), Some("198.51.100.9".parse().unwrap()));
+    }
+
+    /// The UPnP check (raven-swarm `VettedUpnp`, STRANGER-UPNP-2) lets an
+    /// honest user through: once a contact saw this computer at an IP,
+    /// through the path Identify takes, a mapping at that IP is vouched for,
+    /// at any port; a mapping at another IPv4 address, or an IPv6 one, is
+    /// not.
+    #[test]
+    fn a_contacts_sighting_vouches_for_a_upnp_mapping_at_that_ip() {
+        let check = upnp_check();
+        let at = |text: &str| -> Multiaddr { text.parse().unwrap() };
+        assert!(
+            vouched_after_a_sighting(Ipv4Addr::new(203, 0, 113, 61), || {
+                check.vouches_for(&at("/ip4/203.0.113.61/tcp/4001"))
+                    && check.vouches_for(&at("/ip4/203.0.113.61/udp/4002/quic-v1"))
+            }),
+            "a sighting at the IP did not vouch for its mapping"
+        );
+        assert!(!check.vouches_for(&at("/ip4/203.0.113.62/tcp/4001")));
+        assert!(!check.vouches_for(&at("/ip6/2001:db8::61/tcp/4001")));
     }
 
     #[test]

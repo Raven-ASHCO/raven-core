@@ -630,6 +630,15 @@ fn plan_listeners(
     Ok((usable, lines))
 }
 
+/// The check a UPnP-IGD mapping of the relay's own ports must pass before
+/// it is used (raven-swarm `VettedUpnp`, STRANGER-UPNP-2). With UPnP on it
+/// is the one the endpoint uses: the IP must be one a contact or relay saw
+/// this computer at ([`crate::autoreach::upnp_check`]). With UPnP off there
+/// is none, and no libp2p-upnp is made.
+fn relay_upnp_check(upnp: bool) -> Option<raven_swarm::portmap::PublicIpCheck> {
+    upnp.then(crate::autoreach::upnp_check)
+}
+
 /// A stamp further in the future than this is from a clock that went back:
 /// [`earlier_confirmed_at`] does not keep it.
 const CONFIRMED_CLOCK_SLACK_MS: u64 = 5 * 60 * 1000;
@@ -929,7 +938,7 @@ pub(crate) async fn run_relay(
         cmd.limits,
         &guard,
         cmd.autonat_server,
-        cmd.upnp.then(crate::autoreach::upnp_check),
+        relay_upnp_check(cmd.upnp),
         wss,
     )
     .map_err(|e| RelayExit::Other(format!("relay: {e}")))?;
@@ -1217,6 +1226,25 @@ pub(crate) mod tests {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// The relay asks the router only with UPnP on, and then uses a mapping
+    /// only at an IP a contact or relay saw this computer at, as the endpoint
+    /// does (STRANGER-UPNP-2); never at an IPv6 address.
+    #[test]
+    fn the_relay_uses_a_upnp_mapping_only_at_an_ip_seen_from_outside() {
+        assert!(relay_upnp_check(false).is_none(), "UPnP off made a check");
+        let check = relay_upnp_check(true).expect("UPnP on has a check");
+        let at = |text: &str| -> Multiaddr { text.parse().unwrap() };
+        assert!(!check.vouches_for(&at("/ip4/203.0.113.64/tcp/4001")));
+        assert!(
+            crate::autoreach::vouched_after_a_sighting(
+                std::net::Ipv4Addr::new(203, 0, 113, 63),
+                || { check.vouches_for(&at("/ip4/203.0.113.63/tcp/4001")) }
+            ),
+            "a sighting at the IP did not vouch for its mapping"
+        );
+        assert!(!check.vouches_for(&at("/ip6/2001:db8::63/tcp/4001")));
     }
 
     /// A new run of a relay keeps the confirmation its last run recorded
