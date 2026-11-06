@@ -281,12 +281,14 @@ fn reject_unresolved_dir(dir: &Path) -> Result<(), String> {
 /// Only for the data directory itself (and directories Raven owns inside it);
 /// never for caller-chosen locations such as export destinations or a
 /// `--forward-db` parent. Fails closed when the mode cannot be restricted,
-/// rather than keeping private state in a shared dir.
+/// rather than keeping private state in a shared dir. A directory another
+/// account owns is refused whatever its mode, and left as it is
+/// ([`owned_by_another_account`], review KS-2).
 pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     reject_unresolved_dir(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -295,6 +297,9 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
         let metadata = std::fs::metadata(dir).map_err(|e| e.to_string())?;
         if !metadata.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
+        }
+        if another_accounts(metadata.uid(), account_uid()) {
+            return Err(another_accounts_folder_text(dir));
         }
         let mode = metadata.permissions().mode();
         if mode & 0o077 != 0 {
@@ -310,12 +315,124 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
         if !metadata.is_dir() {
             return Err(format!("{} is not a directory", dir.display()));
         }
+        // Its owner keeps the right to change the ACL back (review KS-2).
+        if owned_by_another_account(dir)? {
+            return Err(another_accounts_folder_text(dir));
+        }
         crate::win_acl::restrict_path(dir, crate::win_acl::Kind::Dir)
     }
     #[cfg(not(any(unix, windows)))]
     {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())
     }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static ACCOUNT_FOR_TESTS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A unit test's seam (review KS-2): this thread checks who owns a folder as
+/// if it ran as account `uid`, until the guard drops. A folder "another
+/// account owns" then needs no chown of a real file.
+#[cfg(all(test, unix))]
+pub(crate) struct AsAccountForTests {
+    was: Option<u32>,
+}
+
+#[cfg(all(test, unix))]
+impl AsAccountForTests {
+    pub(crate) fn uid(uid: u32) -> Self {
+        Self {
+            was: ACCOUNT_FOR_TESTS.with(|account| account.replace(Some(uid))),
+        }
+    }
+
+    /// An account other than the one the tests run as, never root.
+    pub(crate) fn another() -> Self {
+        Self::uid(if crate::ipc::current_euid() == 1 {
+            2
+        } else {
+            1
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for AsAccountForTests {
+    fn drop(&mut self) {
+        ACCOUNT_FOR_TESTS.with(|account| account.set(self.was));
+    }
+}
+
+/// The account a private folder must belong to (review KS-2): the one this
+/// process runs as, or the one a unit test's thread acts as
+/// ([`AsAccountForTests`]).
+#[cfg(unix)]
+fn account_uid() -> u32 {
+    #[cfg(test)]
+    if let Some(uid) = ACCOUNT_FOR_TESTS.with(std::cell::Cell::get) {
+        return uid;
+    }
+    crate::ipc::current_euid()
+}
+
+/// Whether a folder `owner` owns is another account's for a process that
+/// runs as `account`. Root may use any folder: the Linux relay installer
+/// checks the relay account's folder as root (`relay --check`).
+#[cfg(unix)]
+fn another_accounts(owner: u32, account: u32) -> bool {
+    account != 0 && owner != account
+}
+
+/// Review KS-2: whether a Windows folder whose owner is `owner` (a SID
+/// string) may hold the private files of `user`: the user, SYSTEM
+/// (`S-1-5-18`) or the Administrators group (`S-1-5-32-544`, the owner of
+/// what an elevated administrator creates). Neither of the last two is
+/// another ordinary account: both can take any folder anyway.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_owner_may_hold(owner: &str, user: &str) -> bool {
+    const SYSTEM: &str = "S-1-5-18";
+    const ADMINISTRATORS: &str = "S-1-5-32-544";
+    !owner.is_empty() && (owner == user || owner == SYSTEM || owner == ADMINISTRATORS)
+}
+
+/// Review KS-2: whether the existing folder `dir` belongs to another account
+/// than the one this process runs as. Its mode or ACL is no protection then:
+/// its owner can open it again at any time, and read, rename or replace what
+/// is written in it. Root may use any folder (Unix); on Windows the user,
+/// SYSTEM and the Administrators group may own it
+/// ([`windows_owner_may_hold`]). Every private folder
+/// ([`ensure_private_dir`]) and `raven erase` (`erase::refusal`) use this
+/// rule. An owner that cannot be read is an error.
+pub(crate) fn owned_by_another_account(dir: &Path) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::metadata(dir).map_err(|e| e.to_string())?.uid();
+        Ok(another_accounts(owner, account_uid()))
+    }
+    #[cfg(windows)]
+    {
+        let owner = crate::win_acl::owner_sid(dir)?;
+        Ok(!windows_owner_may_hold(&owner, crate::win_acl::user_sid()?))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        Ok(false)
+    }
+}
+
+/// The words when a private folder belongs to another account (review
+/// KS-2).
+#[cfg(any(unix, windows))]
+fn another_accounts_folder_text(dir: &Path) -> String {
+    format!(
+        "{} belongs to another account, so Raven will not keep private files in it: use a folder \
+         of your own",
+        dir.display()
+    )
 }
 
 /// Create missing parents of a private file owner-only, without touching the
@@ -1184,6 +1301,79 @@ mod tests {
             "existing data dir must lose group/other access"
         );
         assert_eq!(mode(&legacy.join(".probe.lock.sqlite")), 0o600);
+    }
+
+    /// Review KS-2: the mode alone made a folder private. A folder another
+    /// account owns is refused whatever its mode (its owner can open it again
+    /// at any time, and read, rename or replace what is written in it), and
+    /// it is never changed. Root may use any folder (the Linux relay
+    /// installer checks the relay account's folder as root). Another account
+    /// is a seam (`AsAccountForTests`): no file changes its owner.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_dir_another_account_owns_is_refused_whatever_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let theirs = root.path().join("theirs");
+        let loose = root.path().join("loose");
+        for (dir, bits) in [(&theirs, 0o700), (&loose, 0o755)] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(bits)).unwrap();
+        }
+        {
+            let _other = AsAccountForTests::another();
+            for dir in [&theirs, &loose] {
+                let refused = ensure_private_dir(dir).unwrap_err();
+                assert!(
+                    refused.contains("belongs to another account"),
+                    "{}: {refused}",
+                    dir.display()
+                );
+                // Every store's lock goes through the same rule.
+                assert!(DataDirLock::acquire(dir, ".probe.lock.sqlite").is_err());
+                assert!(!dir.join(".probe.lock.sqlite").exists());
+                assert!(owned_by_another_account(dir).unwrap());
+            }
+            assert_eq!(
+                mode(&loose),
+                0o755,
+                "another account's folder is not changed"
+            );
+        }
+        {
+            let _root = AsAccountForTests::uid(0);
+            assert!(!owned_by_another_account(&theirs).unwrap());
+            ensure_private_dir(&theirs).unwrap();
+        }
+        // The account that owns them may.
+        assert!(!owned_by_another_account(&loose).unwrap());
+        ensure_private_dir(&theirs).unwrap();
+        ensure_private_dir(&loose).unwrap();
+        assert_eq!(mode(&loose), 0o700);
+    }
+
+    /// Review KS-2 on Windows: a private folder's owner must be the user,
+    /// SYSTEM or the Administrators group (the owner of what an elevated
+    /// administrator creates). Another user, the Users group or a well known
+    /// SID such as Everyone owns no Raven folder.
+    #[test]
+    fn a_windows_private_folder_belongs_to_the_user() {
+        let user = "S-1-5-21-111-222-333-1001";
+        for owner in [user, "S-1-5-18", "S-1-5-32-544"] {
+            assert!(windows_owner_may_hold(owner, user), "{owner}");
+        }
+        for owner in [
+            "S-1-5-21-111-222-333-1002",
+            "S-1-5-21-111-222-333-10011",
+            "S-1-5-32-545",
+            "S-1-1-0",
+            "S-1-5-7",
+            "S-1-5-11",
+            "",
+        ] {
+            assert!(!windows_owner_may_hold(owner, user), "{owner:?}");
+        }
     }
 
     #[cfg(unix)]

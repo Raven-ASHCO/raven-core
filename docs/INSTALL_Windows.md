@@ -987,4 +987,9 @@ root can on Unix). Files that other programs create in the folder inherit the
 same entry. The ACL is set before a file's contents are written and read back
 afterwards; when that fails (for example a profile on a FAT32 or exFAT drive,
 which has no ACLs) Raven refuses to use the folder instead of keeping private
-state readable by others. Check it with `icacls "$env:USERPROFILE\.raven"`.
+state readable by others. A folder that another account owns is refused too,
+whatever its ACL (security review 2026-11, KS-2): its owner could change the
+ACL back at any time. Your account, SYSTEM and the Administrators group (the
+owner of what an elevated administrator creates) may own it. Check it with
+`icacls "$env:USERPROFILE\.raven"` (and the owner with
+`(Get-Acl "$env:USERPROFILE\.raven").Owner`).

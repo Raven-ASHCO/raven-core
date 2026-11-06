@@ -1206,3 +1206,53 @@ fn the_tor_helpers_keys_are_overwritten_and_its_folder_goes() {
     #[cfg(unix)]
     assert_eq!(std::fs::read(&witness.1).unwrap(), [0; 64]);
 }
+
+/// Review KS-2: erase never touches a folder another account owns (its
+/// owner could swap a key file for a link while it is overwritten), by the
+/// rule of every private folder (`paths::ensure_private_dir`); root may.
+/// Another account is a seam: no file changes its owner.
+#[cfg(unix)]
+#[test]
+fn erase_refuses_a_folder_another_account_owns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile = tmp.path().join("p");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("identity.backend"), b"locked-file\n").unwrap();
+    assert_eq!(refusal_with(&profile, None, false, None), None);
+    {
+        let _other = crate::paths::AsAccountForTests::another();
+        let refused = refusal_with(&profile, None, false, None);
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|text| text.contains("belongs to another account")),
+            "{refused:?}"
+        );
+    }
+    {
+        let _root = crate::paths::AsAccountForTests::uid(0);
+        assert_eq!(refusal_with(&profile, None, false, None), None);
+    }
+    // Nothing was changed by the refusal.
+    assert_eq!(files_below(&profile), ["identity.backend"]);
+}
+
+/// Review KS-2: the zero overwrite never follows a link. One put in place of
+/// a key file between its check and its open zeroed the start of the file it
+/// points to, outside the profile.
+#[cfg(unix)]
+#[test]
+fn the_zero_overwrite_never_follows_a_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let victim = tmp.path().join("victim.txt");
+    std::fs::write(&victim, [0x42u8; 64]).unwrap();
+    let link = tmp.path().join(crate::identity_store::SEED_FILE_NAME);
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    overwrite_with_zeros(&link, 64);
+    assert_eq!(std::fs::read(&victim).unwrap(), [0x42u8; 64]);
+    // A key file itself still gets its zeros.
+    let key = tmp.path().join(META_KEY_FILE);
+    std::fs::write(&key, [0x42u8; 64]).unwrap();
+    overwrite_with_zeros(&key, 64);
+    assert_eq!(std::fs::read(&key).unwrap(), [0u8; 64]);
+}

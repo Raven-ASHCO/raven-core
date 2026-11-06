@@ -47,7 +47,9 @@ still name a `*_PRODUCTION_ENABLED = false`
 gate describe features that stay held, or say so.
 
 Never overwrite `/bin/ash`. The installer links `~/.local/bin/ash` → `raven` only in the user prefix.
-The data directory (`~/.raven`) is created mode `0700`. The installer picks the
+The data directory (`~/.raven`) is created mode `0700`, and Raven refuses one that
+another account owns, whatever its mode (security review 2026-11, KS-2; root may use any
+folder). The installer picks the
 same profile `raven` / `ash` use without `--data-dir` (`RAVEN_DATA_DIR`, then
 `ASH_DATA_DIR`, then a legacy `~/.raven-ash` while `~/.raven` does not exist, else
 `~/.raven`), and registers *absolute* paths in the launchd agent (launchd starts

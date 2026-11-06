@@ -27,7 +27,8 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE, ACL,
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
@@ -293,6 +294,42 @@ fn read_dacl_coded(path: &Path) -> Result<DaclView, (u32, String)> {
     let sd = LocalSd(sd);
     // SAFETY: a descriptor just read with DACL_SECURITY_INFORMATION.
     unsafe { view(sd.0) }.map_err(|text| (0, text))
+}
+
+/// The owner of `path` as a SID string (review KS-2: a private folder must
+/// be the user's, [`crate::paths::owned_by_another_account`]).
+pub(crate) fn owner_sid(path: &Path) -> Result<String, String> {
+    let name = wide(path);
+    let mut owner: PSID = null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `name` is NUL-terminated; `sd` receives a LocalAlloc'd
+    // descriptor that `LocalSd` frees; `owner` points into it.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut sd,
+        )
+    };
+    if err != ERROR_SUCCESS || sd.is_null() {
+        return Err(format!(
+            "cannot read the owner of {}: {}",
+            path.display(),
+            os_error(err)
+        ));
+    }
+    let _sd = LocalSd(sd);
+    if owner.is_null() {
+        return Err(format!("{} has no owner", path.display()));
+    }
+    // SAFETY: `owner` points into the descriptor `_sd` holds until this
+    // function returns, read with OWNER_SECURITY_INFORMATION.
+    unsafe { sid_string(owner) }
 }
 
 fn handle_dacl(handle: HANDLE, path: &Path) -> Result<DaclView, String> {
@@ -571,5 +608,20 @@ mod tests {
             child.aces.iter().all(|a| a.sid == user_sid().unwrap()),
             "{child:?}"
         );
+    }
+
+    /// Review KS-2: a folder this process makes is its own (the user's, or
+    /// the Administrators group's when it runs elevated), so the owner rule
+    /// of every private folder keeps it.
+    #[test]
+    fn a_folder_this_process_makes_passes_the_owner_rule() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner_sid(root.path()).unwrap();
+        assert!(owner.starts_with("S-1-5-"), "{owner}");
+        assert!(
+            crate::paths::windows_owner_may_hold(&owner, user_sid().unwrap()),
+            "{owner}"
+        );
+        assert!(!crate::paths::owned_by_another_account(root.path()).unwrap());
     }
 }

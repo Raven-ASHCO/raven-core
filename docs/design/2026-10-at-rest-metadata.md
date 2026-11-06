@@ -994,7 +994,13 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   program could name, such as `contacts.json`, is no proof), never the home folder, a folder above
   it or a filesystem root ("This folder doesn't look like a Raven profile, so erase won't touch it:
   {folder}"), and in a debug build strictly inside `RAVEN_LAB_ERASE_ROOT` (canonical paths; no
-  switch refuses). There is no list of owner paths in product code.
+  switch refuses). Never a folder another account owns, whatever its mode or ACL ("This folder
+  belongs to another account, so erase will not touch it: {folder}"; its owner could put a link in
+  place of a key file while it is overwritten): the rule of every private folder,
+  `paths::owned_by_another_account`, which `paths::ensure_private_dir` applies too, so no store
+  opens in such a folder either (security review 2026-11, KS-2; root may use any folder, and on
+  Windows SYSTEM and the Administrators group may own it). An owner that cannot be read refuses as
+  well. There is no list of owner paths in product code.
 - **Step 1, the stop.** Raven's own login item for this profile (`node_control::own_login_item`)
   is unloaded for the session, then the stop step; the node must be gone within 5 s (no IPC
   answer, the instance lock free), else "Raven is still running, so erase can't continue: ..."
@@ -1042,7 +1048,9 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   security review 2026-11, KS-1 and TOR-7: before, they were deleted without an overwrite, and the
   intro points' keys, seven levels below the profile, were left), and an interrupted write's temp
   copy of one (`.<name>.tmp.<16 hex>` beside it), get zeros over their length (fsynced), then go:
-  hygiene only (on APFS and SSDs an overwrite lands in new blocks).
+  hygiene only (on APFS and SSDs an overwrite lands in new blocks). The overwrite never follows a
+  link: on Unix the file is opened with `O_NOFOLLOW` (security review 2026-11, KS-2: a link put in
+  place of a key file after its check had its target zeroed).
 - **Step 4, Raven's files only.** Registry-driven: every name and pattern of `at_rest::FILES` with
   `erase: yes` (since PP.16 the relay-folder entries too: in a profile a relay ran in they are
   Raven's; a dedicated relay folder has no identity and is refused) and a quarantine copy of one
@@ -1081,7 +1089,11 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   stay; a linked `friend_relay` and a link put in place after the plan are not followed; temp
   files in Raven's folders go, a key's with its overwrite; review KS-1 and TOR-7: the Tor
   helper's keys, the intro points' keys seven levels down among them, are overwritten and its
-  folder goes),
+  folder goes; review KS-2: a folder another account owns is refused, through a seam that acts as
+  another account and changes no file's owner, and the zero overwrite never follows a link),
+  raven-core's `paths::tests` (a private folder another account owns is refused whatever its mode
+  and left as it is, root may; the Windows owner rule) and `win_acl::tests` (Windows CI: a folder
+  this process makes passes the owner rule),
   `lan_dispatch::tests::b_still_sends_and_receives`
   (in-process), ash's (`paste_guard_and_non_tty_refusal`, `erase_refuses_while_the_node_still_answers`,
   `failed_stop_leaves_the_profile_usable_and_unmarked`, `after_erase_nothing_of_a_remains_in_the_temp_home`

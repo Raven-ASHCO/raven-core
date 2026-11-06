@@ -139,6 +139,24 @@ pub fn not_a_profile_text(data_dir: &Path) -> String {
     )
 }
 
+/// The refusal for a folder another account owns (review KS-2; the UX
+/// copy).
+pub fn another_account_text(data_dir: &Path) -> String {
+    format!(
+        "This folder belongs to another account, so erase will not touch it: {}",
+        sanitize_terminal_line(&data_dir.display().to_string())
+    )
+}
+
+/// The refusal for a folder whose owner cannot be read (review KS-2).
+fn owner_unknown_text(data_dir: &Path, why: &str) -> String {
+    format!(
+        "Erase cannot tell which account owns this folder, so it will not touch it: {} ({})",
+        sanitize_terminal_line(&data_dir.display().to_string()),
+        sanitize_terminal_line(why)
+    )
+}
+
 // ── Step 0: refusals ────────────────────────────────────────────────────────
 
 /// Why `raven erase` must not touch `data_dir` (step 0), or None. Reads
@@ -185,6 +203,15 @@ pub(crate) fn refusal_with(
             Some(root) if dir.starts_with(&root) && dir != root => {}
             _ => return Some(LAB_GUARD_TEXT.to_owned()),
         }
+    }
+    // Review KS-2: never a folder another account owns (its owner could put
+    // a link in place of a key file while it is overwritten), by the rule of
+    // every private folder (`paths::ensure_private_dir`). An owner that
+    // cannot be read refuses too.
+    match crate::paths::owned_by_another_account(&dir) {
+        Ok(false) => {}
+        Ok(true) => return Some(another_account_text(data_dir)),
+        Err(why) => return Some(owner_unknown_text(data_dir, &why)),
     }
     if is_raven_profile(&dir) {
         None
@@ -1029,11 +1056,22 @@ pub(crate) fn remove_file(path: &Path, overwrite: bool) -> Result<bool, String> 
     }
 }
 
+/// Zeros over the first `len` bytes of the file at `path`, fsynced (best
+/// effort). A link is never followed (review KS-2: one put in place of a key
+/// file after its check zeroed the file it points to); on Unix the open
+/// refuses it (`O_NOFOLLOW`).
 fn overwrite_with_zeros(path: &Path, len: u64) {
     use std::io::Write;
     // The key files are small; a larger file is not overwritten whole.
     const MAX: u64 = 64 * 1024 * 1024;
-    let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) else {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let Ok(mut file) = options.open(path) else {
         return;
     };
     let zeros = [0u8; 8192];
