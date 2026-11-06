@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Design for the lab build (branch `feature/auto-reach`). Built in stages behind two new gates, both `false`; every existing gate stays as it is. |
-| **Gates** | `STUN_DISCOVERY_PRODUCTION_ENABLED = false` (debug `RAVEN_LAB_STUN_DISCOVERY=1`, on top of the p2p lab unlock `RAVEN_LAB_TEST_A=1`) and `SERVERLESS_PUNCH_PRODUCTION_ENABLED = false` (debug `RAVEN_LAB_SERVERLESS_PUNCH=1`, on top of STUN discovery and the NAT class gate). Both in `node/crates/raven-core/src/portmap_gate.rs`, const-asserted to need `P2P_PRODUCTION_ENABLED`. Release builds read neither switch. |
+| **Status** | Designed for the lab build (branch `feature/auto-reach`) and built in stages behind two new gates, both `false` at first. Both were switched on in release builds on 2026-10-29 (`b783524`, after the three-machine field test; not independently reviewed), so everything below is live wherever the p2p carrier is. |
+| **Gates** | `STUN_DISCOVERY_PRODUCTION_ENABLED = true` and `SERVERLESS_PUNCH_PRODUCTION_ENABLED = true`, both since 2026-10-29 (`b783524`); serverless punching also needs STUN discovery and the NAT class gate (`NAT_CLASS_PRODUCTION_ENABLED = true`). Both in `node/crates/raven-core/src/portmap_gate.rs`, const-asserted to need `P2P_PRODUCTION_ENABLED`. Until then they were `false`, and debug builds opened them with `RAVEN_LAB_STUN_DISCOVERY=1` and `RAVEN_LAB_SERVERLESS_PUNCH=1` on top of the p2p lab unlock `RAVEN_LAB_TEST_A=1`; release builds read neither switch. |
 | **User switch** | `node_policy.stun` (`raven node stun on|off|status`): unset is on while the gate is live, `false` is off. Hide my IP for everyone (`raven node hide-ip on`) also stops every query. |
 | **Owner decisions in force** | D1 stands (no project-run relay, mailbox or rendezvous server); D13 stands (no port prediction, no birthday punching, no public DHT); the only new outside contact allowed is a STUN Binding request to a public STUN server ("what is my public address", approved 2026-10-28); no `*_PRODUCTION_ENABLED` constant changes. |
 | **Wire** | One new optional RRH1 entry, `0x24 INET_DIRECT` (route hints spec §13.3), sent only while STUN discovery is live. DIRECT (0x03) may now also carry a discovered, not yet confirmed address. Since 2026-11-06 (INET-STUN-1, §3.2) a STUN or router address goes into DIRECT, INET_DIRECT or a relay offer only once a contact or relay saw this computer at that IP: content, not format. No card field changes: a card never names a discovered address (owner rule 2026-10-28, §4.3). No other frame or envelope changes. |
@@ -133,7 +133,9 @@ this computer at that very IP:
   follow the answers; a lie there costs only failed attempts.
 - A node no contact or relay has seen from outside yet tells no public
   address at all; it stays reachable through Tor, a relay slot, the LAN and
-  friend custody (§7).
+  friend custody (§7). Friends behind NATs with no relay slot and no direct
+  path between them therefore never punch to each other: an open owner
+  decision, AR-5 (§7, §12).
 - In a loopback lab (the debug local-candidates switch) every node is at
   127.0.0.1 and every contact sees it there, so that address counts as seen;
   any other one (127.0.0.2, say) does not.
@@ -353,8 +355,10 @@ A contact is a punch target while all of these hold:
   (hide my IP off for it);
 - its live route hints name a PeerId and at least one global QUIC DIRECT
   endpoint (a friend tells its endpoint only once a contact or relay saw it
-  from outside, §3.2), and its NAT_CLASS says its IPv4 QUIC mapping is
-  `no_nat`, `stable_kept` or `stable_shifted`;
+  from outside, §3.2: two friends behind NATs with no relay slot and no
+  direct path never get here, the open owner decision AR-5 in §12), and its
+  NAT_CLASS says its IPv4 QUIC mapping is `no_nat`, `stable_kept` or
+  `stable_shifted`;
 - this node's own QUIC class is one of those three (from STUN or the
   classifier);
 - no connection to that PeerId is open now.
@@ -453,7 +457,7 @@ back.
 | A friend moved and its old endpoint is stale | Its punches go to the old endpoint and fail until a link (LAN, relay, custody, a forward) brings its new hints; nothing serverless can tell a moved friend's new endpoint to a friend behind address-dependent filtering. |
 | Clocks more than a few seconds apart | Slots do not overlap; punches fail; the other paths work. |
 | A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. It can make this node's own punches fail. (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
-| No contact or relay has seen this computer from outside yet (a new node; one whose contacts are all on its LAN or behind NATs; no relay slot) | Its public address is not told, so friends cannot dial it directly or punch to it, and its friend relay is not offered without `--external`. It stays reachable through Tor (the onion address in its card), a relay it holds a slot on (set by hand or offered by a friend: that relay's view counts within a minute of the reservation, and so makes the address seen), the LAN, friend custody, and the operator's `relay_external`. The first contact it dials directly over the internet does the same. |
+| No contact or relay has seen this computer from outside yet (a new node; one whose contacts are all on its LAN or behind NATs; no relay slot) | Its public address is not told, so friends cannot dial it directly or punch to it, and its friend relay is not offered without `--external`. It stays reachable through Tor (the onion address in its card), a relay it holds a slot on (set by hand or offered by a friend: that relay's view counts within a minute of the reservation, and so makes the address seen), the LAN, friend custody, and the operator's `relay_external`. The first contact it dials directly over the internet does the same. **[OWNER] AR-5, open (§12):** this costs honest friends something. Two friends behind NATs, neither holding a relay slot and neither reachable directly by the other or by any other contact, never see each other from outside: neither tells its endpoint, so serverless punching between them (§5) never starts, and a friend relay behind a forwarded port is never offered without `--external`. Before INET-STUN-1 both happened on STUN's word alone. A check on the receiving side cannot close the gap: the receiver has no direct path to the sender either, so it has nothing of its own to compare the told address with. |
 
 ## 8. Wire and document changes
 
@@ -544,3 +548,17 @@ p2p lab switches, from an unpublished test checklist.
 - **AR-4** Decided 2026-10-28 (as recommended): idle punching every 16
   minutes for at most 8 friends (about 0.4 MB a day per unreachable
   friend).
+- **AR-5** [OWNER] Open, asked 2026-11-06 (INET-STUN-1 review), to be
+  answered before the INET-STUN-1 work merges: an address is told only once
+  seen from outside (§3.2), so friends behind NATs with no relay slot and
+  no direct path never punch to each other and a friend relay behind a
+  forwarded port is not offered without `--external` (§7). Options:
+  (a) keep the rule for everything told (recommended: otherwise whoever
+  answers this computer's DNS or forges the STUN answers on its network
+  steers every contact's dials); a friend is seen again once it holds a
+  relay slot (set by hand, or offered by a friend) or dials any contact
+  directly, and a punch needs both friends seen; (b) tell an unseen STUN
+  endpoint for serverless punching only, never for DIRECT dials or the
+  relay offer: the punching friends' packets still go wherever STUN
+  pointed, so a liar there sees their IPs and timing; (c) go back to
+  telling the STUN address unseen, as before 2026-11-06.
