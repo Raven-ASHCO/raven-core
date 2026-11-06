@@ -31,9 +31,12 @@
 //!
 //! **Where it is read:** [`recent`] (this process's last [`KEPT`] records),
 //! and, in a debug build with `RAVEN_LAB_TEST_A=1`, the lab file
-//! [`STAGES_ENV`] (an absolute path): one JSON line per dial, for the D1
-//! harness (`scripts/tor_d1_harness.py`). A test sees its own dials'
-//! records through `caught`.
+//! [`STAGES_ENV`] (an absolute path): one JSON line per dial, appended
+//! (0600). The D1 harness `scripts/tor_d1_harness.py` sets it for the
+//! sender of its two lab profiles and takes the lines each send adds as
+//! that send's stage times, next to its D1 (its dry mode runs over the
+//! loopback helper's warm circuit model; its real mode starts only with the
+//! owner's OK). A test sees its own dials' records through `caught`.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;

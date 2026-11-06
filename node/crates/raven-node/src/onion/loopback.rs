@@ -33,8 +33,9 @@
 //! - `RAVEN_LAB_TOR_LOOPBACK_COUNT=1`: the helper keeps its connect counts
 //!   in [`COUNT_FILE`] under its state directory ([`Counts`]).
 //!
-//! The warm circuit model (the D1 measurement's dry runs, security and speed
-//! report 2026-11-05 §7), read only with `RAVEN_LAB_TEST_A=1`:
+//! The warm circuit model (the dry mode of the D1 harness
+//! `scripts/tor_d1_harness.py`, security and speed report 2026-11-05 §7),
+//! read only with `RAVEN_LAB_TEST_A=1`:
 //! - `RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS=<ms>` ([`Knobs::rendezvous`]): a
 //!   fresh rendezvous (R) costs this much more, paid by the first connect
 //!   try per isolation group and onion key;

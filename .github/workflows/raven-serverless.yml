@@ -206,6 +206,11 @@ jobs:
       # settings the fault matrix scrubs (no build, no process, no network).
       - name: Harness environment scrub (lan_fault_matrix.py --self-test)
         run: python3 -I scripts/lan_fault_matrix.py --self-test
+      # The D1 measurement harness (security and speed report 2026-11-05 §7):
+      # its claim rule, its record check, its environments and its real Tor
+      # guard (no build, no process, no network).
+      - name: D1 harness (tor_d1_harness.py --self-test)
+        run: python3 -I scripts/tor_d1_harness.py --self-test
       # Phase 3 P3.7: the bash installers give the service the LAN address
       # `raven-node lan-default` prints (auto once the build's B12 gate is
       # open, else 127.0.0.1:7420). Stub raven-node binaries and

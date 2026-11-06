@@ -1018,8 +1018,9 @@ impl Profile {
             "RAVEN_LAB_TOR_LOOPBACK_OBSOLETE",
             "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS",
             // The loopback helper's warm circuit model (a fresh rendezvous,
-            // Arti's kept circuit) and the onion dials' stage record file
-            // (D1); no case sets them.
+            // Arti's kept circuit) and the onion dials' stage record file:
+            // the D1 harness (scripts/tor_d1_harness.py) sets them for its
+            // own profiles; no case here does.
             "RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS",
             "RAVEN_LAB_TOR_LOOPBACK_KEPT_MS",
             "RAVEN_LAB_TOR_STAGES",
