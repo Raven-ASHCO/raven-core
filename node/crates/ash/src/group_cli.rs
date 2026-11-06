@@ -2,10 +2,11 @@
 //! create|add|remove|leave|forget|clear|list|show|send`, and the group
 //! section of `raven inbox`.
 //!
-//! - **Held** by [`raven_core::group::GROUPS_PRODUCTION_ENABLED`] (false; a
-//!   debug build opens it with `RAVEN_LAB_TEST_A=1 RAVEN_LAB_HORIZON=1
-//!   RAVEN_LAB_GROUPS=1`). Reading (`list`, `show`, the inbox section) works
-//!   with the gate closed: what was stored stays readable.
+//! - **Gate:** [`raven_core::group::GROUPS_PRODUCTION_ENABLED`] (true: on
+//!   in release builds since 2026-10). A debug build closes it with
+//!   `RAVEN_LAB_GROUPS=0` or `RAVEN_LAB_HORIZON=0`, and a security notice
+//!   can hold it. Reading (`list`, `show`, the inbox section) works with
+//!   the gate closed: what was stored stays readable.
 //! - **Delivery.** Every copy is parked for raven-node's outbox
 //!   (`raven_core::group::park`), which seals and sends it; a command kicks
 //!   the outbox, starting raven-node as `raven send` does when none runs.

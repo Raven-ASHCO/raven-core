@@ -3,13 +3,16 @@
 //! code `raven group` runs), and the `group_message` / `group_changed`
 //! events the watcher makes from the store.
 //!
-//! Lab only: with raven-core's gate closed `groups.list` says
-//! `available: false` and every other op is NOT_AVAILABLE_YET, nothing
-//! read or written. Members are named by Raven address; a friend by this
-//! profile's name for them, anyone else by the admin's label. A label can
-//! be any text, the name of one of your friends too, so an author named by
-//! it says so: `from_friend` and `last_from_friend` are false, and the apps
-//! show "not your friend" (APP-02, ASH-2).
+//! On in release builds since 2026-10 (raven-core's
+//! `GROUPS_PRODUCTION_ENABLED`). Only while that gate is closed (a debug
+//! build's `RAVEN_LAB_GROUPS=0` or `RAVEN_LAB_HORIZON=0`, or a security
+//! notice that holds groups) does `groups.list` say `available: false` and
+//! every other op answer NOT_AVAILABLE_YET, nothing read or written.
+//! Members are named by Raven address; a friend by this profile's name for
+//! them, anyone else by the admin's label. A label can be any text, the
+//! name of one of your friends too, so an author named by it says so:
+//! `from_friend` and `last_from_friend` are false, and the apps show "not
+//! your friend" (APP-02, ASH-2).
 
 use std::collections::{HashMap, HashSet};
 

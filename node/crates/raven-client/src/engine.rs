@@ -265,7 +265,7 @@ impl Inner {
             "lock.now" => |me, _| me.lock_now(),
             "lock.unlock" => |me, args| me.lock_unlock(args),
             "updates.status" => |me, _| me.updates_status(),
-            // Group chats (groups.rs; lab only).
+            // Group chats (groups.rs; on in release builds, behind raven-core's group gate).
             "groups.list" => |me, _| me.groups_list(),
             "groups.get" => |me, args| me.groups_get(args),
             "groups.create" => |me, args| me.groups_create(args),
