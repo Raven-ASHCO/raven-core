@@ -131,6 +131,14 @@ is derived live for each plan from a verified binding (§3) and never stored in
 - The helper tears down a rendezvous circuit that opens more than 8 streams at once, and asks
   its introduction points to pass on at most 5 introductions per second (burst 20; the
   EST_INTRO DoS extension).
+- The helper keeps at most 64 rendezvous circuits (TOR-5): a newcomer closes the circuit that
+  has gone longest without a stream, and is refused while every circuit carries a stream (no link
+  in use is cut for it). A rendezvous circuit that has carried no stream for 10 minutes is closed
+  (a client keeps its own that long after its last use, §10). Not defended: a stranger who keeps
+  introducing (within the introduction rate limit) closes the quiet circuits of friends, whose
+  next dial then needs a new introduction; and while every circuit carries a stream (the node
+  holds at most 16 links, so the others are streams being closed) a newcomer is refused, a
+  friend's included.
 - Dial waits: connect (the Tor circuit to the service) 45 s; whole dial 75 s; frame I/O 30 s;
   first reply 30 s; idle reply 5 s.
 
@@ -278,7 +286,8 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   last round at that mail friend brought some, the friend just linked to this node, or no fetch
   there went over Tor for 30 minutes. The route-hints announcer, session renewal's own probes,
   the learning prober and the update exchange plan no onion route.
-- A rendezvous circuit is kept by Arti for 10 minutes after its last use, then closed.
+- A rendezvous circuit is kept by Arti for 10 minutes after its last use, then closed; the
+  helper closes a rendezvous circuit of its service after 10 minutes without a stream (§5).
 - Channel padding `reduced`.
 
 ### §5.1 The onion link's Noise static
