@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Static self test of the installers' hardening (security review 2026-11).
 # Nothing runs but bash -n, grep and awk on the installer files and on copies
-# of them in a temporary folder: no installer runs, nothing is built, nothing
-# is installed or started.
+# of them in a temporary folder, and two printing functions taken out of
+# linux_systemd_user.sh: no installer runs, nothing is built, nothing is
+# installed or started.
 #
 #   WINLIN-1  linux_relay.sh runs `raven-node relay --check` as the relay's
 #             account (setpriv: its uid and gid, no new privileges, and
@@ -10,6 +11,11 @@
 #             copy root staged; root runs it only on a first install (no relay
 #             account and no folder yet); and nothing in the relay folder is
 #             chowned recursively as root.
+#   PRIV-3    linux_systemd_user.sh's unit appends the service's output (a
+#             line per message that arrives) to raven-node-service.log in the
+#             profile, capped at 1 MiB, made owner only before the start, and
+#             sends nothing to the systemd journal (no log at all where
+#             systemd is older than 240 and cannot append to a file).
 #
 # Then each check is shown to catch a copy that undoes it, so a check that
 # can no longer fail is caught too. Runs on ubuntu CI and under macOS
@@ -153,6 +159,67 @@ check_relay() {
     || fail "linux_relay.sh: the staged copy is not in \$LIB_DIR (root owned)"
 }
 
+# The function NAME of FILE, from its `NAME() {` line to the first `}` at
+# column 0 (as scripts/check_install_helpers.sh takes it).
+fn_of() {
+  awk -v start="^$1[(][)] [{]" '$0 ~ start { on = 1 } on { print } on && /^[}]/ { exit }' "$2"
+}
+
+# What FUNCTIONS (shell text) print for COMMAND, comment lines left out.
+printed() {
+  bash -c "$1"$'\n'"$2" 2>&1 | grep -v '^#' || true
+}
+
+# PRIV-3: linux_systemd_user.sh (FILE) gives the unit a log file in the
+# profile, capped, and never the journal.
+check_user_unit() {
+  local file=$1 code unit fns out
+  checks=$((checks + 1))
+  bash -n "$file" || fail "linux_systemd_user.sh: bash -n"
+  code="$(code_of "$file")"
+  unit="$(fn_of render_unit "$file")"
+
+  in_order "linux_systemd_user.sh: the unit does not take its output lines (service_log_lines) in [Service]" \
+    "$(line_of "$unit" '[Service]' line)" "$(line_of "$unit" '$(service_log_lines)' line)" \
+    "$(line_of "$unit" '[Install]' line)"
+  checks=$((checks + 1))
+  [[ "$(count_of "$unit" 'Standard')" -eq 0 ]] \
+    || fail "linux_systemd_user.sh: render_unit sets an output of its own, besides service_log_lines"
+  checks=$((checks + 1))
+  if grep -qE '(StandardOutput|StandardError)=[^ ]*(journal|syslog|kmsg)' <<<"$code"; then
+    fail "linux_systemd_user.sh sends the service output to the journal"
+  fi
+  checks=$((checks + 1))
+  [[ "$(line_of "$code" 'SERVICE_LOG="${DATA_DIR}/raven-node-service.log"' line)" -ne 0 ]] \
+    || fail "linux_systemd_user.sh: the service log is not raven-node-service.log in the profile"
+
+  # What the unit says, from the two functions themselves.
+  fns="$(fn_of sd_path "$file")"$'\n'"$(fn_of service_log_lines "$file")"
+  out="$(printed "$fns" 'LOG_TO_FILE=1 SERVICE_LOG="/home/u/50%/raven-node-service.log" service_log_lines')"
+  checks=$((checks + 1))
+  [[ "$out" == 'StandardOutput=append:/home/u/50%%/raven-node-service.log
+StandardError=inherit
+Environment=RAVEN_SERVICE_LOG_MAX_BYTES=1048576' ]] \
+    || fail "linux_systemd_user.sh: the unit does not append its output to the capped log file (got: ${out:-nothing})"
+  out="$(printed "$fns" 'LOG_TO_FILE=0 SERVICE_LOG=/p/raven-node-service.log service_log_lines')"
+  checks=$((checks + 1))
+  [[ "$out" == 'StandardOutput=null
+StandardError=null' ]] \
+    || fail "linux_systemd_user.sh: a systemd that cannot append does not get null output (got: ${out:-nothing})"
+  checks=$((checks + 1))
+  [[ "$(line_of "$code" 'if [[ -n "$SD_VERSION" && "$SD_VERSION" -lt 240 ]]; then' line)" -ne 0 \
+    && "$(count_of "$code" 'LOG_TO_FILE=0')" -eq 1 ]] \
+    || fail "linux_systemd_user.sh: the log file is not used whenever systemd is 240 or later"
+
+  # Made owner only before the start, never in render-only mode.
+  in_order "linux_systemd_user.sh: the log file is not made owner only after render-only and before the start" \
+    "$(line_of "$code" 'render_unit >"$UNIT"' line)" "$(line_of "$code" '(umask 077 && : >>"$SERVICE_LOG")')" \
+    "$(line_of "$code" 'chmod 600 "$SERVICE_LOG"')" "$(line_of "$code" 'systemctl --user restart raven-node.service' line)"
+  checks=$((checks + 1))
+  [[ -n "$(first_with "$code" '*[[:cntrl:]]*)')" ]] \
+    || fail "linux_systemd_user.sh: a data folder with a control character is not refused"
+}
+
 # FILE with TEXT (a fixed string) in its first line that holds it replaced
 # by WITH (\n is a new line).
 replace() {
@@ -202,8 +269,25 @@ caught "the check always has CAP_NET_BIND_SERVICE" check_relay "$RELAY" \
 caught "a third check runs" check_relay "$RELAY" \
   'as_root systemctl daemon-reload' 'as_root env "$RELAY_NODE_BIN" relay --check --data-dir "$STATE_DIR"\nas_root systemctl daemon-reload'
 
+check_user_unit "$INSTALL/linux_systemd_user.sh"
+
+USER_UNIT="$INSTALL/linux_systemd_user.sh"
+caught "the output goes to the journal" check_user_unit "$USER_UNIT" \
+  "printf 'StandardOutput=append:%s\\\\n' \"\$(sd_path \"\$SERVICE_LOG\")\"" "printf 'StandardOutput=journal\\\\n'"
+caught "stderr goes to the journal" check_user_unit "$USER_UNIT" \
+  "printf 'StandardError=inherit\\\\n'" "printf 'StandardError=journal\\\\n'"
+caught "the log has no cap" check_user_unit "$USER_UNIT" \
+  "printf 'Environment=RAVEN_SERVICE_LOG_MAX_BYTES=1048576\\\\n'" ':'
+caught "the unit takes no output lines" check_user_unit "$USER_UNIT" '$(service_log_lines)' ''
+caught "a percent sign in the path is not doubled" check_user_unit "$USER_UNIT" \
+  '"${1//%/%%}"' '"$1"'
+caught "an old systemd falls back to the journal" check_user_unit "$USER_UNIT" \
+  "printf 'StandardOutput=null\\\\n'" "printf 'StandardOutput=journal\\\\n'"
+caught "the log file keeps the umask" check_user_unit "$USER_UNIT" \
+  '(umask 077 && : >>"$SERVICE_LOG")' '(: >>"$SERVICE_LOG")'
+
 if [[ "$failures" -ne 0 ]]; then
   echo "installer_hardening_selftest: $failures of $checks checks failed" >&2
   exit 1
 fi
-echo "installer_hardening_selftest OK ($checks checks; linux_relay.sh, each check caught a copy that undoes it)"
+echo "installer_hardening_selftest OK ($checks checks; linux_relay.sh and linux_systemd_user.sh, each check caught a copy that undoes it)"

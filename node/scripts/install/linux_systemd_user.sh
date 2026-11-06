@@ -116,6 +116,14 @@ case "$RENDER_ONLY" in
   0|1) ;;
   *) echo "RAVEN_INSTALL_RENDER_ONLY must be 1 (print the unit, install nothing) or 0" >&2; exit 1 ;;
 esac
+# A unit line cannot carry a control character (a new line ends it), and the
+# log path goes into the unit unquoted (service_log_lines below).
+case "$DATA_DIR" in
+  *[[:cntrl:]]*)
+    echo "the Raven data folder name holds a control character (such as a new line), which a systemd unit cannot name: set RAVEN_DATA_DIR to another folder" >&2
+    exit 1
+    ;;
+esac
 TOR_HELPER="${RAVEN_INSTALL_TOR_HELPER:-1}"
 case "$TOR_HELPER" in
   0|1) ;;
@@ -292,6 +300,42 @@ else
   BIN_DIR="$(CDPATH='' cd -- "$BIN_DIR" && pwd)"
   DATA_DIR="$(CDPATH='' cd -- "$DATA_DIR" && pwd)"
 fi
+# Security review 2026-11, PRIV-3: the service's output (a line for each
+# message that arrives, with the carrier it came by) goes to
+# raven-node-service.log in the profile, as on macOS: capped at 1 MiB
+# (RAVEN_SERVICE_LOG_MAX_BYTES; raven-node truncates the file it appends to)
+# and removed by `raven erase`. Never to the systemd journal, which keeps it
+# outside the profile for months, out of reach of both, and shows it to the
+# adm and systemd-journal groups. systemd before 240 cannot append to a file
+# (StandardOutput=append:), so its unit gets no log at all. Render-only asks
+# no systemctl: it shows the file form.
+SERVICE_LOG="${DATA_DIR}/raven-node-service.log"
+LOG_TO_FILE=1
+SD_VERSION=""
+if [[ "$RENDER_ONLY" != 1 ]]; then
+  SD_VERSION="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p' || true)"
+  if [[ -n "$SD_VERSION" && "$SD_VERSION" -lt 240 ]]; then
+    LOG_TO_FILE=0
+  fi
+fi
+# A path for a unit setting that takes it unquoted (quotes would be part of
+# it): `%` starts a specifier there, so it is doubled.
+sd_path() {
+  printf '%s' "${1//%/%%}"
+}
+# The unit's output lines.
+service_log_lines() {
+  if [[ "$LOG_TO_FILE" == 1 ]]; then
+    printf '# Output: raven-node-service.log in the profile (capped, removed by raven erase), never the journal.\n'
+    printf 'StandardOutput=append:%s\n' "$(sd_path "$SERVICE_LOG")"
+    printf 'StandardError=inherit\n'
+    printf 'Environment=RAVEN_SERVICE_LOG_MAX_BYTES=1048576\n'
+  else
+    printf '# Output: none (this systemd cannot append to a file), never the journal.\n'
+    printf 'StandardOutput=null\n'
+    printf 'StandardError=null\n'
+  fi
+}
 # systemd.service(5): a word may be double-quoted (so spaces survive), and `%`
 # and `$` are special inside it (specifiers / variable expansion).
 sd_quote() {
@@ -447,6 +491,7 @@ LockPersonality=yes
 RestrictRealtime=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
+$(service_log_lines)
 $(keystore_unit_lines)
 
 [Install]
@@ -499,6 +544,12 @@ if [[ "$RENDER_ONLY" == 1 ]]; then
   exit 0
 fi
 render_unit >"$UNIT"
+# The log is there, owner only, before systemd opens it (it would make it
+# under the unit's umask, 0644 by default).
+if [[ "$LOG_TO_FILE" == 1 ]]; then
+  (umask 077 && : >>"$SERVICE_LOG")
+  chmod 600 "$SERVICE_LOG"
+fi
 
 systemctl --user daemon-reload
 # The profile was created above, before the LAN default.
@@ -539,6 +590,11 @@ fi
 systemctl --user enable raven-node.service
 systemctl --user restart raven-node.service
 echo "enabled + (re)started systemd --user raven-node.service"
+if [[ "$LOG_TO_FILE" == 1 ]]; then
+  echo "Log: ${SERVICE_LOG} (capped at 1 MiB, removed by raven erase; nothing goes to the systemd journal)"
+else
+  echo "Log: off. systemd ${SD_VERSION} cannot append the log to a file (240 or later can), and it stays out of the systemd journal"
+fi
 LINGER_USER="${USER:-$(id -un)}"
 if [[ "${RAVEN_ENABLE_LINGER:-0}" == "1" ]]; then
   loginctl enable-linger "$LINGER_USER" \

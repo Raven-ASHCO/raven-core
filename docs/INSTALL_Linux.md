@@ -117,6 +117,19 @@ same profile `raven` / `ash` use without `--data-dir` (`RAVEN_DATA_DIR`, then
 starts it from your home directory, so a relative `RAVEN_DATA_DIR` /
 `RAVEN_BIN_DIR` is resolved by the installer first).
 
+The service's log goes to `raven-node-service.log` in the data directory, as on
+macOS: the unit appends its output there (`StandardOutput=append:`), the
+installer makes the file owner only (`0600`) before the first start, raven-node
+keeps it under 1 MiB (`RAVEN_SERVICE_LOG_MAX_BYTES=1048576`), and `raven erase`
+removes it. Nothing goes to the systemd journal, which would keep the line each
+arriving message writes (a contact tag and the carrier it came by) outside the
+profile for months, out of reach of the cap and of `raven erase`, and readable by
+the `adm` and `systemd-journal` groups (security review 2026-11, PRIV-3). This
+needs systemd 240 or later; with an older one (RHEL 8 ships 239) the unit gets no
+service log at all (`StandardOutput=null`), and the installer says so. Lines a
+unit from an older installer sent to the journal stay there until the journal
+rotates them out; re-running the installer changes the unit.
+
 **IPC socket location.** The daemon listens on `<data-dir>/raven-node.sock`. When
 that path would be too long for a Unix socket (about 107 bytes on Linux) it serves
 `/tmp/raven-<uid>/raven-<hash>.sock` instead (a private, owner-only directory).
@@ -412,7 +425,8 @@ in use by another program (another raven-node?); it is not opened and is
 retried`, keeps the rest of the host running, `p2p_listen` says `(none open yet:
 its port is busy, or its address is not on this computer)`, and once the port is
 free it logs `raven-node p2p: listen port 7423/tcp is open now`. The log
-(`journalctl --user -u raven-node`) holds categories and counts only, never a
+(`raven-node-service.log` in the data directory, e.g. `tail -f
+~/.raven/raven-node-service.log`; never the systemd journal) holds categories and counts only, never a
 PeerId or an address: `raven-node p2p: host up (listeners=<n>)`, `raven-node
 p2p: reservation accepted (active=<k>)`, `raven-node p2p: reservation lost
 (active=<k>)` and `raven-node p2p: direct connection upgraded (dcutr)`, and
