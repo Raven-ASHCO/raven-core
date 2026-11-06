@@ -144,10 +144,11 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
-## Freeze record changes (2026-11-06, security review 2026-11: inbound admission, the Tor helper's circuits)
+## Freeze record changes (2026-11-06, security review 2026-11: inbound admission, the Tor helper's circuits, a lab IPC op)
 
-Behaviour changes of the listeners' admission and of the Tor helper, not of the wire format: no
-frame, header, caps bit or vector changed, and the local helper protocol stays version 2.
+Behaviour changes of the listeners' admission, of the Tor helper and of one local IPC op, not of
+the wire format: no frame, header, caps bit or vector changed, the local helper protocol stays
+version 2 and the IPC version stays 1.
 
 - **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) §5: a
   rendezvous circuit that lost a pre-authentication link (closed for a newcomer, or ended before
@@ -169,6 +170,10 @@ frame, header, caps bit or vector changed, and the local helper protocol stays v
   neighbours' slots; a source from outside this host's networks keeps the /64 (LAN-ADM-1). The
   LAN listener, too, keeps at most 4 authenticated links per contact (LAN-ADM-2), as do the
   Internet direct, p2p and nearby responders (nearby: 2, its cap per pipe already).
+- **Error codes.** [`RAVEN_ERROR_CODES_V1.md`](RAVEN_ERROR_CODES_V1.md): the local ipc code
+  `NOT_AVAILABLE`. A release build answers `SealUnderSession` with it: that op is served only
+  with a debug build's lab unlock (IPC-1, ADR 0004 D4); apps use `AppSubmit`. Before, a release
+  build served it to any process of the same user.
 
 ## Freeze record changes (2026-11-01, a frame-less dial asks for route hints)
 
