@@ -222,11 +222,12 @@ never touches Raven's login item.
 
 Group chats (`docs/design/2026-10-groups.md`, `protocol/RAVEN_GROUP_V1.md`). A group message is sealed
 once for each member who is your friend and sent by raven-node like any message (every way, friend
-custody, the 7-day wait); members who are not your friends get it passed on by another member. Lab
-only: `groups.list` says `available: false` in a release build (the apps then show no Groups
-section), and every other `groups.*` op is `NOT_AVAILABLE_YET` there; in a debug build the switches
-`RAVEN_LAB_TEST_A=1 RAVEN_LAB_HORIZON=1 RAVEN_LAB_GROUPS=1` turn it on (for the engine and for
-raven-node).
+custody, the 7-day wait); members who are not your friends get it passed on by another member. On
+in release builds since 2026-10-29 (commit b783524, not independently reviewed): `groups.list` says
+`available: true` there. Only while the gate is closed does `groups.list` say `available: false`
+(the apps then show no Groups section) and every other `groups.*` op answer `NOT_AVAILABLE_YET`: a
+debug build with `RAVEN_LAB_GROUPS=0` or `RAVEN_LAB_HORIZON=0` (for the engine and for raven-node),
+or a security notice that holds `feature/groups` or `feature/long-horizon`.
 
 - **Ids.** `group` is the group's id (32 hex characters, opaque to the apps); a message `id` is its
   group message id. Members are named by their Raven `address`.
@@ -601,7 +602,7 @@ Message   { id, address, direction: "in" | "out", text, at_ms,
               websocket "p2p · relayed over WebSocket" (relayed while every relay in use runs over
                 WebSocket/TLS) ·
               nearby "Bluetooth nearby" ·
-              onion "via Tor" (the friend's Tor onion service; lab, RAVEN_LAB_TOR) ·
+              onion "via Tor" (the friend's Tor onion service; on in release builds since 2026-10-29) ·
               friend "Held by a friend" (friend custody; said while it waits too) ·
               handoff "Passed on between friends" (multi-hop custody) ·
               letter "Sealed letter with a friend".
@@ -616,7 +617,7 @@ Message   { id, address, direction: "in" | "out", text, at_ms,
             of each delivered message of yours is kept in `desktop_private.rms` (by history id), so
             it comes back after a restart.
             until_ms (waiting): when it runs out for good, the time raven-node's outbox applies: its
-            envelope's expiry, or, while the long message horizon is live (a lab switch), 7 days
+            envelope's expiry, or, while the long message horizon is live (on in release builds), 7 days
             after it was written (an envelope that runs out first only parks it).
             delivered_at_ms: when its receipt came, only for a delivery more than a minute after it
             was written (the apps then say "Delivered 15:10"); kept with the path.
@@ -853,7 +854,7 @@ is your friend); a member who is not a friend is `NOT_A_CONTACT`, a message over
 Every app also has a `MockRaven` that implements this contract in memory with the demo friends Ali
 (verified, in touch), Mina (one waiting message) and Rena (not verified), and replays the demo events
 of the design mockups. The mocks have no groups and no `nearby.*` ops yet (no app has group or
-nearby screens yet; a mock that adds them follows "Groups" and "Bluetooth nearby" above). Its network answers are a release build's: LAN direct on, every other way
+nearby screens yet; a mock that adds them follows "Groups" and "Bluetooth nearby" above). Its network answers are a release build's from before 2026-10-29: LAN direct on, every other way
 `preview` (Bluetooth nearby `not_on_this_os` where the OS has no backend), `network.set` refusing to
 turn a held way on with `NOT_AVAILABLE_YET` and keeping the bridge/store/relay flags, LAN and hide
 IP it was given; Ali's routes are a LAN address, Mina's none; no security notice; Lock v2 and

@@ -19,7 +19,10 @@
 #      `socketfilterfw --getglobalstate`; Linux `ip -br addr` and `ip -6 addr
 #      show scope link`; Windows (MINGW/MSYS/CYGWIN) every cmdlet the guide
 #      names exists and `Get-NetIPAddress` runs. Nothing that changes the
-#      system runs (no hotspot, no cable setup, no firewall rule).
+#      system runs (no hotspot, no cable setup, no firewall rule);
+#   5. every other doc with a gate marker (the threat model, the nearby
+#      guide and the rest) matches the code: check_safety_offline.sh
+#      --gate-docs.
 #
 # Usage: bash scripts/check_offline_guide.sh RAVEN_BIN [--self-test]
 #   RAVEN_BIN: the built `raven` (target/debug/raven; `.exe` is tried on
@@ -199,3 +202,4 @@ if [[ "${2:-}" == "--self-test" ]]; then
 fi
 check_guide "$GUIDE" "$SAFETY"
 os_commands
+RAVEN_BIN_DIR="$BIN_DIR" bash "$REPO/scripts/check_safety_offline.sh" --gate-docs

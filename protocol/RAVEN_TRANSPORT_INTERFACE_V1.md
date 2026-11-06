@@ -29,10 +29,11 @@ Transport {
 | Caps | bits 0-7: `ble`/`internet`/`relay`/`store`/`bridge` (node capabilities, never contacts); bits 8-31: link features (bit 8 = RRH1, [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3.1; bit 9 = PAD1, [`RAVEN_LINK_PADDING_V1.md`](RAVEN_LINK_PADDING_V1.md) §3; bit 10 = RUP1, [`RAVEN_UPDATE_EXCHANGE_V1.md`](RAVEN_UPDATE_EXCHANGE_V1.md) §2; bit 11 = the RRH1 request, [`RAVEN_ROUTE_HINTS_V1.md`](RAVEN_ROUTE_HINTS_V1.md) §3.1) |
 | Errors | Map to [`RAVEN_ERROR_CODES_V1.md`](RAVEN_ERROR_CODES_V1.md) |
 
-## 3. Internet framing (lab-gated)
+## 3. Internet framing (on in release builds)
 
-InternetTransport is compiled into default builds but runs only in debug
-builds with `RAVEN_LAB_TEST_A=1` (`INTERNET_DIRECT_PRODUCTION_ENABLED=false`).
+InternetTransport is compiled into default builds and runs in release builds
+since 2026-10-29 (`INTERNET_DIRECT_PRODUCTION_ENABLED = true`; listening is the
+user's `raven node internet on`; a debug build closes it with `RAVEN_LAB_TEST_A=0`).
 Implemented in `raven_core::internet` (codec) and `raven-node`
 `internet_direct` (sockets).
 
@@ -117,7 +118,7 @@ Ed25519-signed. MAY be published into a Kademlia DHT when `rust-libp2p` integrat
 
 | Feature | V1 status |
 |---------|-----------|
-| TCP length-prefix + Noise XX + channel-bound hello | **IMPLEMENTED** (lab-gated, §3) |
+| TCP length-prefix + Noise XX + channel-bound hello | **IMPLEMENTED** (on in release builds since 2026-10-29, §3) |
 | QUIC / Noise / Yamux stack | **IMPLEMENTED** local swarm (`raven-swarm`: TCP+Noise+Yamux; QUIC listen attempted) |
 | DHT signed discovery | Record format **IMPLEMENTED**; local Kad put/get **IMPLEMENTED**; public Internet Kad **BLOCKED_HARDWARE** |
 | Circuit relay / DCUtR | Not complete — see BLOCKED_HARDWARE |

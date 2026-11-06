@@ -4,9 +4,14 @@
 with the Noise prologue `raven/onion-link/v1` (§5), the local helper protocol (§6), the
 card field (§7), the RRH1 entry (§8), the outbox race (§9).
 
-**Status:** Draft. Production is disabled (`ONION_PRODUCTION_ENABLED = false`, raven-core
-`onion_gate.rs`). Lab only: debug builds with `RAVEN_LAB_TEST_A=1` and `RAVEN_LAB_TOR=1`;
-release builds read neither variable. A security notice can hold `feature/onion`.
+**Status:** Draft. On in release builds since 2026-10-29 (`ONION_PRODUCTION_ENABLED = true`,
+raven-core `onion_gate.rs`), switched on after the three-machine field test and before the
+waiver and the external review the design asked for (its §9, OD-T5); not independently
+reviewed. Owner decision 2026-11-06 (decision 4): it stays on in release. It needs the Tor
+helper next to raven-node (the raven-node feature `tor`, which the install scripts build by
+default). A debug build closes it with `RAVEN_LAB_TOR=0`, or with `RAVEN_LAB_NEARBY_ONLY=1` together
+with `RAVEN_LAB_TEST_A=1`; release builds read none of these variables. A security notice can
+hold `feature/onion`.
 
 **Design:** [`docs/design/2026-10-tor-fallback.md`](../docs/design/2026-10-tor-fallback.md)
 (owner approval 2026-10-28: Tor as the universal baseline, raced against the direct paths).
@@ -41,8 +46,10 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
 
 ## §1 Gate
 
-- `ONION_PRODUCTION_ENABLED = false`. Lab: `RAVEN_LAB_TOR=1` with the Lab Test A unlock, debug
-  builds only. `RAVEN_LAB_TEST_A=1` alone never opens it.
+- `ONION_PRODUCTION_ENABLED = true` (since 2026-10-29): open in every release build unless a
+  security notice holds `feature/onion`. A debug build closes it with `RAVEN_LAB_TOR=0` (every
+  lab run and test that must not touch the Tor network sets it) or `RAVEN_LAB_NEARBY_ONLY=1` with
+  `RAVEN_LAB_TEST_A=1`; a release build reads none of these variables.
 - With the gate closed a node starts no Tor helper, publishes no onion service, makes no onion
   dial, prints no `onion=` card field and sends no RRH1 ONION entry. Its plans are exactly those
   of a build without the carrier.
@@ -379,8 +386,11 @@ onion_static = HKDF-SHA256(salt = "rvn1/onion-noise/v1", IKM = identity seed,
   - The first onion dial before any verified onion link with that contact is still trust on
     first use, as is the first after a binding naming another `hs_id`.
 - Noise pins (M0) of the device static are neither checked nor recorded on onion links.
-- Nodes from before this rule answered onion links with the device static. The carrier has
-  never been on in a release build, so no deployed node does.
+- Nodes from before this rule answered onion links with the device static. The rule (commit
+  05fdd35) and the switch on in release builds (b783524) were made on two branches on 2026-10-29
+  and reached the release line together in merge 1b1783b the same day, so a release build of a
+  commit between b783524 and that merge has the carrier on and answers with the device static.
+  No release was published before that merge, so no published release build does.
 
 ## §11 Vectors
 

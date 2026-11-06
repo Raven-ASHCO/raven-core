@@ -70,6 +70,9 @@ wrapper or incompatible handshake change requires a new version and vectors.
    mailbox tags. Store Object V1 deletion is TTL-only: sealed ACK arrival
    cannot reveal the acknowledged ID or authorize custody deletion. Early
    deletion requires a future versioned, object-bound deletion token.
+   Friend Custody V1 (RFC1) RELEASE is such an object-bound deletion:
+   RELEASE by the authenticated recipient deletes the object's payload and
+   pair columns; the digest is kept until expiry for dedup.
 
 ## Required session boundary
 

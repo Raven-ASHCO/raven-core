@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Design record, not a wire spec. P6.39 (2026-10-24): the identifier inventory (section 2), what each measure does not hide (section 4), the observers (section 5), the link layer against a later quantum computer (section 6) and the cover-traffic assessment (section 7). Every measure here is built behind its own `*_PRODUCTION_ENABLED` gate, and **every one of those gates is `false`: none of them is in this version.** A release build puts on the network exactly what earlier builds did (section 2, "This version"). |
+| **Status** | Design record, not a wire spec. P6.39 (2026-10-24): the identifier inventory (section 2), what each measure does not hide (section 4), the observers (section 5), the link layer against a later quantum computer (section 6) and the cover-traffic assessment (section 7). Every measure here is built behind its own `*_PRODUCTION_ENABLED` gate, and **every one of those gates is `false`: none of them is in this version.** Phase 6b adds nothing to what a release build puts on the network (section 2, "This version"). Since 2026-10-29 release builds also run Internet direct, p2p (with friend relays, port mapping, STUN discovery and serverless punching), route hints, the Tor onion carrier and, on macOS, Bluetooth nearby (their gates are `true`): section 5 and [`THREAT_MODEL.md`](../THREAT_MODEL.md) §3.17 say what each observer learns from them. |
 | **Plan** | `docs/roadmap/plans/phase6-design.json`, design B ("Traffic-analysis and unlinkability hardening"), steps P6.33-P6.39. |
 | **Owner decisions** | OD6b-8 (PAD1 buckets), OD6b-9 (the RLK1 knock on top of M0, per-connection statics, silent to strangers as a setting), OD6b-10 (a random port for new profiles), OD6b-11 (beacon amendment before its flip), OD6b-12 (pair seeds), OD6b-13 (no cover traffic). |
 | **Wire** | This document changes no byte. The wire lives in [`RAVEN_LINK_PADDING_V1.md`](../../protocol/RAVEN_LINK_PADDING_V1.md) (PAD1), [`RAVEN_LINK_KNOCK_V1.md`](../../protocol/RAVEN_LINK_KNOCK_V1.md) (RLK1), [`RAVEN_LAN_BEACON_V1.md`](../../protocol/RAVEN_LAN_BEACON_V1.md) §3 and §8 (beacon jitter and the join round, amended before the beacon's flip) and [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §14 (the `PAIR_SEED` entry). |
@@ -22,13 +22,17 @@ Symbols, not line numbers, anchor every reference.
   how much; their IP addresses; on a radio, that a device is there. No measure below hides these,
   and section 7 explains why cover traffic is not the answer.
 - **In this version** every gate below is shut. The network sees the "This version" column of
-  section 2: exact message sizes, port 7420, and a listener key that is the same on every network.
+  section 2: exact message sizes, port 7420, and a listener key that is the same on every network;
+  and, from the carriers on in release builds since 2026-10-29, the addresses, ports and timing of
+  Internet direct, p2p and STUN traffic, a connection to a Tor guard and, on a Mac with nearby
+  enabled, Bluetooth adverts (section 5).
 
 ## 2. Identifier inventory (design B §1)
 
 What can link a laptop, or a pair of friends, over time. "This version" is a release build with every
-Phase 6b gate shut (and the Phase 3-5 gates as they are: the LAN beacon, p2p, PeerId rotation and
-Bluetooth are off too). "Gates live" is what the gated code does once its gate is flipped.
+Phase 6b gate shut (and the Phase 3-5 gates as they are: the LAN beacon and PeerId rotation are off;
+p2p is on since 2026-10-29, and so is Bluetooth nearby on macOS). "Gates live" is what the gated
+code does once its gate is flipped.
 
 | Identifier | Who sees it | This version | Gates live | Still links (honest) |
 |---|---|---|---|---|
@@ -41,8 +45,8 @@ Bluetooth are off too). "Gates live" is what the gated code does once its gate i
 | Frame sizes | Anyone on the path | Exact: the cleartext 4-byte length before each Noise message gives every frame's size (an ACK 293 bytes, a PairInit 2,788, a text about its own length) | `LINK_PADDING`: four classes, 512 / 4,096 / 16,384 / 65,519 bytes plus the 16-byte tag, on links where both sides offered PAD1 | The number, timing, direction and class of frames; every frame on a link with a peer without PAD1; the LAN dialer's bind (96 bytes, fixed anyway) and the hellos. |
 | LAN beacon (Phase 3) | Anyone on the segment | Not sent (`LAN_BEACON_PRODUCTION_ENABLED = false`) | Queries 160-191 bytes, answers 48-63, the first copy after a random 0-500 ms and the repeat 100-400 ms later; a join round only when something waits (a queued message, mail held for a friend, or meeting mode); tags keyed per pair, 10-minute epochs, keys from the pair seed (`PAIR_SEED`) or the R2 root | That a Raven node is on the network (UDP 7420, the group addresses, two size ranges); a query, then an answer within 3 s, then a TCP link marks two contacts. |
 | Pair keys (beacon 0x02, knock 0x03, Bluetooth 0x01) | Whoever later holds an identity key, or breaks X25519 (section 6) | The R2 root: X25519 of the two identity keys (`rc/lan_beacon.rs` `pair_root`), no forward secrecy | `PAIR_SEED`: `K_pair` from a seed the two friends rotate every 7 days over authenticated links; the root stays the fallback | Periods without a seed (before the first, after one is lost); a full disk image plus keystore (seeds live in a sealed file); a later X25519 break (the seeds travel in RRH1 inside Noise). |
-| libp2p PeerId (Phase 4) | Relays, p2p peers | p2p off (`P2P_PRODUCTION_ENABLED = false`) | 28-day epochs with `PEER_ROTATION` (`false`; an opt-in setting even after a flip). Reused as designed; 6b adds nothing | Within an epoch. |
-| Bluetooth LE service UUIDs (Phase 5) | Anyone in radio range | Not sent (`NEARBY_PRODUCTION_ENABLED = false`) | Per-pair UUIDs, 15-minute epochs, keys from the pair seed when one exists | Radio presence; sightings inside one epoch; address and token rotation are not synchronised; the computer's Bluetooth name to a device that connects. |
+| libp2p PeerId (Phase 4) | Relays, p2p peers | One PeerId for the life of the identity, on every network (`P2P_PRODUCTION_ENABLED = true` since 2026-10-29; PeerId rotation off) | 28-day epochs with `PEER_ROTATION` (`false`; an opt-in setting even after a flip). Reused as designed; 6b adds nothing | With rotation off, always; with it on, within an epoch. |
+| Bluetooth LE service UUIDs (Phase 5) | Anyone in radio range | On macOS after `raven nearby enable` (`NEARBY_PRODUCTION_ENABLED` is `cfg!(target_os = "macos")` since 2026-10-29): per-pair UUIDs keyed from the R2 root, 15-minute epochs; not sent on Windows and Linux | Per-pair UUIDs, 15-minute epochs, keys from the pair seed when one exists | Radio presence; sightings inside one epoch; address and token rotation are not synchronised; the computer's Bluetooth name to a device that connects. |
 | Routing tags, `dest_device_hint = 0` | Carriers | Per object | Unchanged | Sizes and times of carried objects. |
 | Wi-Fi (MAC) address, computer name, mDNS and DHCP | The network | The operating system's behaviour, not Raven's | Guide text only ([`SAFETY_OFFLINE.md`](../SAFETY_OFFLINE.md) sections 2 and 4): a private Wi-Fi address and a plain computer name | A private address kept per network still links repeat visits to the same network; many systems announce the computer's name on every network. |
 
@@ -59,7 +63,7 @@ set).
 | RLK1 link knock, per-connection statics, handshake shape jitter, legacy / strict / silent (LAN and Internet direct) | `LINK_KNOCK_PRODUCTION_ENABLED` (a compile-time check keeps it shut in release while `LAN_NOISE_PIN_PRODUCTION_ENABLED` is) | `RAVEN_LAB_LINK_KNOCK=1` with `RAVEN_LAB_TEST_A=1` | P6.35 | [`RAVEN_LINK_KNOCK_V1.md`](../../protocol/RAVEN_LINK_KNOCK_V1.md) |
 | A random listen port for new profiles | `LISTEN_PORT_RANDOM_PRODUCTION_ENABLED` | `RAVEN_LAB_RANDOM_PORT=1` with `RAVEN_LAB_TEST_A=1` | P6.36 | none: local (cards, route hints and beacon answers already carry the port) |
 | Beacon length and timing jitter, join round only on need | Phase 3's `LAN_BEACON_PRODUCTION_ENABLED` (no gate of its own: an amendment before the flip) | `RAVEN_LAB_LAN_BEACON=1` | P6.37 | [`RAVEN_LAN_BEACON_V1.md`](../../protocol/RAVEN_LAN_BEACON_V1.md) §3, §8 |
-| Pair-seed rotation | `PAIR_SEED_PRODUCTION_ENABLED` (on top of `ROUTE_HINTS_PRODUCTION_ENABLED`, also `false`) | `RAVEN_LAB_PAIR_SEED=1` with `RAVEN_LAB_TEST_A=1` and route hints live | P6.38 | [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §14 |
+| Pair-seed rotation | `PAIR_SEED_PRODUCTION_ENABLED` (on top of `ROUTE_HINTS_PRODUCTION_ENABLED`, which is `true` since 2026-10-29) | `RAVEN_LAB_PAIR_SEED=1` with `RAVEN_LAB_TEST_A=1` and route hints live | P6.38 | [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §14 |
 | The `SEC_*` events that report active misuse (section 8) | `SECURITY_EVENTS_PRODUCTION_ENABLED` | `RAVEN_LAB_SECURITY_EVENTS=1` with `RAVEN_LAB_TEST_A=1` | P6.22-P6.29 | [`SECURITY_EVENTS.md`](../SECURITY_EVENTS.md) |
 
 Not built: a command that sets "Silent to strangers" (`security_silent_to_strangers` in the node
@@ -86,8 +90,9 @@ sizes on the network", "Silent to strangers: Automatic | On | Off").
 | T1 passive, same network | IPs, MACs, port 7420, connection times and durations, exact frame sizes, fixed handshake sizes | IPs, MACs, the profile's port, times, durations, four size classes, handshake sizes in ranges | That two devices talk, when, how long, and how much (in classes). MAC and computer-name leaks are the operating system's (guide text). Undetectable. |
 | T2 active stranger (scanner) | A Noise XX responder on 7420 that hands every dialer the same lifelong static | Legacy mode: the derived static (unchanged for strangers). Strict mode: a fresh static per probe. Silent mode: a TCP port that closes after message 1 | That something listens on a TCP port while listening is on (meeting mode limits the window). |
 | T2 impostor at a friend's old address | The dialer's identity: its bind goes out before it checks who answered (the gap in SAFETY_OFFLINE section 1; M0 closes it, gated off) | An ephemeral key and a random-looking 32-byte tag, even without a pin when the friend is knock-capable | A connection attempt at that address and time. |
-| T5 radio observer (Bluetooth, Phase 5) | Nothing from Raven (Bluetooth gated off) | Per-pair tokens, 15-minute epochs, keys from the pair seed | Radio presence, address rotation gaps (Phase 5 risk 6). |
-| ISP on an Internet path (Internet direct, p2p) | Nothing from Internet direct or p2p: both are gated off in release (a LAN-direct link to a typed address that crosses it shows what T1 sees) | IPs, ports, times, durations, four size classes; RLK1 on Internet direct as on the LAN | As T1. |
+| T5 radio observer (Bluetooth, Phase 5) | On macOS after `raven nearby enable` (on in macOS release builds since 2026-10-29): per-pair tokens keyed from the R2 root, 15-minute epochs, the random address, timing and sizes ([`THREAT_MODEL.md`](../THREAT_MODEL.md) §1.1); on Windows and Linux nothing | Per-pair tokens, 15-minute epochs, keys from the pair seed | Radio presence, address rotation gaps (Phase 5 risk 6). |
+| ISP on an Internet path (Internet direct, p2p) | Both are on in release builds since 2026-10-29, listening each person's choice: the IPs, ports, times and durations of Internet direct and p2p links with exact frame and fixed handshake sizes, the relay or punched hole a p2p link uses, the STUN queries, and a connection to a Tor guard | IPs, ports, times, durations, four size classes; RLK1 on Internet direct as on the LAN | As T1. |
+| STUN servers, the router, friend relays, Tor and card holders, custodians (carriers on since 2026-10-29) | [`THREAT_MODEL.md`](../THREAT_MODEL.md) §3.17, the table of what each observer learns | PAD1 size classes on links where both sides offer it; the rest unchanged | As this version. |
 | Recorder who keeps traffic for a future quantum computer | Section 6 | Section 6 | Section 6. |
 | Later thief of an identity key | Can recompute every R2-rooted beacon and knock key, and so attribute recorded beacons and knocks | Only for periods without a pair seed | The root fallback window. |
 

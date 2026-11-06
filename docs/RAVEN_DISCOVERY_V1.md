@@ -42,7 +42,7 @@ scopes: LOCAL | EXACT_ID | EXACT_ALIAS | MY_NETWORK | NEARBY | PUBLIC | ALL
 | LocalContactsProvider | Implemented |
 | ExactRavenIdProvider | Implemented (`H("raven/profile/v1"\|\|id)`) |
 | AliasDhtProvider | Implemented — bounded signed claims + conflict_count |
-| NearbyBleProvider | Implemented as a resolver over *confirmed* nearby results — ephemeral adv; no permanent ID until confirm. Nothing in this repo produces such results any more: the old `ash nearby` mock is retired (Phase 5 P5.28), and `ash nearby` is now the Bluetooth nearby carrier (`protocol/RAVEN_NEARBY_LINK_V1.md`, verified contacts only, held in this build), which finds contacts, not strangers |
+| NearbyBleProvider | Implemented as a resolver over *confirmed* nearby results — ephemeral adv; no permanent ID until confirm. Nothing in this repo produces such results any more: the old `ash nearby` mock is retired (Phase 5 P5.28), and `ash nearby` is now the Bluetooth nearby carrier (`protocol/RAVEN_NEARBY_LINK_V1.md`, verified contacts only; on in macOS release builds since 2026-10-29, held on Windows and Linux), which finds contacts, not strangers |
 | SocialIntroductionProvider | Implemented — recipient-specific encrypted intros |
 | PublicProfileIndexProvider | **STUB/OFF** (exact search first) |
 | PrivateDirectoryProvider | **NOT V1** |
@@ -80,7 +80,7 @@ Contact requests ride existing **MessageRouter** paths: direct / relay / store /
 ash find @poline
 ash find rvn1…
 ash find poline --local          # no public fuzzy in V1
-ash nearby status                # Bluetooth nearby (held in this build)
+ash nearby status                # Bluetooth nearby (on in macOS release builds since 2026-10-29; held on Windows and Linux)
 ash alias publish --alias poline
 ash contact add …                # QR / OOB pin
 ash contact request @poline     # currently fails closed: ATSAM session required

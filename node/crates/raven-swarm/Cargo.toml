@@ -40,7 +40,7 @@ experimental-nat-connectivity = [
 # `raven-swarm` smoke binary still compiles none of these protocols. Only
 # raven-node enables it, and raven-node never instantiates it unless its
 # runtime gate is open (`raven_core::p2p_live_enabled`:
-# P2P_PRODUCTION_ENABLED=false, or the debug lab unlock), the same way the
+# P2P_PRODUCTION_ENABLED, true since 2026-10-29), the same way the
 # compiled-in Internet direct carrier is held by
 # INTERNET_DIRECT_PRODUCTION_ENABLED. With the gate closed nothing listens,
 # dials, reserves or advertises.

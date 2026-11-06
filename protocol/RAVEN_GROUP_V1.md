@@ -1,9 +1,11 @@
 # RAVEN Group V1 (`RVNGRP/1`)
 
-**Status:** Draft; **production disabled** (`GROUPS_PRODUCTION_ENABLED = false`,
-which also needs `LONG_HORIZON_PRODUCTION_ENABLED`). Lab unlock: debug builds
-with `RAVEN_LAB_TEST_A=1`, `RAVEN_LAB_HORIZON=1` and `RAVEN_LAB_GROUPS=1`
-(`raven_core::group::group_live_enabled`). Release builds ignore the switches.
+**Status:** Draft; **on in release builds since 2026-10-29** (`GROUPS_PRODUCTION_ENABLED = true`,
+which also needs `LONG_HORIZON_PRODUCTION_ENABLED`, also `true` since then; commit b783524,
+after the three-machine field test; not independently reviewed). A debug build closes groups
+with `RAVEN_LAB_GROUPS=0` (or the horizon with `RAVEN_LAB_HORIZON=0`)
+(`raven_core::group::group_live_enabled`); a security notice can hold `feature/groups`.
+Release builds ignore the switches.
 **Design:** [`docs/design/2026-10-groups.md`](../docs/design/2026-10-groups.md).
 **Reference code:** `raven_core::group` (Rust).
 **Not a wire change:** a group frame is the AEAD plaintext of an ordinary
@@ -261,7 +263,8 @@ not fit is ACKed and dropped (§4.2).
 ## 6. Compatibility
 
 - A receiver older than this spec shows a group frame as chat text starting
-  `RVNGRP/1`. Groups are lab-only.
+  `RVNGRP/1`. Groups are on in release builds since 2026-10-29 (Status), so a
+  member whose build is older than this spec can see such text.
 - Chat text that starts with `RVNGRP/` is refused by the composers.
 - `RVNGRP/2` and later are reserved (deferred by v1 receivers).
 - The frames and their bytes are unchanged by the limits of §4.2: a

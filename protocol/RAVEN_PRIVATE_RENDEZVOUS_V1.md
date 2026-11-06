@@ -2,16 +2,18 @@
 
 **Version:** 1 (architecture/privacy draft; wire not frozen)
 
-**Document revision:** 8
+**Document revision:** 9
 
-**Date:** 2026-10-23
+**Date:** 2026-11-06
 
 **Status:** **REQUIRED / NOT YET APPROVED**
 
 **Production:** **disabled** — this document authorizes no rendezvous service,
 presence beacon, DHT record, OHTTP deployment, public inbox, contact mutation,
 route publication, realtime provider/path discovery, carrier dial, codec,
-database migration, live callsite, or Release flag
+database migration, live callsite, or Release flag. One exception runs
+without that approval: the §5.3b Bluetooth LE profile is live in macOS
+release builds since 2026-10-29 (Bluetooth nearby, see §5.3b)
 
 **Approval prerequisites:**
 [`RAVEN_UNIFIED_SERVERLESS_ARCHITECTURE_V2.md`](RAVEN_UNIFIED_SERVERLESS_ARCHITECTURE_V2.md)
@@ -440,8 +442,13 @@ Bluetooth LE between terminal nodes (laptops). It builds on §5.3a; the rest of
    (`shared-vectors/rvn1/nearby/`), which pin the shared root; Swift MUST
    match them before an Apple device takes part (§13.1).
 
-This profile authorizes no production path (`NEARBY_PRODUCTION_ENABLED =
-false`). Approval still follows §14, including item 4.
+This profile authorized no production path, yet Bluetooth nearby runs it in
+macOS release builds since 2026-10-29 (`NEARBY_PRODUCTION_ENABLED` is
+`cfg!(target_os = "macos")`; Windows and Linux release builds have no
+Bluetooth nearby): it was switched on after a field test, before this
+profile's approval and the independent review of item 4 of §14. Owner
+decision 2026-11-06 (decision 4) keeps it on. Approval still follows §14,
+including item 4.
 
 ### 5.4 `R3_PAIRWISE_DIRECTORY`
 
@@ -883,4 +890,5 @@ Raven claims no wire compatibility with these systems:
 | 5 | 2026-10-22 | Bluetooth LE terminal-node profile (§5.3b, for owner approval) for `RAVEN_NEARBY_LINK_V1`: the RNB1 token as a pairwise rotating 16-byte service UUID from the §5.3a root with medium byte `0x01`; advertising only within a 15-minute foreground mark of a user send, an open chat or `nearby on`, at most 1 token on air and 2 contacts in rotation; passive background scanning; a match permits only a bounded knock and Noise dial; pinned contacts with a cached certificate only; the lineage-key KDF binding recorded as a deviation. §5.3a item 2 names the medium; §15 item 4 notes the Bluetooth counterpart. Production stays disabled; approval follows §14 |
 | 6 | 2026-10-23 | Medium byte `0x03` registered in §5.3a item 2 for the RLK1 link knock (`RAVEN_LINK_KNOCK_V1`): knock and proof keys from the same pairwise root, used only inside an authenticated Noise XX dial between contacts; no discovery traffic. Production stays disabled |
 | 7 | 2026-10-23 | §5.3a item 4 and §15 item 4: the LAN beacon's datagrams carry a random tail (queries 160-191 bytes, answers 48-63) and go out after a random 0-500 ms delay, an amendment of `RAVEN_LAN_BEACON_V1` before its production flip (people study M13). The header now names this revision. Production stays disabled |
+| 9 | 2026-11-06 | The header and §5.3b record the release state: the §5.3b Bluetooth LE profile runs in macOS release builds since 2026-10-29 (`NEARBY_PRODUCTION_ENABLED` is `cfg!(target_os = "macos")`), switched on before this document's approval and the review of §14 item 4; owner decision 2026-11-06 (decision 4) keeps it on. No rule, key, size or byte changed |
 | 8 | 2026-10-23 | §5.3a item 2: pair seeds (`RAVEN_ROUTE_HINTS_V1.md` §14, Phase 6b P6.38) give each medium's key forward secrecy against a later identity-key thief; `K_pair` takes the root's place while they are live, and the root stays the fallback. Production stays disabled |

@@ -7,6 +7,15 @@
 > met, and the gate-flip change (§8) is applied as its own reviewed commit. For
 > this phase the design recommends an independent review, not only a waiver
 > (design §8 Q1; §3 hold 3 below).
+>
+> **Release state (recorded 2026-11-06).** That did not happen. Since commit
+> b783524 (2026-10-29) `P2P_PRODUCTION_ENABLED` is `true`: the libp2p
+> carrier is on in release builds, switched on together with other gates
+> after the three-machine field test, before a signature, before the §8
+> spec amendments and without the independent review. Listening stays the
+> user's choice (`raven node p2p on`). The gates of the §9, §10 and §11
+> amendments were switched on at the same time, except PeerId rotation,
+> which stays off. This record and its amendments are still unsigned.
 
 | | |
 |---|---|
@@ -624,6 +633,12 @@ edits none of them, and the freeze manifest is not regenerated here.
 > with `RAVEN_LAB_ROUTE_HINTS=1` and `RAVEN_LAB_FRIEND_RELAY=1` (the second
 > needs the p2p lab unlock `RAVEN_LAB_TEST_A=1`); release builds never read
 > either switch.
+>
+> **Release state (recorded 2026-11-06).** Both gates have been `true`
+> since commit b783524 (2026-10-29), switched on with the p2p gate, before
+> this amendment or its LAN companion was signed. A debug build closes them
+> with `RAVEN_LAB_ROUTE_HINTS=0` and `RAVEN_LAB_FRIEND_RELAY=0`. Relaying
+> for contacts stays each person's choice (`raven relay offer on`).
 
 | | |
 |---|---|
@@ -964,13 +979,13 @@ All open until recorded; none of it replaces the real rows.
   - C35 no route to the internet: LAN only, and no relay, VPS, UPnP or port
     advice (cutoff study F9);
   - C7f the app channel beyond the LAN (RDAP over Raven beyond the LAN, lab
-    only; `APP_CHANNEL_PRODUCTION_ENABLED` stays held).
+    runs; `APP_CHANNEL_PRODUCTION_ENABLED` has been true since 2026-10-29).
 - **lan_fault_matrix** (`scripts/lan_fault_matrix.py`, macOS and Linux):
   s04/s04b/s04c/s04p (`RAVEN_FAULT_HINTS=1`; s04c also with a real pre-RRH1
   build, `RAVEN_FAULT_OLD_BIN`), s39 and s40 (route hints over p2p), s41-s44
   (friend relays), s45-s47 (the kit), s48, s48c, s49 and s48o (the
   diagnosis; s48o with `RAVEN_FAULT_NETWATCH=1`); and s32b-s32e (RDAP over
-  Raven beyond the LAN, lab only; APP_CHANNEL stays held).
+  Raven beyond the LAN, lab runs; APP_CHANNEL true since 2026-10-29).
 - **netns** (`node/scripts/netns_nat_dcutr.sh`, Linux, root; advisory until
   each has its green streak): `hints`, `friend`, `friend-sleep`, `only443`
   (with its friend relay run) and `diag`
@@ -1037,6 +1052,12 @@ Not signed.
 > `FRIEND_CUSTODY_WAN_ENABLED` without `P2P_PRODUCTION_ENABLED`. Debug builds
 > open it with `RAVEN_LAB_TEST_A=1` and `RAVEN_LAB_CUSTODY_WAN=1`; release
 > builds never read either.
+>
+> **Release state (recorded 2026-11-06).** `FRIEND_CUSTODY_WAN_ENABLED` has
+> been `true` since commit b783524 (2026-10-29), switched on with the p2p
+> gate. The custody record was accepted by the owner on 2026-11-06 (owner
+> decision 4: custody stays on in release); this amendment is still
+> unsigned. A debug build closes WAN custody with `RAVEN_LAB_CUSTODY_WAN=0`.
 
 | | |
 |---|---|
@@ -1093,6 +1114,11 @@ Not signed.
 > `RAVEN_LAB_PEER_ROTATION=1`, each with the p2p lab unlock
 > `RAVEN_LAB_TEST_A=1`; release builds never read either switch. Rotation stays
 > an opt-in privacy setting, off by default, even after its flip (O4-13).
+>
+> **Release state (recorded 2026-11-06).** `NAT_CLASS_PRODUCTION_ENABLED`
+> has been `true` since commit b783524 (2026-10-29), switched on with the
+> p2p gate before this amendment was signed; a debug build closes it with
+> `RAVEN_LAB_NAT_CLASS=0`. `PEER_ROTATION_PRODUCTION_ENABLED` stays `false`.
 
 | | |
 |---|---|

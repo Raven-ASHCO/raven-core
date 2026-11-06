@@ -374,7 +374,8 @@ a name matches domain and glob entries and `<local>`. Loopback (127.0.0.0/8, ::1
   refuse the whole card. `p2pn=` (Phase 4 key rotation) is accepted once, only with `p2p=`, and
   checked like it (`RAVEN_P2P_PEER_ROTATION_V1.md` §5); nothing writes it while rotation is
   production disabled. Card v3 is printed only while route hints
-  are live (`ROUTE_HINTS_PRODUCTION_ENABLED = false`).
+  are live (`ROUTE_HINTS_PRODUCTION_ENABLED = true` since 2026-10-29) and the card
+  names relays only, which a release card never does (`RAVEN_ROUTE_HINTS_V1.md` §9.1).
 - New IPC and node_policy fields are `serde(default)` and skipped when empty.
 
 ## 11. Vectors

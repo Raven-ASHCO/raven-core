@@ -6,7 +6,8 @@
 //! - **Live radio:** not here. The desktop Bluetooth LE path is the nearby
 //!   carrier (`protocol/RAVEN_NEARBY_LINK_V1.md`, raven-node `nearby/`):
 //!   RNB1 beacon tokens, the RNK1 knock and the RNP1 pipe under the Raven
-//!   Noise link, held by `NEARBY_PRODUCTION_ENABLED=false`. It replaced the
+//!   Noise link, gated by `NEARBY_PRODUCTION_ENABLED` (true on macOS since
+//!   2026-10-29, false on Windows and Linux). It replaced the
 //!   old CoreBluetooth experiment. `prefer_platform_gatt` is a software path
 //!   flag only; it opens no radio. iOS GATT is unverified/absent on `main`
 //!   (no Swift / `ios-native`). SoT until B8 (not merged):

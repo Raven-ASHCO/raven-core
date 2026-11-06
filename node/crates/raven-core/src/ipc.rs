@@ -74,7 +74,7 @@ pub enum IpcRequest {
         frames_b64: Vec<String>,
     },
     /// Direct-dial an InternetTransport peer (RIH1 hello + framed envelopes).
-    /// Lab-only until INTERNET_DIRECT_PRODUCTION_ENABLED. Not a WAN claim.
+    /// Gated by INTERNET_DIRECT_PRODUCTION_ENABLED (true since 2026-10-29). Not a WAN claim.
     InternetDial {
         v: u16,
         internet_dial: String,
@@ -86,7 +86,7 @@ pub enum IpcRequest {
     /// (`raven/p2p-link/v1` + RIH1 bind) inside a `/raven/link/1.0.0` stream.
     /// `multiaddr` ends in the target's `/p2p/<PeerId>`: `/p2p/<PeerId>` alone
     /// means "every address the contact book has". Verified contacts only.
-    /// Lab-only until P2P_PRODUCTION_ENABLED. Not a WAN claim.
+    /// Gated by P2P_PRODUCTION_ENABLED (true since 2026-10-29). Not a WAN claim.
     P2pDial {
         v: u16,
         multiaddr: String,
@@ -98,7 +98,7 @@ pub enum IpcRequest {
     /// (`raven/nearby-link/v1`) over its pipe. `nearby_dial` is the route's
     /// dial string, `nearby:<64 lowercase hex>`
     /// ([`crate::outbox::nearby_dial_for`]): a name, never an address.
-    /// Lab-only until NEARBY_PRODUCTION_ENABLED. An older daemon answers
+    /// Gated by NEARBY_PRODUCTION_ENABLED (true on macOS since 2026-10-29). An older daemon answers
     /// `IPC_FRAME`.
     NearbyDial {
         v: u16,
@@ -106,12 +106,12 @@ pub enum IpcRequest {
         expected_pub_hex: String,
         frames_b64: Vec<String>,
     },
-    /// Dial a verified contact over the Tor onion carrier (lab,
+    /// Dial a verified contact over the Tor onion carrier (on in release,
     /// `protocol/RAVEN_ONION_CARRIER_V1.md`) and run the Raven Noise link
     /// (`raven/onion-link/v1`) inside the Tor stream. `onion_dial` is the
     /// route's dial string, `onion:<64 lowercase hex>`
     /// ([`crate::onion::dial_for`]): the onion key, never a `.onion` text.
-    /// Lab-only until ONION_PRODUCTION_ENABLED. An older daemon answers
+    /// Gated by ONION_PRODUCTION_ENABLED (true since 2026-10-29). An older daemon answers
     /// `IPC_FRAME`.
     OnionDial {
         v: u16,

@@ -202,8 +202,9 @@ raven ❯
 ```
 
 Note: **6 Mailbox** is a local-only store (`mailbox_store.json` in the data dir; it contacts no peer or
-store node). **7 Nearby** shows Bluetooth nearby (`raven nearby status`), which is held in this
-build (`NEARBY_PRODUCTION_ENABLED=false`): it says so and reaches no other device.
+store node). **7 Nearby** shows Bluetooth nearby (`raven nearby status`). It is on in macOS
+release builds since 2026-10-29 once `raven nearby enable` ran, and held on Windows and Linux
+(`NEARBY_PRODUCTION_ENABLED` is false there): a held build says so and reaches no other device.
 
 ### Banner / CLI security checklist
 

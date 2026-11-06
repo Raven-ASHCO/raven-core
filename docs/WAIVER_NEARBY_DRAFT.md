@@ -2,11 +2,23 @@
 
 > **DRAFT. NOT SIGNED, NOT IN FORCE.** Nothing in the tree depends on this
 > file (the doc comment of `nearby_gate.rs` only names "a nearby waiver").
-> `NEARBY_PRODUCTION_ENABLED` stays `false` until the owner signs a final copy
-> (renamed to `docs/WAIVER_NEARBY_<date>.md`), the hardware rows N1-N12 and
-> the other exit conditions in §7 are met, and the gate is flipped on its
-> own, in its own reviewed commit (owner decisions O5-13 and O11). Nothing in
-> Phase 5 flips a gate.
+> This draft asked that `NEARBY_PRODUCTION_ENABLED` stay `false` until the
+> owner signs a final copy (renamed to `docs/WAIVER_NEARBY_<date>.md`), the
+> hardware rows N1-N12 and the other exit conditions in §7 are met, and the
+> gate is flipped on its own, in its own reviewed commit (owner decisions
+> O5-13 and O11).
+>
+> **Release state (recorded 2026-11-06).** That did not happen. Since commit
+> b783524 (2026-10-29) `NEARBY_PRODUCTION_ENABLED` is
+> `cfg!(target_os = "macos")`: on in macOS release builds, off on Windows
+> and Linux, which have no release Bluetooth backend. It was switched on
+> together with other gates, after the three-machine field test (a
+> Bluetooth chain between two Macs, both ways:
+> [`FIELD_TEST_2026_10.md`](FIELD_TEST_2026_10.md) section 4), before a
+> signature, before the rows N1-N12 were all signed and without an
+> independent review. Owner decision 2026-11-06 (decision 4): nearby stays
+> on in macOS release builds. This record is still unsigned; the owner reads
+> its final text before it is published. §3 gives the holds as they stand.
 
 | | |
 |---|---|
@@ -93,10 +105,10 @@ MeshEnvelope GATT profile; phones.
 
 | Hold | Status at signature (to fill) | Waived? |
 |---|---|---|
-| Hardware rows N1-N12 | Not run | **Not waived** |
+| Hardware rows N1-N12 | Not all run, none signed. The field test of 2026-10 carried 10 / 10 messages each way over a Bluetooth chain between two Macs, which is not a signed row | **Not waived**, yet the gate is on in macOS release builds (release state above) |
 | The R2 amendment (§5.3b, revision 5) approved | Draft, for owner approval | **Not waived**: this record cannot stand without it |
 | Automated gates (§7 list) green on their runners | Built (P5.24-P5.32); CI's first macOS, Windows and btvirt runs pending | Not waived |
-| macOS Bluetooth permission under launchd (row N8): the prompt names RavenNearby and no SIGABRT | Unverified (helper spawned as a plain child of raven-node) | **Not waived**: if N8 fails, the spawn changes first |
+| macOS Bluetooth permission under launchd (row N8): the prompt names RavenNearby and no SIGABRT | Unverified under launchd. The helper is now started as its own responsible process (`responsibility_spawnattrs_setdisclaim`, raven-node `src/nearby/apple.rs`), so the prompt asks about RavenNearby, not about the program that started raven-node (the SIGABRT the field test saw; fixed) | **Not waived** |
 | Windows advert and connect addresses (row N7w) | Unknown: Windows is treated as public, so it neither advertises nor connects | **Not waived**: needed before Windows uses nearby at all |
 | Custody over nearby | Under the friend custody gates and waiver | Covered there, not here |
 
@@ -163,8 +175,9 @@ MeshEnvelope GATT profile; phones.
   device handles and frames; raven-node's code signature and Keychain access
   are untouched (the installer checks raven-node's signature before and
   after installing the helper).
-- The gate is asserted false in `nearby_gate.rs`, `p2p_gate.rs` and
-  `lan_gate.rs`; release builds read no lab switch.
+- The gate's value, `cfg!(target_os = "macos")`, is asserted in the tests
+  of `nearby_gate.rs`, `p2p_gate.rs` and `lan_gate.rs`: on in macOS release
+  builds, off on Windows and Linux; release builds read no lab switch.
 
 ## 6. Conditions
 
@@ -240,6 +253,11 @@ rows.
    (their `gate:` markers), the install guides and the README.
 4. `docs/PROTOCOL_FREEZE_HASHES_V1.md` regenerated with
    `scripts/freeze_protocol_hashes.sh` in the same commit.
+
+Applied on 2026-11-06, after the flip of 2026-10-29: items 1, 2 (revision
+9) and 4, and in item 3 [`NEARBY.md`](NEARBY.md) with its marker, which
+`scripts/check_safety_offline.sh` now compares with the code like every
+other doc's marker; the other user texts of item 3 already said macOS only.
 
 ## 9. Signature
 

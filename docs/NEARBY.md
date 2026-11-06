@@ -1,13 +1,16 @@
 # Bluetooth nearby: messages between laptops with no network
 
-> **Not in this version.** Bluetooth nearby is held in every build
-> (`NEARBY_PRODUCTION_ENABLED = false`) <!-- gate: NEARBY_PRODUCTION_ENABLED=false -->
-> until the owner signs [`WAIVER_NEARBY_DRAFT.md`](WAIVER_NEARBY_DRAFT.md)
-> after the hardware rows in
-> an unpublished test checklist. Until then
-> `raven nearby status` says "held in this build" and every other `raven
-> nearby` command changes nothing. This guide says how it works once it is
-> released, and how developers try it today (section 9).
+> **In this version: on a Mac only.** Bluetooth nearby is in macOS release
+> builds since 29 October 2026 (`NEARBY_PRODUCTION_ENABLED` is true on
+> macOS) <!-- gate: NEARBY_PRODUCTION_ENABLED=macos -->
+> and works once you turn it on (`raven nearby enable`, section 2). It was
+> switched on after a field test between two Macs, without an independent
+> review; the hardware rows in an unpublished test checklist are not all
+> signed, and [`WAIVER_NEARBY_DRAFT.md`](WAIVER_NEARBY_DRAFT.md) is not
+> signed either. Windows and Linux release builds have no Bluetooth nearby:
+> there `raven nearby status` says "held in this build" and every other
+> `raven nearby` command changes nothing. This guide says how it works, and
+> how developers try it on Windows and Linux (section 9).
 
 Bluetooth nearby lets two laptops (macOS, Linux, Windows) exchange Raven
 messages over Bluetooth LE when there is no Wi-Fi, cable, hotspot or
@@ -115,7 +118,8 @@ laptop). It needs nearby itself on and never turns it on. Off a terminal,
 `raven nearby status` shows a `background` row while it is on, and `raven
 doctor`'s `nearby:` line ends `background_mail=yes|no`.
 
-**Friends who keep mail** (friend custody, held in this build as well,
+**Friends who keep mail** (friend custody, in release builds too and a
+choice on each side,
 [`WAIVER_FRIEND_CUSTODY_DRAFT.md`](WAIVER_FRIEND_CUSTODY_DRAFT.md)): when a
 Bluetooth link to such a friend comes up, raven-node asks it at once for
 the mail it keeps for you, leaves with it what waits for the contacts that
@@ -309,7 +313,7 @@ Windows service is not supported for nearby).
 
 | What you see | Why | What to do |
 |---|---|---|
-| `held in this build` | the build holds nearby | nothing: this version cannot use it |
+| `held in this build` | Windows or Linux, whose release builds have no Bluetooth nearby (on a Mac only a debug build with `RAVEN_LAB_NEARBY=0`, or a security notice, holds it) | nothing: this system cannot use it in this version |
 | `raven-node is not running` | no raven-node | `raven listen`, or start the login service |
 | `no Bluetooth support in this build of raven-node` | built without feature `nearby-radio` (or a static Linux build) | install with Bluetooth support (section 5 on macOS) |
 | `the RavenNearby helper is missing, outdated or did not run` (macOS) | RavenNearby.app is not installed, belongs to another release, or stopped | `RAVEN_INSTALL_NEARBY_HELPER=1 bash scripts/install/macos_launchd.sh`, then restart raven-node (section 5) |
@@ -330,7 +334,8 @@ fewer than 64 bytes) stays silent on purpose; such adapters are rare.
 ## 9. Developers: trying it today
 
 Lab builds only: a debug build with Bluetooth support and both lab
-switches, in a test profile, never `~/.raven` or a profile you use
+switches (a Mac needs neither switch: a debug build has nearby on, as a
+release build does), in a test profile, never `~/.raven` or a profile you use
 (a build of this tree seals a profile at its first start; a debug build only
 with `RAVEN_LAB_AT_REST=1`). From `node/`:
 

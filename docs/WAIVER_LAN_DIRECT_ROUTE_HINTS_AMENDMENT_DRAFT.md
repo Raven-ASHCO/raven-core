@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **DRAFT, not signed.** Nothing here is in force until the owner signs it. Until then `ROUTE_HINTS_PRODUCTION_ENABLED` stays `false` and route hints run only in debug builds with `RAVEN_LAB_ROUTE_HINTS=1`; with it off the LAN wire is byte-identical to today. |
+| **Status** | **DRAFT, not signed.** Nothing here is in force until the owner signs it. Until then `ROUTE_HINTS_PRODUCTION_ENABLED` stays `false` and route hints run only in debug builds with `RAVEN_LAB_ROUTE_HINTS=1`; with it off the LAN wire is byte-identical to today. **Release state (recorded 2026-11-06):** that did not happen. Since commit b783524 (2026-10-29) `ROUTE_HINTS_PRODUCTION_ENABLED` is `true`, switched on with other gates after the three-machine field test, before this amendment was signed: release builds send RLX1 and RRH1 on LAN links. A debug build closes it with `RAVEN_LAB_ROUTE_HINTS=0`. |
 | **Amends** | [`WAIVER-LAN-DIRECT-2026-10-07`](WAIVER_LAN_DIRECT_INDEXED_SESSION_2026-10-07.md), its [P2a amendment](WAIVER_LAN_DIRECT_P2A_AMENDMENT_DRAFT.md) and its [session reset amendment](WAIVER_LAN_DIRECT_SESSION_RESET_AMENDMENT_DRAFT.md) (none is edited) |
 | **Companion** | The Phase 2 amendment of [`WAIVER_P2P_RELAY_DRAFT.md`](WAIVER_P2P_RELAY_DRAFT.md) (§9: route hints on p2p links, friend relays). Both are signed before `ROUTE_HINTS_PRODUCTION_ENABLED` is flipped (one gate for every link, owner decision "gate shape") |
 | **Design** | the any-network reachability plan (not published) §3, Phase 2 item 1 (C5) |

@@ -1,26 +1,31 @@
 # RAVEN Route Hints V1 (RRH1, RLX1)
 
 **Version:** 1 (`RRH1`, version byte `1`; `RLX1`, version byte `1`)
-**Status:** Draft; **production disabled** (`ROUTE_HINTS_PRODUCTION_ENABLED = false`).
-Lab only: debug builds with `RAVEN_LAB_ROUTE_HINTS=1`. Release builds ignore the
-switch. Each carrier's own gate also applies (LAN direct, Internet direct, p2p).
-Relay records (§11) are also held by the friend relay gate
-(`FRIEND_RELAY_PRODUCTION_ENABLED = false`; debug builds: `RAVEN_LAB_FRIEND_RELAY=1`
-with the p2p lab unlock `RAVEN_LAB_TEST_A=1`). Custody entries (§12) are also
-held by the friend custody gates (`FRIEND_CUSTODY_PRODUCTION_ENABLED = false`,
-`FRIEND_CUSTODY_WAN_ENABLED = false`; [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md)).
-The Phase 4 entry NAT_CLASS (§13) is also held by its own gate
-(`NAT_CLASS_PRODUCTION_ENABLED = false`; debug builds: `RAVEN_LAB_NAT_CLASS=1`
-with `RAVEN_LAB_TEST_A=1`), and so is PEER_SCHEDULE (§13.2:
-`PEER_ROTATION_PRODUCTION_ENABLED = false`; debug builds:
-`RAVEN_LAB_PEER_ROTATION=1` with `RAVEN_LAB_TEST_A=1`), and so is INET_DIRECT
-(§13.3, auto-reach: `STUN_DISCOVERY_PRODUCTION_ENABLED = false`; debug builds:
-`RAVEN_LAB_STUN_DISCOVERY=1` with `RAVEN_LAB_TEST_A=1`). The Phase 6b entry
+**Status:** Draft; **on in release builds since 2026-10-29** (`ROUTE_HINTS_PRODUCTION_ENABLED =
+true`, commit b783524, after the three-machine field test; not independently reviewed). A
+debug build closes it with `RAVEN_LAB_ROUTE_HINTS=0`; release builds read no switch; a
+security notice can hold `feature/route-hints` or mark `rrh1/1` BROKEN. Each carrier's own
+gate also applies (LAN direct, Internet direct, p2p, Tor, nearby).
+Relay records (§11) are also behind the friend relay gate
+(`FRIEND_RELAY_PRODUCTION_ENABLED = true` since 2026-10-29; debug builds close it with
+`RAVEN_LAB_FRIEND_RELAY=0`; relaying for contacts stays each person's `raven relay offer on`).
+Custody entries (§12) are also behind the friend custody gates
+(`FRIEND_CUSTODY_PRODUCTION_ENABLED` and `FRIEND_CUSTODY_WAN_ENABLED`, both `true` since
+2026-10-29, with each side's consent; [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md)).
+The Phase 4 entry NAT_CLASS (§13) is also behind its own gate
+(`NAT_CLASS_PRODUCTION_ENABLED = true` since 2026-10-29; debug builds close it with
+`RAVEN_LAB_NAT_CLASS=0`), and so is INET_DIRECT (§13.3, auto-reach:
+`STUN_DISCOVERY_PRODUCTION_ENABLED = true` since 2026-10-29; debug builds close it with
+`RAVEN_LAB_STUN_DISCOVERY=0`; `raven node stun off` and hide my IP stop it). PEER_SCHEDULE
+(§13.2) is held by its gate (`PEER_ROTATION_PRODUCTION_ENABLED = false`; debug builds:
+`RAVEN_LAB_PEER_ROTATION=1` with `RAVEN_LAB_TEST_A=1`). The Phase 6b entry
 PAIR_SEED (§14) is also held by its own gate (`PAIR_SEED_PRODUCTION_ENABLED =
 false`; debug builds: `RAVEN_LAB_PAIR_SEED=1` with `RAVEN_LAB_TEST_A=1`).
-Enabling it in production needs owner-signed Phase 2 amendments of the P2P relay
-waiver (`docs/WAIVER_P2P_RELAY_DRAFT.md`, whose §6 lists route hints as a lapse
-condition) and of the LAN-direct waiver (RLX1, RRH1 on LAN links).
+This header said that enabling it in production needs owner-signed Phase 2 amendments of the
+P2P relay waiver (`docs/WAIVER_P2P_RELAY_DRAFT.md` §9; its §6 lists route hints as a lapse
+condition) and of the LAN-direct waiver (`docs/WAIVER_LAN_DIRECT_ROUTE_HINTS_AMENDMENT_DRAFT.md`:
+RLX1, RRH1 on LAN links). Neither amendment is signed: the gates were switched on before them,
+and both records say so (2026-11-06).
 **Audience:** re-implementers of the LAN / Internet / p2p direct links and of
 the dial planner.
 **Design:** the any-network reachability plan (an internal design document, not published)
@@ -677,8 +682,8 @@ raven-card/3 address=<rvn1> pub_hex=<64 hex> fingerprint=<fp> p2p=<PeerId> [rela
   raven)". /3 readers built before the `p2pn` and dropped-`relay` rules
   (2026-10-21) refuse a card with either; /3 readers of 2026-10-21 until the
   `p2pn` check (2026-10-22) accept any `p2pn` value and ignore it. No release
-  build prints /3 (route hints are production disabled), and no release build
-  writes `p2pn` (PeerId rotation is production disabled).
+  build prints /3 (a release card carries no relay route, §9.1), and no release
+  build writes `p2pn` (PeerId rotation is production disabled).
 
 ### 9.1 Unsigned card routes (release builds, October 2026)
 
@@ -1317,11 +1322,11 @@ a full disk image with its keystore.
 - A sender with the gate closed never writes the entry: an older receiver and
   a newer one with the gate closed see the same bytes as before.
 
-## 15. The Tor onion carrier's entry (lab)
+## 15. The Tor onion carrier's entry
 
-Held by the onion gate as well as the route hints gate
-(`ONION_PRODUCTION_ENABLED = false`; debug builds: `RAVEN_LAB_TOR=1` with
-`RAVEN_LAB_TEST_A=1`). Carrier: [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md).
+Sent only while the onion gate and the route hints gate are both open, as they are in release
+builds since 2026-10-29 (`ONION_PRODUCTION_ENABLED = true`; a debug build closes the carrier
+with `RAVEN_LAB_TOR=0`). Carrier: [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md).
 
 ### 15.1 ONION (0x40)
 

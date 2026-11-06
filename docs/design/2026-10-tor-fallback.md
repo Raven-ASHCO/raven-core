@@ -1,9 +1,9 @@
-# Tor onion services as Raven's universal internet baseline (lab)
+# Tor onion services as Raven's universal internet baseline
 
 | | |
 |---|---|
-| **Status** | Designed and built behind its gate, lab only. Nothing here is enabled in a release build. |
-| **Gate** | `ONION_PRODUCTION_ENABLED = false` (`node/crates/raven-core/src/onion_gate.rs`). Debug builds open it per process with the Lab Test A unlock (`RAVEN_LAB_TEST_A=1`) plus `RAVEN_LAB_TOR=1`; release builds never read either variable. |
+| **Status** | Designed and built behind its gate; on in release builds since 2026-10-29 (commit b783524, after the three-machine field test), not independently reviewed. Owner decision 2026-11-06 (decision 4): it stays on in release (§9, OD-T5). The Tor speed Stage A gates of §4 stay lab only. |
+| **Gate** | `ONION_PRODUCTION_ENABLED = true` (`node/crates/raven-core/src/onion_gate.rs`). Debug builds close it per process with `RAVEN_LAB_TOR=0` (every lab run and test that must not touch the Tor network sets it) or `RAVEN_LAB_NEARBY_ONLY=1` with `RAVEN_LAB_TEST_A=1`; release builds never read these variables. |
 | **Build** | The Tor helper (`raven-tor-helper`, Arti inside) is built only with the cargo feature `tor` of `raven-node`. Without it the carrier still builds and is tested against a loopback helper. |
 | **Decision** | Owner approval 2026-10-28 (Tor onion services, new dependency Arti, lab first), changed the same day from "last resort" to "universal baseline, always on, raced against the direct paths". |
 | **Related** | the any-network reachability plan (not published) (D1: no project-run servers), [`RAVEN_ONION_CARRIER_V1.md`](../../protocol/RAVEN_ONION_CARRIER_V1.md) (wire and rules), [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §15 (ONION entry), [`RAVEN_CARRIER_CONFORMANCE_V1.md`](../../protocol/RAVEN_CARRIER_CONFORMANCE_V1.md) §11.9 (onion profile), research: `reports/Raven serverless internet reachability research - part 2.md` §3 (outside the repository). |
@@ -425,8 +425,8 @@ Shown by `raven status --explain tor` and in the docs:
 
 | Item | Value |
 |---|---|
-| Production gate | `ONION_PRODUCTION_ENABLED = false`; feature `feature/onion` in the suite registry (a security notice can hold it). |
-| Lab switch | `RAVEN_LAB_TOR=1` with `RAVEN_LAB_TEST_A=1`, debug builds only. Closed under `RAVEN_LAB_NEARBY_ONLY=1`. |
+| Production gate | `ONION_PRODUCTION_ENABLED = true` since 2026-10-29 (on in release builds); feature `feature/onion` in the suite registry (a security notice can hold it). |
+| Lab switch | `RAVEN_LAB_TOR=0` closes it, debug builds only; any other value leaves it open. Closed under `RAVEN_LAB_NEARBY_ONLY=1` with `RAVEN_LAB_TEST_A=1`. |
 | Cargo feature | `tor` (raven-node): builds `raven-tor-helper`. |
 | Helper path | Next to `raven-node`; debug builds may override it with `RAVEN_TOR_HELPER=<path>`. |
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. Its warm circuit model, for the dry mode of the D1 harness (`scripts/tor_d1_harness.py`, below; read only with `RAVEN_LAB_TEST_A=1`): `RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS=<ms>` adds a fresh rendezvous (R) to the first connect per isolation group and onion key, and `RAVEN_LAB_TOR_LOOPBACK_KEPT_MS=<ms>` drops a circuit no connect was handed for that long, so the next connect pays R again (Arti keeps one for 10 minutes after its last use). |
@@ -539,5 +539,14 @@ within 10 s each; steps 7-9 deliver without a manual restart.
 - **OD-T4 Card field.** `onion=` makes older readers refuse a card; a new
   card version (`raven-card/4`) would make the break explicit. Recommended:
   keep the field (lab only) and decide the card version before release.
+  Outcome: release cards carry the field since 2026-10-29, in the card
+  versions of before (no `raven-card/4`); `raven whoami --card --compat`
+  leaves it out for older readers.
 - **OD-T5 Production.** A waiver, an external review of the carrier and the
   helper, and the field test before `ONION_PRODUCTION_ENABLED` can flip.
+  Outcome (recorded 2026-11-06): the gate was switched on in release builds
+  on 2026-10-29 (commit b783524) after the field test
+  ([`FIELD_TEST_2026_10.md`](../FIELD_TEST_2026_10.md)), without the waiver
+  or the external review: neither exists yet. Owner decision 2026-11-06
+  (decision 4): the onion carrier stays on in release; the owner reads this
+  record before it is published.

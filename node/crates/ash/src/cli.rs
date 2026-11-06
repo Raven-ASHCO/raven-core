@@ -15798,8 +15798,8 @@ enum CarrierChoice {
     /// Bluetooth nearby only (Phase 5, RNL1): verified contacts in radio
     /// range.
     Nearby,
-    /// Tor only (lab: the onion carrier is held unless a debug build runs
-    /// with RAVEN_LAB_TEST_A=1 and RAVEN_LAB_TOR=1): a verified contact's
+    /// Tor only (the onion carrier, on in release builds since 2026-10-29; a
+    /// debug build closes it with RAVEN_LAB_TOR=0): a verified contact's
     /// signed onion address, so two computers on one LAN can test Tor.
     Onion,
 }

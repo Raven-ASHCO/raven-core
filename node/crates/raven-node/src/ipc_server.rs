@@ -1447,7 +1447,7 @@ async fn handle_p2p_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {
     }
 }
 
-/// IPC `OnionDial` (lab, `raven send` to a contact reached over Tor): the
+/// IPC `OnionDial` (`raven send` to a contact reached over Tor): the
 /// same rules as the outbox's onion dials ([`crate::onion::dial_with_meta`]:
 /// the gate, a verified contact, a ready helper), Tor's waits.
 async fn handle_onion_dial(data_dir: &Path, req: IpcRequest) -> IpcResponse {

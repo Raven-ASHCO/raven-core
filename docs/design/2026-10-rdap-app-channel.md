@@ -6,7 +6,7 @@
 | **Date** | 2026-10-15 |
 | **Baselines** | Raven: the Raven tree of that date (`feature/reliability-and-mesh`) (staged). RDAP: the RDAP tree of that date. Line numbers refer to these trees; re-check them before editing. |
 | **Risk class** | R3 under ADR 0004 D6. Architect #1, Crypto ATSAM #3 and Identity AuthZ #15 must ack; no self-merge. **P0 touches the live LAN receive path, so it is R3 too.** `AppSubmit` and `AgentSign` need the ADR 0004 D4 review that `SealUnderSession` had. |
-| **New gate** | `raven_core::app_gate`: `APP_CHANNEL_PRODUCTION_ENABLED = false`, `APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED = false`. The lab unlock is debug-only `RAVEN_LAB_TEST_A=1` (`core/pair_init.rs:29-37`). |
+| **New gate** | `raven_core::app_gate`: `APP_CHANNEL_PRODUCTION_ENABLED` and `APP_CHANNEL_MACOS_UID_ONLY_ACCEPTED`, both `true` in release builds since 2026-10-29 (now in `raven_core::app_channel`; at design time both `false`). The lab unlock is debug-only `RAVEN_LAB_TEST_A=1` (`core/pair_init.rs:29-37`). |
 | **Carrier gates** | Unchanged. LAN direct is live; Internet direct and p2p stay held. The app channel adds no carrier. |
 
 Path shorthand:

@@ -1,12 +1,15 @@
 # RAVEN Friend Custody V1 (RFC1)
 
 **Version:** 1 (`RFC1`, version byte `1`)
-**Status:** Draft; **production disabled** (`FRIEND_CUSTODY_PRODUCTION_ENABLED = false`,
-`FRIEND_CUSTODY_WAN_ENABLED = false`). Lab only: debug builds with
-`RAVEN_LAB_TEST_A=1` (WAN custody also needs `RAVEN_LAB_CUSTODY_WAN=1`).
+**Status:** Draft; on in release builds since 2026-10-29 (`FRIEND_CUSTODY_PRODUCTION_ENABLED =
+true`, `FRIEND_CUSTODY_WAN_ENABLED = true`), switched on after the three-machine field test;
+not independently reviewed. Owner decision 2026-11-06 (decision 4): custody stays on in
+release, and the custody waiver and the errata rule 9 amendment (RELEASE deletes, §6) are
+accepted. Each person opts in: a custodian with `raven node custody on`, a sender or recipient
+with `raven custody use on`; both are off by default. A debug build closes custody with
+`RAVEN_LAB_TEST_A=0`, and WAN custody alone with `RAVEN_LAB_CUSTODY_WAN=0`.
 The letter ops (§10) also need the letter gate (`ASYNC_LETTER_PRODUCTION_ENABLED
-= false`; lab `RAVEN_LAB_HORIZON=1` and `RAVEN_LAB_LETTER=1`).
-Enabling it needs an owner-signed custody waiver.
+= false`; lab `RAVEN_LAB_LETTER=1` with `RAVEN_LAB_TEST_A=1`, debug builds only).
 **Audience:** re-implementers of the custodian, the sender's outbox and the
 recipient's fetcher.
 **Design:** [`docs/design/2026-10-friend-custody.md`](../docs/design/2026-10-friend-custody.md)
@@ -183,10 +186,13 @@ that never sends the handoff ops reads them, like any other unknown code, as
 
 ## 6. Custodian rules
 
-A DEPOSIT is stored only if, in order: the gate allows the link (LAN from a
-local-network source while WAN custody is off; an Internet or p2p link only
-while `FRIEND_CUSTODY_WAN_ENABLED` is set, in debug builds also
-`RAVEN_LAB_CUSTODY_WAN=1`, otherwise `HOLD`), the link peer is a pinned
+A DEPOSIT is stored only if, in order: the gate allows the link (custody is
+live and the link's carrier is open, and then: a LAN link from a
+local-network source, and any LAN link while WAN custody is on; an Internet
+direct, p2p or onion link only while WAN custody is on
+(`FRIEND_CUSTODY_WAN_ENABLED`, which a debug build closes with
+`RAVEN_LAB_CUSTODY_WAN=0`); a Bluetooth nearby link whether or not WAN
+custody is on, since it is local like LAN; otherwise `HOLD`), the link peer is a pinned
 contact, custody is on, the depositor's rate window allows it, the RSO1 obeys
 §4, custody admission accepts the envelope (sealed indexed message or ACK
 shape, TTL, no pairing material), its hop fields are the canonical outbound
@@ -199,8 +205,10 @@ only after commit.
 
 FETCH returns, in page-token order, the link peer's unreleased, unexpired
 objects under the presented tags, after the cursor: at most `max_items` (≤ 16)
-and 128 KiB, at least one if any matches. RELEASE hides the named objects from
-that recipient; the payload is deleted only at TTL.
+and 128 KiB, at least one if any matches. RELEASE by the authenticated
+recipient deletes the named objects' payload and pair columns (recipient,
+depositor, sizes, times); the digest is kept until expiry for dedup, so a
+DEPOSIT of a released digest is DUPLICATE and FETCH never returns it.
 
 ## 7. Recipient rules
 

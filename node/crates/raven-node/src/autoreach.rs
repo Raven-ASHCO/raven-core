@@ -4,7 +4,8 @@
 //! where to reach it, with no setup and no server of Raven's.
 //!
 //! - **Gate and consent.** [`raven_core::stun_discovery_live_enabled`]
-//!   (debug `RAVEN_LAB_STUN_DISCOVERY=1` with the p2p lab unlock), and the
+//!   (on in release builds since 2026-10-29; a debug build closes it with
+//!   `RAVEN_LAB_STUN_DISCOVERY=0`), and the
 //!   profile's [`raven_core::node_policy::NodePolicy::stun_allowed`] (`raven
 //!   node stun off`, or hide my IP for everyone, stops every query). While
 //!   either is off nothing is sent and nothing found is used.

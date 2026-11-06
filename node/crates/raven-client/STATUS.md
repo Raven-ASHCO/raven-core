@@ -69,10 +69,10 @@ The macOS app's tests on the real engine (`RAVEN_ENGINE=dev swift test`, 81) lin
 | `security.status` | done | security_cli `app_read` (no write), the node's counts |
 | `lock.state` / `lock.now` / `lock.unlock` | done | lock_cli `node_lock_v2`, `lock_once`, `unlock_once`; NOT_AVAILABLE_YET where the node does not serve Lock v2; PASSPHRASE_WRONG, PASSPHRASE_NEEDED, UNLOCK_WAIT |
 | `updates.status` | done | update_install `view(dir, false)`; install stays CLI-only |
-| `groups.list` / `groups.get` | done (lab) | raven-core `group::list` / `group::view` after `group::run_pending` (the copies' delivery read in); `available: false` and no store read while the gate is closed (release) |
-| `groups.create` / `groups.add` / `groups.remove` / `groups.leave` | done (lab) | raven-core `group::create`, `add_members`, `remove_members`, `leave` (what `raven group` runs); members by friend address (NOT_A_CONTACT, CONTACT_BLOCKED otherwise); then the outbox kick, raven-node started first as a send starts it |
-| `groups.forget` | done (lab) | raven-core `group::forget` (what `raven group forget` runs): a group this profile left or was removed from (or one with no other member) leaves every list and op and frees its place; its id, epoch and remembered ids stay so its old frames do not bring it back; GROUP_STILL_MEMBER for a group still joined |
-| `groups.history` / `groups.send` / `groups.mark_read` | done (lab) | `group::history` (`before` is a message id), `group::send` (8,192 bytes at most; extra `note` when raven-node could not be asked), `group::mark_read`; a member's message has `path_kind`/`path` (the arrival the store keeps), a receipt of yours `held_by` (the friend whose name `outbox_routes.json` gives for that member's copy); events `group_message` and `group_changed` from the watcher's look at groups.json and outbox_routes.json (first look only notes) |
+| `groups.list` / `groups.get` | done | raven-core `group::list` / `group::view` after `group::run_pending` (the copies' delivery read in); `available: false` and no store read while the gate is closed (a debug build with `RAVEN_LAB_GROUPS=0` or `RAVEN_LAB_HORIZON=0`, or a security notice; release builds have groups on since 2026-10-29) |
+| `groups.create` / `groups.add` / `groups.remove` / `groups.leave` | done | raven-core `group::create`, `add_members`, `remove_members`, `leave` (what `raven group` runs); members by friend address (NOT_A_CONTACT, CONTACT_BLOCKED otherwise); then the outbox kick, raven-node started first as a send starts it |
+| `groups.forget` | done | raven-core `group::forget` (what `raven group forget` runs): a group this profile left or was removed from (or one with no other member) leaves every list and op and frees its place; its id, epoch and remembered ids stay so its old frames do not bring it back; GROUP_STILL_MEMBER for a group still joined |
+| `groups.history` / `groups.send` / `groups.mark_read` | done | `group::history` (`before` is a message id), `group::send` (8,192 bytes at most; extra `note` when raven-node could not be asked), `group::mark_read`; a member's message has `path_kind`/`path` (the arrival the store keeps), a receipt of yours `held_by` (the friend whose name `outbox_routes.json` gives for that member's copy); events `group_message` and `group_changed` from the watcher's look at groups.json and outbox_routes.json (first look only notes) |
 
 Opening the profile (profile.rs, the engine bridge's `open_profile`): what cli.rs's `run` does
 before every command, for an engine that keeps the profile open. Before every operation but
@@ -228,8 +228,8 @@ listening on 127.0.0.1 with free ports only.
   raven-node pipe is per user, not per profile, so an engine on another `RAVEN_DATA_DIR` reaches the
   user's default node (tests use the debug-only `RAVEN_LAB_IPC_PIPE_SUFFIX`); the Rust DLL and
   raven-node.exe need the MSVC runtime, which the Windows installer must provide.
-- Internet direct, p2p and friend custody in a release build: held, refused as the CLI refuses
-  them (their lab paths are tested above).
+- Internet direct, p2p and friend custody in a release build (on since 2026-10-29): only their
+  debug paths are tested above.
 - `node.start` with `receive` on (0.0.0.0:7420) was not run: tests never bind that port.
 - Login-service detection (launchd, systemd, scheduled task) and the `still_running` / `advice`
   stop outcomes.

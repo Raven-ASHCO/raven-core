@@ -1,16 +1,16 @@
-# DRAFT (unsigned): amendment to errata rule 9 for friend custody RELEASE
+# Amendment to errata rule 9 for friend custody RELEASE (accepted 2026-11-06, applied)
 
 | | |
 |---|---|
-| **Status** | **DRAFT, not signed.** Nothing here is in force until the Protocol owner signs it. `FRIEND_CUSTODY_PRODUCTION_ENABLED` and `FRIEND_CUSTODY_WAN_ENABLED` stay `false` in `node/crates/raven-core/src/custody_gate.rs`; custody runs only in debug builds with `RAVEN_LAB_TEST_A=1` (the fault matrix's `RAVEN_FAULT_CUSTODY=1`), and release builds never read that variable. The custody flip waits for this signature (and for the custody waiver). |
-| **Amends** | [`protocol/SECURITY_ERRATA_RVN1_2026-08-13.md`](../protocol/SECURITY_ERRATA_RVN1_2026-08-13.md) rule 9 and [`protocol/RAVEN_FRIEND_CUSTODY_V1.md`](../protocol/RAVEN_FRIEND_CUSTODY_V1.md) §6 "Custodian rules". Neither file is edited by this draft: both are frozen, and the freeze hashes are unchanged. |
-| **Decision** | Owner decision OD-PP-6 (a) of the privacy pack (`docs/roadmap/plans/privacy-pack-plan.json`), which takes Phase 6b's OD6b-15 and the cutoff pack's OD-C11: delete on RELEASE, behind the existing custody gate, with this amendment signed before any custody flip |
+| **Status** | **Accepted by the owner on 2026-11-06 (owner decision 4: custody stays on in release); applied the same day.** The owner reads the final text before it is published. This draft had asked for its signature before any custody flip; instead `FRIEND_CUSTODY_PRODUCTION_ENABLED` and `FRIEND_CUSTODY_WAN_ENABLED` (`node/crates/raven-core/src/custody_gate.rs`) were switched on in release builds on 2026-10-29 (commit b783524), so release custodians have deleted on RELEASE since then, before this acceptance. The file keeps its name because many documents link to it. |
+| **Amends** | [`protocol/SECURITY_ERRATA_RVN1_2026-08-13.md`](../protocol/SECURITY_ERRATA_RVN1_2026-08-13.md) rule 9 and [`protocol/RAVEN_FRIEND_CUSTODY_V1.md`](../protocol/RAVEN_FRIEND_CUSTODY_V1.md) §6 "Custodian rules". Both frozen files carry the diffs of §2 and §3 since 2026-11-06, with a freeze record entry in [`protocol/PROTOCOL_VERSIONS.md`](../protocol/PROTOCOL_VERSIONS.md) and the freeze hashes regenerated. |
+| **Decision** | Owner decision OD-PP-6 (a) of the privacy pack (`docs/roadmap/plans/privacy-pack-plan.json`), which takes Phase 6b's OD6b-15 and the cutoff pack's OD-C11: delete on RELEASE, behind the existing custody gate, with this amendment signed before any custody flip. The flip came first; owner decision 4 of 2026-11-06 accepted the amendment afterwards |
 | **Code** | Privacy pack PP.17: `CustodyStore::release` in `node/crates/raven-core/src/friend_custody.rs`; design `docs/design/2026-10-at-rest-metadata.md` sections 4.15 and 7.4, `docs/design/2026-10-friend-custody.md` §6.5 |
 | **Wire** | No change: the RELEASE and RELEASE_RESULT frames, their codes, RSO1 and every other byte stay as they are; no version changes |
-| **Approver** | Protocol owner (signature pending) |
+| **Approver** | Protocol owner: accepted on 2026-11-06 (owner decision 4); the owner reads the final text before publication |
 | **Date drafted** | 2026-10-19 |
-| **Applying it** | A separate change after the signature: the two diffs below go into the frozen files, `docs/PROTOCOL_FREEZE_HASHES_V1.md` is regenerated with `scripts/freeze_protocol_hashes.sh` and checked (`--check`), and this file records the signature |
-| **Withdrawal** | Leave it unsigned: custody stays gated off. To withdraw after a signature, revert the two diffs (and the freeze manifest) and turn RELEASE back to hiding only |
+| **Applying it** | Done on 2026-11-06: the two diffs below went into the frozen files, `docs/PROTOCOL_FREEZE_HASHES_V1.md` was regenerated with `scripts/freeze_protocol_hashes.sh` and checked (`--check`), and this file records the acceptance |
+| **Withdrawal** | Revert the two diffs (and the freeze manifest, with a freeze record entry) and turn RELEASE back to hiding only, or set both custody consts `false` |
 
 ## 1. Why an amendment
 
@@ -39,7 +39,8 @@ So the amendment adds no token and no frame: it states that RFC1's RELEASE delet
 > RELEASE by the authenticated recipient deletes the object's payload and pair columns; the digest
 > is kept until expiry for dedup.
 
-Proposed diff of `protocol/SECURITY_ERRATA_RVN1_2026-08-13.md` (rule 9, its last sentences):
+The diff of `protocol/SECURITY_ERRATA_RVN1_2026-08-13.md` (rule 9, its last sentences), applied
+on 2026-11-06:
 
 ```diff
     mailbox tags. Store Object V1 deletion is TTL-only: sealed ACK arrival
@@ -53,7 +54,7 @@ Proposed diff of `protocol/SECURITY_ERRATA_RVN1_2026-08-13.md` (rule 9, its last
 ## 3. RAVEN_FRIEND_CUSTODY_V1.md §6 "Custodian rules": the matching sentence
 
 The spec's sections are 1-9; RELEASE is specified in §6 ("RELEASE hides the named objects from that
-recipient; the payload is deleted only at TTL"). Proposed diff:
+recipient; the payload is deleted only at TTL"). The diff, applied on 2026-11-06:
 
 ```diff
  FETCH returns, in page-token order, the link peer's unreleased, unexpired
@@ -69,7 +70,7 @@ recipient; the payload is deleted only at TTL"). Proposed diff:
 No other section changes: §2 (custody off still serves FETCH and RELEASE until held objects
 expire), the codes of §5 and the recipient rules of §7 read the same.
 
-## 4. What the code behind the gate does (PP.17)
+## 4. What the code does (PP.17; live in release builds since 2026-10-29)
 
 - `CustodyStore::release`: in one IMMEDIATE transaction each released object's row is deleted
   (payload, recipient, depositor, size, store tag, page token, both times) and its digest is kept

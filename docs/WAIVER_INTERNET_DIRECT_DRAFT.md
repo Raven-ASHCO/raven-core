@@ -5,6 +5,14 @@
 > a final copy (renamed to `docs/WAIVER_INTERNET_DIRECT_<date>.md`), the exit
 > conditions in §7 are met, and the gate-flip change is applied as its own
 > reviewed commit.
+>
+> **Release state (recorded 2026-11-06).** That did not happen. Since commit
+> b783524 (2026-10-29) `INTERNET_DIRECT_PRODUCTION_ENABLED` is `true`:
+> Internet direct is on in release builds, switched on together with other
+> gates after the three-machine field test, before a signature, before the
+> spec amendments §7 lists and without an independent review. Listening
+> stays the user's choice (`raven node internet on`). This record is still
+> unsigned.
 
 | | |
 |---|---|
