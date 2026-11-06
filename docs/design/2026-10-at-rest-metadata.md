@@ -1036,16 +1036,21 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   and that the search shows none, is checked in the owner's real row R34.
 - **Step 3.** `meta_key.rmk`, `identity.seed`, `device_x25519.secret`, `lab_device_x25519.secret`,
   `relay_key.ed25519` and `friend_relay/relay_key.ed25519` (only while `friend_relay` is a real
-  folder, not a link: review C-deletion-erase-2), and an interrupted write's temp copy of one
-  (`.<name>.tmp.<16 hex>` beside it), get zeros over their length (fsynced), then go: hygiene only
-  (on APFS and SSDs an overwrite lands in new blocks).
+  folder, not a link: review C-deletion-erase-2), every file the registry calls an unsealed key
+  (the Tor helper's keystore `tor/state/keystore/`, at any depth: the onion service key, each time
+  period's keys, the intro points' keys and Arti's `<name>.tmp` of an interrupted key write;
+  security review 2026-11, KS-1 and TOR-7: before, they were deleted without an overwrite, and the
+  intro points' keys, seven levels below the profile, were left), and an interrupted write's temp
+  copy of one (`.<name>.tmp.<16 hex>` beside it), get zeros over their length (fsynced), then go:
+  hygiene only (on APFS and SSDs an overwrite lands in new blocks).
 - **Step 4, Raven's files only.** Registry-driven: every name and pattern of `at_rest::FILES` with
   `erase: yes` (since PP.16 the relay-folder entries too: in a profile a relay ran in they are
   Raven's; a dedicated relay folder has no identity and is refused) and a quarantine copy of one
   (`<file>.corrupt`, `.corrupt-<n>`, `.corrupt.<n>`) or an interrupted write's temp file beside
-  one (`.<file>.tmp.<16 hex>`); inside Raven's own folders (those the registry names files in) the
-  same rule (the temp files there since review C-deletion-erase-3: before, they were listed as
-  files Raven didn't create). A symbolic link is deleted as a link and never followed: a file is
+  one (`.<file>.tmp.<16 hex>`); inside Raven's own folders (those the registry names files in,
+  and every folder below `tor/` at any depth: the registry's `tor/**`, review TOR-7) the same rule
+  (the temp files there since review C-deletion-erase-3: before, they were listed as files Raven
+  didn't create). A symbolic link is deleted as a link and never followed: a file is
   deleted only while every folder on its way from the data dir is a real one, so a link put in
   place of a folder after the plan was made is refused and reported (review C-deletion-erase-2).
   A pass then looks again for a file a process finished writing after the marker went down (its
@@ -1074,7 +1079,9 @@ raven-node's `main` (the refusal at start), and the marker checks below.
   stays keeps its store, WAL included, for the next run, and the namespace pass takes a head-less
   item and nothing of another profile; a damaged store never ends in Erased while its keys may
   stay; a linked `friend_relay` and a link put in place after the plan are not followed; temp
-  files in Raven's folders go, a key's with its overwrite),
+  files in Raven's folders go, a key's with its overwrite; review KS-1 and TOR-7: the Tor
+  helper's keys, the intro points' keys seven levels down among them, are overwritten and its
+  folder goes),
   `lan_dispatch::tests::b_still_sends_and_receives`
   (in-process), ash's (`paste_guard_and_non_tty_refusal`, `erase_refuses_while_the_node_still_answers`,
   `failed_stop_leaves_the_profile_usable_and_unmarked`, `after_erase_nothing_of_a_remains_in_the_temp_home`
@@ -1626,7 +1633,8 @@ literal ending in `.json`, `.sqlite`,
 `.sqlite3`, `.bin`, `.seed`, `.secret`, `.vault` or `.dpapi`, every `data_dir.join("...")` and
 `join(format!(...))` name, and the SQLite `CREATE TABLE` statements. Names that occur only in
 tests or vectors were dropped. "Rule" is one of: an RMS1 kind, keyed SQLite columns, already
-protected (keystore or K_hist), or plain with a reason.
+protected (keystore or K_hist), plain with a reason, or an unsealed key with a reason (the Tor
+helper's keystore, section 6.6).
 
 ### 6.1 Sealed JSON files (RMS1)
 
@@ -1763,6 +1771,7 @@ the lab backend), and Windows' K_hist `chat_history_key.dpapi` (DPAPI-wrapped, P
 | `outbox_routes.json` `ended` evidence | cutoff review FU-3 | inside kind 4, no change of rule |
 | `peer_session_end`, `peer_session_end_erased` | cutoff CP.6 | keyed with the PP.13 tables |
 | `lan_noise_pins.json.corrupt` | cutoff CP.2 | the `.corrupt` rule (PP.5); `lan_noise_pins.rms` gets no plain quarantine copy |
+| `tor/` (the Tor helper, Arti; owner only): the keystore `tor/state/keystore/` with the onion service key, each time period's keys and the intro points' keys, in clear in Arti's own files; the guards, circuit times, intro point state and replay logs; the cache of public relay documents | the onion carrier, live in release builds since 2026-10; security review 2026-11, KS-1 and TOR-7 (the registry still called it lab only, and erase left the intro points' keys, seven levels down) | `tor/state/keystore/**` is an unsealed key (`Rule::UnsealedKey`: erase writes zeros over every file in it before it deletes it, section 4.14 step 3); `tor/**` is plain (no friend in it; the replay logs show how many introductions arrived, not from whom) and erase deletes it at every depth. Sealing the keys is owner decision OD-T3; until then a copy of the folder lets its holder run this profile's onion service (THREAT_MODEL §3.7a, T3a) |
 
 ### 6.7 Deleting in SQLite (PP.2)
 
@@ -2191,7 +2200,7 @@ What keeps a later change from writing a friend's data in clear without anyone n
 
 | Guard | Where | What fails it |
 |---|---|---|
-| The file registry | `at_rest::FILES` (`rc/at_rest/registry.rs`): every file and pattern a profile writes, with its rule (sealed kind, epoch keys, keyed SQLite, already protected, plain with a reason, relay folder, lab), its writer lock and whether erase deletes it | `every_profile_file_name_is_classified`: a file name in the production sources of raven-core, raven-node or ash (`.json`, `.sqlite`, `.sqlite3`, `.bin`, `.seed`, `.secret`, `.vault`, `.dpapi`, `.rmk`, `.rms`) that the registry does not cover |
+| The file registry | `at_rest::FILES` (`rc/at_rest/registry.rs`): every file and pattern a profile writes (`*` within a folder, `folder/**` at any depth below it), with its rule (sealed kind, epoch keys, keyed SQLite, already protected, plain with a reason, relay folder, unsealed key with a reason, lab), its writer lock and whether erase deletes it | `every_profile_file_name_is_classified`: a file name in the production sources of raven-core, raven-node or ash (`.json`, `.sqlite`, `.sqlite3`, `.bin`, `.seed`, `.secret`, `.vault`, `.dpapi`, `.rmk`, `.rms`) that the registry does not cover |
 | Who uses the registry | `migrate_all` and the rotation pass (what to seal), `erase::plan` (what to delete), `unseal_all` (what to write back), `raven privacy status` (sealed and plain files), carrier_matrix C87 (the lab backends' files) | - |
 | The SQLite schema guard | `indexed_session_store::tests::sealed_store::no_clear_key_address_or_message_id_columns` | a column of any store (sessions, owed ACKs, the app store, custody, custody handoff, the security ledger) in a sealed profile whose name says address, device, peer, sender, recipient, depositor, custodian, message id, digest or nonce and that is not keyed, unless its list says why (R20's ids, the app store's open item) |
 | Version by shape | each store's open (`sqlite_rebuild`, section 4.10) | an older process's `user_version` stamp never migrates a keyed table twice |
@@ -2219,6 +2228,10 @@ pack on purpose, each with its place:
   7.2, `APP_CHANNEL_PRODUCTION_ENABLED = false`), and the legacy bridge queues `queue.sqlite` and
   `forward_queue.sqlite` (`secure_delete` only, OD-PP-11).
 - **Dedicated relay folders** (no identity, so no key root): plain.
+- **The Tor helper's keystore** (`tor/state/keystore/`, section 6.6): the onion service key and
+  the intro points' keys stay in clear in Arti's own files; erase overwrites them. Keeping the key
+  sealed and giving it to the helper only in memory is owner decision OD-T3 (security review
+  2026-11, KS-1).
 - **Lock v2** (a running node that drops its keys, auto-lock on sleep, a Raven passphrase on macOS
   and Windows): Phase 6 (P6.40). Lock v1 stops Raven (section 4.13).
 - **The terminal app's files and rows** (`tui_private.rms`, the settings rows, the overlays):

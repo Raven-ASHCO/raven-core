@@ -1144,3 +1144,65 @@ fn temp_files_of_interrupted_writes_go_with_ravens_folders() {
     #[cfg(unix)]
     assert_eq!(std::fs::read(&witness.1).unwrap(), [0; 32]);
 }
+
+/// Review KS-1 (interim) and TOR-7: once the onion service ran, the Tor
+/// helper's keystore holds the service's key, each time period's keys and
+/// the intro points' keys (seven levels below the profile). Every one is
+/// overwritten like the profile's own key files, and nothing of the
+/// helper's folder is left.
+#[test]
+fn the_tor_helpers_keys_are_overwritten_and_its_folder_goes() {
+    let _windows = ForTests::on();
+    let dir = sealed_profile();
+    let dd = canonical(&dir);
+    let lid = "01".repeat(32);
+    let keystore = "tor/state/keystore/hss/raven";
+    let keys = [
+        format!("{keystore}/ks_hs_id.ed25519_expanded_private"),
+        format!("{keystore}/ks_hs_blind_id+20412_1440_43200.ed25519_expanded_private"),
+        format!("{keystore}/ks_hs_desc_sign+20412_1440_43200.ed25519_private"),
+        format!("{keystore}/ipts/k_sid+{lid}.ed25519_private"),
+        format!("{keystore}/ipts/k_hss_ntor+{lid}.x25519_private"),
+        // An interrupted key write (Arti writes `<name>.tmp`, then renames).
+        format!("{keystore}/ks_hs_id.tmp"),
+    ];
+    let state = [
+        "tor/state/state.lock".to_owned(),
+        "tor/state/state/guards.json".to_owned(),
+        "tor/state/state.old/guards.json".to_owned(),
+        "tor/state/hss/raven.lock".to_owned(),
+        "tor/state/hss/raven/ipts.json".to_owned(),
+        format!("tor/state/hss/raven/iptreplay/{lid}.bin"),
+        "tor/cache/dir.sqlite3".to_owned(),
+        "tor/cache/dir_blobs/abcd".to_owned(),
+    ];
+    for name in keys.iter().chain(&state) {
+        std::fs::create_dir_all(dd.join(name).parent().unwrap()).unwrap();
+        std::fs::write(dd.join(name), [0x42; 64]).unwrap();
+    }
+    let p = plan(&dd).unwrap();
+    for name in &keys {
+        assert!(
+            p.key_files.contains(&dd.join(name)),
+            "{name} is not an overwritten key file: {:?}",
+            p.key_files
+        );
+    }
+    for name in &state {
+        assert!(p.data_files.contains(&dd.join(name)), "{name}");
+    }
+    assert!(p.left_unknown.is_empty(), "{:?}", p.left_unknown);
+    // A hard link outside the profile sees the zeros.
+    #[cfg(unix)]
+    let witness = {
+        let outside = tempfile::tempdir().unwrap();
+        let witness = outside.path().join("witness");
+        std::fs::hard_link(dd.join(&keys[3]), &witness).unwrap();
+        (outside, witness)
+    };
+    let report = erase(&dd);
+    assert!(report.finished && report.folder_removed, "{report:?}");
+    assert!(report.left_unknown.is_empty(), "{report:?}");
+    #[cfg(unix)]
+    assert_eq!(std::fs::read(&witness.1).unwrap(), [0; 64]);
+}

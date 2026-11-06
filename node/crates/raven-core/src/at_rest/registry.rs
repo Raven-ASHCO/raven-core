@@ -29,6 +29,11 @@ pub enum Rule {
     /// A dedicated relay folder's own file: no identity there, so no key root
     /// to seal under.
     RelayDirPlain,
+    /// A key another program keeps in clear, in its own format (the Tor
+    /// helper's keystore), for this reason: not sealed yet. `raven erase`
+    /// writes zeros over it before it deletes it, as over the profile's own
+    /// key files (review KS-1).
+    UnsealedKey(&'static str),
     /// Lab or experimental builds only, for this reason.
     Lab(&'static str),
 }
@@ -37,7 +42,8 @@ pub enum Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileRule {
     /// The path below the data dir (`/`-separated), or a pattern in which `*`
-    /// stands for any run of characters other than `/`.
+    /// stands for any run of characters other than `/`, and `**`, as a whole
+    /// last part (`folder/**`), for any path below the folder at any depth.
     pub name: &'static str,
     pub rule: Rule,
     /// The writer lock (a `DataDirLock` file in the data dir) every writer of
@@ -95,21 +101,35 @@ const ADVISORY_EXPORT: &str =
 
 /// The registry. Exact names are matched before patterns, patterns in order.
 pub const FILES: &[FileRule] = &[
-    // ── The Tor onion carrier (lab, RAVEN_ONION_CARRIER_V1) ──
+    // ── The Tor onion carrier (RAVEN_ONION_CARRIER_V1): live in release
+    // builds since 2026-10 (`ONION_PRODUCTION_ENABLED`), so the helper's
+    // files have release rules, at every depth Arti writes them (review
+    // KS-1, TOR-7). ──
     plain(
         crate::onion::SELF_FILE,
         "this node's own onion binding: public (every card and route hint carries it), names \
          no friend; read by `raven whoami --card` without a running node",
     ),
-    lab(
-        "tor/*",
-        "the Tor helper's state (Arti, lab only): its onion service key, guards and directory \
-         cache, kept by Arti with owner-only permissions",
+    // Arti's keystore, `tor/state/keystore/`: the onion service key
+    // (`hss/raven/ks_hs_id`), each time period's blinded and descriptor
+    // signing keys, the intro points' keys (`hss/raven/ipts/`, seven levels
+    // below the profile) and an interrupted write's `<name>.tmp`. Every
+    // file in it is a key; sealing them is the owner's decision OD-T3.
+    rule(
+        "tor/state/keystore/**",
+        Rule::UnsealedKey(
+            "the Tor helper's keys in Arti's own files (owner only): the onion service key, each \
+             time period's keys and the intro points' keys, in clear until their sealing is \
+             decided (OD-T3); a copy lets its holder run this profile's onion service",
+        ),
     ),
-    lab("tor/*/*", "the Tor helper's state (Arti, lab only)"),
-    lab("tor/*/*/*", "the Tor helper's state (Arti, lab only)"),
-    lab("tor/*/*/*/*", "the Tor helper's state (Arti, lab only)"),
-    lab("tor/*/*/*/*/*", "the Tor helper's state (Arti, lab only)"),
+    plain(
+        "tor/**",
+        "the Tor helper's other state (owner only): Arti's guards, circuit times, intro point \
+         state and replay logs (how many introductions arrived, never from whom) and its cache \
+         of public relay documents; the loopback helper of debug builds keeps its stand in \
+         onion seed and counts here; names no friend",
+    ),
     // ── Sealed JSON and secrets (RMS1) ──
     sealed("contacts.json", Kind::Contacts, ".contacts.lock.sqlite"),
     sealed(
@@ -604,12 +624,17 @@ pub fn rule_for(name: &str) -> Option<&'static FileRule> {
     })
 }
 
-/// `*` matches any run of characters other than `/`; everything else
-/// matches itself.
+/// `*` matches any run of characters other than `/`, `**` any run of
+/// characters with `/` (the registry writes it only as a whole last part:
+/// `folder/**` is every file below the folder, at any depth); everything
+/// else matches itself.
 pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
     fn go(pattern: &[u8], name: &[u8]) -> bool {
         match pattern.split_first() {
             None => name.is_empty(),
+            Some((b'*', rest)) if rest.first() == Some(&b'*') => {
+                (0..=name.len()).any(|taken| go(&rest[1..], &name[taken..]))
+            }
             Some((b'*', rest)) => {
                 let mut taken = 0;
                 loop {
@@ -1208,6 +1233,23 @@ mod tests {
             "contact_inbox/a/b.wire"
         ));
         assert!(!glob_match("*.sqlite-wal", "x/y.sqlite-wal"));
+        // `**` crosses folders; `*` never does.
+        assert!(glob_match("tor/**", "tor/state.lock"));
+        assert!(glob_match(
+            "tor/**",
+            "tor/state/keystore/hss/raven/ipts/k_sid+00"
+        ));
+        assert!(!glob_match("tor/**", "tor"));
+        assert!(!glob_match("tor/**", "torrent/a"));
+        assert!(!glob_match("tor/*", "tor/state/state.lock"));
+        assert_eq!(
+            rule_for("tor/state/keystore/hss/raven/ipts/k_sid+00").map(|r| r.name),
+            Some("tor/state/keystore/**")
+        );
+        assert_eq!(
+            rule_for("tor/state/hss/raven/iptreplay/00.bin").map(|r| r.name),
+            Some("tor/**")
+        );
         assert_eq!(
             rule_for(".send_00ab.lock.sqlite").map(|r| r.name),
             Some(".send_*.lock.sqlite")
@@ -1221,6 +1263,46 @@ mod tests {
             Some(Rule::Sealed(Kind::Contacts))
         );
         assert!(rule_for("unknown.json").is_none());
+    }
+
+    /// Review KS-1 (interim) and TOR-7: release builds run the Tor helper
+    /// (the onion carrier is live), so every file it writes has a release
+    /// rule, at every depth Arti writes one: its keystore (the onion service
+    /// key, each time period's keys, the intro points' keys seven levels
+    /// below the profile, an interrupted key write), its guard and intro
+    /// point state and its directory cache.
+    #[test]
+    fn the_tor_helpers_files_have_release_rules_at_every_depth() {
+        let lid = "01".repeat(32);
+        let keystore = "tor/state/keystore/hss/raven";
+        let names = [
+            format!("{keystore}/ks_hs_id.ed25519_expanded_private"),
+            format!("{keystore}/ks_hs_blind_id+20412_1440_43200.ed25519_expanded_private"),
+            format!("{keystore}/ks_hs_desc_sign+20412_1440_43200.ed25519_private"),
+            format!("{keystore}/ipts/k_sid+{lid}.ed25519_private"),
+            format!("{keystore}/ipts/k_hss_ntor+{lid}.x25519_private"),
+            format!("{keystore}/ks_hs_id.tmp"),
+            "tor/state/state.lock".to_owned(),
+            "tor/state/state/guards.json".to_owned(),
+            "tor/state/hss/raven/ipts.json".to_owned(),
+            format!("tor/state/hss/raven/iptreplay/{lid}.bin"),
+            "tor/cache/dir.sqlite3".to_owned(),
+            "tor/cache/dir_blobs/abcd".to_owned(),
+        ];
+        for (n, name) in names.iter().enumerate() {
+            let rule = rule_for(name);
+            assert!(rule.is_some_and(|r| r.erase), "{name}: {rule:?}");
+            if crate::onion_gate::ONION_PRODUCTION_ENABLED {
+                assert!(
+                    !matches!(rule.map(|r| r.rule), Some(Rule::Lab(_))),
+                    "{name}: a release build writes it, yet its rule is {rule:?}"
+                );
+            }
+            // The keystore's files are keys (erase overwrites them); the
+            // rest of the helper's state is not.
+            let key = matches!(rule.map(|r| r.rule), Some(Rule::UnsealedKey(_)));
+            assert_eq!(key, n < 6, "{name}: {rule:?}");
+        }
     }
 
     /// Names are unique, every sealed entry names a writer lock (the existing
@@ -1250,8 +1332,19 @@ mod tests {
                 }
                 assert!(rule.erase, "{} is a profile file", rule.name);
             }
-            if let Rule::Plain(reason) | Rule::Lab(reason) = rule.rule {
+            if let Rule::Plain(reason) | Rule::Lab(reason) | Rule::UnsealedKey(reason) = rule.rule {
                 assert!(!reason.trim().is_empty(), "{} needs a reason", rule.name);
+            }
+            if let Rule::UnsealedKey(_) = rule.rule {
+                assert!(rule.erase, "{} is a key of the profile", rule.name);
+            }
+            // `**` only as a whole last part (erase walks the folder below).
+            if rule.name.contains("**") {
+                assert!(
+                    rule.name.ends_with("/**") && rule.name.matches("**").count() == 1,
+                    "{}: `**` is a whole last part only",
+                    rule.name
+                );
             }
         }
         for kind in Kind::ALL {

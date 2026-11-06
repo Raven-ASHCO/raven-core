@@ -30,8 +30,10 @@
 //!    starts with this data dir's namespace: one whose head was never
 //!    recorded, or all of them when the store can't be read), so no item of
 //!    another profile is ever named.
-//! 3. The small key files, and an interrupted write's temp copy of one,
-//!    overwritten and then deleted (hygiene only: on APFS and SSDs an
+//! 3. The small key files, every file the registry calls a key (the Tor
+//!    helper's keystore, at any depth: its onion service key and the intro
+//!    points' keys; review KS-1, TOR-7), and an interrupted write's temp copy
+//!    of one, overwritten and then deleted (hygiene only: on APFS and SSDs an
 //!    overwrite lands in new blocks).
 //! 4. Only Raven's files: what the registry ([`crate::at_rest::FILES`])
 //!    names, its declared patterns, quarantine copies (`<file>.corrupt*`)
@@ -101,6 +103,8 @@ const PREKEY_SECRETS_DIR: &str = "prekey-lifecycle-secrets";
 const PREKEY_LAB_FILE: &str = "prekey_lifecycle.protected";
 
 /// Step 3: small files that hold keys, overwritten before they are deleted.
+/// The registry's [`at_rest::Rule::UnsealedKey`] files are overwritten too,
+/// wherever the walk finds them ([`key_file`]).
 const KEY_FILES: &[&str] = &[
     at_rest::META_KEY_FILE,
     crate::identity_store::SEED_FILE_NAME,
@@ -556,7 +560,7 @@ pub(crate) fn plan_with(dir: &Path, platform: bool) -> Result<ErasePlan, String>
                 continue;
             }
             plan_folder(&mut plan, &taken, entry, &name);
-        } else if key_temp(&name) {
+        } else if key_file(&name) {
             plan.key_files.push(entry);
         } else if ravens_file(&name) {
             plan.data_files.push(entry);
@@ -569,8 +573,9 @@ pub(crate) fn plan_with(dir: &Path, platform: bool) -> Result<ErasePlan, String>
 
 /// One of Raven's folders (`name` below the profile): its files Raven's
 /// or not, and the folders in it the registry names files in, the same way
-/// (`updates/staged/<build serial>/`, P6.47). A link is never followed: it
-/// is not a real folder, so it is listed as it is.
+/// (`updates/staged/<build serial>/`, P6.47; every folder below `tor/`,
+/// TOR-7). A link is never followed: it is not a real folder, so it is
+/// listed as it is.
 fn plan_folder(plan: &mut ErasePlan, taken: &[PathBuf], folder: PathBuf, name: &str) {
     for inner in entries(&folder) {
         let below = inner
@@ -582,7 +587,7 @@ fn plan_folder(plan: &mut ErasePlan, taken: &[PathBuf], folder: PathBuf, name: &
             Some(below) if is_real_dir(&inner) && raven_folder(&below) => {
                 plan_folder(plan, taken, inner, &below)
             }
-            Some(below) if !is_real_dir(&inner) && key_temp(&below) => plan.key_files.push(inner),
+            Some(below) if !is_real_dir(&inner) && key_file(&below) => plan.key_files.push(inner),
             Some(below) if !is_real_dir(&inner) && ravens_file(&below) => {
                 plan.data_files.push(inner)
             }
@@ -631,14 +636,17 @@ fn ravens_file(name: &str) -> bool {
 
 /// A folder the registry names files in (`contact_inbox/`, `friend_relay/`,
 /// `lan_pair_response/`, ...), its patterns' folders too (`updates/staged/*`
-/// for `updates/staged/5`).
+/// for `updates/staged/5`), and every folder below one whose files it names
+/// at any depth (`tor/**`: the Tor helper's intro point keys are seven levels
+/// below the profile, review TOR-7).
 fn raven_folder(name: &str) -> bool {
     let depth = name.split('/').count();
     at_rest::FILES.iter().any(|rule| {
         let segments: Vec<&str> = rule.name.split('/').collect();
         rule.erase
-            && segments.len() > depth
-            && at_rest::registry::glob_match(&segments[..depth].join("/"), name)
+            && ((segments.len() > depth
+                && at_rest::registry::glob_match(&segments[..depth].join("/"), name))
+                || (rule.name.ends_with("/**") && at_rest::registry::glob_match(rule.name, name)))
     })
 }
 
@@ -658,9 +666,17 @@ fn temp_of(name: &str) -> Option<String> {
     Some(format!("{folder}{file}"))
 }
 
-/// A temp copy of one of the [`KEY_FILES`]: overwritten like the key.
-fn key_temp(name: &str) -> bool {
-    temp_of(name).is_some_and(|file| KEY_FILES.contains(&file.as_str()))
+/// A key file the folder walk finds: one the registry calls a key
+/// ([`at_rest::Rule::UnsealedKey`]: every file of the Tor helper's keystore,
+/// its own `<name>.tmp` of an interrupted write included; review KS-1,
+/// TOR-7), or the temp copy of an interrupted write of one of those or of
+/// the [`KEY_FILES`] (`.<name>.tmp.<16 hex>`). Overwritten like the key.
+fn key_file(name: &str) -> bool {
+    let key = |file: &str| {
+        KEY_FILES.contains(&file)
+            || rule_for(file).is_some_and(|rule| matches!(rule.rule, at_rest::Rule::UnsealedKey(_)))
+    };
+    key(name) || temp_of(name).is_some_and(|file| key(&file))
 }
 
 /// Whether every folder of `name` (a `/`-separated path below `dir`) is a
