@@ -177,8 +177,8 @@ class FakeCargo:
         return subprocess.CompletedProcess(command, 101, "", f"FakeCargo: unexpected command {command}")
 
 
-class ForkAndPathCrateAuditTests(unittest.TestCase):
-    """The audit sees the forks under their crates.io identity and refuses unknown sources."""
+class AuditWorld(unittest.TestCase):
+    """A node folder with a workspace crate, one fork and one crates.io crate, audited through main()."""
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="raven-audit-test.")
@@ -200,6 +200,8 @@ class ForkAndPathCrateAuditTests(unittest.TestCase):
             }
         ]
         self.non_registry: list[dict] = []
+        self.accepted: list[dict] = []
+        self.inactive: list[dict] = []
         self.active = {("app", "0.1.1"), ("forked", "1.0.0+raven.1"), ("plain", "2.0.0")}
         self.workspace = {("app", "0.1.1")}
         self.advisories = {("forked", "1.0.0"): "RUSTSEC-TEST-0002"}
@@ -217,7 +219,8 @@ class ForkAndPathCrateAuditTests(unittest.TestCase):
             json.dumps(
                 {
                     "schema": 1,
-                    "inactive_vulnerability_exceptions": [],
+                    "inactive_vulnerability_exceptions": self.inactive,
+                    "active_vulnerability_acceptances": self.accepted,
                     "non_registry_packages": self.non_registry,
                 }
             ),
@@ -230,6 +233,10 @@ class ForkAndPathCrateAuditTests(unittest.TestCase):
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = audit.main()
         return code, out.getvalue(), err.getvalue(), cargo
+
+
+class ForkAndPathCrateAuditTests(AuditWorld):
+    """The audit sees the forks under their crates.io identity and refuses unknown sources."""
 
     def test_an_advisory_against_a_forks_upstream_version_is_reported(self) -> None:
         code, _, err, cargo = self.audit_main()
@@ -341,6 +348,94 @@ class ForkAndPathCrateAuditTests(unittest.TestCase):
         self.assertIn("patch.unused", err)
 
 
+# ── Reviewed, time bounded acceptance of an active advisory (DEP-2) ─────────
+
+
+class ActiveAdvisoryAcceptanceTests(AuditWorld):
+    """An advisory against a package in the build graph passes only with an exact, reviewed acceptance."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.advisories = {("plain", "2.0.0"): "RUSTSEC-TEST-0003"}
+
+    def acceptance(self, **changes) -> dict:
+        entry = {
+            "advisory_id": "RUSTSEC-TEST-0003",
+            "package": "plain",
+            "version": "2.0.0",
+            "review_by": soon(),
+            "reachability": "only the verify path of plain is used",
+            "reason": "no fixed release exists",
+        }
+        entry.update(changes)
+        return {key: value for key, value in entry.items() if value is not None}
+
+    def test_an_active_vulnerability_without_an_acceptance_still_fails(self) -> None:
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 1, err)
+        self.assertIn("ACTIVE VULNERABILITY RUSTSEC-TEST-0003: plain v2.0.0", err)
+
+    def test_an_accepted_active_vulnerability_passes_and_is_named(self) -> None:
+        self.accepted = [self.acceptance()]
+        code, out, err, _ = self.audit_main()
+        self.assertEqual(code, 0, err)
+        self.assertIn("accepted active advisory RUSTSEC-TEST-0003: plain v2.0.0", out)
+        self.assertIn("only the verify path of plain is used", out)
+
+    def test_an_accepted_vulnerability_in_a_fork_passes(self) -> None:
+        self.advisories = {("forked", "1.0.0"): "RUSTSEC-TEST-0003"}
+        self.accepted = [self.acceptance(package="forked", version="1.0.0")]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 0, err)
+
+    def test_an_acceptance_needs_a_reachability_rationale(self) -> None:
+        self.accepted = [self.acceptance(reachability=None)]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 2, err)
+
+    def test_an_acceptance_needs_a_reason(self) -> None:
+        self.accepted = [self.acceptance(reason="  ")]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 2, err)
+
+    def test_an_expired_acceptance_fails(self) -> None:
+        self.accepted = [self.acceptance(review_by=(dt.date.today() - dt.timedelta(days=1)).isoformat())]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 2, err)
+        self.assertIn("expired", err)
+
+    def test_an_acceptance_reviewed_too_far_ahead_fails(self) -> None:
+        later = dt.date.today() + dt.timedelta(days=audit.MAX_ACTIVE_REVIEW_DAYS + 1)
+        self.accepted = [self.acceptance(review_by=later.isoformat())]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 2, err)
+        self.assertIn("days ahead", err)
+
+    def test_a_stale_acceptance_fails(self) -> None:
+        self.advisories = {}
+        self.accepted = [self.acceptance()]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 1, err)
+        self.assertIn("STALE ACTIVE ADVISORY ACCEPTANCE RUSTSEC-TEST-0003: plain v2.0.0", err)
+
+    def test_an_acceptance_for_a_package_outside_the_build_graph_fails(self) -> None:
+        self.active = {("app", "0.1.1"), ("forked", "1.0.0+raven.1")}
+        self.accepted = [self.acceptance()]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 1, err)
+        self.assertIn("ACTIVE ADVISORY ACCEPTANCE FOR A PACKAGE OUTSIDE THE BUILD GRAPH RUSTSEC-TEST-0003", err)
+
+    def test_one_advisory_cannot_be_both_accepted_and_excepted(self) -> None:
+        self.accepted = [self.acceptance()]
+        self.inactive = [
+            {"advisory_id": "RUSTSEC-TEST-0003", "package": "plain", "version": "2.0.0", "review_by": soon(),
+             "reason": "lock only"}
+        ]
+        code, _, err, _ = self.audit_main()
+        self.assertEqual(code, 2, err)
+        self.assertIn("RUSTSEC-TEST-0003", err)
+
+
 class RepositoryLockTests(unittest.TestCase):
     """The real node/Cargo.lock, node/third_party/forks.json and policy (no cargo run)."""
 
@@ -369,6 +464,15 @@ class RepositoryLockTests(unittest.TestCase):
             sorted(f"{name} {version}" for name, version in audited.forks.values()),
             ["arti-client 0.47.0", "libsqlite3-sys 0.38.2", "saturating-time 0.5.0", "secret-service 2.0.2"],
         )
+
+    def test_the_policy_accepts_only_the_rsa_timing_advisory(self) -> None:
+        # rsa 0.9.10 reaches the build only through Arti, which only verifies
+        # RSA signatures; RUSTSEC-2023-0071 needs private key operations.
+        policy = audit.load_policy(audit.DEFAULT_POLICY)
+        self.assertEqual(set(policy.active), {("RUSTSEC-2023-0071", "rsa", "0.9.10")})
+        entry = policy.active[("RUSTSEC-2023-0071", "rsa", "0.9.10")]
+        self.assertIn("verif", entry["reachability"])
+        self.assertEqual(policy.inactive, {})
 
 
 if __name__ == "__main__":

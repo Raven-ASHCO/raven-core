@@ -7,6 +7,13 @@ keeps that broad scan, then fails closed against Cargo's union of Raven's
 all-feature/all-target graph.  A lock-only vulnerability is accepted only when
 an exact, time-bounded review entry exists in `rustsec-inactive-advisories.json`.
 
+A vulnerability in a package of that graph passes only with an exact entry in
+active_vulnerability_acceptances of the same file: the advisory, package and
+version, why the vulnerable code cannot be reached (reachability), a reason,
+and a review date at most MAX_ACTIVE_REVIEW_DAYS ahead.  An acceptance that
+no longer matches a reported advisory, or whose package left the build
+graph, stops the audit too (security review 2026-11, DEP-2).
+
 The policy deliberately has no advisory-ID-only ignore.  If an excepted
 package becomes buildable, changes version, expires, disappears, or a new
 lock-only advisory appears, CI stops for a fresh review.
@@ -46,6 +53,8 @@ HARD_WARNING_KINDS = {"unsound", "yanked"}
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 # A reviewed policy entry is good for at most this long (about six months).
 MAX_REVIEW_DAYS = 183
+# An accepted advisory against a package in the build graph: about three months.
+MAX_ACTIVE_REVIEW_DAYS = 92
 LOCK_KEYS = ("name", "version", "source", "checksum", "dependencies")
 LOCK_STRING = re.compile(r'^(name|version|source|checksum) = "([^"\\]*)"$')
 LOCK_DEPENDENCY = re.compile(r'^ "([^"\\]*)",$')
@@ -140,12 +149,18 @@ class Policy(NamedTuple):
 
     inactive: dict[tuple[str, str, str], dict[str, Any]]
     non_registry: dict[tuple[str, str, str], dict[str, Any]]
+    active: dict[tuple[str, str, str], dict[str, Any]]
 
 
 def reviewed_entries(
-    items: Any, key_fields: tuple[str, ...], what: str
+    items: Any,
+    key_fields: tuple[str, ...],
+    what: str,
+    text_fields: tuple[str, ...] = ("reason",),
+    max_days: int = MAX_REVIEW_DAYS,
 ) -> dict[tuple[str, ...], dict[str, Any]]:
-    """Entries keyed by key_fields, each with a reason and a review date that has not passed."""
+    """Entries keyed by key_fields, each with its text_fields filled in and
+    a review date that has not passed and is at most max_days ahead."""
     if not isinstance(items, list):
         raise AuditFailure(f"{what} entries must be a list")
     entries: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -154,21 +169,23 @@ def reviewed_entries(
         try:
             key = tuple(entry[name] for name in key_fields)
             review_by = dt.date.fromisoformat(entry["review_by"])
-            reason = entry["reason"].strip()
+            texts = {name: entry[name].strip() for name in text_fields}
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             raise AuditFailure(f"malformed {what} entry: {entry!r}") from error
         if not all(isinstance(part, str) and part for part in key):
             raise AuditFailure(f"malformed {what} entry: {entry!r}")
         if key in entries:
             raise AuditFailure(f"duplicate {what} entry: {key}")
-        if not reason:
-            raise AuditFailure(f"{what} entry has no rationale: {key}")
+        for name, text in texts.items():
+            if not text:
+                missing = "rationale" if name == "reason" else name
+                raise AuditFailure(f"{what} entry has no {missing}: {key}")
         if review_by < today:
             raise AuditFailure(f"{what} review expired on {review_by.isoformat()}: {key}")
-        if (review_by - today).days > MAX_REVIEW_DAYS:
+        if (review_by - today).days > max_days:
             raise AuditFailure(
                 f"{what} review date {review_by.isoformat()} is more than "
-                f"{MAX_REVIEW_DAYS} days ahead: {key}"
+                f"{max_days} days ahead: {key}"
             )
         entries[key] = entry
     return entries
@@ -181,7 +198,7 @@ def load_policy(path: Path) -> Policy:
         raise AuditFailure(f"cannot read advisory policy {path}: {error}") from error
     if not isinstance(document, dict) or document.get("schema") != 1:
         raise AuditFailure("inactive-advisory policy schema must be exactly 1")
-    return Policy(
+    policy = Policy(
         inactive=reviewed_entries(
             document.get("inactive_vulnerability_exceptions", []),
             ("advisory_id", "package", "version"),
@@ -192,7 +209,18 @@ def load_policy(path: Path) -> Policy:
             ("package", "version", "source"),
             "non_registry_packages",
         ),
+        active=reviewed_entries(
+            document.get("active_vulnerability_acceptances", []),
+            ("advisory_id", "package", "version"),
+            "active_vulnerability_acceptances",
+            text_fields=("reachability", "reason"),
+            max_days=MAX_ACTIVE_REVIEW_DAYS,
+        ),
     )
+    both = sorted(set(policy.inactive) & set(policy.active))
+    if both:
+        raise AuditFailure(f"an advisory is both an inactive exception and an active acceptance: {both}")
+    return policy
 
 
 # ── The forks, audited as the crates.io crates they were forked from ────────
@@ -515,10 +543,14 @@ def classify(
     active: set[tuple[str, str]],
     policy: dict[tuple[str, str, str], dict[str, Any]],
     labels: dict[tuple[str, str], str] | None = None,
+    accepted: dict[tuple[str, str, str], dict[str, Any]] | None = None,
 ) -> int:
     labels = labels or {}
+    accepted = accepted or {}
     failures: list[str] = []
     reported_policy_keys: set[tuple[str, str, str]] = set()
+    reported_accepted_keys: set[tuple[str, str, str]] = set()
+    accepted_active = 0
     vulnerabilities = report["vulnerabilities"]["list"]
 
     for record in vulnerabilities:
@@ -527,9 +559,26 @@ def classify(
         if key in policy:
             reported_policy_keys.add(key)
         label = labels.get((name, version), "")
+        if key in accepted:
+            reported_accepted_keys.add(key)
         if (name, version) in active:
+            entry = accepted.get(key)
+            if entry is None:
+                failures.append(
+                    f"ACTIVE VULNERABILITY {advisory_id}: {name} v{version}{label}"
+                )
+                continue
+            accepted_active += 1
+            print(
+                f"accepted active advisory {advisory_id}: {name} v{version}{label} "
+                f"(review by {entry['review_by']}): {entry['reachability'].strip()}"
+            )
+            continue
+        if key in accepted:
             failures.append(
-                f"ACTIVE VULNERABILITY {advisory_id}: {name} v{version}{label}"
+                "ACTIVE ADVISORY ACCEPTANCE FOR A PACKAGE OUTSIDE THE BUILD GRAPH "
+                f"{advisory_id}: {name} v{version}{label} (review it again as an "
+                "inactive_vulnerability_exceptions entry)"
             )
             continue
         entry = policy.get(key)
@@ -549,6 +598,11 @@ def classify(
     for advisory_id, name, version in sorted(stale):
         failures.append(
             "STALE INACTIVE-ADVISORY EXCEPTION "
+            f"{advisory_id}: {name} v{version}"
+        )
+    for advisory_id, name, version in sorted(set(accepted) - reported_accepted_keys):
+        failures.append(
+            "STALE ACTIVE ADVISORY ACCEPTANCE "
             f"{advisory_id}: {name} v{version}"
         )
 
@@ -573,8 +627,9 @@ def classify(
     print(
         "active dependency audit passed: "
         f"{len(active)} exact package versions resolved; "
-        f"{len(vulnerabilities)} reviewed lock-only vulnerabilities; "
-        "0 active vulnerabilities"
+        f"{len(vulnerabilities) - accepted_active} reviewed lock-only vulnerabilities; "
+        f"{accepted_active} accepted active vulnerabilities (reviewed, time bounded); "
+        "0 other active vulnerabilities"
     )
     return 0
 
@@ -617,7 +672,7 @@ def main() -> int:
             copy.write_text(audited.text, encoding="utf-8")
             report = rustsec_report(copy)
         active = audited.audit_terms(resolved_packages())
-        return classify(report, active, policy.inactive, audited.labels())
+        return classify(report, active, policy.inactive, audited.labels(), policy.active)
     except AuditFailure as error:
         print(f"ERROR: dependency audit failed closed: {error}", file=sys.stderr)
         return 2

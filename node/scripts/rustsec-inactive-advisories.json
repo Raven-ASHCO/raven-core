@@ -1,6 +1,16 @@
 {
   "schema": 1,
   "inactive_vulnerability_exceptions": [],
+  "active_vulnerability_acceptances": [
+    {
+      "advisory_id": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.9.10",
+      "review_by": "2027-02-05",
+      "reachability": "rsa reaches the build only through Arti (tor-llcrypto, tor-key-forge and ssh-key-fork-arti). Raven runs Arti as a Tor client and onion service (arti-client features onion-service-client and onion-service-service, no relay), where Arti uses RSA only to verify signatures with public keys (relay and directory authority identity keys). RUSTSEC-2023-0071 (the Marvin attack) recovers a private key from the timing of private key operations; Raven holds no RSA private key and makes no RSA decryption or signature (its onion service keys are ed25519).",
+      "reason": "No rsa release fixes it (the advisory lists no patched version), and rsa is a required dependency of Arti 0.47.0, so it cannot be dropped without dropping the Tor carrier. Security review 2026-11 (DEP-2). Review again by review_by, or as soon as a patched rsa release or an Arti release without rsa exists."
+    }
+  ],
   "non_registry_packages": [
     {
       "package": "spqr",

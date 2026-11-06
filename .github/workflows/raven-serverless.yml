@@ -145,6 +145,17 @@ jobs:
           set -euo pipefail
           bash scripts/check_locked_builds.sh --self-test
           bash scripts/check_locked_builds.sh
+      # Security review 2026-11 (DEP-2): the RustSec audit runs in a job of
+      # its own, the Linux, macOS and Windows jobs each run both release inert
+      # test sets, and every release gate step survives a failed step before
+      # it (static; the self-test plants faults it must catch). The inert test
+      # script runs against a stand-in cargo: nothing is built.
+      - name: Release gate steps on every OS (check_ci_release_gates.py, release_inert_tests.sh)
+        run: |
+          set -euo pipefail
+          python3 -I scripts/check_ci_release_gates.py --self-test
+          python3 -I scripts/check_ci_release_gates.py
+          bash node/scripts/release_inert_tests.sh --self-test
       # The secret scanner must still see a real seed after many allow-listed RFC 8032
       # test seeds, and the O6 IPC-surface guard must fire on an injected forbidden op
       # (both used to be silent no-ops). Neither writes anything. The Keychain guard
@@ -315,6 +326,35 @@ jobs:
             !node/proof_artifacts/LATEST
           if-no-files-found: warn
 
+  # The RustSec audit in a job of its own (security review 2026-11, DEP-2): a
+  # new advisory turns this job red without skipping the release gate steps
+  # of the Linux, macOS and Windows jobs. An advisory against a package in
+  # the build graph passes only with a reviewed, time bounded entry in
+  # node/scripts/rustsec-inactive-advisories.json; the vendored forks are
+  # audited as the crates.io releases they were forked from (DEP-4).
+  rustsec-audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: node
+          prefix-key: rustsec-audit
+      - name: RustSec active dependency audit
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2
+          python3 -m unittest scripts/test_audit_active_dependencies.py
+          python3 scripts/audit_active_dependencies.py
+
   rust-linux:
     name: Rust + vectors (Linux)
     runs-on: ubuntu-latest
@@ -357,24 +397,20 @@ jobs:
             --features raven-node/embedded,raven-client/tor-embedded -- -D warnings
       - name: fuzz targets type-check (cargo-fuzz crate, stable)
         run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --lib --bins -- -D warnings
-      - name: RustSec active dependency audit
-        run: |
-          set -euo pipefail
-          cargo install cargo-audit --locked --version 0.22.2
-          python3 -m unittest scripts/test_audit_active_dependencies.py
-          python3 scripts/audit_active_dependencies.py
       # The lab SQLCipher provider (bundled-sqlcipher*, full-braid-durable-lab)
       # must never reach a shipped package's resolved feature graph. The script
       # also self-tests that it fires on raven-core's lab feature graph, and asserts
       # that libsqlite3-sys still resolves to the audited path fork (node + node/fuzz
       # lockfiles): a rusqlite bump that drops the [patch] fails here.
       - name: SQLCipher lab provider absent from release feature graphs
+        if: ${{ !cancelled() }}
         run: bash scripts/sqlcipher_release_feature_audit.sh
       # Phase 6b (P6.46, OD6b-28): the offline release tool (ash feature
       # `release-tool`) is in no release feature graph, no release script or
       # CI release command enables it (the audit self-tests both checks), and
       # its own lint and tests (test keys only) run here.
       - name: release tool absent from release builds; its lint and tests
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           bash scripts/release_tool_feature_audit.sh
@@ -577,202 +613,14 @@ jobs:
       # every switch set, the generic lab unlock opens nothing in release
       # (pair_init), and a card carries and takes no unsigned route
       # (route_hints::tests::card_routes_lab_switch_is_inert_in_release).
+      # The switches, the lists and what each proves are in
+      # node/scripts/release_inert_tests.sh, which macOS and Windows run too
+      # (security review 2026-11, DEP-2); each run must run at least one test.
+      # !cancelled(): a failed step before this one does not skip it.
       - name: lab switches inert in release (every switch set)
+        if: ${{ !cancelled() }}
         shell: bash
-        env:
-          RAVEN_LAB_TEST_A: "1"
-          RAVEN_LAB_ROUTE_HINTS: "1"
-          RAVEN_LAB_HINTS_NO_ANNOUNCE: "1"
-          RAVEN_LAB_FRIEND_RELAY: "1"
-          RAVEN_LAB_FRIEND_RELAY_LISTEN: "127.0.0.1:0"
-          RAVEN_LAB_RELAY_SELECT: "1,1,1"
-          RAVEN_LAB_P2P_PROFILE_RELAY: "1"
-          RAVEN_LAB_P2P_LOCAL_CANDIDATES: "1"
-          RAVEN_LAB_P2P_RELAY_ONLY: "1"
-          RAVEN_LAB_NET_TAG: "lab"
-          RAVEN_LAB_P2P_PING: "2,1"
-          RAVEN_LAB_SESSION_RESET: "1"
-          RAVEN_LAB_CUSTODY_WAN: "1"
-          RAVEN_LAB_CUSTODY_AFTER_MS: "1"
-          RAVEN_LAB_CUSTODY_FETCH_MS: "1"
-          RAVEN_LAB_CUSTODY_PRETEND_OLD: "1"
-          # Phase 5 (P5.13): a custodian without the letter ops.
-          RAVEN_LAB_CUSTODY_BASE_OPS_ONLY: "1"
-          # Phase 5 (P5.17): multi-hop custody's lab unlock; (P5.21) the
-          # forwarder's interval.
-          RAVEN_LAB_CUSTODY_HANDOFF: "1"
-          RAVEN_LAB_CUSTODY_FORWARD_MS: "1"
-          RAVEN_LAB_OFFLINE: "1"
-          RAVEN_LAB_NOISE_PIN: "1"
-          RAVEN_LAB_LAN_DEFAULT_PORT: "17420"
-          RAVEN_LAB_LAN_AUTO: "1"
-          RAVEN_LAB_LAN_SOURCE_DENY_LOOPBACK: "1"
-          RAVEN_LAB_LAN_BEACON: "1"
-          RAVEN_LAB_LAN_BEACON_PORT: "17421"
-          RAVEN_LAB_LAN_BEACON_FAMILY: "v6"
-          RAVEN_LAB_LAN_BEACON_BUS: "/tmp/raven-lab-beacon-bus"
-          # The privacy pack's (PP.1): never read in release; a release build
-          # seals without RAVEN_LAB_AT_REST.
-          RAVEN_LAB_AT_REST: "1"
-          RAVEN_LAB_ERASE_ROOT: "/tmp/raven-lab-erase-root"
-          RAVEN_LAB_AT_REST_KEY_FAULT: "unavailable"
-          RAVEN_LAB_RETENTION_GRACE_MS: "1"
-          RAVEN_LAB_LOGIN_ITEM_ROOT: "/tmp/raven-lab-login-items"
-          RAVEN_LAB_LOGIN_ITEM_TOOLS: "/tmp/raven-lab-login-tools"
-          # Phase 5 (P5.3): the horizon's and the letters' lab unlocks.
-          RAVEN_LAB_HORIZON: "1"
-          RAVEN_LAB_LETTER: "1"
-          # Groups (docs/design/2026-10-groups.md): the lab unlock.
-          RAVEN_LAB_GROUPS: "1"
-          # Phase 5 (P5.25-P5.28): nearby's lab unlock, its ether hub, the
-          # public-address allowance, the shorter foreground and the network
-          # audit: never read in release.
-          RAVEN_LAB_NEARBY: "1"
-          RAVEN_LAB_NEARBY_ETHER: "127.0.0.1:9"
-          RAVEN_LAB_NEARBY_ALLOW_PUBLIC_ADDR: "1"
-          RAVEN_LAB_NEARBY_FOREGROUND_MS: "1"
-          # Offline mesh carry Phase 0: the field test's Bluetooth-only
-          # switch; no gate reads it in release (raven-core
-          # `nearby_gate::tests::nearby_only_closes_and_never_opens`).
-          RAVEN_LAB_NEARBY_ONLY: "1"
-          # The Tor onion carrier (on in release builds since 2026-10): its
-          # close switch, the helper path, the loopback helper and the race's
-          # head start are never read in release (raven-core `onion_gate::`).
-          RAVEN_LAB_TOR: "1"
-          RAVEN_TOR_HELPER: "/tmp/raven-lab-no-tor-helper"
-          RAVEN_LAB_TOR_LOOPBACK: "/tmp/raven-lab-tor-loopback"
-          RAVEN_LAB_TOR_HEAD_START_MS: "1"
-          RAVEN_LAB_NET_AUDIT: "/tmp/raven-lab-net-audit"
-          # Phase 4 (P4.1): its six gates stay at their consts and its
-          # harness values are never read.
-          RAVEN_LAB_WSS: "1"
-          RAVEN_LAB_WSS_PROXY: "1"
-          RAVEN_LAB_PORT_MAP: "1"
-          RAVEN_LAB_V6_PINHOLE: "1"
-          RAVEN_LAB_NAT_CLASS: "1"
-          RAVEN_LAB_PEER_ROTATION: "1"
-          RAVEN_LAB_PORTMAP_GATEWAY: "127.0.0.1:5351"
-          RAVEN_LAB_PORTMAP_LIFETIME: "8"
-          RAVEN_LAB_NAT_CLASS_FORCE: "varies"
-          RAVEN_LAB_PEER_EPOCH_S: "10"
-          # Auto-reach: STUN discovery and serverless punching stay at their
-          # consts (on in release builds since 2026-10) and their harness
-          # values are never read (raven-core
-          # `portmap_gate::lab_switches_are_inert_in_release`).
-          RAVEN_LAB_STUN_DISCOVERY: "1"
-          RAVEN_LAB_SERVERLESS_PUNCH: "1"
-          RAVEN_LAB_STUN_SERVERS: "127.0.0.1:9"
-          RAVEN_LAB_STUN_REFRESH_S: "5"
-          RAVEN_LAB_PUNCH_SLOT_S: "5"
-          # Phase 6a (P6.2): learning connectivity's unlock, its harness
-          # timings and the sealer fault; learning stays shut, untuned and
-          # sealed in release (raven-core
-          # `learning_lab_switches_are_inert_without_debug_assertions`).
-          RAVEN_LAB_LEARNING: "1"
-          RAVEN_LAB_LEARNING_TUNE: "1,1,1"
-          RAVEN_LAB_LEARNING_SEALER: "unavailable"
-          # Phase 6b (P6.21): the sensing gates' switches; no SEC_* event is
-          # noted or answered and no session profile is refused in release
-          # (raven-core `security_lab_switches_are_inert_without_debug_assertions`
-          # and `security_gate::`, raven-node `security::` with its gates
-          # shut).
-          RAVEN_LAB_SECURITY_EVENTS: "1"
-          RAVEN_LAB_SECURITY_RESPONSES: "1"
-          RAVEN_LAB_SUITE_FLOOR: "1"
-          # Phase 6b (P6.26): the penalty box's loopback switch; loopback stays
-          # exempt in release (raven-core
-          # `penalty_loopback_switch_is_inert_without_debug_assertions`).
-          RAVEN_LAB_SEC_PENALTY_LOOPBACK: "1"
-          # Phase 6b (P6.34): PAD1 link padding's lab switch; no link offers
-          # or sends RPD1 in release (raven-node `link::`).
-          RAVEN_LAB_LINK_PADDING: "1"
-          # Phase 6b (P6.35): the RLK1 link knock's lab switch; no dial knocks
-          # and no listener reads a knock in release (raven-node
-          # `link_knock::`).
-          RAVEN_LAB_LINK_KNOCK: "1"
-          # Phase 6b (P6.36): the random LAN port's lab switch; no new
-          # profile picks a port and none is read in release (raven-core
-          # `random_port_lab_switch_is_inert_in_release`).
-          RAVEN_LAB_RANDOM_PORT: "1"
-          # Phase 6b (P6.38): pair seeds' lab switch; no RRH1 carries a seed
-          # and every beacon, knock and Bluetooth key comes from the root in
-          # release (raven-core `pair_seed::`, raven-node `pair_seed::`).
-          RAVEN_LAB_PAIR_SEED: "1"
-          # Phase 6b (P6.40): Lock now v2's lab switch; nothing locks and
-          # Status has no `locked` in release.
-          RAVEN_LAB_LOCAL_PROTECTION: "1"
-          # Phase 6b (P6.44): the advisory gate's switch; the update state
-          # reads and writes nothing in release, and the lab release key
-          # set (written below) is never read there.
-          RAVEN_LAB_ADVISORY: "1"
-          # Phase 6b (P6.47): the release bundle gate's switch; `raven
-          # update` stages, installs and records nothing in release.
-          RAVEN_LAB_RELEASE_BUNDLE: "1"
-          # Phase 6b (P6.48): the mesh update gate's switch; the RUP1
-          # exchange (`update_exchange::live`) stays shut in release.
-          RAVEN_LAB_MESH_UPDATE: "1"
-          # Phase 6b (P6.49): the lab download approval and install word;
-          # nothing is approved or typed by itself in release.
-          RAVEN_LAB_UPDATE_AUTO_APPROVE: "1"
-          # Phase 6b (P6.51): the lab friend whose HAVE claims a newer
-          # notice than it holds; no HAVE claims anything it lacks in release.
-          RAVEN_LAB_UPDATE_CLAIM_NEWER: "1"
-        run: |
-          set -euo pipefail
-          events="$RUNNER_TEMP/netwatch-events"
-          printf 'up 192.0.2.10/24\negress none\n' >"$events"
-          export RAVEN_LAB_NETWATCH_EVENTS="$events"
-          clock="$RUNNER_TEMP/lab-clock"
-          printf '864000000\n' >"$clock"
-          export RAVEN_LAB_CLOCK_FILE="$clock"
-          keys="$RUNNER_TEMP/lab-release-keys"
-          printf '%s\n' 010203d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce >"$keys"
-          export RAVEN_LAB_RELEASE_KEYS_FILE="$keys"
-          cargo test --locked --release -p raven-core --lib -- \
-            lan_gate:: p2p_gate:: route_hints:: route_memory:: relay_select:: reach_diag:: clock:: horizon:: \
-            wss_gate:: portmap_gate:: gateway:: nearby_gate:: lab_audit:: pair_seed:: security_gate:: \
-            lan_gate::tests::learning_lab_switches_are_inert_without_debug_assertions \
-            lan_gate::tests::security_lab_switches_are_inert_without_debug_assertions \
-            lan_gate::tests::penalty_loopback_switch_is_inert_without_debug_assertions \
-            learning::tests::lab_tune_parse_table \
-            session_reset::tests::session_reset_lab_switch_is_inert_without_debug_assertions \
-            custody_gate::tests::handoff_live_needs_custody_and_its_own_switch \
-            at_rest::tests::key_fault_switch_is_inert_without_debug_assertions \
-            node_policy::tests::random_port_lab_switch_is_inert_in_release \
-            update_state::tests::release_keys_file_is_inert_without_debug_assertions \
-            update_state::tests::the_bundle_gate_is_inert_without_debug_assertions \
-            update_exchange::tests::the_exchange_is_inert_without_debug_assertions \
-            update_downloads::tests::auto_approve_is_inert_without_debug_assertions \
-            group::tests::the_lab_switch_is_inert_without_debug_assertions \
-            onion_gate:: internet_gate:: \
-            custody_gate::tests::custody_flags_are_on_and_handoff_stays_off \
-            custody_gate::tests::gates_follow_the_consts_and_the_debug_close_switches \
-            custody_gate::tests::hold_text_names_the_flag_and_the_close_switch \
-            pair_init::tests::lab_gate_and_test_a_gate_are_inert_without_debug_assertions \
-            app_channel::tests::production_flags_are_on \
-            release_plan_is_byte_identical_with_the_gate_off
-          # Phase 5 (review cross-6): nearby's service, the custody handoff
-          # forwarder and the letter steps read their real gates here too,
-          # once as built by default and once with the platform radio built
-          # in (nearby-radio, the build that has a real radio backend).
-          node_inert=(
-            netwatch:: p2p:: proxy:: hints:: friend_relay:: link:: link_knock:: pair_seed:: relay_listen_is_retired_unless_the_test_switch
-            lan_default_lab_switch_is_inert_in_release
-            the_lab_foreground_ttl_only_shortens_and_only_in_the_lab
-            lab_bus_port_and_family_overrides_are_inert_without_debug_assertions
-            nearby::tests::a_service_with_the_gate_closed_creates_no_radio
-            custody::tests::forward_hops_are_nobody_with_the_handoff_gate_closed
-            custody::tests::an_encounter_with_the_custody_gate_off_is_a_no_op
-            letters::tests::the_letter_steps_do_nothing_with_the_letter_gate_closed
-            lock_v2_lab_switch_is_inert_in_release
-            update_exchange::tests::with_the_gate_shut_nothing_is_offered_sent_or_taken
-            update_exchange::tests::the_newer_claim_is_inert_without_debug_assertions
-            security::tests::nothing_is_noted_or_reported_while_the_gate_is_shut
-            security::tests::status_is_reported_only_while_the_gate_is_live
-          )
-          cargo test --locked --release -p raven-node --lib -- "${node_inert[@]}"
-          cargo test --locked --release -p raven-node --features nearby-radio --lib -- \
-            "${node_inert[@]}"
+        run: bash scripts/release_inert_tests.sh switches
       - name: build swarm
         run: cargo build --locked -p raven-swarm -p raven-node
       - name: experimental mailbox/NAT tests (still production-disabled)
@@ -810,6 +658,7 @@ jobs:
             "experimental NAT connectivity requires explicit runtime opt-in" \
             target/release/raven-swarm-connectivity-experimental --run-seconds 1
       - name: release crypto feature gate
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo build --locked --release -p raven-core -p raven-node -p ash
@@ -830,6 +679,7 @@ jobs:
             rm -f "$log"
           done
       - name: release build of ash makes no raven-release (P6.46)
+        if: ${{ !cancelled() }}
         run: bash scripts/release_tool_feature_audit.sh --release-build
       # The configuration the Linux installer ships (docs/INSTALL_Linux.md):
       # ash and raven-node with the Tor helper, compiled only, warning-free.
@@ -837,6 +687,7 @@ jobs:
       # no later step starts a release raven-node next to it (it would start
       # real Tor).
       - name: release build of the shipped configuration (Tor helper)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -852,9 +703,9 @@ jobs:
       # switched on in October 2026), so a new gate's tests run here in
       # release without a list to keep up to date (Phase 3 "release job").
       - name: lab switches inert, production flags as pinned (release)
-        run: |
-          cargo test --locked --release -p raven-core --lib -- inert production_flag
-          cargo test --locked --release -p raven-node --bins -- inert production_flag
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/release_inert_tests.sh pinned
       - name: libp2p swarm smoke
         run: ./scripts/libp2p_swarm_smoke.sh
       - name: bootstrap manual-peer smoke
@@ -1120,8 +971,9 @@ jobs:
     name: Rust (macOS)
     runs-on: macos-latest
     # 80, not 60: the shipped release build with the Tor helper (Arti) adds
-    # several minutes while its cache is cold.
-    timeout-minutes: 80
+    # several minutes while its cache is cold. 100: the release test sets of
+    # node/scripts/release_inert_tests.sh build release test binaries too.
+    timeout-minutes: 100
     defaults:
       run:
         working-directory: node
@@ -1217,31 +1069,21 @@ jobs:
           cargo test --manifest-path third_party/saturating-time-0.5.0-raven/Cargo.toml \
             --target-dir target/saturating-time --lib -- coarse_clock system_time_limits
           git diff --exit-code -- ../shared-vectors/rvn1/onion
-      # Phase 5 (review cross-6): a release raven-node with the CoreBluetooth
-      # backend built in and every Phase 5 lab switch set reads none of
-      # them: nearby's service creates no radio object, the custody handoff
-      # forwarder has no next hop and the letter steps do nothing (the
-      # Linux job runs the same tests in its "every switch set" step).
-      - name: Phase 5 switches inert in release (nearby radio built in)
+      # The release test sets of the Linux job, from the same script
+      # (node/scripts/release_inert_tests.sh): every lab switch set, then no
+      # switch set, so the gate evidence comes from macOS too (security
+      # review 2026-11, DEP-2). !cancelled(): a failed step before these
+      # does not skip them. The raven-node runs include the five Phase 5
+      # tests (nearby, custody handoff, letters) with the CoreBluetooth
+      # backend built in (nearby-radio) and every switch set.
+      - name: lab switches inert in release (every switch set)
+        if: ${{ !cancelled() }}
         shell: bash
-        env:
-          RAVEN_LAB_TEST_A: "1"
-          RAVEN_LAB_NEARBY: "1"
-          RAVEN_LAB_NEARBY_ETHER: "127.0.0.1:9"
-          RAVEN_LAB_NEARBY_ALLOW_PUBLIC_ADDR: "1"
-          RAVEN_LAB_NEARBY_FOREGROUND_MS: "1"
-          RAVEN_LAB_CUSTODY_HANDOFF: "1"
-          RAVEN_LAB_CUSTODY_FORWARD_MS: "1"
-          RAVEN_LAB_HORIZON: "1"
-          RAVEN_LAB_LETTER: "1"
-        run: |
-          set -euo pipefail
-          cargo test --locked --release -p raven-node --features nearby-radio --lib -- \
-            the_lab_foreground_ttl_only_shortens_and_only_in_the_lab \
-            nearby::tests::a_service_with_the_gate_closed_creates_no_radio \
-            custody::tests::forward_hops_are_nobody_with_the_handoff_gate_closed \
-            custody::tests::an_encounter_with_the_custody_gate_off_is_a_no_op \
-            letters::tests::the_letter_steps_do_nothing_with_the_letter_gate_closed
+        run: bash scripts/release_inert_tests.sh switches
+      - name: lab switches inert, production flags as pinned (release)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/release_inert_tests.sh pinned
       # Phase 5 (P5.32): the macOS installer's helper-only mode as a dry run
       # (temporary HOME, bin dir and profile; cargo and launchctl stubbed for
       # the installer): RavenNearby.app is copied, signed ad hoc and checked,
@@ -1255,6 +1097,7 @@ jobs:
       # binary; the helpers are deleted at once, so no later step starts a
       # release raven-node next to them (it would start real Tor).
       - name: release build of the shipped configuration (Tor helper, Bluetooth)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1379,8 +1222,9 @@ jobs:
     name: Rust (Windows)
     runs-on: windows-latest
     # 80, not 60: the shipped release build with the Tor helper (Arti) adds
-    # several minutes while its cache is cold.
-    timeout-minutes: 80
+    # several minutes while its cache is cold. 100: the release test sets of
+    # node/scripts/release_inert_tests.sh build release test binaries too.
+    timeout-minutes: 100
     defaults:
       run:
         working-directory: node
@@ -1493,6 +1337,7 @@ jobs:
       # Bluetooth backend, compiled only, warning-free. Nothing here runs a
       # release binary; the helper is deleted at once.
       - name: release build of the shipped configuration (Tor helper)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1503,6 +1348,19 @@ jobs:
             echo "the shipped release build is not warning-free" >&2
             exit 1
           fi
+      # The release test sets of the Linux job, from the same script
+      # (node/scripts/release_inert_tests.sh): every lab switch set, then no
+      # switch set, so the gate evidence comes from Windows too (security
+      # review 2026-11, DEP-2). !cancelled(): a failed step before these
+      # does not skip them.
+      - name: lab switches inert in release (every switch set)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/release_inert_tests.sh switches
+      - name: lab switches inert, production flags as pinned (release)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/release_inert_tests.sh pinned
       # Named reliability gates (Sprint 0 evidence bar). cargo, not bash.
       # reliability_10k on Windows is QUEUE DURABILITY ONLY — not a path proof.
       # Path proof: named bridge_v1 + ash_doctor_send_smoke.ps1 (this job).

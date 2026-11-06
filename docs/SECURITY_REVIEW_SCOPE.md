@@ -47,7 +47,9 @@ Everything else (sealed letters, custody handoff, relays over WSS and HTTPS prox
 rotation, the LAN beacon, learning connectivity, the Phase 6b security features, session reset and
 renewal, the hybrid ratchet) is compiled in but held off by `*_PRODUCTION_ENABLED = false` gates; a
 release build never reads the `RAVEN_LAB_*` switches that open them in debug builds. CI checks this
-(the "lab switches inert in release" and "production flags as pinned" steps).
+on Linux, macOS and Windows (the "lab switches inert in release" and "production flags as pinned"
+steps, both from `node/scripts/release_inert_tests.sh`), in steps that still run when a step before
+them fails; the RustSec audit runs in a job of its own, so an advisory cannot skip them.
 
 ## 2. Components, in priority order
 
