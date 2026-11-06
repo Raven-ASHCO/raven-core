@@ -41,7 +41,9 @@ Python reference `protocol/reference/raven_protocol/lan_beacon.py`, and the vect
 
 **What the contact gate already does on every LAN link** (raven-node `lan_direct` `handle_inbound`;
 raven-core `lan_dispatch` `link_admission`):
-1. Pre-authentication slots per IP, and a handshake deadline.
+1. Pre-authentication slots per IP, and a handshake deadline. A contact holds at most 4
+   authenticated links: a newer one that authenticates closes that contact's oldest, so one
+   contact on several addresses cannot hold every slot (LAN-ADM-2).
 2. Noise XX. The responder's static key travels in m2, encrypted under ee. A passive observer does
    not see it. Anyone who connects does, and it is stable per identity (the D7 residual).
 3. The dialer's signed bind comes first.

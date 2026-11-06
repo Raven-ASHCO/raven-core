@@ -1407,7 +1407,7 @@ async fn handle_inbound_with<S: AsyncRead + AsyncWrite + Unpin>(
     // keeps a displaceable pre-auth slot, so a handful of sources cannot fill the
     // listener with throw-away identities and lock real contacts out.
     if trusted {
-        slot.authenticated();
+        slot.authenticated(remote_ed);
         // Remember where from first: a contact whose DHCP address changed is
         // reached again at `<this ip>:<saved port>` (raven_core::lan_seen), and
         // the dial-back below must already see it.

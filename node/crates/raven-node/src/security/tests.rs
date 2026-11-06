@@ -721,7 +721,7 @@ async fn sixteen_junk_handshakes_ban_a_source_until_a_contact_authenticates() {
     // A contact behind the banned address gets through within 10 s and
     // clears it.
     let mut contact = adm.admit(bad_ip).expect("the next probation");
-    contact.authenticated();
+    contact.authenticated([0xC1; 32]);
     assert!(!source_banned(bad_ip), "a contact cleared the source");
     for _ in 0..3 {
         held.push(adm.admit(bad_ip).expect("no longer banned"));

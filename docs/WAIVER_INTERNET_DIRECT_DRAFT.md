@@ -81,10 +81,12 @@ revocation, Keychain prompts, platform coverage) applies unchanged, plus:
    listens on 7422.
 2. **Denial of service.** Handshakes cost CPU (X25519, Ed25519 verify) and
    pre-auth slots. The listener shares `PRODUCTION_INBOUND` limits with LAN (32
-   connections, 8 per IP, 4 handshaking per IP, 10 s handshake deadline,
-   120 s session, 64 frames) with contacts in non-displaceable slots; the
-   per-/24 (IPv4) and per-/48 (IPv6) pre-auth cap proposed in design §3.4 is
-   **not** implemented yet. A distributed flood can still keep contacts out.
+   connections, 8 per IP, 4 handshaking per IP, 4 authenticated per contact,
+   10 s handshake deadline, 120 s session, 64 frames) with contacts in slots
+   no newcomer displaces (a contact's newer link closes its oldest past 4,
+   TOR-2 and LAN-ADM-2); the per-/24 (IPv4) and per-/48 (IPv6) pre-auth cap
+   proposed in design §3.4 is **not** implemented yet. A distributed flood can
+   still keep contacts out.
 3. **Metadata.** Every network observer sees both IPs, timing and frame sizes.
    A contact card or a contact record maps an IP or DNS name to a Raven ID for
    whoever holds it; a stable IPv6 address or DNS name in a card is a stable

@@ -3318,8 +3318,9 @@ async fn serve_streams(
                 () = displaced.notified() => netutil::log_inbound_failure(
                     "p2p inbound",
                     format_args!(
-                        "from {}: unauthenticated link displaced by a newcomer",
-                        netutil::link_tag(&peer.to_bytes())
+                        "from {}: {}",
+                        netutil::link_tag(&peer.to_bytes()),
+                        displaced.why()
                     ),
                 ),
             }

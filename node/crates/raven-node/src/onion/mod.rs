@@ -1627,7 +1627,7 @@ async fn serve_forward(
                 },
                 () = displaced.notified() => netutil::log_inbound_failure(
                     "onion inbound",
-                    "from a Tor stream: unauthenticated link displaced by a newcomer",
+                    format_args!("from a Tor stream: {}", displaced.why()),
                 ),
                 () = crate::lock::until_locked() => {}
             }

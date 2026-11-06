@@ -1174,6 +1174,11 @@ pub(crate) mod netutil {
         /// newcomer instead. Zero: any of them may give way. The onion
         /// listener's covers a friend's handshake over Tor (TOR-1).
         pub preauth_grace: Duration,
+        /// Authenticated connections of one contact. A newer one that
+        /// authenticates closes that contact's oldest: one contact (or
+        /// whoever holds its key) cannot hold every slot, which nobody could
+        /// then displace (TOR-2, LAN-ADM-2).
+        pub max_per_contact: usize,
         /// How long a link waits, before its handshake, for a contact book
         /// this process holds while its key loads ([`book_open_within`]).
         /// Well below a dialer's wait for Noise message 2 (30 s): a dialer
@@ -1189,6 +1194,7 @@ pub(crate) mod netutil {
         lifetime: Duration::from_secs(120),
         handshake_deadline: Duration::from_secs(10),
         preauth_grace: Duration::ZERO,
+        max_per_contact: 4,
         book_wait: BOOK_WAIT,
     };
 
@@ -1204,6 +1210,7 @@ pub(crate) mod netutil {
         lifetime: Duration::from_secs(300),
         handshake_deadline: Duration::from_secs(20),
         preauth_grace: Duration::ZERO,
+        max_per_contact: 2,
         book_wait: BOOK_WAIT,
     };
 
@@ -1226,6 +1233,7 @@ pub(crate) mod netutil {
         lifetime: Duration::from_secs(180),
         handshake_deadline: raven_core::onion::ONION_HANDSHAKE_DEADLINE,
         preauth_grace: Duration::from_secs(10),
+        max_per_contact: 4,
         book_wait: BOOK_WAIT,
     };
 
@@ -1286,11 +1294,50 @@ pub(crate) mod netutil {
         /// Still pre-auth: counts against the small per-source cap and may be
         /// displaced by a newcomer.
         handshaking: bool,
+        /// The contact it authenticated as ([`AdmissionSlot::authenticated`]).
+        contact: Option<[u8; 32]>,
         /// When it was admitted ([`InboundLimits::preauth_grace`]).
         admitted: Instant,
         /// The helper life it was admitted in ([`Admission::new_life`]).
         life: u64,
-        displaced: Arc<Notify>,
+        displaced: Displaced,
+    }
+
+    /// Fires once a connection's slot was taken: a newcomer displaced it
+    /// while it was pre-auth, or a newer link of the same contact replaced
+    /// it ([`InboundLimits::max_per_contact`]). Its handler must then be
+    /// dropped, which closes the connection.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct Displaced(Arc<DisplacedState>);
+
+    #[derive(Debug, Default)]
+    struct DisplacedState {
+        notify: Notify,
+        by_contact: AtomicBool,
+    }
+
+    impl Displaced {
+        /// Takes the slot; `by_contact`: for a newer link of its contact.
+        fn fire(&self, by_contact: bool) {
+            self.0.by_contact.store(by_contact, Ordering::SeqCst);
+            // Stores a permit, so the wake-up is not lost if the handler's
+            // task has not polled yet.
+            self.0.notify.notify_one();
+        }
+
+        /// Until the slot was taken.
+        pub(crate) async fn notified(&self) {
+            self.0.notify.notified().await;
+        }
+
+        /// Why the slot was taken, for the log (no key, no address).
+        pub(crate) fn why(&self) -> &'static str {
+            if self.0.by_contact.load(Ordering::SeqCst) {
+                "closed for a newer link of the same contact"
+            } else {
+                "unauthenticated link displaced by a newcomer"
+            }
+        }
     }
 
     /// At most this many circuits are remembered as having lost a pre-auth
@@ -1380,6 +1427,24 @@ pub(crate) mod netutil {
                 self.lost.insert(key);
             }
         }
+
+        /// Connection `id` authenticated as `contact`: close that contact's
+        /// oldest other connections while it holds more than `cap`, never
+        /// `id` itself (TOR-2, LAN-ADM-2).
+        fn keep_newest_of(&mut self, contact: [u8; 32], id: u64, cap: usize) {
+            let theirs: Vec<u64> = self
+                .conns
+                .iter()
+                .filter(|(_, c)| c.contact == Some(contact))
+                .map(|(&other, _)| other)
+                .collect();
+            let excess = theirs.len().saturating_sub(cap.max(1));
+            for old in theirs.into_iter().filter(|&other| other != id).take(excess) {
+                if let Some(conn) = self.conns.remove(&old) {
+                    conn.displaced.fire(true);
+                }
+            }
+        }
     }
 
     /// The admission's clock: tokio's (a paused test runtime moves it), the
@@ -1396,8 +1461,9 @@ pub(crate) mod netutil {
     /// connection of a busier source (see `AdmissionState::displaceable`), so a
     /// pool of silent sockets cannot lock real peers out; one younger than
     /// the listener's [`InboundLimits::preauth_grace`] is never displaced.
-    /// Authenticated sessions are never displaced, and a source over its own
-    /// caps is simply refused.
+    /// Authenticated sessions are never displaced by a newcomer; a contact's
+    /// newest ones close its oldest beyond [`InboundLimits::max_per_contact`].
+    /// A source over its own caps is simply refused.
     ///
     /// A listener whose sources are network addresses
     /// ([`Admission::for_addresses`]) also asks the process's penalty box
@@ -1432,7 +1498,7 @@ pub(crate) mod netutil {
     pub(crate) struct AdmissionSlot {
         admission: Arc<Admission>,
         id: u64,
-        displaced: Arc<Notify>,
+        displaced: Displaced,
         /// The handler knows whom it serves ([`AdmissionSlot::authenticated`],
         /// [`AdmissionSlot::contact_admitted`]): from then on it reports the
         /// link's security events itself, and the accept loop notes none of
@@ -1536,23 +1602,22 @@ pub(crate) mod netutil {
                     if self.circuits {
                         st.mark_lost(conn.key, conn.life);
                     }
-                    // Stores a permit, so the wake-up is not lost if the
-                    // victim's task has not polled yet.
-                    conn.displaced.notify_one();
+                    conn.displaced.fire(false);
                 }
             }
             let id = st.next_id;
             st.next_id += 1;
-            let displaced = Arc::new(Notify::new());
+            let displaced = Displaced::default();
             let life = st.life;
             st.conns.insert(
                 id,
                 Conn {
                     key,
                     handshaking: true,
+                    contact: None,
                     admitted: now,
                     life,
-                    displaced: Arc::clone(&displaced),
+                    displaced: displaced.clone(),
                 },
             );
             drop(st);
@@ -1568,12 +1633,21 @@ pub(crate) mod netutil {
 
     impl AdmissionSlot {
         /// The peer completed the handshake **and is trusted** (a local
-        /// contact): stop counting it against the pre-auth caps and protect it
-        /// from displacement. Possessing a key is not trust: anyone can
-        /// self-sign an RLB1 bundle, so callers must not promote strangers.
-        pub(crate) fn authenticated(&mut self) {
-            if let Some(c) = lock(&self.admission.state).conns.get_mut(&self.id) {
-                c.handshaking = false;
+        /// contact, whose identity key is `contact`): stop counting it
+        /// against the pre-auth caps and protect it from displacement by a
+        /// newcomer. Possessing a key is not trust: anyone can self-sign an
+        /// RLB1 bundle, so callers must not promote strangers. A contact
+        /// holds at most [`InboundLimits::max_per_contact`] such slots: this
+        /// one closes that contact's oldest beyond them (TOR-2, LAN-ADM-2).
+        pub(crate) fn authenticated(&mut self, contact: [u8; 32]) {
+            {
+                let mut st = lock(&self.admission.state);
+                // Gone already if it was displaced.
+                if let Some(c) = st.conns.get_mut(&self.id) {
+                    c.handshaking = false;
+                    c.contact = Some(contact);
+                    st.keep_newest_of(contact, self.id, self.admission.limits.max_per_contact);
+                }
             }
             self.auth.store(true, Ordering::Relaxed);
             // A contact came from here: the source is no stranger's (a
@@ -1597,10 +1671,11 @@ pub(crate) mod netutil {
             Arc::clone(&self.auth)
         }
 
-        /// Fires once a newcomer has taken this (pre-auth) slot over: the
+        /// Fires once this slot was taken over (a newcomer displaced it while
+        /// pre-auth, or a newer link of its contact replaced it): the
         /// connection must then be dropped.
-        pub(crate) fn displaced(&self) -> Arc<Notify> {
-            Arc::clone(&self.displaced)
+        pub(crate) fn displaced(&self) -> Displaced {
+            self.displaced.clone()
         }
     }
 
@@ -1838,10 +1913,7 @@ pub(crate) mod netutil {
                     // Dropping `work` closes the socket.
                     () = displaced.notified() => log_inbound_failure(
                         &format!("{name} inbound"),
-                        format_args!(
-                            "from {}: unauthenticated connection displaced by a newcomer",
-                            source_tag(addr.ip())
-                        ),
+                        format_args!("from {}: {}", source_tag(addr.ip()), displaced.why()),
                     ),
                     // Lock v2 (P6.40): every link ends when Raven locks, and
                     // the identity it held goes with it.
@@ -2270,6 +2342,12 @@ pub(crate) mod netutil {
             s.parse().unwrap()
         }
 
+        /// Contact `n`'s key, as a listener passes it to
+        /// [`AdmissionSlot::authenticated`].
+        fn contact(n: u8) -> [u8; 32] {
+            [n; 32]
+        }
+
         impl AdmissionSlot {
             /// Not displaced, not dropped.
             fn is_live(&self) -> bool {
@@ -2286,8 +2364,8 @@ pub(crate) mod netutil {
             assert!(adm.try_admit(a).is_none(), "per-ip cap");
             let mut s3 = adm.try_admit(b).expect("other ip");
             // Authenticated sessions are never displaced: full means full.
-            for s in [&mut s1, &mut s2, &mut s3] {
-                s.authenticated();
+            for (s, k) in [&mut s1, &mut s2, &mut s3].into_iter().zip(1..) {
+                s.authenticated(contact(k));
             }
             assert!(adm.try_admit(b).is_none(), "global cap");
             drop(s1);
@@ -2304,8 +2382,8 @@ pub(crate) mod netutil {
             let ip: IpAddr = "192.0.2.9".parse().unwrap();
             let mut held: Vec<AdmissionSlot> = (0..4).map(|_| adm.try_admit(ip).unwrap()).collect();
             assert!(adm.try_admit(ip).is_none(), "four handshakes in flight");
-            held[0].authenticated();
-            held[1].authenticated();
+            held[0].authenticated(contact(1));
+            held[1].authenticated(contact(2));
             // Two promoted: two more handshakes fit ...
             for _ in 0..2 {
                 held.push(adm.try_admit(ip).expect("room after authentication"));
@@ -2313,9 +2391,9 @@ pub(crate) mod netutil {
             assert!(adm.try_admit(ip).is_none(), "handshake cap binds again");
             // ... and once everything is authenticated the total cap (8) is
             // the only limit left.
-            for slot in &mut held {
-                slot.authenticated();
-                slot.authenticated(); // idempotent
+            for (slot, k) in held.iter_mut().zip(1..) {
+                slot.authenticated(contact(k));
+                slot.authenticated(contact(k)); // idempotent
             }
             for _ in 0..2 {
                 held.push(adm.try_admit(ip).expect("handshake room"));
@@ -2351,7 +2429,7 @@ pub(crate) mod netutil {
             );
             assert!(silent[1..].iter().all(AdmissionSlot::is_live));
             // It completes the handshake: its slot is now untouchable.
-            peer.authenticated();
+            peer.authenticated(contact(1));
             // Silent sockets keep arriving from the attacker's addresses; each
             // one only ever displaces another silent socket.
             for round in 0..64 {
@@ -2396,8 +2474,8 @@ pub(crate) mod netutil {
             assert!(sa1.is_live() && sa2.is_live() && sb1.is_live() && sb2.is_live());
             // Promote everything: nothing is displaceable any more.
             let mut all = [sa1, sa2, sb1, sb2];
-            for s in &mut all {
-                s.authenticated();
+            for (s, k) in all.iter_mut().zip(1..) {
+                s.authenticated(contact(k));
             }
             assert!(
                 adm.try_admit(ip("192.0.2.3")).is_none(),
@@ -2480,7 +2558,7 @@ pub(crate) mod netutil {
                 assert!(friend.is_live(), "the friend's link survived newcomer {i}");
             }
             // Its handshake done within those 10 s: no stranger displaces it.
-            friend.authenticated();
+            friend.authenticated(contact(0xF1));
             for i in 0..32u64 {
                 if let Ok(slot) = adm.admit_at(circuit(200 + i), at(30_000 + 100 * i)) {
                     stranger.push(slot);
@@ -2560,6 +2638,75 @@ pub(crate) mod netutil {
             let _three = adm
                 .admit_at(circuit(3), late)
                 .expect("a link of the last life marks no circuit of this one");
+        }
+
+        /// TOR-2: authenticated links are never displaced, so one contact
+        /// (or whoever holds its key) that opened 16 onion links over 4
+        /// circuits held every slot, and every other friend was refused
+        /// until those links ended. Each contact now holds at most 4: a
+        /// newer link that authenticates closes that contact's oldest.
+        #[test]
+        fn one_contact_holding_every_onion_slot_does_not_stop_another() {
+            let adm = Admission::for_circuits(ONION_INBOUND);
+            let (greedy, other) = (contact(0x6A), contact(0x0B));
+            let mut held = Vec::new();
+            for c in 1..=4 {
+                for _ in 0..ONION_INBOUND.max_per_ip {
+                    let mut slot = adm.try_admit(circuit(c)).expect("room for its link");
+                    slot.authenticated(greedy);
+                    held.push(slot);
+                }
+            }
+            let mut friend = adm
+                .try_admit(circuit(5))
+                .expect("another contact gets a slot");
+            friend.authenticated(other);
+            let (closed, kept) = held.split_at(held.len() - ONION_INBOUND.max_per_contact);
+            assert!(kept.iter().all(AdmissionSlot::is_live), "its newest 4 stay");
+            assert!(
+                !closed.iter().any(AdmissionSlot::is_live),
+                "its older ones were closed for them"
+            );
+            assert_eq!(
+                closed[0].displaced().why(),
+                "closed for a newer link of the same contact"
+            );
+            assert!(friend.is_live());
+        }
+
+        /// LAN-ADM-2: the LAN listener's caps are per source (8 links each),
+        /// and authenticated links are never displaced, so one contact on 4
+        /// addresses held all 32 slots and every other contact was refused.
+        /// Each contact now holds at most 4; its pre-auth links stay
+        /// displaceable as before.
+        #[test]
+        fn one_contact_on_four_addresses_does_not_fill_the_lan_listener() {
+            let adm = Admission::for_addresses(PRODUCTION_INBOUND, OutboxCarrier::Lan);
+            let (greedy, other) = (contact(0x6A), contact(0x0B));
+            let mut held = Vec::new();
+            for host in 1..=4 {
+                for _ in 0..PRODUCTION_INBOUND.max_per_ip {
+                    let mut slot = adm
+                        .try_admit(ip(&format!("192.0.2.{host}")))
+                        .expect("room for its link");
+                    slot.authenticated(greedy);
+                    held.push(slot);
+                }
+            }
+            let mut friend = adm
+                .try_admit(ip("192.0.2.77"))
+                .expect("another contact gets a slot");
+            friend.authenticated(other);
+            let live: Vec<bool> = held.iter().map(AdmissionSlot::is_live).collect();
+            let newest = held.len() - PRODUCTION_INBOUND.max_per_contact;
+            assert!(live[newest..].iter().all(|&l| l), "its newest 4 stay");
+            assert!(!live[..newest].iter().any(|&l| l), "the older ones went");
+            assert!(friend.is_live());
+            // Another contact's links on the same address are its own.
+            let mut neighbour = adm.try_admit(ip("192.0.2.1")).expect("room");
+            neighbour.authenticated(contact(0x0C));
+            assert!(friend.is_live() && neighbour.is_live());
+            assert!(held[newest..].iter().all(AdmissionSlot::is_live));
         }
 
         #[test]
@@ -3265,6 +3412,62 @@ pub(crate) mod netutil {
                 .await
                 .expect("the displaced connection is closed");
             assert!(matches!(cut, Ok(0) | Err(_)), "{cut:?}");
+            assert!(!server.is_finished(), "the accept loop never ends");
+            server.abort();
+        }
+
+        /// TOR-2, LAN-ADM-2: a contact's connection past its cap of
+        /// authenticated ones is cut (its handler dropped, the socket
+        /// closed) when a newer one of that contact authenticates; another
+        /// contact's is not.
+        #[tokio::test]
+        async fn serve_connections_cuts_a_contacts_oldest_for_its_newest() {
+            let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+            let addr = listener.local_addr().unwrap();
+            let (started_tx, mut started_rx) = mpsc::unbounded_channel::<()>();
+            // Which contact each accepted connection authenticates as.
+            let contacts = Arc::new(Mutex::new(vec![contact(2), contact(1), contact(1)]));
+            let server = tokio::spawn(serve_connections(
+                "test",
+                move || {
+                    let listener = listener.clone();
+                    async move { listener.accept().await }
+                },
+                InboundLimits {
+                    max_per_contact: 1,
+                    ..limits(8, 8, 8)
+                },
+                move |mut stream, mut slot| {
+                    let started = started_tx.clone();
+                    let who = lock(&contacts).pop().expect("a scripted contact");
+                    async move {
+                        slot.authenticated(who);
+                        started.send(()).unwrap();
+                        let mut sink = Vec::new();
+                        let _ = stream.read_to_end(&mut sink).await;
+                        drop(slot);
+                        Ok(())
+                    }
+                },
+            ));
+            let mut oldest = TcpStream::connect(addr).await.unwrap();
+            started_rx.recv().await.unwrap();
+            let mut newest = TcpStream::connect(addr).await.unwrap();
+            started_rx.recv().await.unwrap();
+            let mut buf = [0u8; 1];
+            let cut = tokio::time::timeout(Duration::from_secs(30), oldest.read(&mut buf))
+                .await
+                .expect("the contact's older connection is closed");
+            assert!(matches!(cut, Ok(0) | Err(_)), "{cut:?}");
+            // Another contact's connection leaves the newest alone.
+            let _other = TcpStream::connect(addr).await.unwrap();
+            started_rx.recv().await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), newest.read(&mut buf))
+                    .await
+                    .is_err(),
+                "the newest stays open"
+            );
             assert!(!server.is_finished(), "the accept loop never ends");
             server.abort();
         }
