@@ -1019,6 +1019,12 @@ impl Profile {
             "RAVEN_LAB_TOR_LOOPBACK_DELAY_MS",
             // The onion dials' stage record file (D1); no case sets it.
             "RAVEN_LAB_TOR_STAGES",
+            // Tor speed Stage A's switches (all held); no case sets them.
+            "RAVEN_LAB_TOR_WARM",
+            "RAVEN_LAB_TOR_HEDGE",
+            "RAVEN_LAB_TOR_EARLY",
+            "RAVEN_LAB_TOR_OPTIMISTIC",
+            "RAVEN_LAB_TOR_WARM_LINK",
             // Groups' lab unlock; no case sets it.
             "RAVEN_LAB_GROUPS",
         ] {

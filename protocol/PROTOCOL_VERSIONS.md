@@ -144,6 +144,20 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, Tor speed Stage A gates)
+
+Five new gates, every one false, and their feature ids; no frame layout, entry
+type, caps bit, card field or vector changed. Security and speed report
+2026-11-05 §7 (speed design M1 to M10).
+
+- **Security Advisory V1 (draft).** [`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md)
+  §4.2: feature ids `feature/onion-warm`, `feature/onion-hedge`,
+  `feature/onion-early`, `feature/onion-optimistic` and
+  `feature/onion-warm-link` (`onion_gate::ONION_*_PRODUCTION_ENABLED`, all
+  false; lab switches `RAVEN_LAB_TOR_WARM`, `_HEDGE`, `_EARLY`, `_OPTIMISTIC`
+  and `_WARM_LINK` with `RAVEN_LAB_TEST_A=1`, debug builds only). Each opens
+  only while the onion carrier is live, and a notice can hold each.
+
 ## Freeze record changes (2026-11-06, the onion link pin)
 
 A behaviour change of a frozen rule, not of the wire format: no frame layout,
