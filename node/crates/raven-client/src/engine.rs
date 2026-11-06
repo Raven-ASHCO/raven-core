@@ -224,6 +224,9 @@ impl Inner {
             "contacts.block" => |me, args| me.contacts_block(args),
             "contacts.unblock" => |me, args| me.contacts_unblock(args),
             "contacts.unverify" => |me, args| me.contacts_unverify(args),
+            // Warm the Tor path to a friend ahead of a send (warm.rs; the warm
+            // gate, lab only).
+            "contacts.warm" => |me, args| me.contacts_warm(args),
             "messages.clear" => |me, args| me.messages_clear(args),
             "groups.clear" => |me, args| me.groups_clear(args),
             "chats.delete" => |me, args| me.chats_delete(args),

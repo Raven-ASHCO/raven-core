@@ -583,10 +583,21 @@ fn blocked(data_dir: &Path, contact: &[u8; 32], offer: &[u8]) -> Result<bool, St
 /// M2, M3): a verified contact (fingerprint pinned) not on the block list.
 /// An unreadable store says no.
 pub(crate) fn may_warm(data_dir: &Path, contact: &[u8; 32]) -> bool {
+    warm_refusal(data_dir, contact).is_none()
+}
+
+/// Blocking: why this profile may not warm its Tor path to `contact`
+/// ([`may_warm`]), in a word of `raven_core::ipc::WARM_SKIP_WORDS`:
+/// `not_verified` (no pinned fingerprint, or the contact store unreadable)
+/// or `blocked` (on the block list, or the list unreadable).
+pub(crate) fn warm_refusal(data_dir: &Path, contact: &[u8; 32]) -> Option<Skip> {
     let pinned = raven_core::contact_is_pinned(data_dir, contact).unwrap_or(false);
-    raven_core::carrier_allowed_for_contact(OutboxCarrier::Onion, pinned)
-        && raven_core::chat_history::BlockList::load_checked(data_dir)
-            .is_ok_and(|list| !list.is_blocked(&hex::encode(contact)))
+    if !raven_core::carrier_allowed_for_contact(OutboxCarrier::Onion, pinned) {
+        return Some("not_verified");
+    }
+    let unblocked = raven_core::chat_history::BlockList::load_checked(data_dir)
+        .is_ok_and(|list| !list.is_blocked(&hex::encode(contact)));
+    (!unblocked).then_some("blocked")
 }
 
 /// The process's kept links: the sends programs make over Tor
@@ -1069,7 +1080,8 @@ impl Talk {
 /// each for at most [`MAX_CIRCUIT_AGE`]; a lock, a pause, a network change
 /// and the end of a Tor life end it ([`flush`]), and a new Tor life that is
 /// ready starts it again for the conversations going on, each with a probe
-/// at once (the resume warm-up, M10: [`Self::tor_ready`]).
+/// at once (the resume warm-up, M10: [`Self::tor_ready`]). It also keeps
+/// the rate limits of the app's warm-ups (M3, [`Self::warm_up`]).
 pub(crate) struct KeepWarm {
     limits: KeepLimits,
     gate: Gate,
@@ -1086,6 +1098,10 @@ struct KeepInner {
     /// the runtime it ran on.
     task: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// Why a warm-up warms nothing ([`KeepWarm::warm_up`], [`warm_refusal`]):
+/// one of `raven_core::ipc::WARM_SKIP_WORDS`.
+pub(crate) type Skip = &'static str;
 
 impl KeepWarm {
     /// Keep warm with `limits`, its own `gate`, its probes sharing `pool`.
@@ -1109,6 +1125,11 @@ impl KeepWarm {
     /// Its gate is open.
     pub(crate) fn live(&self) -> bool {
         self.gate.open()
+    }
+
+    /// The kept links its probes share.
+    pub(crate) fn pool(&self) -> &'static WarmPool {
+        self.pool
     }
 
     /// `contact`'s conversation shows now (a message either way over Tor,
@@ -1206,6 +1227,44 @@ impl KeepWarm {
         if self.live() && is_chat(frame) {
             self.talked(data_dir, contact, None);
         }
+    }
+
+    /// The app's warm-up of `level` for `contact` at its onion service
+    /// `hs_id` (speed design M3), asked now: `Ok` when it may go ahead (it
+    /// counts for its rate limit from now), else why not: the gate is shut
+    /// (`off`), or the same warm-up ran for the friend within its limit
+    /// (`soon`: a chat open once per [`OPEN_WARM_EVERY`], and not while its
+    /// circuit was in use within that; typing once per [`WARM_IDLE`]).
+    /// Either way the conversation shows ([`Self::talked`]).
+    pub(crate) fn warm_up(
+        &'static self,
+        data_dir: &Path,
+        contact: &[u8; 32],
+        hs_id: [u8; 32],
+        level: raven_core::ipc::WarmLevel,
+    ) -> Result<(), Skip> {
+        use raven_core::ipc::WarmLevel;
+        if !self.live() {
+            return Err("off");
+        }
+        self.talked(data_dir, contact, Some(hs_id));
+        let now = Instant::now();
+        let limits = self.limits;
+        let mut inner = self.lock();
+        let at = self.talk_at(&mut inner, data_dir, contact, now);
+        let talk = &mut inner.talks[at];
+        let (last, every) = match level {
+            WarmLevel::Circuit => (&mut talk.circuit_used, limits.open_every),
+            WarmLevel::Link => (&mut talk.typed, limits.typing_every),
+        };
+        if last.is_some_and(|at| now.saturating_duration_since(at) < every) {
+            return Err("soon");
+        }
+        *last = Some(now);
+        // Either opens a stream on the friend's circuit (a refused one, or
+        // the link's).
+        talk.circuit_used = Some(now);
+        Ok(())
     }
 
     /// Why every kept link closes ([`flush`]): keep warm ends (its circuits

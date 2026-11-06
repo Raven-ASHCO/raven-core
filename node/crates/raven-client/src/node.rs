@@ -755,7 +755,7 @@ impl Inner {
 impl Inner {
     /// This profile's whole node runs in this process (embedded only; not
     /// a mail check's small node nor the background node).
-    fn full_node_runs_here(&self) -> bool {
+    pub(crate) fn full_node_runs_here(&self) -> bool {
         #[cfg(feature = "embedded-node")]
         if embedded_mode() {
             return self

@@ -119,6 +119,23 @@ pub enum IpcRequest {
         expected_pub_hex: String,
         frames_b64: Vec<String>,
     },
+    /// Warm the Tor path to a verified contact ahead of a send (speed
+    /// design M3; lab: served only while
+    /// [`crate::onion_gate::onion_warm_live`]), at `onion_dial` as in
+    /// `OnionDial`. [`WarmLevel::Circuit`] (a chat opened) probes the
+    /// contact's rendezvous circuit, which its Tor answers and its
+    /// raven-node never sees; [`WarmLevel::Link`] (typing) opens an onion
+    /// link with no frame, kept for the next send. Carries no content.
+    /// Answered `Accepted` once the warm-up started (it goes on after the
+    /// answer); `Error` [`ONION_WARM_SKIPPED`] with one word as its message
+    /// when nothing warms ([`WARM_SKIP_WORDS`]). An older daemon answers
+    /// `IPC_FRAME`.
+    OnionWarm {
+        v: u16,
+        onion_dial: String,
+        expected_pub_hex: String,
+        level: WarmLevel,
+    },
     /// Wake the background outbox worker (`raven-node service`): retry the
     /// staged objects to one peer (64 hex Ed25519), or to every peer, now.
     /// Carries no content; answered `Accepted`. A daemon without a worker (or
@@ -538,6 +555,31 @@ impl<'de> Deserialize<'de> for IpcSecret {
 /// Lock v2 (P6.40): what raven-node answers, while it is locked, to any
 /// request but `Ping`, `Status`, `Lock` and `Unlock`.
 pub const LOCKED: &str = "LOCKED";
+/// [`IpcRequest::OnionWarm`] warmed nothing; the message is one of
+/// [`WARM_SKIP_WORDS`].
+pub const ONION_WARM_SKIPPED: &str = "ONION_WARM_SKIPPED";
+/// Why an [`IpcRequest::OnionWarm`] warmed nothing: the warm gate is shut
+/// (`off`), the same warm-up ran for the contact a moment ago (`soon`), the
+/// contact is not verified or is blocked, Tor is off on this mobile data
+/// (`mobile_data`) or not ready (`tor_not_ready`).
+pub const WARM_SKIP_WORDS: [&str; 6] = [
+    "off",
+    "soon",
+    "not_verified",
+    "blocked",
+    "mobile_data",
+    "tor_not_ready",
+];
+
+/// How far [`IpcRequest::OnionWarm`] warms (speed design M3).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmLevel {
+    /// A probe of the contact's rendezvous circuit (a chat opened).
+    Circuit,
+    /// An onion link with no frame, kept for the next send (typing).
+    Link,
+}
 /// `UpdateKick` to a raven-node whose update exchange is not active (the
 /// mesh-update gate shut, or no release keys; Phase 6b P6.49).
 pub const UPDATE_EXCHANGE_OFF: &str = "UPDATE_EXCHANGE_OFF";
@@ -1982,6 +2024,7 @@ pub fn decode_request_checked(frame: &[u8]) -> Result<IpcRequest, IpcDecodeError
         | IpcRequest::P2pDial { v, .. }
         | IpcRequest::NearbyDial { v, .. }
         | IpcRequest::OnionDial { v, .. }
+        | IpcRequest::OnionWarm { v, .. }
         | IpcRequest::OutboxKick { v, .. }
         | IpcRequest::OutboxStatus { v, .. }
         | IpcRequest::OutboxList { v, .. }
@@ -3492,6 +3535,54 @@ mod tests {
         assert!(!FORBIDDEN_FIELD_TOKENS
             .iter()
             .any(|bad| "until_ms".contains(bad)));
+    }
+
+    /// Speed design M3: `OnionWarm` round-trips with its level as a word,
+    /// names nothing secret, and a wrong version or an unknown level is
+    /// refused like any other bad request.
+    #[test]
+    fn onion_warm_round_trips_and_checks_its_version() {
+        let key = "cd".repeat(32);
+        let dial = format!("onion:{}", "ef".repeat(32));
+        for (level, word) in [(WarmLevel::Circuit, "circuit"), (WarmLevel::Link, "link")] {
+            let req = IpcRequest::OnionWarm {
+                v: IPC_VERSION,
+                onion_dial: dial.clone(),
+                expected_pub_hex: key.clone(),
+                level,
+            };
+            let f = encode_request(&req).unwrap();
+            assert_eq!(decode_request_checked(&f).unwrap(), req);
+            let raw = std::str::from_utf8(&f[4..]).unwrap();
+            assert_eq!(
+                raw,
+                format!(
+                    r#"{{"op":"onion_warm","v":1,"onion_dial":"{dial}","expected_pub_hex":"{key}","level":"{word}"}}"#
+                )
+            );
+            assert_json_has_no_secret_tokens(raw);
+        }
+        let err = decode_request_checked(&frame_of(
+            format!(
+                r#"{{"op":"onion_warm","v":2,"onion_dial":"{dial}","expected_pub_hex":"{key}","level":"link"}}"#
+            )
+            .as_bytes(),
+        ))
+        .unwrap_err();
+        assert_eq!(err.code, "IPC_VERSION");
+        for bad in ["typing", "optimistic", ""] {
+            let err = decode_request_checked(&frame_of(
+                format!(
+                    r#"{{"op":"onion_warm","v":1,"onion_dial":"{dial}","expected_pub_hex":"{key}","level":"{bad}"}}"#
+                )
+                .as_bytes(),
+            ))
+            .unwrap_err();
+            assert_eq!(err.code, "IPC_FRAME", "{bad}");
+        }
+        assert!(WARM_SKIP_WORDS
+            .iter()
+            .all(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
     }
 
     /// Phase 3 P3.11: `LanLocate` and `LanLocated` round-trip and name

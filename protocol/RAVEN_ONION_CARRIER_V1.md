@@ -360,6 +360,15 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   probe needs Tor ready (it never waits for it or starts it), and Tor on Wi-Fi only holds for
   it. Probes carry no frame; the conversations are kept in memory only (who and when, never
   what).
+- The app's warm-up (Tor speed Stage A, speed design M3; W1's gate; the local IPC op
+  `OnionWarm`, the app engine's `contacts.warm`): when a chat with a verified contact that is
+  not blocked opens, the node probes the contact's circuit (§6, bit 1), at most once per 6
+  minutes and not while the circuit was in use within that; while the user types in it, the
+  node opens an onion link with no frame, kept as W1 keeps a send's check link, at most once per
+  20 s, and the send rides it. No frame goes early. None while locked or paused, none in a mail
+  check, none while Tor is not ready (a warm-up never waits for Tor or starts it); Tor on Wi-Fi
+  only holds, and on the iPhone a typing warm-up stays off on mobile data unless the app's
+  setting allows it. A warm-up shows the conversation for keep warm.
 
 ### §5.1 The onion link's Noise static
 
@@ -430,6 +439,9 @@ static (`protocol/reference/tests/test_onion_link.py`).
   refused stream on its service every 6 to 9 minutes, and one rendezvous circuit between the
   two is kept up to 60 minutes, which gives a timing adversary on its relays longer to watch
   it; the contact's node sees nothing.
+- A typing warm-up (§10, warm gate only) opens an authenticated link with no frame: the
+  contact's node learns that this node is online and probably writing to it, even for a draft
+  never sent. A chat open's probe tells its node nothing.
 - The user text is design §3.8.
 
 ## §13 Not in V1

@@ -2021,6 +2021,80 @@ pub(crate) async fn probe_on(
     }
 }
 
+/// Why the app's warm-up warms nothing ([`warm_up_on`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WarmRefused {
+    /// A word of `raven_core::ipc::WARM_SKIP_WORDS`.
+    Skip(warm::Skip),
+    /// No request to warm anything: a contact key or an onion route that is
+    /// none.
+    Bad(String),
+}
+
+/// Speed design M3 (warm gate only): the app's warm-up of `level` for the
+/// verified contact `expected_pub_hex`, whose onion route is `dial`, under
+/// `keep`'s limits and with its pool. A chat open
+/// ([`raven_core::ipc::WarmLevel::Circuit`]) probes the contact's
+/// rendezvous circuit ([`probe_on`]: its node sees nothing); typing
+/// ([`raven_core::ipc::WarmLevel::Link`]) opens an onion link with no
+/// frame, a send's check as a program's send makes it, so it stays kept for
+/// the next send (W1) and no frame goes early. A dial's checks come first
+/// (the gates, the contact verified and not blocked, Tor allowed on this
+/// network and ready now: a warm-up never waits for Tor), then its rate
+/// limit ([`warm::KeepWarm::warm_up`]); the warm-up itself runs in a task
+/// of its own (`Ok`: it started).
+pub(crate) async fn warm_up_on(
+    keep: &'static warm::KeepWarm,
+    data_dir: &Path,
+    dial: &str,
+    expected_pub_hex: &str,
+    level: raven_core::ipc::WarmLevel,
+) -> Result<(), WarmRefused> {
+    use raven_core::ipc::WarmLevel;
+    let expected = internet_direct::parse_pub_hex(expected_pub_hex).map_err(WarmRefused::Bad)?;
+    let hs_id = raven_core::onion::dial_hs_id(dial)
+        .ok_or_else(|| WarmRefused::Bad(ONION_BAD_ROUTE.into()))?;
+    if !keep.live() || ONION_LINK.require_live().is_err() {
+        return Err(WarmRefused::Skip("off"));
+    }
+    let dd = data_dir.to_path_buf();
+    let refused = internet_direct::blocking(move || Ok(warm::warm_refusal(&dd, &expected)))
+        .await
+        .unwrap_or(Some("not_verified"));
+    if let Some(word) = refused {
+        return Err(WarmRefused::Skip(word));
+    }
+    if off_on_mobile_data(data_dir) {
+        return Err(WarmRefused::Skip("mobile_data"));
+    }
+    if ready_connect().is_none() {
+        return Err(WarmRefused::Skip("tor_not_ready"));
+    }
+    keep.warm_up(data_dir, &expected, hs_id, level)
+        .map_err(WarmRefused::Skip)?;
+    let pool = keep.pool();
+    let dd = data_dir.to_path_buf();
+    match level {
+        WarmLevel::Circuit => {
+            tokio::spawn(async move {
+                let _ = probe_on(pool, &dd, expected, hs_id).await;
+            });
+        }
+        WarmLevel::Link => {
+            let (dial, hex) = (dial.to_owned(), expected_pub_hex.to_owned());
+            tokio::spawn(async move {
+                let meta = DialMeta {
+                    send_check: true,
+                    warm: true,
+                    ..DialMeta::default()
+                };
+                let _ = dial_on(pool, ONION_WAITS, &dd, &dial, &hex, &[], meta).await;
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A Tor stream from the helper: a TCP stream from its connect port (in
 /// tests it may be in memory, `memnet`).
 #[cfg(not(test))]

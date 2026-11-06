@@ -2928,3 +2928,122 @@ async fn pause_drops_every_warm_link_and_probe() {
     assert_eq!(f.counts().probes, 0, "the lock forgot the conversation");
     assert_eq!(keep.kept_len(), 0);
 }
+
+// ── M3: the app's warm-up (Tor speed Stage A, speed design M3) ─────────────
+
+/// Speed design M3: a chat open probes the friend's circuit at once, at
+/// most once per 6 minutes, and the send after it rides the circuit it
+/// built (4r, no rendezvous); typing opens a link with no frame at most
+/// once per WARM_IDLE, kept for the send, which then costs one round trip.
+/// The friend's node gets the sends alone. On loopback Tor on the paused
+/// clock.
+#[tokio::test(start_paused = true)]
+async fn a_warm_up_keeps_its_limits_and_the_send_after_it_rides_it() {
+    use raven_core::ipc::WarmLevel::{Circuit, Link};
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let min = |m: u64| Duration::from_secs(m * 60);
+    let (pool, gate) = test_pool(warm::LIMITS);
+    // Keep warm's own probes (a warm-up shows the conversation) come only
+    // after the test.
+    let limits = warm::KeepLimits {
+        every: (min(60), min(60)),
+        ..warm::KEEP_LIMITS
+    };
+    let keep = test_keep(limits, gate, pool);
+    let (dir, bob) = (f.a.path(), hex::encode(f.bob_pub));
+    let dial = raven_core::onion::dial_for(&f.side_b.hs_id);
+    // A chat open: one probe, which builds the circuit (R + r).
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Circuit).await, Ok(()));
+    tokio::time::sleep(RENDEZVOUS + 2 * R).await;
+    assert_eq!((f.counts().probes, f.counts().connects), (1, 0));
+    tokio::time::sleep(min(1)).await;
+    let soon = warm_up_on(keep, dir, &dial, &bob, Circuit).await;
+    assert_eq!(soon, Err(WarmRefused::Skip("soon")), "within 6 minutes");
+    let (acks, took) = f.program_sends(pool, "after the chat opened").await;
+    assert_eq!(acks, 1);
+    assert!(about(took, 4 * R), "a send after a chat open took {took:?}");
+    tokio::time::sleep(min(6)).await;
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Circuit).await, Ok(()));
+    tokio::time::sleep(2 * R).await;
+    assert_eq!(f.counts().probes, 2, "6 minutes on");
+    // Typing: a link with no frame (3r on the kept circuit), kept.
+    pool.flush();
+    let connects = f.counts().connects;
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Link).await, Ok(()));
+    tokio::time::sleep(4 * R).await;
+    assert_eq!(f.counts().connects, connects + 1, "one link");
+    assert_eq!(pool.len(), 1, "kept for the send");
+    let soon = warm_up_on(keep, dir, &dial, &bob, Link).await;
+    assert_eq!(soon, Err(WarmRefused::Skip("soon")), "within WARM_IDLE");
+    let (acks, took) = f.program_sends(pool, "after typing").await;
+    assert_eq!(acks, 1);
+    assert!(about(took, R), "a send after typing took {took:?}");
+    assert_eq!(f.counts().connects, connects + 1, "it rode the warm link");
+    tokio::time::sleep(warm::WARM_IDLE).await;
+    assert_eq!(warm_up_on(keep, dir, &dial, &bob, Link).await, Ok(()));
+    assert_eq!(
+        inbox(f._b.path()),
+        ["after the chat opened", "after typing"]
+    );
+    pool.flush();
+}
+
+/// Speed design M3: nothing warms with the gate shut, for a friend not
+/// verified or blocked, on mobile data with Tor on Wi-Fi only, or while
+/// Tor is not ready (a warm-up never waits for it); a key or a route that
+/// is none is no warm-up. No probe and no link reach the helper.
+#[tokio::test(start_paused = true)]
+async fn a_warm_up_is_refused_with_the_gate_shut_and_for_a_friend_not_verified_or_blocked() {
+    use crate::outbox::test_rig::contacts;
+    use raven_core::ipc::WarmLevel::{Circuit, Link};
+    use raven_core::net_path::{self, PathKind};
+    use std::sync::atomic::Ordering::SeqCst;
+    let _one_at_a_time = LAB_ONION.lock().await;
+    let Some(f) = Friends::with(kept_circuit_knobs()).await else {
+        return;
+    };
+    let (pool, gate) = test_pool(warm::LIMITS);
+    let keep = test_keep(warm::KEEP_LIMITS, gate, pool);
+    let (dir, bob) = (f.a.path(), hex::encode(f.bob_pub));
+    let dial = raven_core::onion::dial_for(&f.side_b.hs_id);
+    let skip = |word| Err(WarmRefused::Skip(word));
+    for level in [Circuit, Link] {
+        gate.store(false, SeqCst);
+        assert_eq!(warm_up_on(keep, dir, &dial, &bob, level).await, skip("off"));
+        gate.store(true, SeqCst);
+        contacts(dir, &f.bob_pub, "", "", false);
+        let not_verified = warm_up_on(keep, dir, &dial, &bob, level).await;
+        contacts(dir, &f.bob_pub, "", "", true);
+        assert_eq!(not_verified, skip("not_verified"));
+        let mut blocks = raven_core::BlockList::default();
+        blocks.block(&bob);
+        blocks.save(dir).unwrap();
+        let blocked = warm_up_on(keep, dir, &dial, &bob, level).await;
+        raven_core::BlockList::default().save(dir).unwrap();
+        assert_eq!(blocked, skip("blocked"));
+        let policy = raven_core::node_policy::NodePolicy {
+            tor_wifi_only: true,
+            ..Default::default()
+        };
+        raven_core::node_policy::save_policy(dir, &policy).unwrap();
+        net_path::set(PathKind::Cellular);
+        let on_mobile_data = warm_up_on(keep, dir, &dial, &bob, level).await;
+        net_path::set(PathKind::Unknown);
+        raven_core::node_policy::save_policy(dir, &Default::default()).unwrap();
+        assert_eq!(on_mobile_data, skip("mobile_data"));
+        let ready = live_lock().take();
+        let not_ready = warm_up_on(keep, dir, &dial, &bob, level).await;
+        *live_lock() = ready;
+        assert_eq!(not_ready, skip("tor_not_ready"));
+        let bad = warm_up_on(keep, dir, "onion:not a route", &bob, level).await;
+        assert!(matches!(bad, Err(WarmRefused::Bad(_))), "{bad:?}");
+        let bad = warm_up_on(keep, dir, &dial, "not a key", level).await;
+        assert!(matches!(bad, Err(WarmRefused::Bad(_))), "{bad:?}");
+    }
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!((f.counts().probes, f.counts().connects), (0, 0));
+    assert_eq!(pool.len(), 0);
+}

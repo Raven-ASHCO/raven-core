@@ -144,6 +144,27 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, the app's Tor warm-up, lab only)
+
+A behaviour change of the onion dialer behind a gate that stays false, and
+one new local IPC op, not of the wire format: no frame layout, entry type,
+caps bit, card field or vector changed, the listener is unchanged and the
+IPC version stays 1 (an older raven-node answers the new op `IPC_FRAME`).
+Security and speed report 2026-11-05 §7 (speed design M3).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §10: with `onion_gate::ONION_WARM_PRODUCTION_ENABLED` open (false; lab
+  switch `RAVEN_LAB_TOR_WARM`), the app's warm-up (IPC `OnionWarm`, level
+  `circuit` or `link`; the engine's `contacts.warm`, `open` or `typing`):
+  a chat open probes a verified contact's circuit (§6, bit 1) at most once
+  per 6 minutes; typing opens an onion link with no frame, kept for the
+  send, at most once per 20 s. No frame goes early. Refused (`Error`
+  `ONION_WARM_SKIPPED`, one word) with the gate shut, for a contact not
+  verified or blocked, on mobile data with Tor on Wi-Fi only, while Tor is
+  not ready, or within its limit; never while locked (`LOCKED`). §12: a
+  typing warm-up tells the contact's node this node is online and probably
+  writing to it.
+
 ## Freeze record changes (2026-11-06, the keep-warm probe and keep warm, lab only)
 
 A behaviour change of the onion dialer and its own Tor helper behind a gate

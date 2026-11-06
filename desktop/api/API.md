@@ -108,6 +108,7 @@ changes. Fields marked `?` may be missing.
 | `settings.set` | `{...partial Settings}` | `Settings` |
 | `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool, locked?: true}` (see Events) |
 | `events.wait` | `{after_seq, timeout_ms?}` | as `events.poll`; with nothing new it waits up to `timeout_ms` (at most and by default 25000) and answers as soon as an event comes (see Events) |
+| `contacts.warm` | `{address, why: "open" \| "typing"}` | `{warming: bool, why?}` (lab, the warm gate: warms the Tor path to a verified friend before a send, when a chat with it opens or the user types in it; nothing is sent early; see "Warm-ups") |
 | `privacy.state` | – | `{available: bool, encrypted: bool, locked: bool}` (`encrypted`: the privacy pack encrypts this profile; `locked`: `raven lock` stopped Raven; `available` is false until the apps offer the privacy actions, which they then show with the Preview label) |
 | `privacy.lock` / `privacy.unlock` | – | `{state}` (`unlock` clears a `raven lock` and answers as `profile.state`) |
 | `privacy.encrypt` | – | `{state}` (encrypts everything Raven stores on this computer) |
@@ -380,6 +381,26 @@ version is too old for the Tor network; update Raven"); the node and the app kee
 Architecture, lifecycle and limits:
 [`docs/IOS.md`](../../docs/IOS.md).
 
+### Warm-ups (Tor, lab)
+
+`contacts.warm` warms the Tor path to a verified friend before the user sends (speed design M3;
+only while the warm gate is open, which no release build does): `why: "open"` when a chat with the
+friend opens, `why: "typing"` when the user starts typing in it. A chat open probes the friend's
+rendezvous circuit (the friend's Tor refuses the probe and its raven-node sees nothing); typing
+opens an onion link with no message on it, which the send then rides. Nothing is sent early: the
+message goes when the user sends it. The answer is `{warming: true}` once raven-node started the
+warm-up, else `{warming: false, why}`, `why` one of `off` (the gate is shut), `soon` (the same
+warm-up ran for that friend within its limit: a chat open once per 6 minutes, typing once per 20
+seconds), `not_verified`, `blocked`, `paused` (`node.pause`), `mobile_data` (typing on mobile data
+while the setting `typing_warm_on_mobile_data` is off, or Tor on Wi-Fi only), `tor_not_ready` (a
+warm-up never waits for Tor or starts it), `no_tor_route` (no Tor address is known for the
+friend), `node_off` (no raven-node answers, or on the iPhone only a mail check's node runs),
+`old_node`, `locked` or `other`. It is refused with `PROFILE_LOCKED` while Lock v2 holds the
+profile. The app needs to do nothing with the answer. Keeping a conversation's circuit warm for up
+to an hour, and warming the chats going on after a resume, are raven-node's own (nothing to call).
+A typing warm-up tells the friend's raven-node that you are online and probably writing to it
+([`docs/THREAT_MODEL.md`](../../docs/THREAT_MODEL.md)).
+
 ### Network
 
 Every way a Raven node reaches friends or helps them, as the terminal Raven has it
@@ -635,7 +656,11 @@ NodeStatus{ running: bool, started_by_app: bool, pid?, listening?: "0.0.0.0:7420
             lab_switches the RAVEN_LAB_* variables this engine sees (both always empty in a release).
             carriers: whether each is released in this build (NetworkStatus has the full state).
 Settings  { display_name?, receive: bool, reduced_motion: bool, when_quit: "keep" | "stop_if_started" | "ask",
-            keep_chats_days?: 7 | 30 | 90 | null, forget_addresses: bool, lock_on_sleep: bool }
+            keep_chats_days?: 7 | 30 | 90 | null, forget_addresses: bool, lock_on_sleep: bool,
+            typing_warm_on_mobile_data: bool }
+            typing_warm_on_mobile_data: may a typing warm-up (contacts.warm) use mobile data; until
+            set, true on the desktop and false on the iPhone (the iOS app reports the network with
+            network.path).
             keep_chats_days is the privacy pack's chat-keeping time, which it enforces.
             forget_addresses is always true: Raven forgets a friend's address after 30 days without
             contact (setting it false is NOT_AVAILABLE_YET). lock_on_sleep is stored and reported;
