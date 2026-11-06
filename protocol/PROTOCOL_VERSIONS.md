@@ -153,7 +153,9 @@ bit, card field or vector changed, and every gate stays as it was. Security and 
 
 - **Group V1 (draft).** [`RAVEN_GROUP_V1.md`](RAVEN_GROUP_V1.md) status: on in release builds
   since 2026-10-29 with the 7-day horizon it needs; not independently reviewed; the debug close
-  switches. Before, "production disabled" with a lab unlock.
+  switches. Before, "production disabled" with a lab unlock. §6: groups are on in release
+  builds, so a member whose build is older than this spec can see a group frame as chat text.
+  Before, "Groups are lab-only".
 - **Transport Interface V1.** [`RAVEN_TRANSPORT_INTERFACE_V1.md`](RAVEN_TRANSPORT_INTERFACE_V1.md)
   §3: InternetTransport runs in release builds since 2026-10-29, listening is the user's choice.
   Before, debug builds only with the gate `false`. The §3 heading and the §6 row of the

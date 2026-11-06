@@ -263,7 +263,8 @@ not fit is ACKed and dropped (§4.2).
 ## 6. Compatibility
 
 - A receiver older than this spec shows a group frame as chat text starting
-  `RVNGRP/1`. Groups are lab-only.
+  `RVNGRP/1`. Groups are on in release builds since 2026-10-29 (Status), so a
+  member whose build is older than this spec can see such text.
 - Chat text that starts with `RVNGRP/` is refused by the composers.
 - `RVNGRP/2` and later are reserved (deferred by v1 receivers).
 - The frames and their bytes are unchanged by the limits of §4.2: a
