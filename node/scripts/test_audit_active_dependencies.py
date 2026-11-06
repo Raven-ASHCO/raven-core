@@ -462,7 +462,8 @@ class RepositoryLockTests(unittest.TestCase):
                 self.assertEqual(now, before)
         self.assertEqual(
             sorted(f"{name} {version}" for name, version in audited.forks.values()),
-            ["arti-client 0.47.0", "libsqlite3-sys 0.38.2", "saturating-time 0.5.0", "secret-service 2.0.2"],
+            ["arti-client 0.47.0", "igd-next 0.17.1", "libsqlite3-sys 0.38.2", "saturating-time 0.5.0",
+             "secret-service 2.0.2"],
         )
 
     def test_the_policy_accepts_only_the_rsa_timing_advisory(self) -> None:

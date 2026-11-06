@@ -29,6 +29,24 @@
       }
     },
     {
+      "path": "node/third_party/igd-next-0.17.1-raven",
+      "lock_name": "igd-next",
+      "lock_version": "0.17.1",
+      "upstream": {
+        "name": "igd-next",
+        "version": "0.17.1",
+        "crate_sha256": "de7238d487a9aff61f81b5ab41c0a841532a115a398b5fa92a2fadd0885e2581"
+      },
+      "why": "STRANGER-UPNP-1: the UPnP-IGD gateway search takes the answer of the default router only, and every response is bounded in size and nesting (RAVEN_DELTA.md)",
+      "delta": {
+        "modified": {},
+        "added": {},
+        "removed": [
+          "Cargo.lock"
+        ]
+      }
+    },
+    {
       "path": "node/third_party/saturating-time-0.5.0-raven",
       "lock_name": "saturating-time",
       "lock_version": "0.5.0",

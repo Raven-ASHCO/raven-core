@@ -266,7 +266,7 @@ jobs:
   # pins to the checksummed crates.io libsqlite3-sys 0.38.2 archive. It is merge-blocking
   # only once this check is added to branch protection (the required-check pin is OFF).
   # curl is retried: a provenance MISMATCH fails the same way every attempt.
-  # The other [patch.crates-io] forks (arti-client, saturating-time,
+  # The other [patch.crates-io] forks (arti-client, igd-next, saturating-time,
   # secret-service) are path dependencies too, with no Cargo.lock checksum:
   # verify_vendored_forks.py ties every file of each to its pinned crates.io
   # archive plus exactly the delta node/third_party/forks.json records

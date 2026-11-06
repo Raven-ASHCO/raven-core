@@ -16,6 +16,7 @@ exclude = [
     "third_party/secret-service-2.0.2-raven-noprompt",
     "third_party/saturating-time-0.5.0-raven",
     "third_party/arti-client-0.47.0-raven",
+    "third_party/igd-next-0.17.1-raven",
 ]
 
 [workspace.package]
@@ -59,3 +60,8 @@ saturating-time = { path = "third_party/saturating-time-0.5.0-raven" }
 # requires a protocol this Arti lacks (arti#1932): in the iOS app Tor runs in
 # the app's own process (third_party/arti-client-0.47.0-raven/RAVEN_DELTA.md).
 arti-client = { path = "third_party/arti-client-0.47.0-raven" }
+# UPnP-IGD (libp2p-upnp 0.7, raven-swarm feature `p2p-host`): igd-next 0.17.1
+# with its gateway search answered by the default router only, and bounded
+# responses (STRANGER-UPNP-1: a stranger on the LAN could abort raven-node
+# with a deeply nested description; third_party/igd-next-0.17.1-raven/RAVEN_DELTA.md).
+igd-next = { path = "third_party/igd-next-0.17.1-raven" }
