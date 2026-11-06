@@ -306,10 +306,16 @@ tags resist linkage at the tag-value layer, not global traffic analysis. In
 this version every Raven link also shows each frame's exact size (a
 cleartext 4-byte length before each Noise transport message: an ACK, a
 PairInit and a text each have a recognisable size) and fixed handshake
-sizes. Internet direct and p2p are themselves gated off in release
-(`INTERNET_DIRECT_PRODUCTION_ENABLED`, `P2P_PRODUCTION_ENABLED` = `false`),
-so in this version the Raven link such an observer sees is LAN direct, with
-the same exposure.
+sizes. Internet direct, p2p and the onion carrier are on in release builds
+since 2026-10-29 (`INTERNET_DIRECT_PRODUCTION_ENABLED`, `P2P_PRODUCTION_ENABLED`,
+`ONION_PRODUCTION_ENABLED` = `true`; Internet direct and p2p listening are
+each the user's choice), so such an observer may see a LAN direct link, an
+Internet direct link to a contact's address and a p2p link (direct, through
+a punched hole, or to a relay), each with the same exposure, and on Tor a
+connection to a Tor guard. While a p2p host runs, STUN discovery also asks
+two public STUN servers at each start or network change and every 20
+minutes, unless the user turned it off or hides the IP. What each observer
+learns from each live carrier: §3.17.
 
 **Phase 6b (built, gated off; not in this version):** PAD1 link padding
 (`LINK_PADDING_PRODUCTION_ENABLED = false`,

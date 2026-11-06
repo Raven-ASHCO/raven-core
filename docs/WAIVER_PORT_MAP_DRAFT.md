@@ -7,6 +7,13 @@
 > copy (renamed to `docs/WAIVER_PORT_MAP_<date>.md`), the exit conditions in §7
 > are met, and each gate is flipped on its own, in its own reviewed commit
 > (owner decision O4-16). Nothing in Phase 4 flips a gate.
+>
+> **Release state (recorded 2026-11-06).** That did not happen. Since commit
+> b783524 (2026-10-29) both gates are `true`: port mapping and IPv6 pinholes
+> are on in release builds, switched on together with other gates after the
+> three-machine field test, before a signature and without an independent
+> review. Nothing is asked of a router before the user's yes (`upnp`, and
+> `v6_pinhole` for IPv6; §5). This record is still unsigned.
 
 | | |
 |---|---|
@@ -128,8 +135,9 @@ allowed in release builds by owner decision O4-10.
 - Nothing is sent to a router without the user's yes (IPv4) and a separate
   yes (IPv6), and with a gate closed nothing is sent at all beyond Phase 1's
   UPnP (C43's gate-closed case: the fake router receives 0 packets).
-- Only the OS default router is asked, from a connected socket; a datagram
-  from anyone else is never read. Replies go through a strict decoder
+- Only the OS default router is asked, from a connected socket, which drops
+  a datagram from any other source address but not one that forges the
+  router's (next item). Replies go through a strict decoder
   (vectors under `shared-vectors/rvn1/portmap/`, fuzz target
   `portmap_reply`).
 - The connected socket filters by source address only, which another host on

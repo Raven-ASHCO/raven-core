@@ -1,11 +1,16 @@
 # RAVEN Port Mapping Profile V1
 
 **Version:** 1 (a client profile of NAT-PMP, RFC 6886, and PCP, RFC 6887)
-**Status:** Draft; **production disabled** (`PORT_MAP_PRODUCTION_ENABLED = false`,
-`V6_PINHOLE_PRODUCTION_ENABLED = false`). Lab only: debug builds with `RAVEN_LAB_TEST_A=1` and
-`RAVEN_LAB_PORT_MAP=1` (IPv6 pinholes also `RAVEN_LAB_V6_PINHOLE=1`). Release builds read no
-switch. Enabling it in production needs the owner-signed port-mapping waiver (real rows R2b and
-R2c).
+**Status:** Draft; **on in release builds since 2026-10-29** (`PORT_MAP_PRODUCTION_ENABLED = true`,
+`V6_PINHOLE_PRODUCTION_ENABLED = true`, commit b783524, after the three-machine field test; not
+independently reviewed). Nothing is asked of a router before the user's yes: IPv4 mappings
+follow the ask-once `upnp` consent and IPv6 pinholes their own `v6_pinhole` consent (§10), both
+for the listener of `raven node p2p on`. A debug build closes them with `RAVEN_LAB_PORT_MAP=0`
+(IPv6 pinholes also with `RAVEN_LAB_V6_PINHOLE=0`, both with the p2p switch
+`RAVEN_LAB_TEST_A=0`); release builds read no switch; a security notice can hold
+`feature/port-map` or `feature/v6-pinhole`. Enabling it in production was to need the
+owner-signed port-mapping waiver (real rows R2b and R2c); the gates were switched on before
+that waiver was signed, and its draft records how (2026-11-06).
 **Audience:** re-implementers of the endpoint's router port mapping.
 **Code:** `node/crates/raven-core/src/portmap.rs` (codec and the `MapperCore` state machine),
 `portmap_gate.rs` (gates),
@@ -21,10 +26,10 @@ contacts can dial it directly, and on IPv6 to open a pinhole in the router's fir
 profile fixes the subset of NAT-PMP and PCP Raven sends and accepts, and how it acts on the
 answers. It is not a Raven wire: no Raven peer ever sees these bytes (§13).
 
-| Gate | What it opens | Lab unlock (debug builds) |
+| Gate | What it opens | Debug builds (release builds: `true`, no switch) |
 |---|---|---|
-| `PORT_MAP_PRODUCTION_ENABLED` | NAT-PMP and PCP mapping of the egress IPv4 address | `RAVEN_LAB_TEST_A=1 RAVEN_LAB_PORT_MAP=1` |
-| `V6_PINHOLE_PRODUCTION_ENABLED` | PCP MAP pinholes for the egress global IPv6 address (needs the gate above) | also `RAVEN_LAB_V6_PINHOLE=1` |
+| `PORT_MAP_PRODUCTION_ENABLED` | NAT-PMP and PCP mapping of the egress IPv4 address | open; `RAVEN_LAB_PORT_MAP=0` closes it |
+| `V6_PINHOLE_PRODUCTION_ENABLED` | PCP MAP pinholes for the egress global IPv6 address (needs the gate above) | open; `RAVEN_LAB_V6_PINHOLE=0` closes it |
 
 Both gates sit on the p2p carrier (`P2P_PRODUCTION_ENABLED`). With the gates closed the endpoint
 keeps today's UPnP-IGD behaviour, except that a UPnP mapping is used only at an IP seen from
@@ -37,7 +42,8 @@ the real network's router): not with the gates closed, and not after a silent pr
 ## 2. Who Raven talks to
 
 - Only the OS default router of each family, on UDP port 5351 (NAT-PMP and PCP share it), from
-  a socket connected to that address: a datagram from any other address or port is never read.
+  a socket connected to that address: the system drops a datagram from any other address or
+  port, but not one that forges the router's address (NAT-PMP answers carry no nonce; §9).
 - IPv4: the default gateway; IPv6: the default router's address (PCP only).
 - IPv4 only while that router is on the Internet path: the source address toward it must equal
   the egress address (the source address of a connected UDP socket toward a documentation
