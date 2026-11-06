@@ -150,9 +150,11 @@ async fn the_forward_listener_drops_a_silent_connection_within_the_wait() {
 }
 
 /// A program that holds the address raven-node dials for its helper (TOR-4
-/// (c): the port of a helper that just ended) learns neither the helper
-/// life's token nor the friend's onion key: raven-node says its proof and
-/// its request only after the helper proved itself.
+/// (c): the port of a helper that just ended) and answers raven-node's
+/// challenge with a whole hello whose proof is not the helper's learns
+/// neither the helper life's token nor the friend's onion key: raven-node
+/// checks the proof first and closes the stream at once, with nothing
+/// after its challenge (no proof of its own, no request).
 #[tokio::test(start_paused = true)]
 async fn a_program_in_the_helpers_place_learns_neither_token_nor_onion_key() {
     let _memory = memnet::MemoryOnly::new();
@@ -160,22 +162,26 @@ async fn a_program_in_the_helpers_place_learns_neither_token_nor_onion_key() {
     let addr = squatter.local_addr();
     let listening = tokio::spawn(async move {
         let mut stream = squatter.accept().await.unwrap();
-        let mut seen = Vec::new();
-        let mut buf = [0u8; 256];
-        while let Ok(Ok(n)) = tokio::time::timeout(SHORT_WAIT * 3, stream.read(&mut buf)).await {
-            if n == 0 {
-                break;
-            }
-            seen.extend_from_slice(&buf[..n]);
-        }
-        seen
+        let mut challenge = [0u8; channel::NONCE_LEN];
+        stream.read_exact(&mut challenge).await.unwrap();
+        stream
+            .write_all(&[0x5a; channel::CONNECT_HELLO_LEN])
+            .await
+            .unwrap();
+        let began = tokio::time::Instant::now();
+        let mut rest = Vec::new();
+        let ended = tokio::time::timeout(SHORT_WAIT * 3, stream.read_to_end(&mut rest)).await;
+        (rest, ended.is_ok(), began.elapsed())
     });
     let (token, hs_id) = (fresh_token(), [0xa5u8; 32]);
     let dialled = connect_via_helper(Route::Port(addr), token, hs_id, 0).await;
     assert!(dialled.is_err());
-    let seen = listening.await.unwrap();
-    assert!(!holds(&seen, &token), "the token reached a stranger");
-    assert!(!holds(&seen, &hs_id), "the onion key reached a stranger");
+    let (rest, closed, after) = listening.await.unwrap();
+    assert!(!holds(&rest, &token), "the token reached a stranger");
+    assert!(!holds(&rest, &hs_id), "the onion key reached a stranger");
+    assert!(closed, "raven-node kept the stream open");
+    assert!(after < SHORT_WAIT, "closed only after {after:?}");
+    assert!(rest.is_empty(), "{} bytes after the challenge", rest.len());
 }
 
 /// A program that copied one whole exchange between raven-node and its
@@ -312,23 +318,45 @@ async fn another_program_gets_no_copy_of_the_channel() {
     use std::os::fd::AsRawFd;
     let (_node_end, helper_end) = channel::pair::new_channel().unwrap();
     let fd = helper_end.as_raw_fd();
-    let probe = |as_helper: bool| {
+    // A shell that copies `fd` (a copy fails when it is not open there).
+    let probe = |fd: i32| {
         let mut cmd = tokio::process::Command::new("/bin/sh");
-        // Fails when `fd` is not open in it.
         cmd.arg("-c")
-            .arg(format!("exec 9<&{fd}"))
+            .arg(copies(fd))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        if as_helper {
-            channel::pair::inherit(&mut cmd, &helper_end);
-        }
         cmd
     };
-    let other = probe(false).status().await.unwrap();
+    // The probe itself fails for a number that is not open, whatever it
+    // is: 9 and 8 included, the numbers it copies into.
+    for closed in [9, 8] {
+        let mut cmd = probe(closed);
+        // SAFETY: close alone, in the child between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::close(closed);
+                Ok(())
+            });
+        }
+        let status = cmd.status().await.unwrap();
+        assert!(!status.success(), "the probe found {closed} open");
+    }
+    let other = probe(fd).status().await.unwrap();
     assert!(!other.success(), "another program got the channel");
-    let helper = probe(true).status().await.unwrap();
+    let mut helper = probe(fd);
+    channel::pair::inherit(&mut helper, &helper_end);
+    let helper = helper.status().await.unwrap();
     assert!(helper.success(), "the helper did not get its end");
+}
+
+/// A shell line that copies `fd` into another number, so it fails when
+/// `fd` is not open (a copy of a number onto itself, `exec 9<&9`, passes
+/// with 9 closed).
+#[cfg(unix)]
+fn copies(fd: i32) -> String {
+    let into = if fd == 9 { 8 } else { 9 };
+    format!("exec {into}<&{fd}")
 }
 
 /// What makes [`child_loopback_helper`] the loopback helper of a test: its
