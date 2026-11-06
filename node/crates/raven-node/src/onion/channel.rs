@@ -532,7 +532,9 @@ pub(crate) mod pair {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     const SEND_FLAGS: libc::c_int = 0;
     /// A descriptor that arrives is closed on exec from its first moment
-    /// where the system can do that.
+    /// where the system can do that: Linux marks it as it arrives; macOS
+    /// and iOS have no such flag, so [`recv_fd`] marks it a moment later
+    /// (see [`inherit`] for that moment).
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -718,6 +720,16 @@ pub(crate) mod pair {
     /// it: every other descriptor of raven-node is closed on exec (Rust opens
     /// them so), and `end` stays so in raven-node, so no other program gets
     /// the channel. The helper's config line names it ([`super::INHERITED`]).
+    ///
+    /// One moment is open on macOS: there a new socket pair (the channel's
+    /// own and each stream's; std marks its ends just after `socketpair`)
+    /// and a stream end that arrives ([`recv_fd`]) are closed on exec only
+    /// a moment after they exist, and a program another thread of
+    /// raven-node starts in that moment (the nearby helper, say) keeps a
+    /// copy of that end until it exits. No copy carries the token (only
+    /// the helper's config line does) and no hello passes without it, but
+    /// the other side sees that end close only when that program exits.
+    /// Linux makes both with the flag set; the iOS app starts no program.
     #[cfg_attr(feature = "tor-embedded", allow(dead_code))]
     pub(crate) fn inherit(cmd: &mut tokio::process::Command, end: &StdUnixStream) {
         let fd = end.as_raw_fd();
@@ -788,7 +800,11 @@ pub(crate) mod pair {
     }
 
     /// No SIGPIPE from a write to a socket whose peer is gone (Apple systems
-    /// say so per socket).
+    /// say so per socket). Elsewhere a stream's own writes go through tokio
+    /// without `MSG_NOSIGNAL` (only the channel's sends carry it,
+    /// [`SEND_FLAGS`]): raven-node and raven-tor-helper are Rust programs,
+    /// which ignore SIGPIPE; a host in another language that runs the
+    /// helper in its own process on Linux or Android must ignore it too.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn no_sigpipe(sock: &StdUnixStream) -> io::Result<()> {
         let on: libc::c_int = 1;
