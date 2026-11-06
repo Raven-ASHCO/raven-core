@@ -1317,11 +1317,11 @@ a full disk image with its keystore.
 - A sender with the gate closed never writes the entry: an older receiver and
   a newer one with the gate closed see the same bytes as before.
 
-## 15. The Tor onion carrier's entry (lab)
+## 15. The Tor onion carrier's entry
 
-Held by the onion gate as well as the route hints gate
-(`ONION_PRODUCTION_ENABLED = false`; debug builds: `RAVEN_LAB_TOR=1` with
-`RAVEN_LAB_TEST_A=1`). Carrier: [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md).
+Sent only while the onion gate and the route hints gate are both open, as they are in release
+builds since 2026-10-29 (`ONION_PRODUCTION_ENABLED = true`; a debug build closes the carrier
+with `RAVEN_LAB_TOR=0`). Carrier: [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md).
 
 ### 15.1 ONION (0x40)
 

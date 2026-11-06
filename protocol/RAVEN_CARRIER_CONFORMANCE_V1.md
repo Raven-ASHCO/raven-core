@@ -903,10 +903,11 @@ QR, file, removable media, and cable are carriers, not trust roots. Import:
 
 ---
 
-### 11.9 Tor onion profile (draft, lab only)
+### 11.9 Tor onion profile (draft, on in release builds)
 
 The terminal-node profile is [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
-(production disabled, `ONION_PRODUCTION_ENABLED = false`). Requirements:
+(on in release builds since 2026-10-29, `ONION_PRODUCTION_ENABLED = true`; not independently
+reviewed). Requirements:
 
 1. The link class is `OPAQUE_CIRCUIT`: the two Raven devices terminate one Raven link
    (`Noise_XX_25519_ChaChaPoly_BLAKE2s`, prologue `raven/onion-link/v1`, the onion link's own
