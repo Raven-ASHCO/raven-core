@@ -255,8 +255,12 @@ Security and speed report 2026-11-05 (TOR-6).
 
 - **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) status
   and §1: on in release builds, switched on before the waiver and the external review of the
-  design's OD-T5; §5.1: the onion link static came before the switch, so no release build
-  answered an onion link with the device static. Before, the status and §1 said production was
+  design's OD-T5; a debug build closes it with `RAVEN_LAB_TOR=0`, or `RAVEN_LAB_NEARBY_ONLY=1`
+  with `RAVEN_LAB_TEST_A=1`; §5.1: the onion link static (05fdd35) and the switch (b783524)
+  were made on two branches and reached the release line together in merge 1b1783b on
+  2026-10-29, so a release build of a commit between the switch and that merge answers an onion
+  link with the device static; no release was published before that merge, so no published
+  release build does. Before, the status and §1 said production was
   disabled and opened only by the lab switches, and §5.1 that the carrier had never been on in
   a release build.
 - **Carrier Conformance V1.** [`RAVEN_CARRIER_CONFORMANCE_V1.md`](RAVEN_CARRIER_CONFORMANCE_V1.md)

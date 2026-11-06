@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Designed and built behind its gate; on in release builds since 2026-10-29 (commit b783524, after the three-machine field test), not independently reviewed. Owner decision 2026-11-06 (decision 4): it stays on in release (§9, OD-T5). The Tor speed Stage A gates of §4 stay lab only. |
-| **Gate** | `ONION_PRODUCTION_ENABLED = true` (`node/crates/raven-core/src/onion_gate.rs`). Debug builds close it per process with `RAVEN_LAB_TOR=0` (every lab run and test that must not touch the Tor network sets it) or `RAVEN_LAB_NEARBY_ONLY=1`; release builds never read either variable. |
+| **Gate** | `ONION_PRODUCTION_ENABLED = true` (`node/crates/raven-core/src/onion_gate.rs`). Debug builds close it per process with `RAVEN_LAB_TOR=0` (every lab run and test that must not touch the Tor network sets it) or `RAVEN_LAB_NEARBY_ONLY=1` with `RAVEN_LAB_TEST_A=1`; release builds never read these variables. |
 | **Build** | The Tor helper (`raven-tor-helper`, Arti inside) is built only with the cargo feature `tor` of `raven-node`. Without it the carrier still builds and is tested against a loopback helper. |
 | **Decision** | Owner approval 2026-10-28 (Tor onion services, new dependency Arti, lab first), changed the same day from "last resort" to "universal baseline, always on, raced against the direct paths". |
 | **Related** | the any-network reachability plan (not published) (D1: no project-run servers), [`RAVEN_ONION_CARRIER_V1.md`](../../protocol/RAVEN_ONION_CARRIER_V1.md) (wire and rules), [`RAVEN_ROUTE_HINTS_V1.md`](../../protocol/RAVEN_ROUTE_HINTS_V1.md) §15 (ONION entry), [`RAVEN_CARRIER_CONFORMANCE_V1.md`](../../protocol/RAVEN_CARRIER_CONFORMANCE_V1.md) §11.9 (onion profile), research: `reports/Raven serverless internet reachability research - part 2.md` §3 (outside the repository). |
@@ -426,7 +426,7 @@ Shown by `raven status --explain tor` and in the docs:
 | Item | Value |
 |---|---|
 | Production gate | `ONION_PRODUCTION_ENABLED = true` since 2026-10-29 (on in release builds); feature `feature/onion` in the suite registry (a security notice can hold it). |
-| Lab switch | `RAVEN_LAB_TOR=0` closes it, debug builds only; any other value leaves it open. Closed under `RAVEN_LAB_NEARBY_ONLY=1`. |
+| Lab switch | `RAVEN_LAB_TOR=0` closes it, debug builds only; any other value leaves it open. Closed under `RAVEN_LAB_NEARBY_ONLY=1` with `RAVEN_LAB_TEST_A=1`. |
 | Cargo feature | `tor` (raven-node): builds `raven-tor-helper`. |
 | Helper path | Next to `raven-node`; debug builds may override it with `RAVEN_TOR_HELPER=<path>`. |
 | Loopback helper (tests) | Debug builds only: `RAVEN_LAB_TOR_LOOPBACK=<directory>` makes raven-node run `raven-node tor-loopback-helper` instead: the same local protocol, with "onion services" that are loopback TCP ports registered in that directory. No Tor network. Its warm circuit model, for the dry mode of the D1 harness (`scripts/tor_d1_harness.py`, below; read only with `RAVEN_LAB_TEST_A=1`): `RAVEN_LAB_TOR_LOOPBACK_RENDEZVOUS_MS=<ms>` adds a fresh rendezvous (R) to the first connect per isolation group and onion key, and `RAVEN_LAB_TOR_LOOPBACK_KEPT_MS=<ms>` drops a circuit no connect was handed for that long, so the next connect pays R again (Arti keeps one for 10 minutes after its last use). |
