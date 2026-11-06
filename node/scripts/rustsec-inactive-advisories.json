@@ -1,4 +1,13 @@
 {
   "schema": 1,
-  "inactive_vulnerability_exceptions": []
+  "inactive_vulnerability_exceptions": [],
+  "non_registry_packages": [
+    {
+      "package": "spqr",
+      "version": "1.5.3",
+      "source": "git+https://github.com/signalapp/SparsePostQuantumRatchet?rev=fd320484dcec89004021e6fdc7481825f5f261fa#fd320484dcec89004021e6fdc7481825f5f261fa",
+      "review_by": "2027-05-01",
+      "reason": "Lab only: the optional full-braid-lab feature of raven-core (Full Braid Slice 2) is the only path to it, and that feature turns on mlkem768-incremental-lab, which cannot compile in a release build (compile_error! and the RAVEN_BUILD_PROFILE const assert in raven-core/src/mlkem768_incremental.rs). Pinned to one git revision of the Signal SparsePostQuantumRatchet repository; RustSec matches only crates.io packages, so no advisory is checked against this revision. By review_by, read the upstream security notes for this revision again, or move to a crates.io release."
+    }
+  ]
 }

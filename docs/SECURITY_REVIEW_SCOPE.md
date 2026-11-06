@@ -176,6 +176,9 @@ path dependencies, so `Cargo.lock` holds no checksum for them: `node/third_party
 records each one's crates.io archive (its SHA-256) and its exact delta (every modified and added
 file pinned by SHA-256, the files left out), and CI checks every tracked file of each fork against
 it (`node/scripts/verify_vendored_forks.py`, the "Vendored fork provenance vs crates.io" job).
+RustSec checks only crates.io packages, so the dependency audit (`node/scripts/audit_active_dependencies.py`)
+checks each fork as the crates.io release it was forked from, and stops on any other package from
+outside crates.io that is neither a workspace member nor declared in its policy (`spqr`, git, lab only).
 
 ## 5. Out of scope
 
