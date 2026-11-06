@@ -318,6 +318,11 @@ pub struct Answer {
 pub struct Discovery {
     /// The public IPv4 address, when two independent servers answered and
     /// every answer names the same one (one answer alone could be spoofed).
+    /// Two answers are not proof either: whoever answers this computer's
+    /// DNS for the servers' names, or forges both replies on its network,
+    /// can make them agree. raven-node tells contacts this address only once
+    /// a contact or relay saw the computer at it (auto-reach design §3.2,
+    /// INET-STUN-1).
     pub public_ip: Option<Ipv4Addr>,
     /// The public endpoint of the local socket: the one every answer named,
     /// when two independent servers answered.
@@ -359,7 +364,10 @@ pub fn classify(
     let same_endpoint = answers.iter().all(|a| a.mapped == first.mapped);
     // One unauthenticated STUN answer (a spoofed UDP reply) is no address to
     // advertise to friends: the address and the endpoint count only when two
-    // independent servers (both operators) agree on them.
+    // independent servers (both operators) agree on them. Two agreeing
+    // answers are still unauthenticated (the servers' names come from the
+    // system resolver): raven-node tells the address to contacts only once
+    // a contact or relay saw this computer there (INET-STUN-1).
     let agreed = independent >= 2;
     let public_ip = (agreed && same_ip).then_some(*first.mapped.ip());
     let mapped = (agreed && same_endpoint).then_some(first.mapped);

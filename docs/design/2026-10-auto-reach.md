@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | Design for the lab build (branch `feature/auto-reach`). Built in stages behind two new gates, both `false`; every existing gate stays as it is. |
-| **Gates** | `STUN_DISCOVERY_PRODUCTION_ENABLED = false` (debug `RAVEN_LAB_STUN_DISCOVERY=1`, on top of the p2p lab unlock `RAVEN_LAB_TEST_A=1`) and `SERVERLESS_PUNCH_PRODUCTION_ENABLED = false` (debug `RAVEN_LAB_SERVERLESS_PUNCH=1`, on top of STUN discovery and the NAT class gate). Both in `node/crates/raven-core/src/portmap_gate.rs`, const-asserted to need `P2P_PRODUCTION_ENABLED`. Release builds read neither switch. |
+| **Status** | Designed for the lab build (branch `feature/auto-reach`) and built in stages behind two new gates, both `false` at first. Both were switched on in release builds on 2026-10-29 (`b783524`, after the three-machine field test; not independently reviewed), so everything below is live wherever the p2p carrier is. |
+| **Gates** | `STUN_DISCOVERY_PRODUCTION_ENABLED = true` and `SERVERLESS_PUNCH_PRODUCTION_ENABLED = true`, both since 2026-10-29 (`b783524`); serverless punching also needs STUN discovery and the NAT class gate (`NAT_CLASS_PRODUCTION_ENABLED = true`). Both in `node/crates/raven-core/src/portmap_gate.rs`, const-asserted to need `P2P_PRODUCTION_ENABLED`. Until then they were `false`, and debug builds opened them with `RAVEN_LAB_STUN_DISCOVERY=1` and `RAVEN_LAB_SERVERLESS_PUNCH=1` on top of the p2p lab unlock `RAVEN_LAB_TEST_A=1`; release builds read neither switch. |
 | **User switch** | `node_policy.stun` (`raven node stun on|off|status`): unset is on while the gate is live, `false` is off. Hide my IP for everyone (`raven node hide-ip on`) also stops every query. |
 | **Owner decisions in force** | D1 stands (no project-run relay, mailbox or rendezvous server); D13 stands (no port prediction, no birthday punching, no public DHT); the only new outside contact allowed is a STUN Binding request to a public STUN server ("what is my public address", approved 2026-10-28); no `*_PRODUCTION_ENABLED` constant changes. |
-| **Wire** | One new optional RRH1 entry, `0x24 INET_DIRECT` (route hints spec §13.3), sent only while STUN discovery is live. DIRECT (0x03) may now also carry a discovered, not yet confirmed address. No card field changes: a card never names a discovered address (owner rule 2026-10-28, §4.3). No other frame or envelope changes. |
+| **Wire** | One new optional RRH1 entry, `0x24 INET_DIRECT` (route hints spec §13.3), sent only while STUN discovery is live. DIRECT (0x03) may now also carry a discovered, not yet confirmed address. Since 2026-11-06 (INET-STUN-1, §3.2) a STUN or router address goes into DIRECT, INET_DIRECT or a relay offer only once a contact or relay saw this computer at that IP: content, not format. No card field changes: a card never names a discovered address (owner rule 2026-10-28, §4.3). No other frame or envelope changes. |
 | **Date** | 2026-10-28 |
 
 ## 1. Why
@@ -38,8 +38,9 @@ Four parts, in stages (each its own commit):
 2. **Use of the address** (§4): the friend relay offers it without
    `--external`; route hints carry the p2p and Internet direct addresses,
    only inside the encrypted, authenticated links between verified friends
-   (never in a card, a log or status); an address is "unconfirmed" until a
-   contact connects in through it from outside, then "confirmed".
+   (never in a card, a log or status), and only once a contact or relay saw
+   this computer at that public IP (§3.2); an address is "unconfirmed" until
+   a contact connects in through it from outside, then "confirmed".
 3. **Serverless hole punching** (§5): two verified friends that know each
    other's mapped endpoints and whose NATs map endpoint-independently both
    dial each other's QUIC endpoint from their own p2p port at the same
@@ -84,17 +85,104 @@ decision AR-1, 2026-10-28), IPv4 over UDP:
 - Names are resolved with the system resolver (no libp2p DNS transport, as for
   route names). Every probe asks both at once. The public address and
   endpoint count only when both answer and agree (two independent answers):
-  one unauthenticated answer could be a spoofed UDP reply, and the address
-  is advertised to friends. When one does
-  not answer (or its name does not resolve), nothing is advertised from
-  that probe; the NAT class needs both too, so a punch waits for a probe
-  both answer.
+  one unauthenticated answer could be a spoofed UDP reply. When one does
+  not answer (or its name does not resolve), nothing is found by that
+  probe; the NAT class needs both too, so a punch waits for a probe both
+  answer.
+- Two agreeing answers are still no proof (INET-STUN-1, review of
+  2026-11-06): both are unauthenticated UDP, and both names come from the
+  system resolver. Whoever answers this computer's DNS for the two names
+  (a rogue DHCP or DNS server, a spoofed reply on open Wi-Fi, a malicious
+  resolver), or forges both servers' replies on its network, can make them
+  agree on an address of its own. Told to contacts, that address would have
+  every verified contact dial the attacker's host, showing it their IPs,
+  dial times and PeerIds (and, on Internet direct, their identity keys). So
+  the address is told only once seen from outside, below.
 - Two answers count as independent only when they come from different IPv4
   addresses. A harness names its own servers with
   `RAVEN_LAB_STUN_SERVERS=IP:PORT[,IP:PORT]...` (debug builds with the lab
   unlock only, IP literals, at most 8); then distinct ports count as distinct
   servers, so a fake server on loopback can stand in. Automated tests never
   reach the public list.
+
+**Seen from outside before it is told** (INET-STUN-1, 2026-11-06). The public
+IP STUN names is told to contacts (DIRECT, INET_DIRECT, the friend relay's
+addresses and its offer, §4) only while a contact or a relay of this node saw
+this computer at that very IP:
+
+- A sighting is libp2p Identify's observed address on a connection this
+  computer dialled directly (not through a relay, not a hole punch, not a
+  circuit address) at a plain TCP or QUIC address whose IP no DNS answer
+  gave, to a verified, unblocked contact the peer gate admits as such
+  (never a hidden one), or to a relay this node holds a slot on (set by
+  hand, or offered by a verified contact). Both links are authenticated, so
+  nobody on the path can change what the peer says, and on a connection this
+  computer dialled the peer reports where its packets came from: from the
+  other side of every NAT, the public IP. On a connection the peer dialled,
+  Identify reports the address the peer dialled instead (libp2p-identify
+  0.48), which may be the very address in question, so that view never
+  counts. A stranger's view never counts.
+- Never over a DNS answer (INET-STUN-1 review, 2026-11-06). A relay slot or
+  contact route named by DNS (a relay `via=` with a `/dns4` name, a friend
+  relay's `--external` name, a contact's route name) is resolved with the
+  system resolver, so whoever answers this computer's DNS chooses the IP
+  dialled, and its host there can pass the connection on to the real peer,
+  which then sees that host and not this computer's NAT. So no connection
+  to an IP a DNS answer gave this node within the hour before it came up
+  (for any name, even when the IP is also dialled as a literal; at most
+  256 such IPs are kept, and while that record is full every IP counts as
+  one) gives a sighting, nor does a WebSocket dial (the HTTPS proxy or a
+  TLS front may carry it). The limit: a node whose relay slots and
+  contacts are all named by DNS is never seen by them, and tells no public
+  address until a relay or contact reached at an IP literal sees it (§7).
+- A sighting vouches for its own IP only, for 24 hours (Identify asks again
+  every minute on every open connection, so a relay slot keeps it fresh),
+  and a network change drops every sighting at once. At most 8 IPs are kept;
+  IPv4 only, never a private or documentation address. On a dual-stack
+  network a connection that runs over IPv6 (a relay slot or a contact
+  dialled at its IPv6 address) shows this computer's IPv6 address, which
+  vouches for nothing here: the IPv4 address waits for a connection over
+  IPv4 (§7).
+- The port needs a sighting of its own (INET-STUN-1 review, 2026-11-06):
+  STUN's port is no more authenticated than its IP, and behind a NAT
+  shared with others whoever controls the answers could name, at the very
+  IP contacts saw, a port forwarded to a host of its own. So the p2p QUIC
+  endpoint (§4.1: the anchor's port, or the listen port where the NAT keeps
+  ports) is told only once a sighting over QUIC from this computer's QUIC
+  listen socket named that very IP and port. A QUIC dial that reuses the
+  listen port (libp2p's default) leaves from that socket, which has the
+  address and port the anchor asked STUN from; where libp2p finds no
+  listen socket to reuse, the view shows a dialer socket's mapping, still
+  this computer's own. At most 8 such endpoints are kept, for 24 hours, and
+  a network change drops them too. Relay slot connections mostly run over
+  TCP (a friend relay offers TCP first), so in practice the endpoint is
+  told once this node dials a contact, or a relay named by a QUIC address,
+  over QUIC.
+- **[OWNER] AR-6, open (§12):** the other guesses still rest on STUN's word
+  that the NAT keeps ports. The TCP forward guess (§4.1), INET_DIRECT and
+  the friend relay's ports (§4.2) take this node's own listen port at a
+  seen IP: on a shared NAT where whoever controls this computer's STUN
+  answers forwarded that port to a host of its own, contacts' dials go
+  there. A router-mapped address's port is likewise unchecked
+  (STRANGER-UPNP-2).
+- The same rule holds for an IPv4 address the router reports (a NAT-PMP, PCP
+  or UPnP mapping: answers anyone on this network can forge) or that an
+  AutoNAT server confirmed: it goes into DIRECT only once seen at its IP.
+  IPv6 addresses (this computer's own) are told as before.
+- Not gated: the NAT class (§3.4) and this node's own punch decisions still
+  follow the answers; a lie there costs only failed attempts.
+- A node no contact or relay has seen from outside yet tells no public
+  address at all; it stays reachable through Tor, a relay slot, the LAN and
+  friend custody (§7). Friends behind NATs with no relay slot and no direct
+  path between them therefore never punch to each other: an open owner
+  decision, AR-5 (§7, §12).
+- In a loopback lab (the debug local-candidates switch) every node is at
+  127.0.0.1 and every contact sees it there, so that address and its QUIC
+  endpoints count as seen; any other one (127.0.0.2, say) does not. The
+  harness scenarios (§9) rest on this stand-in, so they never exercise a
+  sighting; the unit test
+  `a_dialled_contacts_identify_view_reaches_auto_reach` does, with two real
+  hosts over loopback and the stand-in off.
 
 ### 3.3 From which local port
 
@@ -156,15 +244,19 @@ class with no second relay.
 ### 3.5 What is kept and what is logged
 
 - In memory only: the public IPv4 address, the anchor endpoints, the class,
-  when each was learned, and which of the node's ports a contact has reached
-  from outside. Nothing is written to disk, so a stolen profile holds no
-  address history. A discovered address is used for 45 minutes after the
-  last probe that saw it (a refresh is due every 20), and dropped at once on
-  a network change.
+  when each was learned, which of the node's ports a contact has reached
+  from outside (and under which public IP), and the IPs a contact or relay
+  saw this computer at (§3.2, at most 8, for 24 h). Nothing is written to
+  disk, so a stolen profile holds no address history. A discovered address
+  is used for 45 minutes after the last probe that saw it (a refresh is due
+  every 20), and dropped at once on a network change, with every
+  sighting.
 - Logs say the class and whether the address changed, never an address or a
   port: `raven-node autoreach: public address found (NAT endpoint-independent,
   port kept; 2 of 2 servers)`, `... public address changed ...`, `... no STUN
-  server answered (UDP blocked or offline); retrying`.
+  server answered (UDP blocked or offline); retrying`, and once per address
+  `raven-node autoreach: public address seen from outside; contacts are told
+  it`.
 
 ### 3.6 Privacy
 
@@ -222,16 +314,20 @@ No card, log line, status or doctor output names an address.
 ### 4.1 Route hints
 
 - **DIRECT (0x03)** carries, after the confirmed addresses (UPnP mapped,
-  AutoNAT confirmed, or reached from outside), the discovered p2p addresses:
-  `/ip4/<public>/udp/<anchor or inferred port>/quic-v1` and, where the NAT
-  keeps ports (§3.3), `/ip4/<public>/tcp/<p2p TCP listen port>`. At most 4 global entries as
+  AutoNAT confirmed, or reached from outside; an IPv4 one from the router or
+  AutoNAT only once seen at its IP, §3.2), the discovered p2p addresses, once
+  seen from outside (§3.2):
+  `/ip4/<public>/udp/<anchor or inferred port>/quic-v1` (only once seen at
+  that very IP and port over QUIC, §3.2) and, where the NAT keeps ports
+  (§3.3), `/ip4/<public>/tcp/<p2p TCP listen port>`. At most 4 global entries as
   before, QUIC first within each group. Their change moves the generation, so
   contacts are told at once (announce links, §7 of the spec).
 - **NAT_CLASS (0x22)** carries the STUN class (§3.4) when the classifier has
   none.
 - **INET_DIRECT (0x24, new)** carries the Internet direct listener's public
-  address while it listens: `flags u8 || ASCII ip:port` (flag bit 0
-  CONFIRMED). A receiver keeps it from a pinned sender only, global IPs only
+  address while it listens and its IP is seen from outside (§3.2):
+  `flags u8 || ASCII ip:port` (flag bit 0 CONFIRMED). A receiver keeps it
+  from a pinned sender only, global IPs only
   (loopback under the lab local-candidates switch), at most 2, in the
   snapshot's global part, and plans it as an Internet route after the
   contact's saved one. Spec: `protocol/RAVEN_ROUTE_HINTS_V1.md` §13.3.
@@ -248,8 +344,9 @@ to another network: the snapshot lives 72 h on the receiver.
   (TCP, QUIC, and TCP 443 while that listener is open), after the operator's
   `relay_external` and UPnP, like the host's confirmed IPs, where the NAT
   keeps ports (§3.3).
-- An address found this way is **worth offering** without `--external`
-  (spec §11.4 gains "or STUN discovery found the address"), without the
+- An address found this way, and seen from outside (§3.2), is **worth
+  offering** without `--external` (spec §11.4 gains "or STUN discovery found
+  the address and a contact or relay saw it"), without the
   CONFIRMED flag. The existing rule sets CONFIRMED once a member reserves from
   a globally routable IP; members rank confirmed offers higher (relay
   selection), so an unconfirmed offer is tried when nothing better exists.
@@ -286,6 +383,11 @@ through it from outside:
   entry gets CONFIRMED;
 - the friend relay: unchanged (a member's reservation from a global IP).
 
+A p2p or Internet direct confirmation counts for the public IP STUN named when
+it was made (INET-STUN-1): once STUN names another IP, the addresses at the
+new one are unconfirmed until a contact reaches them there, and told only
+once seen there (§3.2).
+
 ## 5. Serverless hole punching
 
 ### 5.1 When
@@ -297,8 +399,11 @@ A contact is a punch target while all of these hold:
 - the contact is verified and unblocked, and this node may show it its IP
   (hide my IP off for it);
 - its live route hints name a PeerId and at least one global QUIC DIRECT
-  endpoint, and its NAT_CLASS says its IPv4 QUIC mapping is `no_nat`,
-  `stable_kept` or `stable_shifted`;
+  endpoint (a friend tells its endpoint only once a contact or relay saw it
+  from outside, §3.2: two friends behind NATs with no relay slot and no
+  direct path never get here, the open owner decision AR-5 in §12), and its
+  NAT_CLASS says its IPv4 QUIC mapping is `no_nat`, `stable_kept` or
+  `stable_shifted`;
 - this node's own QUIC class is one of those three (from STUN or the
   classifier);
 - no connection to that PeerId is open now.
@@ -396,7 +501,10 @@ back.
 | Both friends behind the same NAT | They meet over LAN; a punch toward the shared public IP needs the router to hairpin and simply fails otherwise. |
 | A friend moved and its old endpoint is stale | Its punches go to the old endpoint and fail until a link (LAN, relay, custody, a forward) brings its new hints; nothing serverless can tell a moved friend's new endpoint to a friend behind address-dependent filtering. |
 | Clocks more than a few seconds apart | Slots do not overlap; punches fail; the other paths work. |
-| A STUN server lies | It can only make this node offer a wrong address (dials fail, nothing confirms it) or change the class; two independent answers must agree. It cannot learn or change anything about contacts. |
+| A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. Nor a port of its own at the seen IP for the QUIC endpoint (§3.2); by claiming the NAT keeps ports it can still have this node guess its listen ports at the seen IP (AR-6). It can make this node's own punches fail. (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
+| Relay slots and contact routes all named by DNS (a relay `via=` name, a friend relay's `--external` name) | No sighting comes from them (§3.2): whoever answers the DNS could pass those connections on. The STUN address is not told until a relay or contact reached at an IP literal sees this computer; until then it is as for a node nobody has seen (below). |
+| Dual-stack network where the relay slots and the contacts this node dials are all reached over IPv6 | Their views name this computer's IPv6 address, so no IPv4 sighting comes (§3.2): the STUN address (IPv4) is not told, and IPv4-only friends cannot dial it directly or punch to it. IPv6 addresses (this computer's own) are told as before. Not done: dialling one relay slot over IPv4 to get that sighting. |
+| No contact or relay has seen this computer from outside yet (a new node; one whose contacts are all on its LAN or behind NATs; no relay slot) | Its public address is not told, so friends cannot dial it directly or punch to it, and its friend relay is not offered without `--external`. It stays reachable through Tor (the onion address in its card), a relay it holds a slot on (set by hand or offered by a friend: that relay's view counts within a minute of the reservation, and so makes the address seen), the LAN, friend custody, and the operator's `relay_external`. The first contact it dials directly over the internet does the same. **[OWNER] AR-5, open (§12):** this costs honest friends something. Two friends behind NATs, neither holding a relay slot and neither reachable directly by the other or by any other contact, never see each other from outside: neither tells its endpoint, so serverless punching between them (§5) never starts, and a friend relay behind a forwarded port is never offered without `--external`. Before INET-STUN-1 both happened on STUN's word alone. A check on the receiving side cannot close the gap: the receiver has no direct path to the sender either, so it has nothing of its own to compare the told address with. |
 
 ## 8. Wire and document changes
 
@@ -410,6 +518,12 @@ back.
 - `protocol/RAVEN_NAT_CONNECTIVITY_V1.md`: unchanged (it describes the old
   experimental binary).
 - This document; the any-network plan's Phase 4 section points here.
+- 2026-11-06 (INET-STUN-1): a STUN or router address goes into DIRECT,
+  INET_DIRECT and the relay offer only once seen from outside (§3.2); spec
+  §4, §6, §11.4 and §13.3 say so. Content only: no frame or field changes.
+  After its review the same day, a sighting counts only over a connection
+  to an IP no DNS answer gave and not over a WebSocket, and the QUIC
+  endpoint is told only once seen at that very port (§3.2; spec §6).
 
 ## 9. Tests
 
@@ -417,7 +531,17 @@ back.
   responses, FINGERPRINT, every rejection rule; classification; the
   schedule (phase symmetry, nesting, level rules), limits and target
   selection; hint entries (DIRECT order, INET_DIRECT codec and receiver
-  rules); the friend relay's externals and offer.
+  rules); the friend relay's externals and offer; seen from outside (§3.2):
+  `a_stun_address_is_advertised_only_once_a_contact_saw_it`,
+  `sightings_are_bounded_and_only_what_may_be_told`,
+  `a_router_mapped_ipv4_address_is_told_only_once_seen_from_outside`,
+  `only_a_contact_or_own_relay_this_host_dialled_vouches_for_its_ip`,
+  `a_relay_slot_named_by_dns_gives_no_sighting`,
+  `dns_answers_count_for_an_hour_and_never_stop_early`,
+  `the_quic_endpoint_waits_for_a_quic_view_of_that_very_port`, and end to
+  end over loopback (two real hosts; a contact's Identify view of a QUIC
+  dial reaches auto-reach, and a dial at a DNS answer reaches nothing):
+  `a_dialled_contacts_identify_view_reaches_auto_reach`.
 - Harness (`scripts/lan_fault_matrix.py`, `RAVEN_FAULT_AUTOREACH=1`; real
   `ash` and `raven-node` on loopback, two fake STUN servers on loopback,
   never the public list). The nodes meet over Internet direct links: they
@@ -429,6 +553,9 @@ back.
     from the p2p port (anchored) and offers its friend relay with no
     `--external`; a node without the switch does not; a member learns the
     offer and the discovered DIRECT addresses and reserves;
+  - s146b (INET-STUN-1): both fake servers name 127.0.0.2, an address no
+    contact sees the node at; the node finds it and tells nobody: no relay
+    offer, no DIRECT or INET_DIRECT address at it;
   - s147: a friend that learned that address while "together" reaches it
     after "moving" (no saved route but the PeerId, no relay): p2p `direct`
     to the discovered address, the automatic carrier to the INET_DIRECT
@@ -477,3 +604,29 @@ p2p lab switches, from an unpublished test checklist.
 - **AR-4** Decided 2026-10-28 (as recommended): idle punching every 16
   minutes for at most 8 friends (about 0.4 MB a day per unreachable
   friend).
+- **AR-5** [OWNER] Open, asked 2026-11-06 (INET-STUN-1 review), to be
+  answered before the INET-STUN-1 work merges: an address is told only once
+  seen from outside (§3.2), so friends behind NATs with no relay slot and
+  no direct path never punch to each other and a friend relay behind a
+  forwarded port is not offered without `--external` (§7). Options:
+  (a) keep the rule for everything told (recommended: otherwise whoever
+  answers this computer's DNS or forges the STUN answers on its network
+  steers every contact's dials); a friend is seen again once it holds a
+  relay slot reached at an IP address (set by hand, or offered by a
+  friend) or dials a contact directly at one, and its QUIC endpoint, which
+  a punch needs on both sides, once such a connection runs over QUIC
+  (§3.2); (b) tell an unseen STUN endpoint for serverless punching only,
+  never for DIRECT dials or the relay offer: the punching friends'
+  packets still go wherever STUN pointed, so a liar there sees their IPs
+  and timing; (c) go back to telling the STUN address unseen, as before
+  2026-11-06.
+- **AR-6** [OWNER] Open, asked 2026-11-06 (INET-STUN-1 review): the QUIC
+  endpoint waits for a sighting of its very port (§3.2), but the TCP
+  forward guess, INET_DIRECT and the friend relay's ports still take this
+  node's listen ports at a seen IP whenever STUN says the NAT keeps ports.
+  Options: (a) accept it (the dials still authenticate the peer; the host
+  at that port learns the dialling contacts' IPs and times, as any wrong
+  address did before 2026-11-06); (b) require a sighting over TCP from the
+  TCP listen port at that very port before the TCP guess and the friend
+  relay's TCP port, and tell INET_DIRECT only once confirmed; (c) never
+  guess: tell only the QUIC endpoint and confirmed addresses.

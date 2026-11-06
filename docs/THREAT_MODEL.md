@@ -399,6 +399,35 @@ key, and a wrong key ends the link). Two ways to be that listener:
   network we are, which a contact on the same LAN sees anyway. An unverified
   contact never gets it, nor does anyone while hide my IP is on, and cards
   carry no address.
+- *By steering this node's own public address* (INET-STUN-1, review of
+  2026-11-06): the public IP route hints tell every verified contact
+  (DIRECT, INET_DIRECT, the friend relay's offer) comes from STUN answers
+  and router answers (NAT-PMP, PCP, UPnP), none of them authenticated.
+  Whoever answers this computer's DNS for the STUN servers' names, or
+  forges their replies or the router's on its network, could name a host of
+  its own, and every contact would dial it (their IPs, dial times and
+  PeerIds; on Internet direct their identity binds, the first item above).
+  Control: such an address is told only once a verified contact or a relay
+  this node holds a slot on saw this node at that very IP, on a connection
+  this node dialled directly at an IP no DNS answer gave (libp2p Identify's
+  observed address; the auto-reach design §3.2); a network change forgets
+  every sighting. A connection to a DNS answer never counts: whoever
+  answered could pass it on from a host of its own, which the peer would
+  then see. A malicious verified contact alone cannot steer it either: STUN
+  or the router must name the same IP. What is left: the NAT that really
+  carries this computer's traffic (a hotel, a carrier), and anyone who
+  routes its packets on the way out (its own uplink, a VPN), are where a
+  peer sees it and so where contacts' dials go, as for any public address.
+  The port is checked only for the p2p QUIC endpoint (a sighting over QUIC
+  from the QUIC listen socket at that very port): the guessed ports (the
+  TCP forward guess, INET_DIRECT, the friend relay's ports) still rest on
+  STUN's word that the NAT keeps ports, so behind a shared NAT whoever
+  controls the STUN answers and forwarded that port to a host of its own
+  gets contacts' dials there (owner decision AR-6 in the auto-reach
+  design); a router-mapped address's port likewise (STRANGER-UPNP-2).
+  And a limit, not an exposure: a node whose relay slots and contacts are
+  all named by DNS is never seen by them, so it tells no public address
+  until a relay or contact reached at an IP literal sees it.
 
 **Phase 6b (built, gated off; not in this version):**
 

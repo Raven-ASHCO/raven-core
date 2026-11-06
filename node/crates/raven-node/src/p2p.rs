@@ -516,6 +516,8 @@ enum Command {
         class: PeerClass,
         relays: Vec<PeerId>,
         addrs: Vec<Multiaddr>,
+        /// The IPs DNS answers gave for `addrs` ([`Resolved::dns`]).
+        dns: Vec<IpAddr>,
         checked_at: std::time::Instant,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -537,6 +539,8 @@ enum Command {
         gen: u64,
         relay: PeerId,
         addrs: Vec<Multiaddr>,
+        /// The IPs DNS answers gave ([`Resolved::dns`]).
+        dns: Vec<IpAddr>,
     },
     /// Networks were only added ([`nudge`]): idle relay slots are due now,
     /// their backoff started over ([`RelaySlot::nudge`]).
@@ -1063,10 +1067,14 @@ pub(crate) fn reach_confirmed() -> bool {
 /// This node's own p2p routes, as its route hints tell verified contacts
 /// (`crate::hints`, RAVEN_ROUTE_HINTS_V1 §6): the host's PeerId, the relays
 /// it holds an active reservation on (each active relay slot's `via=`
-/// text), its confirmed (UPnP mapped or AutoNAT confirmed) addresses and its
-/// listen addresses, both without `/p2p`, no circuit, sorted; and (Phase 4)
-/// its NAT mapping classes while the NAT_CLASS gate is live; and (auto-reach)
-/// the public addresses STUN discovery found.
+/// text), its confirmed (router mapped or AutoNAT confirmed) addresses and
+/// its listen addresses, both without `/p2p`, no circuit, sorted; and
+/// (Phase 4) its NAT mapping classes while the NAT_CLASS gate is live; and
+/// (auto-reach) the public addresses STUN discovery found. A public IPv4
+/// address from STUN or the router is here only once a contact or one of
+/// this node's relays saw it at that IP, on a connection this node dialled
+/// directly at an IP no DNS answer gave (INET-STUN-1,
+/// [`crate::autoreach::observed`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OwnP2p {
     pub peer_id: String,
@@ -1074,13 +1082,14 @@ pub(crate) struct OwnP2p {
     pub confirmed: Vec<String>,
     pub listen: Vec<String>,
     pub nat: Option<raven_core::route_hints::NatClass>,
-    /// Auto-reach (gated): the public addresses STUN discovery found for the
-    /// listeners that no contact has reached from outside yet (a reached one
-    /// is among `confirmed`), QUIC first; without `/p2p`.
+    /// Auto-reach (gated): the public addresses STUN discovery found, and a
+    /// contact or relay saw this node at, for the listeners that no contact
+    /// has reached from outside yet (a reached one is among `confirmed`),
+    /// QUIC first; without `/p2p`.
     pub discovered: Vec<String>,
     /// Auto-reach (gated): the Internet direct listener's public address
-    /// (`ip:port`) and whether a contact reached it from outside (RRH1
-    /// INET_DIRECT).
+    /// (`ip:port`, its IP seen as for `discovered`) and whether a contact
+    /// reached it from outside (RRH1 INET_DIRECT).
     pub inet: Vec<(String, bool)>,
 }
 
@@ -1109,6 +1118,25 @@ fn replace_own(held: &mut Option<OwnP2p>, own: Option<OwnP2p>) -> bool {
     let changed = *held != own;
     *held = own;
     changed
+}
+
+/// Auto-reach (INET-STUN-1): may this confirmed external address of the
+/// swarm go into route hints? The swarm confirms one when the router maps a
+/// port (NAT-PMP, PCP or UPnP) or an AutoNAT server (a relay this host holds
+/// a slot on) reached it. A router's answer is not authenticated: someone
+/// else on this network who forges the router's replies can name an
+/// external IP of theirs, and contacts would dial it. So an IPv4 one is told
+/// only once a contact or one of this host's relays saw this host at that
+/// IP, on a connection this host dialled directly (`seen`,
+/// [`crate::autoreach::seen_ip`]). An address an AutoNAT server reached is
+/// normally at the IP that very relay sees this host at, so it passes once
+/// that relay's view came in. IPv6 ones (this host's own address, which a
+/// PCP pinhole answer matched by its nonce names) are told as before.
+fn admitted_external(addr: &Multiaddr, seen: &dyn Fn(Ipv4Addr) -> bool) -> bool {
+    match addr.iter().next() {
+        Some(Protocol::Ip4(ip)) => seen(ip),
+        _ => true,
+    }
 }
 
 /// Ask a running host to shut down cleanly (close its connections, so a
@@ -1217,7 +1245,7 @@ impl HostHandle {
         peer: PeerId,
         class: PeerClass,
         relays: Vec<PeerId>,
-        addrs: Vec<Multiaddr>,
+        Resolved { addrs, dns }: Resolved,
         checked_at: std::time::Instant,
         wait: &ConnectWait,
     ) -> Result<(), String> {
@@ -1228,6 +1256,7 @@ impl HostHandle {
                 class,
                 relays,
                 addrs,
+                dns,
                 checked_at,
                 reply,
             })
@@ -1430,39 +1459,125 @@ fn relay_answer_usable(addr: &Multiaddr, lab_local: bool, lab_loopback: bool) ->
     })
 }
 
+/// INET-STUN-1 (auto-reach design §3.2): how long an IP a DNS answer gave
+/// stays one ([`DnsAnswers`]). Each name is resolved again right before it
+/// is dialled (a relay slot's before every attempt, a contact's on every
+/// dial), so this is far longer than any answer is dialled after it came;
+/// a connection keeps what it was when it came up ([`Host::note_plain_dial`]).
+const DNS_ANSWER_FOR: Duration = Duration::from_secs(3600);
+/// The most IPs [`DnsAnswers`] keeps.
+const MAX_DNS_ANSWERS: usize = 256;
+
+/// INET-STUN-1 (auto-reach design §3.2): the IPs DNS answers gave this
+/// host's dials (a relay slot's or a probed relay's names, a contact's route
+/// names, the relay names of its circuits), each until [`DNS_ANSWER_FOR`]
+/// after it was last given; in memory only. Whoever answers this computer's
+/// DNS chooses such an IP, and its host there can pass the connection on to
+/// the real peer: that peer then sees this computer at the forwarding host,
+/// not at this computer's NAT. So a connection to such an IP never vouches
+/// for this node's public IP ([`Host::outside_view`]). At most
+/// [`MAX_DNS_ANSWERS`]: when they are all younger than [`DNS_ANSWER_FOR`],
+/// the oldest makes room and every IP counts as an answer until that one
+/// would have aged out, so an answer never stops counting early.
+#[derive(Debug, Default)]
+struct DnsAnswers {
+    given: HashMap<IpAddr, Instant>,
+    /// Since the record overflowed: every IP counts as an answer until then.
+    full_until: Option<Instant>,
+}
+
+impl DnsAnswers {
+    /// DNS answers gave `ips` at `now`.
+    fn note(&mut self, ips: &[IpAddr], now: Instant) {
+        for ip in ips.iter().map(IpAddr::to_canonical) {
+            if !self.given.contains_key(&ip) && self.given.len() >= MAX_DNS_ANSWERS {
+                self.given
+                    .retain(|_, at| now.saturating_duration_since(*at) < DNS_ANSWER_FOR);
+            }
+            if !self.given.contains_key(&ip) && self.given.len() >= MAX_DNS_ANSWERS {
+                let oldest = self.given.iter().min_by_key(|(_, at)| **at);
+                if let Some((old, at)) = oldest.map(|(ip, at)| (*ip, *at)) {
+                    self.given.remove(&old);
+                    let until = at + DNS_ANSWER_FOR;
+                    self.full_until = Some(self.full_until.map_or(until, |t| t.max(until)));
+                }
+            }
+            self.given.insert(ip, now);
+        }
+    }
+
+    /// Did a DNS answer give `ip` within [`DNS_ANSWER_FOR`] of `now`?
+    /// Every IP did while the record is full.
+    fn gave(&self, ip: IpAddr, now: Instant) -> bool {
+        self.full_until.is_some_and(|t| now < t)
+            || self
+                .given
+                .get(&ip.to_canonical())
+                .is_some_and(|at| now.saturating_duration_since(*at) < DNS_ANSWER_FOR)
+    }
+}
+
+/// What a dial's names resolved to ([`resolve_held`]): the addresses to
+/// dial, and every IP a DNS answer gave on the way (INET-STUN-1: a
+/// connection to one never vouches for this node's public IP,
+/// [`DnsAnswers`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Resolved {
+    addrs: Vec<Multiaddr>,
+    dns: Vec<IpAddr>,
+}
+
+impl Resolved {
+    /// The IP of each of `answers` (a name's), noted once.
+    fn note_answers(&mut self, answers: &[Multiaddr]) {
+        for ip in answers.iter().filter_map(addr_ip) {
+            if !self.dns.contains(&ip) {
+                self.dns.push(ip);
+            }
+        }
+    }
+}
+
 /// [`resolve_all`], where the answers of each address `held` names must be
 /// [`relay_answer_usable`], and a WSS form `proxied` names keeps its name
 /// for the proxy ([`resolve_addr`]). A held name the proxy would carry is
 /// still resolved here first (review B-4): it is kept, unresolved, only
 /// when this node's own answers are all usable, so a name a contact
 /// controls never steers the user's proxy at their internal hosts or its
-/// own loopback. A name that does not resolve here is not dialled.
+/// own loopback. A name that does not resolve here is not dialled. Every
+/// IP a name's answers gave is in [`Resolved::dns`], dialled or not.
 async fn resolve_held(
     addrs: Vec<Multiaddr>,
     held: impl Fn(&Multiaddr) -> bool,
     proxied: impl Fn(&Multiaddr) -> bool,
     lab_local: bool,
     lab_loopback: bool,
-) -> Vec<Multiaddr> {
-    let mut out = Vec::new();
+) -> Resolved {
+    let mut out = Resolved::default();
     for a in addrs {
         let held = held(&a);
         let proxied = proxied(&a);
-        if held && proxied && is_dns(&a) {
+        let named = is_dns(&a);
+        if held && proxied && named {
             let answers = resolve_addr(a.clone(), false).await;
+            out.note_answers(&answers);
             let usable = !answers.is_empty()
                 && answers
                     .iter()
                     .all(|r| relay_answer_usable(r, lab_local, lab_loopback));
-            if usable && !out.contains(&a) {
-                out.push(a);
+            if usable && !out.addrs.contains(&a) {
+                out.addrs.push(a);
             }
             continue;
         }
-        for r in resolve_addr(a, proxied).await {
+        let answers = resolve_addr(a, proxied).await;
+        if named {
+            out.note_answers(&answers);
+        }
+        for r in answers {
             let usable = !held || relay_answer_usable(&r, lab_local, lab_loopback);
-            if usable && !out.contains(&r) {
-                out.push(r);
+            if usable && !out.addrs.contains(&r) {
+                out.addrs.push(r);
             }
         }
     }
@@ -1479,7 +1594,7 @@ async fn resolve_dial(
     proxied: impl Fn(&Multiaddr) -> bool,
     lab_local: bool,
     lab_loopback: bool,
-) -> Vec<Multiaddr> {
+) -> Resolved {
     resolve_held(
         addrs,
         |a| is_dns(a) && is_circuit(a),
@@ -1503,7 +1618,7 @@ async fn resolve_slot(
     proxied: impl Fn(&Multiaddr) -> bool,
     lab_local: bool,
     lab_loopback: bool,
-) -> Vec<Multiaddr> {
+) -> Resolved {
     resolve_held(
         named,
         |a| offered && is_dns(a),
@@ -2710,6 +2825,8 @@ struct DialCheck {
     /// then on is at least as new ([`GateHandle::admit_dial`]).
     checked_at: std::time::Instant,
     addrs: Vec<Multiaddr>,
+    /// The IPs DNS answers gave for `addrs` ([`Resolved::dns`]).
+    dns: Vec<IpAddr>,
     relays: Vec<PeerId>,
     /// How our own peer gate admits the target: CONTACT_HIDDEN for a
     /// contact this node hides its IP from or whose learned PeerId is not
@@ -2739,6 +2856,7 @@ fn try_second_peer_id(connected: &Result<(), String>) -> bool {
 struct DialAlt {
     peer: PeerId,
     addrs: Vec<Multiaddr>,
+    dns: Vec<IpAddr>,
     relays: Vec<PeerId>,
 }
 
@@ -2751,6 +2869,7 @@ impl DialCheck {
         }
         let alt = self.second.take()?;
         self.addrs = alt.addrs;
+        self.dns = alt.dns;
         self.relays = alt.relays;
         self.peer = Some(alt.peer);
         Some(alt.peer)
@@ -2833,9 +2952,11 @@ async fn check_from_plan(
             let t = P2pDialTarget::Peer {
                 peer_id: s.peer_id.clone(),
             };
+            let Resolved { addrs, dns } = resolve(dial_addrs(&t, Some(s), &forms)?).await;
             alts.push(DialAlt {
                 peer,
-                addrs: resolve(dial_addrs(&t, Some(s), &forms)?).await,
+                addrs,
+                dns,
                 relays: dial_relays(&t, Some(s)),
             });
         }
@@ -2844,6 +2965,7 @@ async fn check_from_plan(
             return Ok(DialCheck {
                 checked_at,
                 addrs: first.addrs,
+                dns: first.dns,
                 relays: first.relays,
                 class,
                 peer: Some(first.peer),
@@ -2851,10 +2973,11 @@ async fn check_from_plan(
             });
         }
     }
-    let addrs = resolve(dial_addrs(target, set, &forms)?).await;
+    let Resolved { addrs, dns } = resolve(dial_addrs(target, set, &forms)?).await;
     Ok(DialCheck {
         checked_at,
         addrs,
+        dns,
         relays: dial_relays(target, set),
         class,
         peer: None,
@@ -2885,7 +3008,10 @@ async fn connect_checked(
                 peer,
                 check.class,
                 check.relays.clone(),
-                check.addrs.clone(),
+                Resolved {
+                    addrs: check.addrs.clone(),
+                    dns: check.dns.clone(),
+                },
                 check.checked_at,
                 wait,
             )
@@ -4366,6 +4492,15 @@ struct Host {
     punch_targets: Vec<PunchTarget>,
     /// Punch dials in flight: the contact each one is for.
     punch_inflight: HashMap<ConnectionId, [u8; 32]>,
+    /// INET-STUN-1: the IPs DNS answers gave this host's dials
+    /// ([`DnsAnswers`]).
+    dns_answers: DnsAnswers,
+    /// INET-STUN-1: each open connection this host dialled at a plain TCP or
+    /// QUIC address whose IP no DNS answer had given when it came up, with
+    /// its transport and whether it asked to leave from the listen port
+    /// ([`Self::note_plain_dial`]): only these may vouch for this host's
+    /// public IP ([`Self::outside_view`]).
+    dialled_plain: HashMap<ConnectionId, (Tr, PortUse)>,
 }
 
 /// Peers [`Host::dialled`] remembers (the oldest go first).
@@ -5443,10 +5578,18 @@ impl Host {
     /// ([`OwnP2p`]): its PeerId, every address each active relay slot's
     /// relay is named by (its fallback too, at most
     /// [`raven_core::route_hints::MAX_ADDRS_PER_RELAY`] per relay), the
-    /// external addresses the swarm holds as confirmed (UPnP mapped,
-    /// AutoNAT confirmed; never a circuit) and its listen addresses. Sorted
-    /// and without `/p2p`, so it changes only when its content does.
+    /// external addresses the swarm holds as confirmed (router mapped,
+    /// AutoNAT confirmed; never a circuit; an IPv4 one only once seen from
+    /// outside, [`admitted_external`]) and its listen addresses. Sorted and
+    /// without `/p2p`, so it changes only when its content does.
     fn own_p2p(&self) -> OwnP2p {
+        let lab_local = raven_core::p2p_local_candidates_enabled();
+        self.own_p2p_with(&|ip| crate::autoreach::seen_ip(ip, lab_local))
+    }
+
+    /// [`Self::own_p2p`], with `seen` saying whether a contact or relay saw
+    /// this host at an IPv4 address ([`crate::autoreach::seen_ip`]).
+    fn own_p2p_with(&self, seen: &dyn Fn(Ipv4Addr) -> bool) -> OwnP2p {
         let texts = |addrs: &mut dyn Iterator<Item = &Multiaddr>| {
             let mut out: Vec<String> = addrs
                 .filter(|a| !is_circuit(a))
@@ -5461,13 +5604,19 @@ impl Host {
             out.dedup();
             out
         };
-        // Auto-reach (gated): what STUN discovery found; a port a contact
-        // reached from outside counts as confirmed.
+        // Auto-reach (gated): what STUN discovery found and a contact or
+        // relay saw this node at; a port a contact reached from outside under
+        // that IP counts as confirmed.
         let found = crate::autoreach::discovered_p2p(
             &self.listen_addrs,
             raven_core::p2p_local_candidates_enabled(),
         );
-        let mut confirmed = texts(&mut self.swarm.external_addresses());
+        let mut confirmed = texts(
+            &mut self
+                .swarm
+                .external_addresses()
+                .filter(|a| admitted_external(a, seen)),
+        );
         for f in found.iter().filter(|f| f.confirmed) {
             if !confirmed.contains(&f.text) {
                 confirmed.push(f.text.clone());
@@ -5799,6 +5948,63 @@ impl Host {
         };
         if let Some(ip) = addr_ip(send_back_addr) {
             crate::autoreach::confirm(what, ip, raven_core::p2p_local_candidates_enabled());
+        }
+    }
+
+    /// Auto-reach (design §3.2, INET-STUN-1): where `peer` saw this host on
+    /// `conn` (Identify's raw observed address, TCP or QUIC), when that
+    /// view may vouch for the public address STUN or the router named: a
+    /// connection this host dialled directly ([`ConnOrigin::Dialled`]: not
+    /// through a relay, not a hole punch, not a circuit address) at a plain
+    /// TCP or QUIC address whose IP no DNS answer gave, and seen over that
+    /// transport ([`Self::dialled_plain`]), to a contact the peer gate admits
+    /// or to a relay this host holds a slot on. Both are authenticated, so
+    /// nobody on the path can change what they say, and on a connection this
+    /// host dialled they report where its packets come from: from outside,
+    /// its public IP. On a connection the peer dialled, Identify reports the
+    /// address the peer dialled instead (libp2p-identify 0.48,
+    /// `handle_established_outbound_connection`), which may be the very
+    /// address in question, so that view never counts; nor does a
+    /// stranger's ([`crate::autoreach::observed`] keeps the IP). Nor does a
+    /// view over an IP a DNS answer gave: whoever answered this computer's
+    /// DNS may pass the connection on from a host of its own, which the peer
+    /// then sees ([`DnsAnswers`]); nor one over a WebSocket, which the HTTPS
+    /// proxy or a TLS front may carry.
+    fn outside_view(
+        &self,
+        conn: ConnectionId,
+        peer: &PeerId,
+        observed: &Multiaddr,
+    ) -> Option<crate::autoreach::Sighting> {
+        let dialled = lock(&self.handle.conns).origin(conn) == Some(ConnOrigin::Dialled);
+        let vouches = self.slots.iter().any(|s| s.peer == *peer)
+            || self.gate.class_of(peer).intersects(PeerClass::CONTACT);
+        let (tr, at) = raw_endpoint(observed)?;
+        let &(by, port_use) = self.dialled_plain.get(&conn)?;
+        // Over QUIC from the listen socket, the view names that socket's
+        // public mapping: the endpoint STUN's anchor named, or not.
+        (dialled && vouches && by == tr).then_some(crate::autoreach::Sighting {
+            at,
+            quic: tr == Tr::Quic && port_use == PortUse::Reuse,
+        })
+    }
+
+    /// INET-STUN-1 (design §3.2): connection `id` came up. One this host
+    /// dialled at a plain TCP or QUIC address (no circuit, no WebSocket: a
+    /// WSS dial may go through the HTTPS proxy or a TLS front, whose address
+    /// the peer then sees) whose IP no DNS answer gave ([`DnsAnswers`]) is
+    /// kept with its transport and port use ([`Self::dialled_plain`]).
+    fn note_plain_dial(&mut self, id: ConnectionId, endpoint: &ConnectedPoint, now: Instant) {
+        let ConnectedPoint::Dialer {
+            address, port_use, ..
+        } = endpoint
+        else {
+            return;
+        };
+        if let Some((tr, to)) = raw_endpoint(address) {
+            if !self.dns_answers.gave(to.ip(), now) {
+                self.dialled_plain.insert(id, (tr, *port_use));
+            }
         }
     }
 
@@ -6375,8 +6581,16 @@ impl Host {
         // settings.
         tokio::spawn(async move {
             let proxied = |a: &Multiaddr| dial.proxied(a);
-            let addrs = resolve_slot(forms, offered, proxied, lab_local, lab_loopback).await;
-            let _ = commands.send(Command::Resolved { gen, relay, addrs }).await;
+            let Resolved { addrs, dns } =
+                resolve_slot(forms, offered, proxied, lab_local, lab_loopback).await;
+            let _ = commands
+                .send(Command::Resolved {
+                    gen,
+                    relay,
+                    addrs,
+                    dns,
+                })
+                .await;
         });
     }
 
@@ -6626,6 +6840,7 @@ impl Host {
                 );
                 self.fresh_port.remove(&connection_id);
                 self.last_ok = Some(Instant::now());
+                self.note_plain_dial(connection_id, &endpoint, Instant::now());
                 self.confirm_reach(&peer_id, &endpoint);
                 self.punch_connected(connection_id, &peer_id, &endpoint);
                 // The online proof came up: choose again at once.
@@ -6681,6 +6896,7 @@ impl Host {
                 cause,
             } => {
                 lock(&self.handle.conns).closed(connection_id);
+                self.dialled_plain.remove(&connection_id);
                 if self.conn_meta.remove(&connection_id).is_some() {
                     if let Some(nc) = self.nat_class.as_mut() {
                         nc.closed(connection_id, std::time::Instant::now());
@@ -6890,6 +7106,13 @@ impl Host {
                         by_relay,
                         std::time::Instant::now(),
                     );
+                }
+                // Auto-reach (design §3.2): a contact's or relay's view on a
+                // connection we dialled directly vouches for the public IP
+                // STUN or the router named before contacts are told it.
+                if let Some(seen) = self.outside_view(connection_id, &peer_id, &info.observed_addr)
+                {
+                    crate::autoreach::observed(seen, raven_core::p2p_local_candidates_enabled());
                 }
                 // Phase 4: the same raw view classifies our NAT's mapping.
                 self.nat_observed(connection_id, &peer_id, &info.observed_addr);
@@ -7232,12 +7455,14 @@ impl Host {
         let lab_loopback = raven_core::route_hints::lab_loopback_relays();
         tokio::spawn(async move {
             let proxied = |a: &Multiaddr| dial.proxied(a);
-            let addrs = resolve_slot(named, true, proxied, lab_local, lab_loopback).await;
+            let Resolved { addrs, dns } =
+                resolve_slot(named, true, proxied, lab_local, lab_loopback).await;
             let _ = commands
                 .send(Command::Resolved {
                     gen,
                     relay: peer,
                     addrs,
+                    dns,
                 })
                 .await;
         });
@@ -7450,14 +7675,28 @@ impl Host {
                 class,
                 relays,
                 addrs,
+                dns,
                 checked_at,
                 reply,
-            } => self.connect(peer, class, relays, addrs, checked_at, reply),
+            } => {
+                // INET-STUN-1: what DNS answered for this dial, before it
+                // is dialled ([`DnsAnswers`]).
+                self.dns_answers.note(&dns, Instant::now());
+                self.connect(peer, class, relays, addrs, checked_at, reply)
+            }
             // The gate is shared by every generation: an older one's load is
             // as good.
             Command::GateLoaded(loaded) => self.gate_loaded(*loaded),
             Command::PreferDirect { peer, reply } => self.prefer_direct(peer, reply),
-            Command::Resolved { gen, relay, addrs } => {
+            Command::Resolved {
+                gen,
+                relay,
+                addrs,
+                dns,
+            } => {
+                // INET-STUN-1: a relay name's answers, before they are
+                // dialled ([`DnsAnswers`]); an older generation's too.
+                self.dns_answers.note(&dns, Instant::now());
                 if gen == self.gen {
                     self.on_resolved(relay, addrs);
                 }
@@ -8699,6 +8938,8 @@ impl<'a> HostSeed<'a> {
             punch_live: raven_core::serverless_punch_live_enabled(),
             punch_targets: Vec::new(),
             punch_inflight: HashMap::new(),
+            dns_answers: DnsAnswers::default(),
+            dialled_plain: HashMap::new(),
         };
         // A new endpoint: a new network for the punch schedule.
         with_punch(|p| p.book.reset());
@@ -9183,13 +9424,17 @@ mod tests {
         ));
         let direct = addr(format!("/dns4/localhost/tcp/7425/p2p/{bob}"));
         let all = vec![named, literal.clone(), direct];
-        let got = resolve_dial(all.clone(), |_| false, false, false).await;
+        let got = resolve_dial(all.clone(), |_| false, false, false)
+            .await
+            .addrs;
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0], literal);
         assert!(got[1].to_string().starts_with("/ip4/127."), "{got:?}");
         assert!(!got.iter().any(|a| a.to_string().contains("/tcp/7423/")));
         for (lab_local, lab_loopback) in [(true, false), (false, true)] {
-            let got = resolve_dial(all.clone(), |_| false, lab_local, lab_loopback).await;
+            let got = resolve_dial(all.clone(), |_| false, lab_local, lab_loopback)
+                .await
+                .addrs;
             assert_eq!(got.len(), 3, "{lab_local} {lab_loopback}: {got:?}");
         }
     }
@@ -9206,22 +9451,29 @@ mod tests {
         let literal = addr(format!("/ip4/127.0.0.1/tcp/7428/p2p/{relay}"));
         let both = vec![named.clone(), literal.clone()];
         assert_eq!(
-            resolve_slot(both.clone(), true, |_| false, false, false).await,
+            resolve_slot(both.clone(), true, |_| false, false, false)
+                .await
+                .addrs,
             vec![literal.clone()]
         );
         assert!(
             resolve_slot(vec![named.clone()], true, |_| false, false, false)
                 .await
+                .addrs
                 .is_empty()
         );
-        let by_hand = resolve_slot(both.clone(), false, |_| false, false, false).await;
+        let by_hand = resolve_slot(both.clone(), false, |_| false, false, false)
+            .await
+            .addrs;
         assert_eq!(by_hand.len(), 2, "{by_hand:?}");
         assert!(
             by_hand[0].to_string().starts_with("/ip4/127."),
             "{by_hand:?}"
         );
         for (lab_local, lab_loopback) in [(true, false), (false, true)] {
-            let got = resolve_slot(both.clone(), true, |_| false, lab_local, lab_loopback).await;
+            let got = resolve_slot(both.clone(), true, |_| false, lab_local, lab_loopback)
+                .await
+                .addrs;
             assert_eq!(got, by_hand, "{lab_local} {lab_loopback}");
         }
     }
@@ -9308,15 +9560,20 @@ mod tests {
         let offered = vec![addr(format!("/dns4/localhost/tcp/443/tls/ws/p2p/{relay}"))];
         assert!(resolve_slot(offered.clone(), true, |_| true, false, false)
             .await
+            .addrs
             .is_empty());
         for (lab_local, lab_loopback) in [(true, false), (false, true)] {
             assert_eq!(
-                resolve_slot(offered.clone(), true, |_| true, lab_local, lab_loopback).await,
+                resolve_slot(offered.clone(), true, |_| true, lab_local, lab_loopback)
+                    .await
+                    .addrs,
                 offered
             );
         }
         assert_eq!(
-            resolve_slot(offered.clone(), false, |_| true, false, false).await,
+            resolve_slot(offered.clone(), false, |_| true, false, false)
+                .await
+                .addrs,
             offered
         );
         let nowhere = vec![addr(format!(
@@ -9324,9 +9581,12 @@ mod tests {
         ))];
         assert!(resolve_slot(nowhere.clone(), true, |_| true, true, true)
             .await
+            .addrs
             .is_empty());
         assert_eq!(
-            resolve_slot(nowhere.clone(), false, |_| true, false, false).await,
+            resolve_slot(nowhere.clone(), false, |_| true, false, false)
+                .await
+                .addrs,
             nowhere
         );
         // A contact's circuit through such a relay, likewise.
@@ -9335,13 +9595,17 @@ mod tests {
         ))];
         assert!(resolve_dial(circuit.clone(), |_| true, false, false)
             .await
+            .addrs
             .is_empty());
         assert_eq!(
-            resolve_dial(circuit.clone(), |_| true, false, true).await,
+            resolve_dial(circuit.clone(), |_| true, false, true)
+                .await
+                .addrs,
             circuit
         );
         assert!(resolve_slot(offered, true, |_| false, false, false)
             .await
+            .addrs
             .is_empty());
     }
 
@@ -12154,7 +12418,11 @@ mod tests {
             "/ip4/192.168.7.5/tcp/7423".parse().unwrap(),
             "/ip4/10.0.0.5/tcp/7423".parse().unwrap(),
         ];
-        let own = host.own_p2p();
+        // The IPv4 one only once a contact or relay saw this host there
+        // (INET-STUN-1, [`admitted_external`]).
+        assert_eq!(host.own_p2p().confirmed, vec![v6.to_string()]);
+        let seen = |ip: Ipv4Addr| ip == Ipv4Addr::new(198, 51, 100, 7);
+        let own = host.own_p2p_with(&seen);
         assert_eq!(own.confirmed, vec![v4.to_string(), v6.to_string()]);
         assert_eq!(
             own.listen,
@@ -12165,20 +12433,432 @@ mod tests {
         host.swarm.add_external_address(v4.clone());
         host.listen_addrs.reverse();
         assert!(
-            !replace_own(&mut held, Some(host.own_p2p())),
+            !replace_own(&mut held, Some(host.own_p2p_with(&seen))),
             "the same addresses in another order"
         );
 
         // A reservation accepted on the second slot, then lost.
         host.slots[1].active = true;
-        let own = host.own_p2p();
+        let own = host.own_p2p_with(&seen);
         assert_eq!(own.relays, vec![relays[1].text.clone()]);
         assert!(replace_own(&mut held, Some(own)));
         host.slots[1].active = false;
-        assert!(replace_own(&mut held, Some(host.own_p2p())));
+        assert!(replace_own(&mut held, Some(host.own_p2p_with(&seen))));
         // The host stopped.
         assert!(replace_own(&mut held, None));
         assert!(!replace_own(&mut held, None));
+    }
+
+    /// INET-STUN-1: a router's answer (NAT-PMP, PCP or UPnP) is not
+    /// authenticated, so someone else on this network can name an external
+    /// IPv4 address of theirs. Such an address, or one an AutoNAT server
+    /// reached, goes into route hints only once a contact or relay saw this
+    /// host at that IP; an IPv6 one as before.
+    #[tokio::test]
+    async fn a_router_mapped_ipv4_address_is_told_only_once_seen_from_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = HostGate::open(true).unwrap();
+        let (seed, _commands) = test_seed(&gate, dir.path(), loopback_config(Vec::new()));
+        let (mut host, _incoming, _handle) = seed.build(0, false).unwrap();
+        let mapped: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
+        let v6: Multiaddr = "/ip6/2001:db8::9/udp/40123/quic-v1".parse().unwrap();
+        host.swarm.add_external_address(mapped.clone());
+        host.swarm.add_external_address(v6.clone());
+        // Nobody saw this host at 203.0.113.9: only the IPv6 one is told.
+        assert_eq!(
+            host.own_p2p().confirmed,
+            vec![v6.to_string()],
+            "told before anyone saw it"
+        );
+        // Seen there: both, in order.
+        let at = |ip: [u8; 4]| move |seen: Ipv4Addr| seen == Ipv4Addr::from(ip);
+        assert_eq!(
+            host.own_p2p_with(&at([203, 0, 113, 9])).confirmed,
+            vec![mapped.to_string(), v6.to_string()]
+        );
+        // Seen at another IP: the mapped one still waits.
+        assert_eq!(
+            host.own_p2p_with(&at([203, 0, 113, 8])).confirmed,
+            vec![v6.to_string()]
+        );
+    }
+
+    /// INET-STUN-1 (design §3.2): whose view of this host vouches for its
+    /// public IP. A contact the peer gate admits, or a relay this host holds
+    /// a slot on, on a connection this host dialled directly: yes. On a
+    /// connection the peer dialled (its Identify then names the address it
+    /// dialled), a hole punch, a relayed connection or a circuit address:
+    /// never. A stranger or a hidden contact: never.
+    #[tokio::test]
+    async fn only_a_contact_or_own_relay_this_host_dialled_vouches_for_its_ip() {
+        let dir = tempfile::tempdir().unwrap();
+        let relays = vec![p2p_route::parse_via(&gate_via(5, "192.0.2.1")).unwrap()];
+        let gate = HostGate::open(true).unwrap();
+        let (seed, _commands) = test_seed(&gate, dir.path(), loopback_config(relays));
+        let (mut host, _incoming, handle) = seed.build(0, false).unwrap();
+        let (contact, hidden, stranger, relay) =
+            (peer_id(31), peer_id(32), peer_id(33), peer_id(5));
+        assert!(host.slots.iter().any(|s| s.peer == relay));
+        host.gate.replace(
+            HashMap::from([
+                (contact, PeerClass::CONTACT),
+                (hidden, PeerClass::CONTACT_HIDDEN),
+            ]),
+            false,
+            std::time::Instant::now(),
+        );
+        let observed: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
+        let seen = Some(crate::autoreach::Sighting {
+            at: "203.0.113.9:40123".parse().unwrap(),
+            quic: false,
+        });
+        // Each connection as the swarm loop notes it: dialled (or not) at
+        // the peer's IP literal.
+        let mut n = 0;
+        let mut conn = |host: &mut Host, peer: PeerId, relayed: bool, dialer: bool| {
+            n += 1;
+            let id = ConnectionId::new_unchecked(n);
+            lock(&handle.conns).established(id, peer, relayed, dialer);
+            let address: Multiaddr = if peer == relay {
+                gate_via(5, "192.0.2.1").parse().unwrap()
+            } else if relayed {
+                format!("{}/p2p-circuit/p2p/{peer}", gate_via(5, "192.0.2.1"))
+                    .parse()
+                    .unwrap()
+            } else {
+                format!("/ip4/198.51.100.31/tcp/7423/p2p/{peer}")
+                    .parse()
+                    .unwrap()
+            };
+            let endpoint = if dialer {
+                ConnectedPoint::Dialer {
+                    address,
+                    role_override: raven_swarm::libp2p::core::Endpoint::Dialer,
+                    port_use: PortUse::Reuse,
+                }
+            } else {
+                ConnectedPoint::Listener {
+                    local_addr: "/ip4/192.168.1.5/tcp/7423".parse().unwrap(),
+                    send_back_addr: address,
+                }
+            };
+            host.note_plain_dial(id, &endpoint, Instant::now());
+            id
+        };
+        // A contact or this host's relay, dialled directly: their view counts.
+        let to_contact = conn(&mut host, contact, false, true);
+        assert_eq!(host.outside_view(to_contact, &contact, &observed), seen);
+        let to_relay = conn(&mut host, relay, false, true);
+        assert_eq!(host.outside_view(to_relay, &relay, &observed), seen);
+        // Never a circuit address.
+        let circuit: Multiaddr = format!("{}/p2p-circuit", gate_via(5, "192.0.2.1"))
+            .parse()
+            .unwrap();
+        assert_eq!(host.outside_view(to_contact, &contact, &circuit), None);
+        // The contact dialled us: it names the address it dialled.
+        let from_contact = conn(&mut host, contact, false, false);
+        assert_eq!(host.outside_view(from_contact, &contact, &observed), None);
+        // Through a relay, either way.
+        for dialer in [true, false] {
+            let relayed = conn(&mut host, contact, true, dialer);
+            assert_eq!(host.outside_view(relayed, &contact, &observed), None);
+        }
+        // A hole punch (DCUtR reported it as its upgrade).
+        let punched = conn(&mut host, contact, false, true);
+        lock(&handle.conns).upgraded(punched, contact, Instant::now());
+        assert_eq!(host.outside_view(punched, &contact, &observed), None);
+        // A stranger or a hidden contact, even dialled directly.
+        for peer in [stranger, hidden] {
+            let id = conn(&mut host, peer, false, true);
+            assert_eq!(host.outside_view(id, &peer, &observed), None);
+        }
+        // A connection the table does not know.
+        let unknown = ConnectionId::new_unchecked(99);
+        assert_eq!(host.outside_view(unknown, &contact, &observed), None);
+    }
+
+    /// INET-STUN-1 (design §3.2): a view over a connection this host dialled
+    /// at an IP a DNS answer gave never vouches for its public IP: whoever
+    /// answered may pass that connection on from a host of its own, which
+    /// the peer then sees. A relay slot named by DNS gives no sighting, one
+    /// named by an IP literal does; a contact dialled at a route name's
+    /// answer gives none, one at a literal does. Nor does a WebSocket dial
+    /// (a proxy or a TLS front may carry it), or a view of another
+    /// transport than the one dialled.
+    #[tokio::test]
+    async fn a_relay_slot_named_by_dns_gives_no_sighting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (named, literal, contact) = (peer_id(5), peer_id(6), peer_id(31));
+        let by_name = format!("/dns4/localhost/tcp/7423/p2p/{named}");
+        let by_ip = gate_via(6, "192.0.2.6");
+        let gate = HostGate::open(true).unwrap();
+        let config = loopback_config(vias(&[&by_name, &by_ip]));
+        let (seed, _commands) = test_seed(&gate, dir.path(), config);
+        let (mut host, _incoming, handle) = seed.build(0, false).unwrap();
+        assert!(host.slots.iter().any(|s| s.peer == named));
+        assert!(host.slots.iter().any(|s| s.peer == literal));
+        host.gate.replace(
+            HashMap::from([(contact, PeerClass::CONTACT)]),
+            false,
+            std::time::Instant::now(),
+        );
+        let observed: Multiaddr = "/ip4/203.0.113.9/tcp/40123".parse().unwrap();
+        let seen = Some(crate::autoreach::Sighting {
+            at: "203.0.113.9:40123".parse().unwrap(),
+            quic: false,
+        });
+        // A connection this host dialled at `address`, as the swarm loop
+        // notes it when it comes up.
+        let mut n = 0;
+        let mut dialled = |host: &mut Host, peer: PeerId, address: &str| {
+            n += 1;
+            let id = ConnectionId::new_unchecked(n);
+            lock(&handle.conns).established(id, peer, false, true);
+            let endpoint = ConnectedPoint::Dialer {
+                address: address.parse().unwrap(),
+                role_override: raven_swarm::libp2p::core::Endpoint::Dialer,
+                port_use: PortUse::Reuse,
+            };
+            host.note_plain_dial(id, &endpoint, Instant::now());
+            id
+        };
+        // The named slot: its name's answer as the resolver task hands it
+        // over, then the connection to that answer.
+        let answer = format!("/ip4/127.0.0.1/tcp/9/p2p/{named}");
+        let resolved = Command::Resolved {
+            gen: 0,
+            relay: named,
+            addrs: vec![answer.parse().unwrap()],
+            dns: vec![Ipv4Addr::LOCALHOST.into()],
+        };
+        assert!(host.on_command(resolved).is_none());
+        let to_named = dialled(&mut host, named, &answer);
+        assert_eq!(
+            host.outside_view(to_named, &named, &observed),
+            None,
+            "a relay reached at a DNS answer vouched"
+        );
+        // The slot named by an IP literal: its view counts.
+        let to_literal = dialled(&mut host, literal, &by_ip);
+        assert_eq!(host.outside_view(to_literal, &literal, &observed), seen);
+        // Its WebSocket form, even at a literal IP: never.
+        let wss = format!("/ip4/192.0.2.6/tcp/443/tls/ws/p2p/{literal}");
+        let to_wss = dialled(&mut host, literal, &wss);
+        assert_eq!(host.outside_view(to_wss, &literal, &observed), None);
+        // A view of QUIC on a connection dialled over TCP: never.
+        let quic: Multiaddr = "/ip4/203.0.113.9/udp/40123/quic-v1".parse().unwrap();
+        assert_eq!(host.outside_view(to_literal, &literal, &quic), None);
+        // A contact dialled at what a route name resolved to (the dial
+        // command carries the answers; no address is dialled here).
+        let (reply, _answer) = oneshot::channel();
+        let connect = Command::Connect {
+            peer: contact,
+            class: PeerClass::CONTACT,
+            relays: Vec::new(),
+            addrs: Vec::new(),
+            dns: vec!["198.51.100.31".parse().unwrap()],
+            checked_at: std::time::Instant::now(),
+            reply,
+        };
+        assert!(host.on_command(connect).is_none());
+        let at_answer = format!("/ip4/198.51.100.31/udp/7423/quic-v1/p2p/{contact}");
+        let to_answer = dialled(&mut host, contact, &at_answer);
+        assert_eq!(
+            host.outside_view(to_answer, &contact, &quic),
+            None,
+            "a contact reached at a DNS answer vouched"
+        );
+        // At a literal one: its view counts, and names the listen socket's
+        // QUIC endpoint (the dial reused the listen port).
+        let at_literal = format!("/ip4/198.51.100.32/udp/7423/quic-v1/p2p/{contact}");
+        let to_contact = dialled(&mut host, contact, &at_literal);
+        assert_eq!(
+            host.outside_view(to_contact, &contact, &quic),
+            Some(crate::autoreach::Sighting {
+                at: "203.0.113.9:40123".parse().unwrap(),
+                quic: true,
+            })
+        );
+    }
+
+    /// INET-STUN-1 (design §3.2), end to end over loopback: this host dials
+    /// a contact over QUIC from its listen socket, and the contact's
+    /// Identify view of that connection reaches auto-reach as a sighting of
+    /// exactly that socket's endpoint; the address STUN would name for the
+    /// socket is told only once it arrived. The same dial at an address a
+    /// DNS answer gave reaches nothing.
+    #[tokio::test]
+    async fn a_dialled_contacts_identify_view_reaches_auto_reach() {
+        let gate = HostGate::open(true).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // B admits this host as its verified contact.
+        let b_dir = dir.path().join("b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        let host_peer = test_key(13).public().to_peer_id();
+        let row = gate_row(&"aa".repeat(32), true, host_peer.to_string(), Vec::new());
+        std::fs::write(
+            b_dir.join("contacts.json"),
+            serde_json::to_string(&vec![row]).unwrap(),
+        )
+        .unwrap();
+        let (b_seed, _b_commands) = test_seed(&gate, &b_dir, loopback_config(Vec::new()));
+        let b_seed = HostSeed {
+            keypair: test_key(22),
+            ..b_seed
+        };
+        let (mut b, _b_incoming, _b_handle) = b_seed.build(0, false).unwrap();
+        let b_peer = *b.swarm.local_peer_id();
+        let quic_of = |h: &Host| {
+            h.listen_addrs
+                .iter()
+                .find(|a| a.iter().any(|p| matches!(p, Protocol::QuicV1)))
+                .cloned()
+        };
+        let b_quic = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = b.swarm.select_next_some().await;
+                b.on_event(event);
+                if let Some(a) = quic_of(&b) {
+                    break a;
+                }
+            }
+        })
+        .await
+        .expect("B listens on QUIC");
+        // This host listens on QUIC too, so its dials leave from that socket.
+        let (seed, _commands) = test_seed(&gate, dir.path(), loopback_config(Vec::new()));
+        let (mut host, _incoming, _handle) = seed.build(0, false).unwrap();
+        let own = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = host.swarm.select_next_some().await;
+                host.on_event(event);
+                if let Some(a) = quic_of(&host) {
+                    break a;
+                }
+            }
+        })
+        .await
+        .expect("the host listens on QUIC");
+        let Some((Tr::Quic, std::net::SocketAddr::V4(mine))) = raw_endpoint(&own) else {
+            panic!("an IPv4 QUIC listen address: {own}");
+        };
+        host.gate.replace(
+            HashMap::from([(b_peer, PeerClass::CONTACT)]),
+            false,
+            std::time::Instant::now(),
+        );
+        // Dial B at its QUIC address through the dial command, `dns` being
+        // what a route name's resolution gave; run both until B's Identify
+        // reaches the host.
+        async fn identified(
+            host: &mut Host,
+            b: &mut Host,
+            b_peer: PeerId,
+            at: Multiaddr,
+            dns: Vec<IpAddr>,
+        ) {
+            let (reply, _answer) = oneshot::channel();
+            let connect = Command::Connect {
+                peer: b_peer,
+                class: PeerClass::CONTACT,
+                relays: Vec::new(),
+                addrs: vec![at],
+                dns,
+                checked_at: std::time::Instant::now(),
+                reply,
+            };
+            assert!(host.on_command(connect).is_none());
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        event = b.swarm.select_next_some() => b.on_event(event),
+                        event = host.swarm.select_next_some() => {
+                            let from_b = matches!(
+                                &event,
+                                SwarmEvent::Behaviour(EndpointBehaviourEvent::Identify(
+                                    identify::Event::Received { peer_id, .. }
+                                )) if *peer_id == b_peer
+                            );
+                            host.on_event(event);
+                            if from_b {
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("B's Identify reaches the host");
+        }
+        assert!(crate::autoreach::caught().is_empty());
+        identified(&mut host, &mut b, b_peer, b_quic.clone(), Vec::new()).await;
+        let seen = crate::autoreach::caught();
+        let socket = crate::autoreach::Sighting {
+            at: std::net::SocketAddr::V4(mine),
+            quic: true,
+        };
+        assert_eq!(seen, vec![socket], "B's view of the QUIC listen socket");
+        // STUN would name that very socket (no NAT on loopback): told only
+        // once B's view arrived.
+        let listen = host.listen_addrs.clone();
+        let endpoint = format!("/ip4/127.0.0.1/udp/{}/quic-v1", mine.port());
+        let before = crate::autoreach::told_in_strict_lab(&listen, mine, &[]);
+        assert!(before.is_empty(), "told before B saw it: {before:?}");
+        let after = crate::autoreach::told_in_strict_lab(&listen, mine, &seen);
+        assert!(after.contains(&endpoint), "{after:?}");
+        // Closed, then the same dial as a route name's answer: nothing.
+        host.swarm.disconnect_peer_id(b_peer).unwrap();
+        let by = Instant::now() + Duration::from_secs(5);
+        assert!(drive_until_closed(&mut host, &mut b, b_peer, by).await);
+        // (An Identify push before the close names the same socket.)
+        assert!(crate::autoreach::caught().iter().all(|s| *s == socket));
+        let dns = vec![Ipv4Addr::LOCALHOST.into()];
+        identified(&mut host, &mut b, b_peer, b_quic, dns).await;
+        assert_eq!(
+            crate::autoreach::caught(),
+            Vec::new(),
+            "a view over a DNS answer reached auto-reach"
+        );
+    }
+
+    /// INET-STUN-1: an IP a DNS answer gave counts as one for an hour after
+    /// it was last given, whatever its form; at most [`MAX_DNS_ANSWERS`]
+    /// are kept, and when the oldest makes room every IP counts as an
+    /// answer until that one would have aged out, so none stops early.
+    #[test]
+    fn dns_answers_count_for_an_hour_and_never_stop_early() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        let mut dns = DnsAnswers::default();
+        let a: IpAddr = "198.51.100.1".parse().unwrap();
+        let other: IpAddr = "198.51.100.2".parse().unwrap();
+        dns.note(&[a], t0);
+        assert!(dns.gave(a, t0));
+        assert!(dns.gave("::ffff:198.51.100.1".parse().unwrap(), t0));
+        assert!(!dns.gave(other, t0));
+        assert!(dns.gave(a, t0 + DNS_ANSWER_FOR - s));
+        assert!(!dns.gave(a, t0 + DNS_ANSWER_FOR));
+        // Full: the newest answer pushes the oldest (`a`) out, and every IP
+        // counts until `a` would have aged out.
+        let v6 = |i: usize| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, i as u16));
+        let many: Vec<IpAddr> = (1..MAX_DNS_ANSWERS).map(v6).collect();
+        dns.note(&many, t0 + s);
+        assert_eq!(dns.given.len(), MAX_DNS_ANSWERS);
+        assert!(dns.full_until.is_none());
+        let newest = v6(MAX_DNS_ANSWERS);
+        dns.note(&[newest], t0 + 2 * s);
+        assert_eq!(dns.given.len(), MAX_DNS_ANSWERS);
+        assert!(!dns.given.contains_key(&a));
+        assert!(dns.gave(a, t0 + 2 * s) && dns.gave(other, t0 + 2 * s));
+        let later = t0 + DNS_ANSWER_FOR;
+        assert!(!dns.gave(a, later) && !dns.gave(other, later));
+        assert!(dns.gave(newest, later) && dns.gave(v6(1), later));
+        // Aged out, they make room without overflowing.
+        let fresh: IpAddr = "198.51.100.3".parse().unwrap();
+        dns.note(&[fresh], t0 + DNS_ANSWER_FOR + s);
+        assert!(dns.given.len() <= 3, "{}", dns.given.len());
+        assert!(!dns.gave(other, t0 + DNS_ANSWER_FOR + s));
+        assert!(dns.gave(fresh, t0 + DNS_ANSWER_FOR + s));
     }
 
     /// A relay's main address and its TCP 443 fallback (`raven relay card`).
@@ -12327,6 +13007,7 @@ mod tests {
             gen: 0,
             relay: relay.parse().unwrap(),
             addrs,
+            dns: vec![Ipv4Addr::LOCALHOST.into()],
         };
         // B's answer: B's slot, the second one.
         assert!(host.on_command(answer(&b, vec![at(&b, 7423)])).is_none());
@@ -12643,6 +13324,7 @@ mod tests {
             gen: 0,
             relay: relay.parse().unwrap(),
             addrs: vec![resolved.clone()],
+            dns: vec![Ipv4Addr::LOCALHOST.into()],
         };
         assert!(host.on_command(stale).is_none());
         let slot = &host.slots[0];
@@ -12652,6 +13334,7 @@ mod tests {
             gen: 1,
             relay: relay.parse().unwrap(),
             addrs: vec![resolved.clone()],
+            dns: vec![Ipv4Addr::LOCALHOST.into()],
         };
         assert!(host.on_command(own).is_none());
         let slot = &host.slots[0];

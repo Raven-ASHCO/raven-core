@@ -215,7 +215,7 @@ Noise transport plaintext. All integers are big-endian.
 |---|---|---|---|---|
 | 0x01 | P2P_ID | 38 | libp2p PeerId bytes of the sender: `00 24 08 01 12 20` \|\| ed25519_pub32 | 1 |
 | 0x02 | RELAY | 1..=300 | ASCII multiaddr `/ip4\|ip6\|dns\|dns4\|dns6/<host>/(tcp/P \| udp/P/quic-v1)/p2p/<relay PeerId>`: an address of a relay the sender holds an active reservation on. Any port, including 443. | 4, naming at most 2 relays (§5.2) |
-| 0x03 | DIRECT | 1..=120 | ASCII multiaddr `/ip4\|ip6/<literal>/(tcp/P \| udp/P/quic-v1)`, with no `/p2p`, no DNS and no circuit: a confirmed (UPnP-mapped, AutoNAT-confirmed, or reached by a contact from outside) address of the sender's libp2p host, then (auto-reach, §6) an address STUN discovery found for it that nothing confirmed yet, or, on LAN links only, a same-LAN listen address | 6 |
+| 0x03 | DIRECT | 1..=120 | ASCII multiaddr `/ip4\|ip6/<literal>/(tcp/P \| udp/P/quic-v1)`, with no `/p2p`, no DNS and no circuit: a confirmed (UPnP-mapped, AutoNAT-confirmed, or reached by a contact from outside) address of the sender's libp2p host, then (auto-reach, §6) an address STUN discovery found for it that nothing confirmed yet, or, on LAN links only, a same-LAN listen address. A public IPv4 address from STUN or the router only once a contact or relay saw the sender at that IP (§6) | 6 |
 | 0x04 | LAN_PORT | 2 | u16 1..=65535: the sender's LAN-direct listener port. LAN links only. | 1 |
 | 0x05 | CUSTODIAN | 32 | (Phase 2) Ed25519 device key of a friend the sender listed as custodian for this receiver ([`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md)). Receive-only since §12: senders MUST NOT emit it any more; receivers MAY still use it (§12.3). | 2 |
 | 0x06 | CUSTODY_OFFER | 1 | flags u8. Bit 0 WAN: the sender serves RFC1 on Internet and p2p links. Bit 1 REACHABLE: the sender's libp2p endpoint is confirmed reachable (public or mapped). Bits 2-7 are sent as 0 and cleared on receipt. Its presence means "I hold sealed mail (RFC1) for my verified contacts" (§12). | 1 |
@@ -459,6 +459,23 @@ therefore MUST NOT send RRH1 without the §3 signal.
     the public IP with the TCP listen port); at most 4 global ones in all.
     A receiver cannot tell the two apart and needs not: it dials them in
     frame order, and one that does not answer fails like any stale address;
+  - seen from outside first (INET-STUN-1, 2026-11-06): an IPv4 address that
+    came from STUN discovery, or from the router (a NAT-PMP, PCP or UPnP
+    mapping, and an AutoNAT-confirmed one), goes only once a verified
+    contact or a relay the sender holds a slot on saw the sender at that
+    very IP: libp2p Identify's observed address on a connection the sender
+    dialled directly (not relayed, not a hole punch, not over a WebSocket)
+    at an IP no DNS answer gave it (whoever answered could pass such a
+    connection on from a host of its own), within 24 hours and since the
+    sender's last network change; the p2p QUIC endpoint only once such a
+    view over QUIC from the sender's QUIC listen socket named that very IP
+    and port (STUN's port is no more authenticated than its IP). Neither
+    STUN nor router answers are authenticated: without this, whoever
+    answers the sender's DNS for the STUN servers' names, or forges their
+    replies or the router's on its network, could name an address of its
+    own and have every contact dial it. A confirmation (reached from
+    outside) counts for the public IP STUN named when it was made only.
+    IPv6 addresses and the receiver's rules do not change;
   - same-LAN listen addresses only on LAN links, at most 2, in listen order:
     local-network listen addresses in the /24 (IPv4) or /64 (IPv6) of the
     link's peer IP, or of an address of the sender's interface on the peer's
@@ -918,7 +935,8 @@ A sender adds RELAY_OFFER only when all of these hold:
 - the relay is up and has an address worth offering: the sender's reach class
   is public or mapped, or the relay is CONFIRMED, or the operator declared the
   relay's external addresses, or (auto-reach) STUN discovery found the
-  sender's public address, which the relay then names with its own ports.
+  sender's public address and a contact or relay saw the sender there (§6),
+  which the relay then names with its own ports.
   Without CONFIRMED such an offer is a guess (a forward of the relay's port
   makes it right); members rank it below confirmed offers (relay selection)
   and its first reservation from a globally routable IP confirms it.
@@ -1130,8 +1148,9 @@ Vectors: `rrh1_peer_schedule_001.json`,
   `203.0.113.7:7422`, `[2001:db8::7]:7422`. It must read back to itself
   (canonical). The value is 10..=48 bytes.
 - Flags: bit 0 CONFIRMED, a contact reached that listener from a globally
-  routable IP that is not the sender's own within the last 24 hours. Senders
-  write 0 in bits 1-7; receivers clear them.
+  routable IP that is not the sender's own within the last 24 hours, while
+  STUN named the same public IP. Senders write 0 in bits 1-7; receivers
+  clear them.
 - At most 2 per frame. A value that breaks a rule is dropped alone with an
   `RRH1_MALFORMED` debug log, and so is a third one or a repeated address;
   the frame and its other entries are kept.
@@ -1143,9 +1162,10 @@ Vectors: `rrh1_peer_schedule_001.json`,
 - **Sender.** Only while STUN discovery is live
   (`STUN_DISCOVERY_PRODUCTION_ENABLED` or its lab switch
   `RAVEN_LAB_STUN_DISCOVERY=1` with `RAVEN_LAB_TEST_A=1`), the Internet
-  direct listener listens, the full snapshot goes (§6) and this node shows
-  the receiver its IP (hide my IP off globally and for this contact). It is
-  part of the generation's inputs.
+  direct listener listens, the full snapshot goes (§6), this node shows
+  the receiver its IP (hide my IP off globally and for this contact), and a
+  contact or relay saw this node at the public IP (§6, seen from outside
+  first). It is part of the generation's inputs.
 - **Receiver.** Kept only from a pinned sender, and only when the IP is
   globally routable (the §5.2 rule; `RAVEN_LAB_P2P_LOCAL_CANDIDATES=1` admits
   loopback and private ones in debug builds). Part of the global part (§5.3):
