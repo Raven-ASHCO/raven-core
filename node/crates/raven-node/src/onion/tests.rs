@@ -200,7 +200,7 @@ fn arti_obsolete_words_are_recognised() {
 
 /// `identity`'s sealed message `text` under the session `key` (as `raven
 /// send` stages it).
-fn seal(
+pub(super) fn seal(
     dir: &Path,
     identity: &Identity,
     key: &raven_core::indexed_session_store::IndexedSessionRecordKey,
@@ -251,7 +251,7 @@ fn seal_as(
     sealed.expect("sealed")
 }
 
-fn inbox(dir: &Path) -> Vec<String> {
+pub(super) fn inbox(dir: &Path) -> Vec<String> {
     raven_core::indexed_session_store::IndexedSessionStore::open(dir)
         .unwrap()
         .list_endpoint_inbox()
@@ -264,16 +264,16 @@ fn inbox(dir: &Path) -> Vec<String> {
 /// One node's onion side in this process: its forward listener (serving
 /// its profile) and its loopback helper on in-memory pipes; the helper's
 /// connect address and onion key once it said them.
-struct Side {
-    connect: SocketAddr,
-    hs_id: [u8; 32],
+pub(super) struct Side {
+    pub(super) connect: SocketAddr,
+    pub(super) hs_id: [u8; 32],
     forward: SocketAddr,
-    token: [u8; proto::TOKEN_LEN],
+    pub(super) token: [u8; proto::TOKEN_LEN],
     _tasks: Vec<AbortOnDrop>,
     _stdin: Pin<Box<dyn AsyncWrite + Send>>,
 }
 
-async fn side(dir: &Path, registry: &Path) -> Side {
+pub(super) async fn side(dir: &Path, registry: &Path) -> Side {
     side_with(dir, registry, loopback::Knobs::default()).await
 }
 
@@ -298,7 +298,7 @@ async fn side_with(dir: &Path, registry: &Path, knobs: loopback::Knobs) -> Side 
             .unwrap();
         let forward = listener.local_addr().unwrap();
         let serving = tokio::spawn(serve_forward(
-            listener,
+            Intake::Tcp(listener),
             Arc::new(std::sync::Mutex::new(token)),
             dir.to_path_buf(),
             identity,
@@ -443,8 +443,9 @@ async fn two_profiles_exchange_messages_and_acks_over_the_onion_link() {
     // "the Tor network": any helper reaches any registered service).
     *live_lock() = Some(Live {
         token: side_a.token,
-        connect: Some(side_a.connect),
+        connect: Some(Route::Port(side_a.connect)),
         binding: None,
+        channel: None,
     });
 
     // Field test round 8: Bob's node just restarted and his service is not
@@ -519,17 +520,18 @@ async fn two_profiles_exchange_messages_and_acks_over_the_onion_link() {
         "no onion key in errors: {err}"
     );
 
-    // Another local program without the token: closed, no Raven byte.
+    // Another local program without the token: closed, no Raven byte
+    // (version 4: raven-node's random challenge, nothing more).
     let mut stranger = TcpStream::connect(side_b.forward).await.unwrap();
     stranger
-        .write_all(&[0u8; proto::FORWARD_HEADER_LEN])
+        .write_all(&[0u8; channel::FORWARD_HELLO_LEN])
         .await
         .unwrap();
-    let mut buf = [0u8; 64];
-    let got = tokio::time::timeout(Duration::from_secs(5), stranger.read(&mut buf))
+    let mut got = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stranger.read_to_end(&mut got))
         .await
         .expect("closed in time");
-    assert!(matches!(got, Ok(0) | Err(_)), "{got:?}");
+    assert!(got.len() <= channel::NONCE_LEN, "{} bytes", got.len());
 
     *live_lock() = None;
 }
@@ -541,7 +543,7 @@ async fn two_profiles_exchange_messages_and_acks_over_the_onion_link() {
 /// test that sets or runs either takes this lock: one at a time, or one
 /// test's helper life clears the connect address or the status another is
 /// about to use.
-static LAB_ONION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static LAB_ONION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Two verified friends, each with an onion side (forward listener and
 /// loopback helper); this process dials through Alice's helper.
@@ -607,8 +609,9 @@ impl Friends {
         let side_b = side_with(b.path(), registry.path(), bob_knobs).await;
         *live_lock() = Some(Live {
             token: side_a.token,
-            connect: Some(side_a.connect),
+            connect: Some(Route::Port(side_a.connect)),
             binding: None,
+            channel: None,
         });
         Some(Self {
             a,
@@ -646,8 +649,10 @@ impl Friends {
     /// "circuit" each), opened and then left silent.
     async fn silent_stream_to_bob(&self) -> TcpStream {
         let mut s = TcpStream::connect(self.side_a.connect).await.unwrap();
+        let keys = channel::Keys::new(&self.side_a.token);
+        let proof = channel::node_connect(&mut s, &keys).await.unwrap();
         s.write_all(&proto::encode_connect(
-            &self.side_a.token,
+            &proof,
             &self.side_b.hs_id,
             raven_core::onion::ONION_VIRTUAL_PORT,
             0,
@@ -705,9 +710,8 @@ async fn one_circuit_cannot_take_every_onion_slot() {
     let mut held = Vec::new();
     for _ in 0..8 {
         let mut s = TcpStream::connect(f.side_b.forward).await.unwrap();
-        s.write_all(&proto::encode_forward(&f.side_b.token, 7))
-            .await
-            .unwrap();
+        let keys = channel::Keys::new(&f.side_b.token);
+        channel::helper_forward(&mut s, &keys, 7).await.unwrap();
         held.push(s);
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -878,6 +882,7 @@ impl TorStarting {
             token: f.side_a.token,
             connect: None,
             binding: None,
+            channel: None,
         });
         update_status(|s| s.phase = Phase::Starting);
         TorStarting
@@ -896,7 +901,7 @@ fn ready_after(after: Duration, connect: SocketAddr) -> tokio::task::JoinHandle<
     tokio::spawn(async move {
         tokio::time::sleep(after).await;
         if let Some(live) = live_lock().as_mut() {
-            live.connect = Some(connect);
+            live.connect = Some(Route::Port(connect));
         }
         update_status(|s| s.phase = Phase::Ready);
     })
@@ -2342,8 +2347,10 @@ async fn a_connect_with_an_unknown_flag_is_refused() {
         return;
     };
     let mut s = TcpStream::connect(f.side_a.connect).await.unwrap();
+    let keys = channel::Keys::new(&f.side_a.token);
+    let proof = channel::node_connect(&mut s, &keys).await.unwrap();
     s.write_all(&proto::encode_connect(
-        &f.side_a.token,
+        &proof,
         &f.side_b.hs_id,
         raven_core::onion::ONION_VIRTUAL_PORT,
         1 << 1,

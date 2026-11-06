@@ -144,6 +144,34 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-06, security review 2026-11: the Tor helper's channel)
+
+A change of the local helper protocol (between raven-node and its Tor helper
+on one computer, never on the network), not of the wire format: no frame,
+header, caps bit, card field or vector changed, the connect and forward
+request layouts and the request set are those of version 3, and every gate
+stays as it was. The local helper protocol goes from version 3 to version 4;
+node and helper ship together and refuse each other's other version.
+Security and speed report 2026-11-05 §2 (TOR-4).
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §6 (and §5's admission line): on macOS and Linux the outbound and inbound
+  streams ride one socket pair per helper life, which a helper process
+  inherits (`forward` `fd:<n>`) or a helper in raven-node's process is
+  handed (`conduit`); each stream is a fresh socket pair sent over it
+  (SCM_RIGHTS), and `ready` says `conduit`. On Windows the streams stay on
+  loopback TCP, and the helper's connect port, like raven-node's forward
+  listener, holds at most 32 connections that still owe their hello. Every
+  stream opens with a hello: raven-node's random challenge, the helper's
+  nonce and proof, then raven-node's proof (HMAC-SHA256 under one key per
+  side, both from the life's token, which no stream carries any more), each
+  step within 2 s; a proof rides where the token did. Before, both kinds of
+  streams were loopback TCP and began with the token itself: any program of
+  any user on the computer could reach both ports, crowd out or drop the
+  onion streams (the helper's connect port had no cap and a 10 s wait), and
+  take the token and a friend's onion key from raven-node's next dial by
+  binding a dead helper's old port.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: a UPnP mapping used only once seen from outside)
 
 A behaviour change of the port mapping client and of the friend relay's

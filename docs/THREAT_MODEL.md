@@ -990,6 +990,14 @@ so such a process cannot have the node seal text through it: no chat or
 group text, and no app payload for a contact who is not verified or no
 longer a contact.
 
+**The Tor helper's streams (security review 2026-11, TOR-4).** On macOS and
+Linux raven-node and its Tor helper reach each other on a socket pair only
+the helper inherits, and on every stream the helper proves the token before
+raven-node does ([`RAVEN_ONION_CARRIER_V1.md`](../protocol/RAVEN_ONION_CARRIER_V1.md)
+§6, version 4); on Windows they stay on loopback TCP, where another local
+program learns nothing but can still crowd out the 32 connections that wait
+for their hello and so hold up the Tor carrier.
+
 **What the app channel takes from the network.** A node takes an app payload
 only from a verified, unblocked contact, only of a registered type
 (`a2a-request/1`, `a2a-response/1`), within the size limits (49,024-byte

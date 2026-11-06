@@ -18,6 +18,12 @@
 //! profile's `tor_wifi_only`) keeps it off while the app says the device is
 //! on mobile data ([`raven_core::net_path`]).
 //!
+//! **The helper channel** ([`channel`], TOR-4): the onion streams between
+//! raven-node and its helper ride a socket pair on macOS and Linux (no
+//! port, no name), loopback ports on Windows; on every stream the helper
+//! proves the life's token first, and a helper of another protocol
+//! version is refused in words a person can act on.
+//!
 //! **This module:**
 //! - [`run`]: the supervised service task (only while the gate is open and a
 //!   helper exists): the identity preflight, the forward listener for
@@ -43,6 +49,7 @@
 //! instead (`RAVEN_LAB_TOR_LOOPBACK=<directory>`, [`loopback`]: the same
 //! protocol with no Tor network, for tests).
 
+pub(crate) mod channel;
 pub(crate) mod proto;
 pub(crate) mod race;
 pub(crate) mod stages;
@@ -105,14 +112,11 @@ fn circuit_source(circuit: u64) -> IpAddr {
     octets[1..8].copy_from_slice(&circuit.to_be_bytes()[1..]);
     IpAddr::V6(Ipv6Addr::from(octets))
 }
-/// How long the forward listener waits for the helper's header (the helper
-/// writes it at once).
-const TOKEN_WAIT: Duration = Duration::from_secs(10);
 /// Local connections still owing the helper's header, at most: one more
 /// closes the oldest of them. The helper writes its header at once, so
 /// only a program without the token ever waits here, and it holds no
 /// admission slot while it does.
-const PRE_TOKEN_MAX: usize = 32;
+const PRE_TOKEN_MAX: usize = channel::PENDING_MAX;
 /// How long an admitted onion link waits for the dialer's first byte
 /// (Noise message 1, sent right after its CONNECTED): well below the whole
 /// handshake's deadline, so a silent stream gives its slot back soon.
@@ -314,8 +318,33 @@ fn wait_words(d: Duration) -> String {
 #[derive(Clone)]
 struct Live {
     token: [u8; proto::TOKEN_LEN],
-    connect: Option<SocketAddr>,
+    connect: Option<Route>,
     binding: Option<OnionBinding>,
+    /// This helper life's channel (macOS, Linux): its only way to the
+    /// helper, [`Self::connect`] once the helper is ready.
+    channel: Option<Route>,
+}
+
+/// Where raven-node opens a Tor stream through its running helper.
+#[derive(Clone)]
+pub(crate) enum Route {
+    /// The helper's loopback connect port (Windows; tests).
+    Port(SocketAddr),
+    /// This helper life's channel (macOS, Linux): no port, no name.
+    #[cfg(unix)]
+    Channel(Arc<channel::Conduit>),
+}
+
+impl Route {
+    /// Its loopback port, if it is one.
+    #[cfg(test)]
+    fn port(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Port(addr) => Some(*addr),
+            #[cfg(unix)]
+            Self::Channel(_) => None,
+        }
+    }
 }
 
 static LIVE: Mutex<Option<Live>> = Mutex::new(None);
@@ -324,11 +353,11 @@ fn live_lock() -> std::sync::MutexGuard<'static, Option<Live>> {
     LIVE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The helper's connect address and its token, while it is ready.
-fn ready_connect() -> Option<(SocketAddr, [u8; proto::TOKEN_LEN])> {
+/// The helper's connect route and its token, while it is ready.
+fn ready_connect() -> Option<(Route, [u8; proto::TOKEN_LEN])> {
     let live = live_lock();
     let live = live.as_ref()?;
-    Some((live.connect?, live.token))
+    Some((live.connect.clone()?, live.token))
 }
 
 /// How long an onion dial waits for a Tor that is still starting, inside
@@ -341,7 +370,7 @@ const READY_LOOK: Duration = Duration::from_millis(100);
 /// [`ready_connect`], waiting at most `within` while the helper is starting
 /// (or about to start again); at once when Tor is ready, off, blocked or
 /// cannot start here.
-async fn ready_connect_within(within: Duration) -> Option<(SocketAddr, [u8; proto::TOKEN_LEN])> {
+async fn ready_connect_within(within: Duration) -> Option<(Route, [u8; proto::TOKEN_LEN])> {
     // Tokio's clock for the wait (a test may pause it), the std one for
     // the helper's restart time.
     let until = tokio::time::Instant::now() + within;
@@ -535,34 +564,79 @@ pub(crate) struct Proc {
 /// Starts helpers ([`Launcher`] in the service; a fake in tests).
 pub(crate) trait Spawn: Send + Sync {
     fn spawn(&self) -> Result<Proc, String>;
+
+    /// This starter's helpers reach raven-node on a channel of their own
+    /// life ([`Self::spawn_on`]; macOS and Linux), not on loopback ports
+    /// ([`Self::spawn`]; Windows, and the tests' fakes).
+    fn on_channel(&self) -> bool {
+        false
+    }
+
+    /// A helper started with its end of this life's channel (`end`), and
+    /// the config line's `forward` that names it for the helper.
+    #[cfg(unix)]
+    fn spawn_on(&self, end: std::os::unix::net::UnixStream) -> Result<(Proc, String), String> {
+        drop(end);
+        Err("the Tor helper could not be started (no channel)".into())
+    }
 }
 
 impl Spawn for Launcher {
     fn spawn(&self) -> Result<Proc, String> {
-        let mut child = self
-            .command()
-            .spawn()
-            .map_err(|e| format!("the Tor helper could not be started ({})", e.kind()))?;
-        let stdin = child.stdin.take().ok_or("the Tor helper has no stdin")?;
-        let stdout = child.stdout.take().ok_or("the Tor helper has no stdout")?;
-        let stderr = child.stderr.take();
-        let (kill, killed) = tokio::sync::oneshot::channel::<()>();
-        let done = async move {
-            tokio::select! {
-                _ = child.wait() => {}
-                _ = killed => {
-                    let _ = child.kill().await;
-                }
-            }
-        };
-        Ok(Proc {
-            stdin: Box::pin(stdin),
-            stdout: Box::pin(stdout),
-            stderr: stderr.map(|e| Box::pin(e) as Pin<Box<dyn AsyncRead + Send>>),
-            done: Box::pin(done),
-            kill: Some(kill),
-        })
+        start(self.command())
     }
+
+    fn on_channel(&self) -> bool {
+        cfg!(unix)
+    }
+
+    #[cfg(unix)]
+    fn spawn_on(&self, end: std::os::unix::net::UnixStream) -> Result<(Proc, String), String> {
+        start_inheriting(self.command(), end)
+    }
+}
+
+/// [`start`], the helper process keeping `end` of its life's channel
+/// across its exec, and only it ([`channel::pair::inherit`]); this process
+/// closes its own copy. The config line's `forward` that names it.
+#[cfg(unix)]
+#[cfg_attr(feature = "tor-embedded", allow(dead_code))]
+fn start_inheriting(
+    mut cmd: tokio::process::Command,
+    end: std::os::unix::net::UnixStream,
+) -> Result<(Proc, String), String> {
+    use std::os::fd::AsRawFd;
+    channel::pair::inherit(&mut cmd, &end);
+    let forward = format!("{}{}", channel::INHERITED, end.as_raw_fd());
+    start(cmd).map(|proc| (proc, forward))
+}
+
+/// The helper `cmd` ([`Launcher::command`]: stdin, stdout and stderr
+/// piped, killed when dropped) started.
+#[cfg_attr(feature = "tor-embedded", allow(dead_code))]
+fn start(mut cmd: tokio::process::Command) -> Result<Proc, String> {
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("the Tor helper could not be started ({})", e.kind()))?;
+    let stdin = child.stdin.take().ok_or("the Tor helper has no stdin")?;
+    let stdout = child.stdout.take().ok_or("the Tor helper has no stdout")?;
+    let stderr = child.stderr.take();
+    let (kill, killed) = tokio::sync::oneshot::channel::<()>();
+    let done = async move {
+        tokio::select! {
+            _ = child.wait() => {}
+            _ = killed => {
+                let _ = child.kill().await;
+            }
+        }
+    };
+    Ok(Proc {
+        stdin: Box::pin(stdin),
+        stdout: Box::pin(stdout),
+        stderr: stderr.map(|e| Box::pin(e) as Pin<Box<dyn AsyncRead + Send>>),
+        done: Box::pin(done),
+        kill: Some(kill),
+    })
 }
 
 // ── The helper inside this process (feature `tor-embedded`) ─────────────────
@@ -615,6 +689,27 @@ const PIPE_BYTES: usize = 64 * 1024;
 #[cfg(feature = "tor-embedded")]
 impl Spawn for InProcess {
     fn spawn(&self) -> Result<Proc, String> {
+        self.start(channel::Handed::Nothing)
+    }
+
+    fn on_channel(&self) -> bool {
+        cfg!(unix)
+    }
+
+    /// The helper is handed `end` itself (its config line says
+    /// `conduit`): inside one process no descriptor goes by its number.
+    #[cfg(unix)]
+    fn spawn_on(&self, end: std::os::unix::net::UnixStream) -> Result<(Proc, String), String> {
+        self.start(channel::Handed::Pair(end))
+            .map(|proc| (proc, channel::CONDUIT.to_string()))
+    }
+}
+
+#[cfg(feature = "tor-embedded")]
+impl InProcess {
+    /// One helper life on its own thread, with what raven-node `handed` it
+    /// besides its pipes ([`channel::Handed`]).
+    fn start(&self, handed: channel::Handed) -> Result<Proc, String> {
         let (node_end, helper_end) = tokio::io::duplex(PIPE_BYTES);
         let (stderr_node, mut stderr_helper) = tokio::io::duplex(1024);
         let (node_out, node_in) = tokio::io::split(node_end);
@@ -641,10 +736,11 @@ impl Spawn for InProcess {
                     runtime.block_on(async move {
                         let serve = async move {
                             match which {
-                                InProcess::Arti => arti::serve(helper_in, helper_out).await,
+                                InProcess::Arti => arti::serve(helper_in, helper_out, handed).await,
                                 #[cfg(debug_assertions)]
                                 InProcess::Loopback(dir) => {
-                                    loopback::serve_in_process(helper_in, helper_out, dir).await
+                                    loopback::serve_in_process(helper_in, helper_out, dir, handed)
+                                        .await
                                 }
                             }
                         };
@@ -729,17 +825,13 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
         })
         .await,
     );
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .map_err(|e| format!("onion forward listener: {}", netutil::io_error_text(&e)))?;
-    let forward = listener
-        .local_addr()
-        .map_err(|e| format!("onion forward listener: {e}"))?;
+    let (intake, forward, forwards) = forward_intake(spawner.on_channel()).await?;
     let token: [u8; proto::TOKEN_LEN] = rand::random();
     *live_lock() = Some(Live {
         token,
         connect: None,
         binding: None,
+        channel: None,
     });
     let _live = LiveGuard;
     let state_dir = data_dir.join(TOR_DIR);
@@ -751,7 +843,7 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
     // connection.
     let current_token = Arc::new(Mutex::new(token));
     let serving = tokio::spawn(serve_forward(
-        listener,
+        intake,
         Arc::clone(&current_token),
         data_dir.clone(),
         identity.clone(),
@@ -761,11 +853,80 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
         v: proto::PROTO_VERSION,
         state_dir: state_dir.to_string_lossy().into_owned(),
         token: hex::encode(token),
-        forward: forward.to_string(),
+        forward,
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
     };
-    match supervise(spawner, config, current_token, data_dir, identity).await {}
+    match supervise_on(spawner, config, current_token, data_dir, identity, forwards).await {}
+}
+
+/// Where each helper life's forward streams go on their way to
+/// [`serve_forward`] (macOS, Linux: they come over the life's channel,
+/// [`take_forwards`]).
+#[cfg(unix)]
+type Forwards = tokio::sync::mpsc::Sender<tokio::net::UnixStream>;
+#[cfg(not(unix))]
+type Forwards = Infallible;
+
+/// Where the helper's forward streams come in ([`serve_forward`]): every
+/// helper life's channel when the starter gives one (macOS, Linux), else a
+/// loopback listener of raven-node's (Windows). The config line's
+/// `forward` (a channel's is set per life, [`Spawn::spawn_on`]), and where
+/// the channels' streams go.
+async fn forward_intake(on_channel: bool) -> Result<(Intake, String, Option<Forwards>), String> {
+    #[cfg(unix)]
+    if on_channel {
+        let (forwards, streams) = tokio::sync::mpsc::channel(PRE_TOKEN_MAX);
+        return Ok((Intake::Channel(streams), String::new(), Some(forwards)));
+    }
+    #[cfg(not(unix))]
+    let _ = on_channel;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|e| format!("onion forward listener: {}", netutil::io_error_text(&e)))?;
+    let forward = listener
+        .local_addr()
+        .map_err(|e| format!("onion forward listener: {e}"))?;
+    Ok((Intake::Tcp(listener), forward.to_string(), None))
+}
+
+/// One helper life on a channel of its own (macOS, Linux; §6): its helper
+/// started with its end ([`Spawn::spawn_on`]), raven-node's end kept for
+/// the dials ([`Live::channel`]), and the life's forward streams taken to
+/// `forwards` until the returned task is dropped. The config line's
+/// `forward` for this life.
+#[cfg(unix)]
+fn spawn_on_channel(
+    spawner: &dyn Spawn,
+    forwards: &Forwards,
+) -> Result<(Proc, String, AbortOnDrop), String> {
+    let opened =
+        |e: std::io::Error| format!("the helper channel could not be opened ({})", e.kind());
+    let (node_end, helper_end) = channel::pair::new_channel().map_err(opened)?;
+    let conduit = Arc::new(channel::Conduit::node(node_end).map_err(opened)?);
+    let (proc, forward) = spawner.spawn_on(helper_end)?;
+    if let Some(live) = live_lock().as_mut() {
+        live.channel = Some(Route::Channel(Arc::clone(&conduit)));
+    }
+    let taking = tokio::spawn(take_forwards(conduit, forwards.clone()));
+    Ok((proc, forward, AbortOnDrop(taking.abort_handle())))
+}
+
+/// One helper life's forward streams, from its channel to
+/// [`serve_forward`], until the helper's end is gone.
+#[cfg(unix)]
+async fn take_forwards(conduit: Arc<channel::Conduit>, forwards: Forwards) {
+    loop {
+        match conduit.accept().await {
+            Ok(Some(stream)) => {
+                if forwards.send(stream).await.is_err() {
+                    return;
+                }
+            }
+            Ok(None) => return,
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
 }
 
 struct AbortOnDrop(tokio::task::AbortHandle);
@@ -788,14 +949,31 @@ fn restrict_dir(dir: &Path) {
     let _ = dir;
 }
 
-/// The helper's lives, one after the other, for as long as the task lives.
+/// [`supervise_on`] with no channel: every helper life on loopback ports
+/// (the tests' fakes).
+#[cfg(test)]
 async fn supervise(
+    spawner: Arc<dyn Spawn>,
+    config: proto::Config,
+    current_token: Arc<Mutex<[u8; proto::TOKEN_LEN]>>,
+    data_dir: PathBuf,
+    identity: Arc<Identity>,
+) -> Infallible {
+    supervise_on(spawner, config, current_token, data_dir, identity, None).await
+}
+
+/// The helper's lives, one after the other, for as long as the task lives;
+/// with `forwards`, each on a channel of its own ([`spawn_on_channel`]).
+async fn supervise_on(
     spawner: Arc<dyn Spawn>,
     mut config: proto::Config,
     current_token: Arc<Mutex<[u8; proto::TOKEN_LEN]>>,
     data_dir: PathBuf,
     identity: Arc<Identity>,
+    forwards: Option<Forwards>,
 ) -> Infallible {
+    #[cfg(not(unix))]
+    let _ = &forwards;
     let mut restarts = Restarts::default();
     let mut first = true;
     loop {
@@ -845,7 +1023,22 @@ async fn supervise(
         });
         eprintln!("raven-node onion: Tor: starting");
         let started = Instant::now();
-        let (end, blame) = match spawner.spawn() {
+        // macOS and Linux: a channel of its own for this life (§6), whose
+        // forward streams are taken while the life lasts.
+        #[cfg(unix)]
+        let (spawned, taking) = match &forwards {
+            Some(forwards) => match spawn_on_channel(&*spawner, forwards) {
+                Ok((proc, forward, taking)) => {
+                    config.forward = forward;
+                    (Ok(proc), Some(taking))
+                }
+                Err(e) => (Err(e), None),
+            },
+            None => (spawner.spawn(), None),
+        };
+        #[cfg(not(unix))]
+        let (spawned, taking) = (spawner.spawn(), None::<AbortOnDrop>);
+        let (end, blame) = match spawned {
             Ok(proc) => {
                 let (end, life) =
                     run_once(proc, &config, &mut restarts, &data_dir, &identity).await;
@@ -861,8 +1054,10 @@ async fn supervise(
                 (End::Exited, Blame::ThisComputer(e))
             }
         };
+        drop(taking);
         if let Some(live) = live_lock().as_mut() {
             live.connect = None;
+            live.channel = None;
         }
         raven_core::onion_gate::set_onion_ready(false);
         // The helper's streams went with its life (W1: no kept link stays).
@@ -1178,6 +1373,12 @@ async fn drain_stderr(stderr: &mut LineReader) -> Said {
 /// last words).
 const ERRORS_LOGGED: u8 = 4;
 
+/// A helper's words for a config line of another protocol version.
+const OTHER_VERSION: &str = "unknown protocol version";
+/// What raven-node says then ([`Phase::CantStart`]).
+pub(crate) const OTHER_VERSION_WHY: &str =
+    "the Tor helper is from another version of Raven; install Raven again";
+
 /// One event from the helper.
 #[allow(clippy::too_many_arguments)]
 async fn handle_event(
@@ -1233,11 +1434,17 @@ async fn handle_event(
             });
         }
         Event::Ready { connect } => {
-            let Some(addr) = connect
-                .parse::<SocketAddr>()
-                .ok()
-                .filter(|a| a.ip().is_loopback())
-            else {
+            // A life on a channel is reached on it alone (macOS, Linux);
+            // else on the loopback port the helper names.
+            let route = match live_lock().as_ref().and_then(|live| live.channel.clone()) {
+                Some(on_channel) => (connect == channel::CONDUIT).then_some(on_channel),
+                None => connect
+                    .parse::<SocketAddr>()
+                    .ok()
+                    .filter(|a| a.ip().is_loopback())
+                    .map(Route::Port),
+            };
+            let Some(route) = route else {
                 netutil::log_limited(
                     &LOG,
                     "raven-node onion",
@@ -1249,7 +1456,7 @@ async fn handle_event(
             life.ready(now);
             restarts.ready();
             if let Some(live) = live_lock().as_mut() {
-                live.connect = Some(addr);
+                live.connect = Some(route);
             }
             raven_core::onion_gate::set_onion_ready(true);
             let bootstrap = life.bootstrap_time();
@@ -1359,6 +1566,14 @@ async fn handle_event(
         }
         Event::Pong { .. } => life.pong(now),
         Event::Error { what, local } => {
+            // A helper of another protocol version refuses the config line
+            // (§6): raven-node and its helper ship together, so the words
+            // say what helps.
+            let what = if local && what == OTHER_VERSION {
+                OTHER_VERSION_WHY.to_string()
+            } else {
+                what
+            };
             // The helper's texts are fixed and name no address; cut anyway
             // (Life::error).
             life.error(&what, local);
@@ -1560,12 +1775,47 @@ impl LineReader {
 
 // ── Inbound: the forward listener ───────────────────────────────────────────
 
+/// Where [`serve_forward`] takes the helper's forward streams from.
+enum Intake {
+    /// raven-node's forward listener on loopback (Windows; tests).
+    Tcp(TcpListener),
+    /// Every helper life's channel (macOS, Linux; [`take_forwards`]).
+    #[cfg(unix)]
+    Channel(tokio::sync::mpsc::Receiver<tokio::net::UnixStream>),
+}
+
+/// A forward stream from the helper.
+type ForwardStream = channel::Stream<TcpStream>;
+
+impl Intake {
+    /// The next forward stream (Nagle off on TCP; a connection from
+    /// anywhere but loopback is dropped).
+    async fn next(&mut self) -> ForwardStream {
+        match self {
+            Self::Tcp(listener) => loop {
+                let (stream, peer) =
+                    crate::accept_retrying("onion", &mut || listener.accept()).await;
+                if peer.ip().is_loopback() {
+                    let _ = stream.set_nodelay(true);
+                    return channel::Stream::Net(stream);
+                }
+            },
+            #[cfg(unix)]
+            Self::Channel(streams) => match streams.recv().await {
+                Some(stream) => channel::Stream::Pair(stream),
+                // The service task is ending.
+                None => std::future::pending().await,
+            },
+        }
+    }
+}
+
 /// Serve the helper's forwarded onion streams: the helper's header first
 /// (token and circuit number) before any admission slot is taken, then the
 /// Raven link listener of the onion carrier, under the onion limits, counted
 /// per circuit.
 async fn serve_forward(
-    listener: TcpListener,
+    mut intake: Intake,
     current_token: Arc<Mutex<[u8; proto::TOKEN_LEN]>>,
     data_dir: PathBuf,
     identity: Arc<Identity>,
@@ -1581,11 +1831,7 @@ async fn serve_forward(
     let mut life_token = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
     let mut life = admission.new_life();
     loop {
-        let (stream, peer) = crate::accept_retrying("onion", &mut || listener.accept()).await;
-        if !peer.ip().is_loopback() {
-            continue;
-        }
-        let _ = stream.set_nodelay(true);
+        let stream = intake.next().await;
         let (waiting, kicked) = pre_token.enter();
         let token = *current_token.lock().unwrap_or_else(PoisonError::into_inner);
         if token != life_token {
@@ -1600,7 +1846,7 @@ async fn serve_forward(
             // holds none.
             let header = tokio::select! {
                 got = check_token(stream, &token) => got,
-                () = kicked.notified() => Err("a local connection waited too long for its token".into()),
+                () = kicked.notified() => Err("a local connection waited too long for its hello".into()),
             };
             pre_token.leave(waiting);
             let (stream, circuit) = match header {
@@ -1623,7 +1869,7 @@ async fn serve_forward(
             };
             let displaced = slot.displaced();
             let work = async move {
-                first_message_within(&stream, FIRST_MESSAGE_WAIT).await?;
+                first_message_on(&stream, FIRST_MESSAGE_WAIT).await?;
                 ONION_LINK.require_live()?;
                 internet_direct::serve_inbound_on(
                     ONION_LINK, dd, id, stream, limits, &mut slot, None, None, None,
@@ -1659,71 +1905,49 @@ fn fresh_token() -> [u8; proto::TOKEN_LEN] {
 
 /// The forward listener's connections still owing the helper's header
 /// ([`PRE_TOKEN_MAX`]): a newcomer past the cap closes the oldest.
-#[derive(Default)]
-struct PreToken(Mutex<PreTokenState>);
+type PreToken = channel::Pending;
 
-#[derive(Default)]
-struct PreTokenState {
-    next: u64,
-    waiting: std::collections::VecDeque<(u64, Arc<tokio::sync::Notify>)>,
-}
-
-impl PreToken {
-    /// A new connection's place, and its "closed for a newcomer" signal.
-    fn enter(&self) -> (u64, Arc<tokio::sync::Notify>) {
-        let mut st = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if st.waiting.len() >= PRE_TOKEN_MAX {
-            if let Some((_, oldest)) = st.waiting.pop_front() {
-                // Stores a permit: the wake-up is not lost if that task has
-                // not polled yet.
-                oldest.notify_one();
-            }
-        }
-        let id = st.next;
-        st.next += 1;
-        let kicked = Arc::new(tokio::sync::Notify::new());
-        st.waiting.push_back((id, Arc::clone(&kicked)));
-        (id, kicked)
-    }
-
-    fn leave(&self, id: u64) {
-        let mut st = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        st.waiting.retain(|(w, _)| *w != id);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .waiting
-            .len()
-    }
-}
-
-/// The helper's header within [`TOKEN_WAIT`]: the token, then the stream's
-/// circuit number. Anyone else on this computer is closed before any Raven
-/// byte.
-async fn check_token<S: AsyncRead + Unpin>(
+/// The helper's hello ([`channel::node_forward`], each step within
+/// [`channel::HELLO_WAIT`]): it proves this life's token, raven-node proves
+/// it in turn, and the stream's circuit number. Anyone else on this
+/// computer gets a random challenge, nothing more, and is closed before
+/// any Raven byte.
+async fn check_token<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     token: &[u8; proto::TOKEN_LEN],
 ) -> Result<(S, u64), String> {
-    let mut got = [0u8; proto::FORWARD_HEADER_LEN];
-    tokio::time::timeout(TOKEN_WAIT, stream.read_exact(&mut got))
-        .await
-        .map_err(|_| "no helper token".to_string())?
-        .map_err(|e| netutil::io_error_text(&e))?;
-    match proto::decode_forward(&got, token) {
-        Some(circuit) => Ok((stream, circuit)),
-        None => Err("a local connection without the Tor helper's token".into()),
-    }
+    let circuit = channel::node_forward(&mut stream, &channel::Keys::new(token)).await?;
+    Ok((stream, circuit))
 }
 
 /// Wait up to `wait` for the dialer's first byte (Noise message 1), without
 /// reading it.
 async fn first_message_within(stream: &TcpStream, wait: Duration) -> Result<(), String> {
     let mut one = [0u8; 1];
-    match tokio::time::timeout(wait, stream.peek(&mut one)).await {
+    first_byte(
+        tokio::time::timeout(wait, stream.peek(&mut one)).await,
+        wait,
+    )
+}
+
+/// [`first_message_within`] on a forward stream of either kind.
+async fn first_message_on(stream: &ForwardStream, wait: Duration) -> Result<(), String> {
+    match stream {
+        channel::Stream::Net(tcp) => first_message_within(tcp, wait).await,
+        #[cfg(unix)]
+        channel::Stream::Pair(pair) => first_byte(
+            tokio::time::timeout(wait, channel::pair::peek_one(pair)).await,
+            wait,
+        ),
+    }
+}
+
+/// What a peek for the dialer's first byte within `wait` found.
+fn first_byte(
+    peeked: Result<std::io::Result<usize>, tokio::time::error::Elapsed>,
+    wait: Duration,
+) -> Result<(), String> {
+    match peeked {
         Ok(Ok(n)) if n > 0 => Ok(()),
         Ok(Ok(_)) => Err("the Tor stream closed before Noise message 1".into()),
         Ok(Err(e)) => Err(netutil::io_error_text(&e)),
@@ -1861,7 +2085,7 @@ async fn dial_on(
                 internet_direct::dial_session_on(
                     ONION_LINK,
                     data_dir,
-                    || connect_via_helper(helper, token, hs_id, flags),
+                    || connect_via_helper(helper.clone(), token, hs_id, flags),
                     &expected,
                     frames,
                     None,
@@ -1870,7 +2094,7 @@ async fn dial_on(
                 .await
             }
             Some(key) => {
-                let route = (helper, token, hs_id);
+                let route = (helper.clone(), token, hs_id);
                 warm_dial(
                     pool,
                     key,
@@ -1924,7 +2148,7 @@ async fn warm_dial(
     key: &warm::WarmKey,
     again: (ReplyWaits, DialMeta),
     data_dir: &Path,
-    (helper, token, hs_id): (SocketAddr, [u8; proto::TOKEN_LEN], [u8; 32]),
+    (helper, token, hs_id): (Route, [u8; proto::TOKEN_LEN], [u8; 32]),
     expected: &[u8; 32],
     frames: &[Vec<u8>],
     progress: &mut DialProgress,
@@ -1944,7 +2168,7 @@ async fn warm_dial(
     let mut open = internet_direct::open_link(
         ONION_LINK,
         data_dir,
-        || connect_via_helper(helper, token, hs_id, flags),
+        || connect_via_helper(helper.clone(), token, hs_id, flags),
         expected,
         frames,
         None,
@@ -1966,41 +2190,56 @@ async fn warm_dial(
     Ok(())
 }
 
-/// A Tor stream from the helper: a TCP stream from its connect port (in
-/// tests it may be in memory, `memnet`).
+/// A Tor stream from the helper: a socket pair over its channel (macOS,
+/// Linux) or a TCP stream from its connect port (in tests it may be in
+/// memory, `memnet`).
 #[cfg(not(test))]
-pub(crate) type HelperStream = TcpStream;
+pub(crate) type HelperStream = channel::Stream<TcpStream>;
 #[cfg(test)]
-pub(crate) type HelperStream = memnet::Stream;
+pub(crate) type HelperStream = channel::Stream<memnet::Stream>;
+
+/// A new stream to the helper: over its channel, or to its connect port.
+async fn helper_stream(helper: &Route) -> std::io::Result<HelperStream> {
+    match helper {
+        Route::Port(addr) => port_stream(*addr).await.map(channel::Stream::Net),
+        #[cfg(unix)]
+        Route::Channel(conduit) => conduit.open().await.map(channel::Stream::Pair),
+    }
+}
 
 /// A stream to the helper's connect port at `helper`, Nagle off.
 #[cfg(not(test))]
-async fn helper_stream(helper: SocketAddr) -> std::io::Result<HelperStream> {
+async fn port_stream(helper: SocketAddr) -> std::io::Result<TcpStream> {
     let stream = TcpStream::connect(helper).await?;
     let _ = stream.set_nodelay(true);
     Ok(stream)
 }
 #[cfg(test)]
-async fn helper_stream(helper: SocketAddr) -> std::io::Result<HelperStream> {
+async fn port_stream(helper: SocketAddr) -> std::io::Result<memnet::Stream> {
     memnet::connect(helper).await
 }
 
 /// A Tor stream to `hs_id`'s onion service through the helper at `helper`,
-/// with the connect `flags` ([`proto::CONNECT_FLAGS`]; 0: as before).
+/// with the connect `flags` ([`proto::CONNECT_FLAGS`]; 0: as before). The
+/// helper proves this life's token first ([`channel::node_connect`]); only
+/// then go raven-node's own proof and the onion key.
 async fn connect_via_helper(
-    helper: SocketAddr,
+    helper: Route,
     token: [u8; proto::TOKEN_LEN],
     hs_id: [u8; 32],
     flags: u8,
 ) -> Result<HelperStream, String> {
     let work = async {
-        let mut stream = helper_stream(helper)
+        let mut stream = helper_stream(&helper)
             .await
             .map_err(|_| ONION_NOT_READY.to_string())?;
         stages::mark(stages::Step::Asked);
+        let proof = channel::node_connect(&mut stream, &channel::Keys::new(&token))
+            .await
+            .map_err(|_| ONION_NOT_READY.to_string())?;
         stream
             .write_all(&proto::encode_connect(
-                &token,
+                &proof,
                 &hs_id,
                 raven_core::onion::ONION_VIRTUAL_PORT,
                 flags,
@@ -2040,6 +2279,9 @@ async fn connect_via_helper(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod channel_tests;
 
 #[cfg(test)]
 mod tor_back_tests {
@@ -2154,11 +2396,13 @@ mod tor_usable_tests {
         /// lab helper has, if any, so a dial there meanwhile goes where it
         /// went, and the rest is put back as it was at once.
         async fn ready(&mut self) {
-            let connect = live_lock().as_ref().map(|live| live.connect);
+            let connect = live_lock().as_ref().map(|live| live.connect.clone());
             let before = status_lock().clone().unwrap_or_default();
             let was_ready = raven_core::onion_gate::onion_ready();
             let port = connect
+                .clone()
                 .flatten()
+                .and_then(|route| route.port())
                 .filter(|a| a.ip().is_loopback())
                 .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 9)));
             self.say(&format!(r#"{{"ev":"ready","connect":"{port}"}}"#))

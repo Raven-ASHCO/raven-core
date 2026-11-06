@@ -17,6 +17,12 @@
 #[allow(dead_code)]
 mod proto;
 
+/// The helper channel (macOS, Linux: its end inherited from raven-node,
+/// named in the config line; Windows: loopback ports) and its hellos.
+#[path = "../../onion/channel.rs"]
+#[allow(dead_code)]
+mod channel;
+
 #[path = "../../onion/arti.rs"]
 mod arti;
 
@@ -32,7 +38,11 @@ fn main() {
         Ok(rt) => rt,
         Err(_) => std::process::exit(3),
     };
-    let code = runtime.block_on(arti::serve(tokio::io::stdin(), tokio::io::stdout()));
+    let code = runtime.block_on(arti::serve(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        channel::Handed::Nothing,
+    ));
     // Too old for the Tor network: say so where raven-node reads it (as
     // Arti's own exit used to), and end as it did.
     let code = if code == arti::EXIT_OBSOLETE {
