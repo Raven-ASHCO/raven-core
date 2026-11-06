@@ -202,6 +202,7 @@ impl Inner {
             "app.info" => return Ok(app_info()),
             "profile.state" => return Ok(self.profile_state()),
             "events.poll" => return self.events_poll(args),
+            "events.wait" => return self.events_wait(args),
             "privacy.state" => return self.privacy_state(),
             "privacy.unlock" => return self.privacy_unlock(),
             "verify.word_hint" => return crate::contacts::word_hint(args),

@@ -28,6 +28,10 @@ pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 const TICK: Duration = Duration::from_secs(1);
 /// The watcher stops when nobody polled for this long.
 pub(crate) const WATCH_IDLE_STOP: Duration = Duration::from_secs(30);
+/// The longest `events.wait` (speed design M9), in ms: below
+/// [`WATCH_IDLE_STOP`], so a caller that waits again at once keeps the
+/// watcher running.
+pub(crate) const EVENTS_WAIT_MAX_MS: u64 = 25_000;
 const STOP_WAIT: Duration = Duration::from_secs(3);
 const STOP_POLL: Duration = Duration::from_millis(100);
 const STOP_PING: Duration = Duration::from_millis(500);
@@ -687,12 +691,26 @@ impl Inner {
     pub(crate) fn events_poll(&self, args: &Args) -> OpResult {
         let after = args.opt_u64("after_seq")?.unwrap_or(0);
         self.ensure_watcher();
-        let batch = self.events.poll(after);
-        let mut v = json!({"seq": batch.seq, "events": batch.events, "reset": batch.reset});
-        if batch.locked {
-            v["locked"] = true.into();
+        Ok(batch_json(self.events.poll(after)))
+    }
+
+    /// `events.wait {after_seq, timeout_ms?}` (speed design M9): what
+    /// `events.poll` answers, but while there is nothing new it waits up to
+    /// `timeout_ms` (at most and by default [`EVENTS_WAIT_MAX_MS`]) and
+    /// answers as soon as an event comes. Only the calling thread waits.
+    /// Events already there, a reset and a lock are answered at once, as
+    /// by a poll. Keeps the watcher running, as a poll does.
+    pub(crate) fn events_wait(&self, args: &Args) -> OpResult {
+        let after = args.opt_u64("after_seq")?.unwrap_or(0);
+        let timeout_ms = args.opt_u64("timeout_ms")?.unwrap_or(EVENTS_WAIT_MAX_MS);
+        if timeout_ms > EVENTS_WAIT_MAX_MS {
+            return Err(ApiError::bad_request(format!(
+                "\"timeout_ms\" must be at most {EVENTS_WAIT_MAX_MS}"
+            )));
         }
-        Ok(v)
+        self.ensure_watcher();
+        let batch = self.events.wait(after, Duration::from_millis(timeout_ms));
+        Ok(batch_json(batch))
     }
 
     fn ensure_watcher(&self) {
@@ -757,6 +775,15 @@ pub(crate) fn paused_here(inner: &Inner) -> bool {
     }
     let _ = inner;
     false
+}
+
+/// An `events.poll` or `events.wait` answer.
+fn batch_json(batch: crate::events::Batch) -> Value {
+    let mut v = json!({"seq": batch.seq, "events": batch.events, "reset": batch.reset});
+    if batch.locked {
+        v["locked"] = true.into();
+    }
+    v
 }
 
 /// The watcher: about once a second while someone polls.
@@ -1016,6 +1043,87 @@ fn vault_needs_passphrase_file(_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use raven_core::ipc::IPC_VERSION;
+
+    /// `events.wait` with `args`, through the engine's envelope (as an app
+    /// calls it).
+    fn events_wait(inner: &Inner, args: Value) -> Value {
+        inner.handle(&json!({"v": 1, "op": "events.wait", "args": args}).to_string())
+    }
+
+    /// Speed design M9: an app that waits for events learns of a receipt at
+    /// once, not at its next poll (500 ms with a window open, 5 s in the
+    /// tray): `events.wait` answers within 50 ms of the event, with it.
+    #[test]
+    fn events_wait_returns_within_50_ms_of_a_receipt() {
+        let inner = Inner::new(Err("no profile in this test".into()));
+        let seq = inner.events.poll(0).seq;
+        let waiter = {
+            let inner = inner.clone();
+            std::thread::spawn(move || {
+                let answer = events_wait(&inner, json!({"after_seq": seq, "timeout_ms": 25_000}));
+                (answer, Instant::now())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let emitted = Instant::now();
+        inner.emit(
+            "receipt",
+            json!({"id": "m1", "path": "Tor", "path_kind": "tor", "ms": 900}),
+        );
+        let (answer, answered) = waiter.join().unwrap();
+        assert_eq!(answer["ok"], true, "{answer}");
+        let events = answer["result"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1, "{answer}");
+        assert_eq!(
+            (&events[0]["kind"], &events[0]["id"]),
+            (&json!("receipt"), &json!("m1"))
+        );
+        assert_eq!(answer["result"]["seq"], seq + 1);
+        let late = answered.saturating_duration_since(emitted);
+        assert!(
+            late < Duration::from_millis(50),
+            "answered {late:?} after the receipt"
+        );
+    }
+
+    /// `events.wait` with nothing new answers no events once its timeout ran
+    /// out (as `events.poll` would have); what is there already, and a lock,
+    /// it answers at once; a wait longer than 25 s is refused.
+    #[test]
+    fn events_wait_times_out_empty() {
+        let inner = Inner::new(Err("no profile in this test".into()));
+        inner.emit("status_ok", json!({}));
+        let seq = inner.events.poll(0).seq;
+        let began = Instant::now();
+        let answer = events_wait(&inner, json!({"after_seq": seq, "timeout_ms": 300}));
+        let took = began.elapsed();
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(
+            answer["result"],
+            json!({"seq": seq, "events": [], "reset": false}),
+            "{answer}"
+        );
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_secs(3),
+            "{took:?}"
+        );
+        let at_once = |args: Value| {
+            let began = Instant::now();
+            let answer = events_wait(&inner, args);
+            assert!(began.elapsed() < Duration::from_millis(200), "{answer}");
+            answer
+        };
+        let there = at_once(json!({"after_seq": 0, "timeout_ms": 25_000}));
+        assert_eq!(there["result"]["events"].as_array().map(Vec::len), Some(1));
+        inner.events.set_locked(true);
+        let locked = at_once(json!({"after_seq": seq, "timeout_ms": 25_000}));
+        assert_eq!(locked["result"]["locked"], true, "{locked}");
+        inner.events.set_locked(false);
+        let reset = at_once(json!({"after_seq": seq, "timeout_ms": 25_000}));
+        assert_eq!(reset["result"]["reset"], true, "{reset}");
+        let refused = events_wait(&inner, json!({"after_seq": seq, "timeout_ms": 25_001}));
+        assert_eq!(refused["error"]["code"], code::BAD_REQUEST, "{refused}");
+    }
 
     #[test]
     fn with_lock_v2_live_a_vault_without_a_file_starts_locked_instead_of_refused() {
