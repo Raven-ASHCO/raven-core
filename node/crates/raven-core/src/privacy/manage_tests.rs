@@ -9,7 +9,9 @@
 
 use super::tests::{arm, kh_row_like_an_epoch_row, Crash};
 use super::*;
-use crate::app_store::{AppInboxItem, AppStore, PlatformRowSealer};
+use crate::app_store::{
+    AppInboxItem, AppOutRecord, AppStore, MetadataOnly, OutState, PairSpend, PlatformRowSealer,
+};
 use crate::chat_history::{
     history_path, load_staged_outbound_body, outbound_body_stage_path, ChatHistory,
     ChatHistoryEntry,
@@ -808,26 +810,60 @@ fn an_unseal_that_stopped_during_a_key_change_points_to_unseal() {
     nothing_sealed(dd);
 }
 
-/// Review E-harness-docs-ci-8: the app store's keyed schema (3) keys only
-/// its sender columns, and its outbox and pairing budget keep the friend's
-/// key and device in clear (only the app channel writes them, gated off in
-/// release). A sealed profile whose app store holds such a row (a lab
-/// build's app channel wrote it) does not call that store keyed, and the
-/// JSON names the table; once they are empty it is keyed again.
+/// Review E-harness-docs-ci-8 and security review 2026-11 PRIV-1: since
+/// schema 4 the app store keys its outbox and pairing budget as well, so a
+/// sealed profile's store is keyed whatever the app channel wrote to them.
+/// A schema-3 store (the pack's earlier builds, its move still to come)
+/// whose outbox or budget holds a row still names the friend in clear: it is
+/// not called keyed and the JSON names the table, until its next open moves
+/// it with its rows.
 #[test]
 fn an_app_store_with_rows_in_its_clear_tables_is_not_keyed() {
-    let dir = full_profile();
-    let dd = dir.path();
-    seal(dd);
     let app = |dd: &Path| {
         store_versions(dd)
             .into_iter()
             .find(|s| s.file == crate::app_store::APP_STORE_FILE)
             .unwrap()
     };
+    let dir = full_profile();
+    let dd = dir.path();
+    seal(dd);
+    {
+        let mut store = AppStore::open(dd, &MetadataOnly).unwrap();
+        store
+            .put_record(
+                &AppOutRecord {
+                    peer_identity: [0xB0; 32],
+                    client_ref: "r1".into(),
+                    peer_device: [0xB1; 32],
+                    content_type: "a2a-request/1".into(),
+                    app_id: [0xA1; 16],
+                    body_sha256: [0xA2; 32],
+                    message_id: [0xA3; 16],
+                    session_id: [0xA4; 32],
+                    object_digest: [0xA5; 32],
+                    created_at_ms: T0,
+                    expires_at_ms: LATER,
+                    state: OutState::Queued,
+                    last_error_code: String::new(),
+                    attempt_seq: 0,
+                },
+                T0,
+            )
+            .unwrap();
+        assert_eq!(
+            store.spend_pair_attempt(&[0xB1; 32], T0, 0).unwrap(),
+            PairSpend::Spent
+        );
+    }
     let sealed = app(dd);
-    assert_eq!((sealed.user_version, sealed.keyed), (3, true), "{sealed:?}");
-    assert!(sealed.clear_tables.is_empty());
+    assert_eq!((sealed.user_version, sealed.keyed), (4, true), "{sealed:?}");
+    assert!(sealed.clear_tables.is_empty(), "{sealed:?}");
+    // A schema-3 store an earlier build of the pack left.
+    let dir = profile();
+    let dd = dir.path();
+    seal(dd);
+    crate::app_store::create_schema_3_store_for_tests(dd);
     let conn = rusqlite::Connection::open(dd.join(crate::app_store::APP_STORE_FILE)).unwrap();
     conn.execute(
         "INSERT INTO app_outbox(peer_identity, client_ref, peer_device, content_type, app_id,
@@ -840,7 +876,7 @@ fn an_app_store_with_rows_in_its_clear_tables_is_not_keyed() {
             vec![0xA1u8; 16],
             vec![0xA2u8; 32],
             vec![0xA3u8; 16],
-            vec![0xA4u8; 16],
+            vec![0xA4u8; 32],
             vec![0xA5u8; 32],
             i64::try_from(LATER).unwrap(),
         ],
@@ -872,9 +908,19 @@ fn an_app_store_with_rows_in_its_clear_tables_is_not_keyed() {
     )
     .unwrap();
     assert_eq!(app(dd).clear_tables, ["app_outbox", "app_pair_attempts"]);
-    conn.execute_batch("DELETE FROM app_outbox; DELETE FROM app_pair_attempts;")
-        .unwrap();
-    assert!(app(dd).keyed);
+    drop(conn);
+    // Its next open moves it, rows and all.
+    let store = AppStore::open(dd, &MetadataOnly).unwrap();
+    let record = store.outbox_record(&[0xB0; 32], "r1").unwrap().unwrap();
+    assert_eq!(
+        (record.message_id, record.state),
+        ([0xA3; 16], OutState::Queued)
+    );
+    assert_eq!(store.pair_attempts_today(&[0xB1; 32], 2).unwrap(), 1);
+    drop(store);
+    let moved = app(dd);
+    assert_eq!((moved.user_version, moved.keyed), (4, true), "{moved:?}");
+    assert!(moved.clear_tables.is_empty(), "{moved:?}");
 }
 
 #[test]
@@ -1002,7 +1048,7 @@ fn stores_report_the_schema_of_each_mode() {
         [
             ("indexed_sessions.sqlite", 4, true),
             ("owed_acks.sqlite", 2, true),
-            ("app_channel.sqlite3", 3, true),
+            ("app_channel.sqlite3", 4, true),
         ]
     );
 }

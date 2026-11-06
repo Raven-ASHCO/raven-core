@@ -1,8 +1,9 @@
 //! PP.12 tests of the app store at rest: a sealed profile's store keys its
-//! senders (schema 3); a schema-2 store moves there with the rebuild recipe
-//! and back. Schema 2 is written and read with the PP.1 snapshot's exact SQL
-//! (what every older build runs). Profiles are temp folders whose keys come
-//! from the test build's lab K_hist (never a keychain item).
+//! senders (schema 3, and since schema 4 the outbox and the pairing budget
+//! too: `outbox_tests`); a schema-2 store moves there with the rebuild
+//! recipe and back. Schema 2 is written and read with the PP.1 snapshot's
+//! exact SQL (what every older build runs). Profiles are temp folders whose
+//! keys come from the test build's lab K_hist (never a keychain item).
 
 use super::tests::{item, profile, Setup, TestSealer};
 use super::*;
@@ -14,7 +15,7 @@ const NOW: u64 = 1_800_000_000_000;
 
 /// The batch an older build runs on a store below schema 2 (a racing older
 /// process that read the version before a migration runs it as well).
-const OLDER_BATCH: &str = "PRAGMA journal_mode=WAL;
+pub(super) const OLDER_BATCH: &str = "PRAGMA journal_mode=WAL;
      CREATE TABLE IF NOT EXISTS app_inbox(
        sender_device BLOB NOT NULL, message_id BLOB NOT NULL, app_id BLOB NOT NULL,
        sender_identity BLOB NOT NULL, content_type TEXT NOT NULL,
@@ -95,8 +96,9 @@ fn older_ingest(conn: &Connection, it: &AppInboxItem) -> rusqlite::Result<usize>
     )
 }
 
-/// Every row of the three sender tables, as an older build reads them.
-type OlderRows = (Vec<Vec<rusqlite::types::Value>>, usize);
+/// Every row of the sender tables, the outbox and the pairing budget, as an
+/// older build reads them.
+type OlderRows = Vec<Vec<rusqlite::types::Value>>;
 
 fn older_rows(conn: &Connection) -> OlderRows {
     let mut all = Vec::new();
@@ -115,6 +117,13 @@ fn older_rows(conn: &Connection) -> OlderRows {
             "sender_device, message_id, app_id, sender_identity, content_type, created_at_ms, \
              received_at_ms, expires_at_ms, body_len, cert_hash, sealed, quarantined_at_ms",
         ),
+        (
+            "app_outbox",
+            "peer_identity, client_ref, peer_device, content_type, app_id, body_sha256, \
+             message_id, session_id, object_digest, created_at_ms, expires_at_ms, state, \
+             last_error_code, attempt_seq, updated_at_ms",
+        ),
+        ("app_pair_attempts", "peer_device, at_ms"),
     ] {
         let n = columns.split(',').count();
         let mut stmt = conn
@@ -131,10 +140,27 @@ fn older_rows(conn: &Connection) -> OlderRows {
             .unwrap();
         all.extend(rows.map(Result::unwrap));
     }
-    let outbox: i64 = conn
-        .query_row("SELECT COUNT(*) FROM app_outbox", [], |r| r.get(0))
-        .unwrap();
-    (all, usize::try_from(outbox).unwrap())
+    all
+}
+
+/// The fixture's outbox record (an older build's `put_record`).
+fn older_record() -> AppOutRecord {
+    AppOutRecord {
+        peer_identity: [0x21; 32],
+        client_ref: "task-older".into(),
+        peer_device: [0x22; 32],
+        content_type: "a2a-request/1".into(),
+        app_id: [0x23; 16],
+        body_sha256: [0x24; 32],
+        message_id: [0x25; 16],
+        session_id: [0x26; 32],
+        object_digest: [0x27; 32],
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 3_600_000,
+        state: OutState::Sent,
+        last_error_code: String::new(),
+        attempt_seq: 0,
+    }
 }
 
 /// The fixture's three inbox items (two senders), in page order.
@@ -180,6 +206,31 @@ fn sealed_with_clear_store() -> tempfile::TempDir {
          INSERT INTO app_pair_attempts (peer_device, at_ms) VALUES (x'0909', 1);",
     )
     .unwrap();
+    let rec = older_record();
+    conn.execute(
+        "INSERT OR REPLACE INTO app_outbox (peer_identity, client_ref, peer_device,
+           content_type, app_id, body_sha256, message_id, session_id, object_digest,
+           created_at_ms, expires_at_ms, state, last_error_code, attempt_seq, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            rec.peer_identity.as_slice(),
+            rec.client_ref,
+            rec.peer_device.as_slice(),
+            rec.content_type,
+            rec.app_id.as_slice(),
+            rec.body_sha256.as_slice(),
+            rec.message_id.as_slice(),
+            rec.session_id.as_slice(),
+            rec.object_digest.as_slice(),
+            ms(rec.created_at_ms),
+            ms(rec.expires_at_ms),
+            rec.state.as_str(),
+            rec.last_error_code,
+            i64::from(rec.attempt_seq),
+            ms(NOW),
+        ],
+    )
+    .unwrap();
     dir
 }
 
@@ -191,9 +242,12 @@ fn schema(dir: &Path) -> (i64, Shape) {
     )
 }
 
+type Served = (Vec<AppInboxItem>, Admit, i64, Option<AppOutRecord>);
+
 /// What the store serves, and what it remembers: the page, whether the
-/// tombstoned and the quarantined rows are still known.
-fn served(dir: &Path) -> (Vec<AppInboxItem>, Admit, i64) {
+/// tombstoned and the quarantined rows are still known, and the outbox
+/// record.
+fn served(dir: &Path) -> Served {
     let mut store = AppStore::open(dir, &TestSealer).unwrap();
     let page = store.page("rdap", false, 10, NOW, &|_| Ok(None)).unwrap();
     let tombstoned = store
@@ -203,11 +257,26 @@ fn served(dir: &Path) -> (Vec<AppInboxItem>, Admit, i64) {
         .conn
         .query_row("SELECT COUNT(*) FROM app_quarantine", [], |r| r.get(0))
         .unwrap();
-    (page, tombstoned, quarantined)
+    let rec = older_record();
+    let record = store
+        .outbox_record(&rec.peer_identity, &rec.client_ref)
+        .unwrap();
+    assert_eq!(store.record_by_message(&rec.message_id).unwrap(), record);
+    (page, tombstoned, quarantined, record)
 }
 
-fn want() -> (Vec<AppInboxItem>, Admit, i64) {
-    (items(), Admit::AlreadyDone, 1)
+fn want() -> Served {
+    (items(), Admit::AlreadyDone, 1, Some(older_record()))
+}
+
+/// The rowids of `table`.
+fn rowid_list(dir: &Path, table: &str) -> Vec<i64> {
+    let conn = Connection::open(app_store_path(dir)).unwrap();
+    let mut stmt = conn
+        .prepare(&format!("SELECT rowid FROM {table} ORDER BY rowid"))
+        .unwrap();
+    let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+    rows.collect::<Result<_, _>>().unwrap()
 }
 
 fn rowids(dir: &Path, table: &str, column: &str) -> Vec<(i64, Vec<u8>)> {
@@ -221,7 +290,7 @@ fn rowids(dir: &Path, table: &str, column: &str) -> Vec<(i64, Vec<u8>)> {
     rows.collect::<Result<_, _>>().unwrap()
 }
 
-fn file_or_wal_holds(dir: &Path, marker: &[u8]) -> bool {
+pub(super) fn file_or_wal_holds(dir: &Path, marker: &[u8]) -> bool {
     let path = app_store_path(dir);
     let mut wal = path.clone().into_os_string();
     wal.push("-wal");
@@ -326,17 +395,17 @@ fn old_version_store_migrates_with_rows_intact() {
         .map(|table| rowids(dir.path(), table, "message_id"))
         .collect();
     assert_eq!(after, before);
+    // The outbox and the pairing budget move in the same transaction
+    // (schema 4, PRIV-1), rowids kept too.
+    for table in ["app_outbox", "app_pair_attempts"] {
+        assert_eq!(rowid_list(dir.path(), table), [1], "{table}");
+    }
     assert_eq!(served(dir.path()), want());
     let conn = Connection::open(app_store_path(dir.path())).unwrap();
     assert_eq!(
         rebuild::recorded(&conn, STORE).unwrap(),
         Some((SCHEMA_VERSION, false))
     );
-    // The other tables are as they were.
-    let pairs: i64 = conn
-        .query_row("SELECT COUNT(*) FROM app_pair_attempts", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(pairs, 1);
 }
 
 #[test]
@@ -370,7 +439,7 @@ fn migration_crash_at_each_statement_recovers() {
         finish_scrub(dir.path());
         assert!(!scrub_pending(dir.path()), "stop at {at}");
     }
-    assert!(stops >= 17, "only {stops} statements");
+    assert!(stops >= 26, "only {stops} statements");
 }
 
 #[test]
@@ -458,7 +527,9 @@ fn reverse_migration_round_trip() {
     let older = older_rows(&older_open(dir.path()).unwrap());
     assert!(migrate(dir.path()).unwrap());
     let back = unseal(dir.path()).unwrap();
-    assert_eq!((back.rows, back.dropped, back.scrub_pending), (5, 0, false));
+    // The five sender rows, the outbox record and the pairing attempt, the
+    // latter two byte for byte as the older build wrote them.
+    assert_eq!((back.rows, back.dropped, back.scrub_pending), (7, 0, false));
     assert_eq!(schema(dir.path()), (CLEAR_VERSION, Shape::Clear));
     assert_eq!(older_rows(&older_open(dir.path()).unwrap()), older);
     assert!(unseal(dir.path()).unwrap().already);
@@ -496,14 +567,15 @@ fn a_sealed_store_without_its_key_fails_closed() {
 fn rotation_reseals_every_meta_and_the_old_epoch_can_go() {
     let dir = sealed_with_clear_store();
     assert!(migrate(dir.path()).unwrap());
-    // Three inbox rows, the tombstone and the quarantined row.
+    // Three inbox rows, the tombstone, the quarantined row, the outbox
+    // record and the pairing attempt.
     assert_eq!(meta_rows_off_epoch(dir.path(), 1).unwrap(), 0);
     crate::at_rest::add_epoch(dir.path(), 1).unwrap();
-    assert_eq!(meta_rows_off_epoch(dir.path(), 2).unwrap(), 5);
+    assert_eq!(meta_rows_off_epoch(dir.path(), 2).unwrap(), 7);
     let resealed = reseal_rows(dir.path()).unwrap();
-    // Five metas; the three bodies are the test sealer's, which no epoch or
+    // Seven metas; the three bodies are the test sealer's, which no epoch or
     // chat-history key opens.
-    assert_eq!((resealed.resealed, resealed.unreadable), (5, 3));
+    assert_eq!((resealed.resealed, resealed.unreadable), (7, 3));
     assert_eq!(meta_rows_off_epoch(dir.path(), 2).unwrap(), 0);
     crate::at_rest::drop_old_epochs(dir.path()).unwrap();
     assert_eq!(served(dir.path()), want());

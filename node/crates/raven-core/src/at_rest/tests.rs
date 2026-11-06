@@ -1136,6 +1136,7 @@ fn index_is_equal_across_tables_and_differs_across_types() {
         ValueType::ObjectDigest,
         ValueType::Nonce,
         ValueType::ObjectBytes,
+        ValueType::ClientRef,
     ] {
         assert_ne!(index(&keys, other, &device), digest, "{other:?}");
     }
@@ -1150,6 +1151,7 @@ fn index_is_equal_across_tables_and_differs_across_types() {
             ValueType::ObjectDigest,
             ValueType::Nonce,
             ValueType::ObjectBytes,
+            ValueType::ClientRef,
         ]
         .map(ValueType::label),
         [
@@ -1158,7 +1160,8 @@ fn index_is_equal_across_tables_and_differs_across_types() {
             "message-id",
             "object-digest",
             "nonce",
-            "object-bytes"
+            "object-bytes",
+            "client-ref"
         ]
     );
 }

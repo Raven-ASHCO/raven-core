@@ -462,6 +462,12 @@ pub const FILES: &[FileRule] = &[
         Kind::OwedAcksAside,
         crate::owed_acks::OWED_ACKS_ASIDE_LOCK,
     ),
+    // The app channel store: since schema 4 (security review 2026-11,
+    // PRIV-1) every table that names a friend is keyed with a sealed `meta`
+    // (the inbox, tombstones and quarantine since PP.12; the outbox and the
+    // pairing budget too), and a schema-3 store from the pack's earlier
+    // builds moves at its open. Until then `raven privacy status` does not
+    // call it keyed (`app_store::clear_tables_with_rows`).
     rule("app_channel.sqlite3", Rule::KeyedSqlite),
     rule("indexed_sessions.sqlite", Rule::KeyedSqlite),
     rule("friend_custody.sqlite", Rule::KeyedSqlite),

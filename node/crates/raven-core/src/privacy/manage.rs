@@ -84,7 +84,9 @@ const STORES: [(&str, i64, i64); 5] = [
         1,
     ),
     (crate::owed_acks::OWED_ACKS_FILE, 2, 1),
-    (crate::app_store::APP_STORE_FILE, 3, 2),
+    // Schema 4 since security review 2026-11 (PRIV-1): the outbox and the
+    // pairing budget keyed too.
+    (crate::app_store::APP_STORE_FILE, 4, 2),
     (crate::friend_custody::CUSTODY_DB_FILE, 2, 1),
     // Phase 5 P5.19: no build before the pack has it; 1 is its clear schema.
     (crate::custody_handoff::HANDOFF_DB_FILE, 2, 1),
@@ -158,12 +160,13 @@ pub fn unseal_unfinished(data_dir: &Path) -> bool {
 pub struct StoreVersion {
     pub file: &'static str,
     pub user_version: i64,
-    /// At its keyed schema (a sealed profile's), with no table that its
-    /// keyed schema leaves in clear holding rows.
+    /// At its keyed schema (a sealed profile's), with no table still in its
+    /// clear shape holding rows.
     pub keyed: bool,
-    /// The tables the keyed schema leaves in clear that hold rows: the app
-    /// channel's outbox and pairing budget (lab only; review
-    /// E-harness-docs-ci-8). Such a store is not called keyed.
+    /// The tables still in their clear shape that hold rows: the app
+    /// channel's outbox and pairing budget in a schema-3 store, before the
+    /// move to schema 4 (review E-harness-docs-ci-8; security review
+    /// 2026-11, PRIV-1). Such a store is not called keyed.
     pub clear_tables: Vec<&'static str>,
 }
 
@@ -252,9 +255,9 @@ pub fn store_versions(data_dir: &Path) -> Vec<StoreVersion> {
         .iter()
         .filter_map(|(file, keyed, _)| {
             let version = crate::sqlite_rebuild::header_user_version(&data_dir.join(file))?;
-            // The app store's keyed schema keys its sender columns only: one
-            // whose outbox or pairing budget holds rows (or that cannot be
-            // read for them) still names friends in clear.
+            // An app store whose outbox or pairing budget is still in its
+            // clear shape and holds rows (a schema-3 store before its move,
+            // or one that cannot be read for them) names friends in clear.
             let (clear_tables, readable) = if *file == crate::app_store::APP_STORE_FILE {
                 match crate::app_store::clear_tables_with_rows(data_dir) {
                     Ok(tables) => (tables, true),

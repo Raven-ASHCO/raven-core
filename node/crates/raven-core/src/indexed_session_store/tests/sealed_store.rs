@@ -1084,36 +1084,8 @@ fn no_clear_key_address_or_message_id_columns() {
             "message_id",
             "random, on the wire (design section 7.2, open item)",
         ),
-        (
-            "app",
-            "app_outbox",
-            "peer_identity",
-            "open item, PP.20 (gated off)",
-        ),
-        (
-            "app",
-            "app_outbox",
-            "peer_device",
-            "open item, PP.20 (gated off)",
-        ),
-        (
-            "app",
-            "app_outbox",
-            "message_id",
-            "open item, PP.20 (gated off)",
-        ),
-        (
-            "app",
-            "app_outbox",
-            "object_digest",
-            "open item, PP.20 (gated off)",
-        ),
-        (
-            "app",
-            "app_pair_attempts",
-            "peer_device",
-            "open item, PP.20 (gated off)",
-        ),
+        // The app outbox and pairing budget are keyed since schema 4
+        // (security review 2026-11, PRIV-1): no allowance.
     ];
     let (dir, path) = profile();
     let dd = dir.path();

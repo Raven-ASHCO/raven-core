@@ -2238,7 +2238,7 @@ fn move_under_windows_key(
 /// current epoch (the migration's part of PP.10): each under its own lock or
 /// transaction, best effort. A sealed profile with its keys loaded. The app
 /// rows wait while the upgrade interlock holds the app store back (PP.12:
-/// opening it would move it to schema 3).
+/// opening it would move it to schema 4).
 fn move_epoch_data(data_dir: &Path, app_rows: bool) {
     let _ = crate::chat_history::ChatHistory::reseal(data_dir);
     let _ = crate::chat_history::reseal_stage(data_dir);
