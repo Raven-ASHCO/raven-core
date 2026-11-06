@@ -110,7 +110,7 @@ Paths use this shorthand: `core/` = `node/crates/raven-core/src/`, `rn/` = `node
 | IPC `LanDial` forwards any frames. Windows shares the handler. | `rn/ipc_server.rs:565-596`, `:720`; `rn/ipc_server_windows.rs:19` (`serve_one`) | Refuse RFC1 frames outside the lab. |
 | `endpoint_outbox` stores the sealed envelope bytes in clear, with `session_id` and `object_digest`. | `core/indexed_session_store.rs:1760-1782` | Read-only queries for F8 session resolution and corruption rebuild. |
 | Session heads carry `created_at_ms` and `expires_at_ms` in SQLite metadata. | `core/indexed_session_store.rs:1683-1700`, `:3320-3340` | The fetcher schedule reads metadata only. |
-| RDAP uses only `SealUnderSession` and ships no dial client. | `team_agents/raven_ipc.py`, `team_agents/raven_bind.py:4` | **No RDAP change.** |
+| RDAP uses only `SealUnderSession` and ships no dial client. Since the 2026-11 security review (IPC-1) a release build answers that op `NOT_AVAILABLE`: it is a lab op (ADR 0004 D4), served only with a debug build's lab unlock. | `team_agents/raven_ipc.py`, `team_agents/raven_bind.py:4` | **No RDAP change.** |
 
 ---
 
