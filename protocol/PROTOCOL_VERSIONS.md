@@ -208,7 +208,12 @@ speed report 2026-11-05 (CUST-2).
   owner-signed waiver required. §6: RELEASE by the authenticated recipient deletes the named
   objects' payload and pair columns, and the digest stays until expiry for dedup, so a
   re-deposit is DUPLICATE and FETCH never returns it. Before, RELEASE only hid the objects and
-  the payload was deleted at TTL.
+  the payload was deleted at TTL. §6, the links a DEPOSIT is taken on, as
+  `custody_gate::custody_link_allowed` decides: a LAN link from a local-network source, any LAN
+  link while WAN custody is on, Internet direct, p2p and onion links while WAN custody is on (a
+  debug build closes it with `RAVEN_LAB_CUSTODY_WAN=0`), and Bluetooth nearby links whether or
+  not WAN custody is on. Before, Internet and p2p links while the WAN const was set and, in debug
+  builds, `RAVEN_LAB_CUSTODY_WAN=1`, with onion and nearby links not named.
 - **Security errata RVN1 2026-08-13.**
   [`SECURITY_ERRATA_RVN1_2026-08-13.md`](SECURITY_ERRATA_RVN1_2026-08-13.md) rule 9: RFC1
   RELEASE is the object-bound deletion the rule asks for, so it deletes the object's payload

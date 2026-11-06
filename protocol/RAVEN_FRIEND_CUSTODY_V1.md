@@ -186,10 +186,13 @@ that never sends the handoff ops reads them, like any other unknown code, as
 
 ## 6. Custodian rules
 
-A DEPOSIT is stored only if, in order: the gate allows the link (LAN from a
-local-network source while WAN custody is off; an Internet or p2p link only
-while `FRIEND_CUSTODY_WAN_ENABLED` is set, in debug builds also
-`RAVEN_LAB_CUSTODY_WAN=1`, otherwise `HOLD`), the link peer is a pinned
+A DEPOSIT is stored only if, in order: the gate allows the link (custody is
+live and the link's carrier is open, and then: a LAN link from a
+local-network source, and any LAN link while WAN custody is on; an Internet
+direct, p2p or onion link only while WAN custody is on
+(`FRIEND_CUSTODY_WAN_ENABLED`, which a debug build closes with
+`RAVEN_LAB_CUSTODY_WAN=0`); a Bluetooth nearby link whether or not WAN
+custody is on, since it is local like LAN; otherwise `HOLD`), the link peer is a pinned
 contact, custody is on, the depositor's rate window allows it, the RSO1 obeys
 §4, custody admission accepts the envelope (sealed indexed message or ACK
 shape, TTL, no pairing material), its hop fields are the canonical outbound
