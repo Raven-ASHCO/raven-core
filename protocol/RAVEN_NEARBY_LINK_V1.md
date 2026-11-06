@@ -3,10 +3,14 @@
 **Version:** 1 (`rvn1`). Parts: RNB1 (pairwise beacon tokens), RNK1 (knock), RNP1 (pipe) and the
 Raven link with the Noise prologue `raven/nearby-link/v1`.
 
-**Status:** Draft. Production is disabled (`NEARBY_PRODUCTION_ENABLED = false`, raven-core
-`nearby_gate.rs`, which the carrier plumbing step adds). The lab switch `RAVEN_LAB_NEARBY=1` works in
-debug builds only (owner decision O5-13: its own switch, because every lab harness already sets
-`RAVEN_LAB_TEST_A`).
+**Status:** Draft. On in release builds for macOS only since 2026-10-29
+(`NEARBY_PRODUCTION_ENABLED` is `cfg!(target_os = "macos")`, raven-core `nearby_gate.rs`), after
+the three-machine field test (a Bluetooth chain between two Macs, both ways); not independently
+reviewed, the hardware rows N1-N12 are not all signed, and the nearby waiver is not signed. Owner
+decision 2026-11-06 (decision 4): it stays on in macOS release builds. Windows and Linux release
+builds have no Bluetooth nearby. The debug switch is `RAVEN_LAB_NEARBY` (owner decision O5-13:
+its own switch, because every lab harness already sets `RAVEN_LAB_TEST_A`): `0` closes the gate,
+and on Windows and Linux `1` opens it with `RAVEN_LAB_TEST_A=1`; release builds read neither.
 
 **Implements:** Private Rendezvous R2 under its revision-5 Bluetooth LE profile
 ([`RAVEN_PRIVATE_RENDEZVOUS_V1.md`](RAVEN_PRIVATE_RENDEZVOUS_V1.md) §5.3b, for owner approval).

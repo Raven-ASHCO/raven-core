@@ -14,15 +14,22 @@
 #      `const NAME: bool = ...;` in node/crates/raven-core/src (`macos`: a
 #      const that is `cfg!(target_os = "macos")`, on in macOS builds only).
 #      A flipped gate fails here until the guide is updated with it.
-# The guide must hold at least one command line and one gate marker (an empty
-# match never passes).
+#   3. every other doc that carries a gate marker passes check 2 too: each
+#      *.md under the repository (outside .git, target and node_modules
+#      folders) that holds `<!-- gate: `, such as the threat model and the
+#      nearby guide (review BT-02: its stale marker was never compared). A
+#      doc with markers only needs no command line. Run after the guide when
+#      RAVEN_SAFETY_DOC is unset, and alone with --gate-docs [ROOT], which
+#      scripts/check_offline_guide.sh calls.
+# The guide must hold at least one command line and one gate marker, and the
+# repository at least one doc with a marker (an empty match never passes).
 #
 # Folded into scripts/check_offline_guide.sh (Phase 3 P3.C7), which runs this
 # on docs/SAFETY_OFFLINE.md and docs/OFFLINE_GUIDE.md, adds the "nothing to
 # do" rule and the links between them, and runs this self-test from its own:
 # CI calls that script. This one still runs alone, as below.
 #
-# Usage: bash scripts/check_safety_offline.sh [--self-test]
+# Usage: bash scripts/check_safety_offline.sh [--self-test | --gate-docs [ROOT]]
 # Environment: RAVEN_BIN_DIR (the debug build holding raven and ash; default
 # $CARGO_TARGET_DIR/debug, else node/target/debug), RAVEN_SAFETY_DOC (the
 # guide; default docs/SAFETY_OFFLINE.md). Build first:
@@ -231,6 +238,46 @@ check_doc() {
   echo "safety guide OK (${doc#"$REPO"/}: $n_cmd command lines exist in --help, $n_gate gate markers match the code)"
 }
 
+# marker_docs ROOT: every *.md under ROOT that holds a gate marker, outside
+# .git, target and node_modules folders, one path per line, sorted.
+marker_docs() {
+  grep -rlF --include='*.md' --exclude-dir=.git --exclude-dir=target \
+    --exclude-dir=node_modules -- '<!-- gate: ' "$1" 2>/dev/null | LC_ALL=C sort || true
+}
+
+# check_gate_docs ROOT: check 3, every marker of every such doc against the
+# code; prints a summary, returns 1 on a violation or when no doc under ROOT
+# carries a marker.
+check_gate_docs() {
+  local root=$1 bad=0 n_doc=0 n_gate=0 doc rel marker name want have
+  while IFS= read -r doc; do
+    [[ -n "$doc" ]] || continue
+    n_doc=$((n_doc + 1))
+    rel="${doc#"$root"/}"
+    while IFS= read -r marker; do
+      [[ -n "$marker" ]] || continue
+      n_gate=$((n_gate + 1))
+      name="${marker%%=*}"
+      want="${marker#*=}"
+      if ! have="$(gate_value "$name")"; then
+        echo "SAFETY_DOC_GATE: $rel names $name, which is not exactly one bool const in $GATE_SRC" >&2
+        bad=1
+      elif [[ "$have" != "$want" ]]; then
+        echo "SAFETY_DOC_GATE: $rel says $name=$want, the code says $have: update the doc with the gate" >&2
+        bad=1
+      fi
+    done < <(gate_markers "$doc")
+  done < <(marker_docs "$root")
+  if [[ "$n_doc" -eq 0 ]]; then
+    echo "SAFETY_DOC_EMPTY: no doc under $root carries a gate marker" >&2
+    bad=1
+  fi
+  if [[ "$bad" -ne 0 ]]; then
+    return 1
+  fi
+  echo "gate markers OK ($n_doc docs carry $n_gate markers, each matches the code)"
+}
+
 # write_doc FILE COMMAND MARKER: a one-command guide for the self-test.
 write_doc() {
   printf '# t\n\n```sh\n%s\n```\n\nrow %s\n' "$2" "$3" >"$1"
@@ -239,7 +286,10 @@ write_doc() {
 # --self-test: good guides pass; an unknown subcommand, an unknown flag, an
 # argument the command does not take, an option missing its value, one
 # argument too many, a wrong gate value, an unknown gate and a guide with no
-# command each fail.
+# command each fail. Check 3 over scratch trees: a tree of marker-only docs
+# passes, whose stale copies under target and .git are not read; NEARBY.md
+# with its marker from before the switch on, an unknown gate and a tree with
+# no marker each fail.
 self_test() {
   local dir rc=0 kind
   dir="$(mktemp -d)"
@@ -281,15 +331,41 @@ self_test() {
       rc=1
     fi
   done
+  mkdir -p "$dir/tree/docs" "$dir/tree/node/target/doc" "$dir/tree/.git" "$dir/stale/docs" \
+    "$dir/unknown/docs" "$dir/none/docs"
+  printf 'row <!-- gate: NEARBY_PRODUCTION_ENABLED=macos -->\n' >"$dir/tree/docs/NEARBY.md"
+  printf 'row <!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=true -->\n' >"$dir/tree/README.md"
+  printf 'row <!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=false -->\n' >"$dir/tree/node/target/doc/old.md"
+  printf 'row <!-- gate: LAN_DIRECT_PRODUCTION_ENABLED=false -->\n' >"$dir/tree/.git/old.md"
+  printf 'row <!-- gate: NEARBY_PRODUCTION_ENABLED=false -->\n' >"$dir/stale/docs/NEARBY.md"
+  printf 'row <!-- gate: NO_SUCH_PRODUCTION_ENABLED=true -->\n' >"$dir/unknown/docs/a.md"
+  printf 'no marker here\n' >"$dir/none/docs/a.md"
+  if ! check_gate_docs "$dir/tree" >/dev/null 2>&1; then
+    echo "SELF_TEST_FAIL: the marker tree was refused" >&2
+    rc=1
+  fi
+  for kind in stale unknown none; do
+    if check_gate_docs "$dir/$kind" >/dev/null 2>&1; then
+      echo "SELF_TEST_FAIL: the '$kind' tree passed" >&2
+      rc=1
+    fi
+  done
   rm -rf "$dir"
   if [[ "$rc" -ne 0 ]]; then
     return 1
   fi
-  echo "check_safety_offline self-test OK (4 good guides pass, 9 bad ones fail)"
+  echo "check_safety_offline self-test OK (4 good guides pass, 9 bad ones fail; a marker tree passes with its target and .git copies unread, a stale, an unknown and an empty tree fail)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
   self_test
   exit $?
 fi
+if [[ "${1:-}" == "--gate-docs" ]]; then
+  check_gate_docs "${2:-$REPO}"
+  exit $?
+fi
 check_doc "${RAVEN_SAFETY_DOC:-$REPO/docs/SAFETY_OFFLINE.md}"
+if [[ -z "${RAVEN_SAFETY_DOC:-}" ]]; then
+  check_gate_docs "$REPO"
+fi
