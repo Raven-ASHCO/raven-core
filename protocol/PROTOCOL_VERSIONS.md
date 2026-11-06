@@ -144,10 +144,10 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
-## Freeze record changes (2026-11-06, security review 2026-11: inbound admission)
+## Freeze record changes (2026-11-06, security review 2026-11: inbound admission, the Tor helper's circuits)
 
-A behaviour change of the listeners' admission, not of the wire format: no frame, header, caps
-bit or vector changed, and the local helper protocol stays version 2.
+Behaviour changes of the listeners' admission and of the Tor helper, not of the wire format: no
+frame, header, caps bit or vector changed, and the local helper protocol stays version 2.
 
 - **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md) §5: a
   rendezvous circuit that lost a pre-authentication link (closed for a newcomer, or ended before
@@ -158,7 +158,11 @@ bit or vector changed, and the local helper protocol stays version 2.
   helper life (an introduction), and enough of them still close a friend's (§5, not defended). A
   full listener still closes a pre-authentication link however young, so silent streams cannot
   lock a friend out. A contact holds at most 4 authenticated links; a newer one closes its oldest
-  (TOR-2). §5 now says what these limits defend and what they do not.
+  (TOR-2). §5 and §10: the Tor helper keeps at most 64 rendezvous circuits of the service; a
+  newcomer closes the circuit that has gone longest without a stream and is refused while every
+  circuit carries one, and a circuit that has carried no stream for 10 minutes is closed (TOR-5).
+  Before, the helper kept every rendezvous circuit an introduction made for as long as its client
+  kept it open. §5 now says what these limits defend and what they do not.
 - **LAN Beacon V1 (draft).** [`RAVEN_LAN_BEACON_V1.md`](RAVEN_LAN_BEACON_V1.md) §0: the LAN
   listener's per-source caps take an IPv6 host on the local network as its whole address, by the
   penalty box's rule, instead of its /64, so one host's handshakes no longer use up its IPv6
