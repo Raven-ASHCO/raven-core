@@ -65,7 +65,8 @@ use raven_core::lan_dispatch::{
 use raven_core::lan_noise::{
     build_initiator, build_responder, build_responder_with_static, derive_noise_static,
     encode_bind, get_remote_static, handshake_read, handshake_write, into_transport,
-    noise_static_public, static_public, verify_bind, LanNoiseError, MAX_TRANSPORT_PLAINTEXT,
+    noise_static_public, static_public, verify_bind, LanNoiseError, BIND_LEN,
+    MAX_TRANSPORT_PLAINTEXT,
 };
 use raven_core::lan_noise_pin::{pin_digest, PinKey};
 use raven_core::link_knock::DialerStep;
@@ -1227,6 +1228,7 @@ async fn initiator_session_pinned<S: AsyncRead + AsyncWrite + Unpin>(
 /// dialer may learn who we are ([`raven_core::lan_dispatch::link_peer_admission`]),
 /// the dialer's message 3 payload (RLX1, or empty), not parsed yet, the
 /// dialer's Noise static (its bind signs it) and what the knock showed.
+/// Our bind is signed once per bind ([`own_bind`]), not once per dialer.
 ///
 /// With `ear` (RLK1, P6.35, [`crate::link_knock`]) message 1 is read before
 /// the responder is built, and the knock in it decides the static (a fresh
@@ -1275,11 +1277,45 @@ async fn responder_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     Ok((
         remote_ed,
         t,
-        encode_bind(identity, &local_pub).to_vec(),
+        own_bind(identity, &local_pub),
         extensions,
         remote_static,
         knocked,
     ))
+}
+
+/// Our own bind for `local_pub` ([`encode_bind`]), signed once per bind
+/// (review batch 24, LAN hardening). The responder makes it for every dialer
+/// that finishes the handshake, strangers included, before the contact gate;
+/// Ed25519 signs deterministically, so one identity and one static always
+/// give the same bytes, and each thread keeps its last one (no lock): a
+/// stranger's dial costs no signing.
+fn own_bind(identity: &Identity, local_pub: &[u8; 32]) -> Vec<u8> {
+    // (our Ed25519 key, the static it signs, the bind): public bytes only.
+    type Kept = Option<([u8; 32], [u8; 32], [u8; BIND_LEN])>;
+    thread_local! {
+        static KEPT: std::cell::RefCell<Kept> = const { std::cell::RefCell::new(None) };
+    }
+    let who = identity.public_key_bytes();
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if let Some((w, s, bind)) = kept.as_ref() {
+            if *w == who && s == local_pub {
+                return bind.to_vec();
+            }
+        }
+        #[cfg(test)]
+        BINDS_SIGNED.with(|n| n.set(n.get() + 1));
+        let bind = encode_bind(identity, local_pub);
+        *kept = Some((who, *local_pub, bind));
+        bind.to_vec()
+    })
+}
+
+// Binds `own_bind` signed on this thread (tests).
+#[cfg(test)]
+thread_local! {
+    static BINDS_SIGNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// [`responder_handshake`] that answers every dialer (scripted test peers).
@@ -4924,6 +4960,69 @@ mod tests {
             .await
             .expect("listener ends")
             .unwrap()
+    }
+
+    /// Review batch 24 (LAN hardening): Ed25519 signs deterministically, so
+    /// the responder's own bind is signed once per bind, not for every
+    /// dialer before the contact gate. The kept bytes are what a fresh
+    /// signature gives, and another static or another identity gets a bind
+    /// of its own.
+    #[test]
+    fn the_own_bind_is_signed_once_per_bind_and_is_a_fresh_signature() {
+        let id = Identity::from_seed(&[0x6a; 32]);
+        let other = Identity::from_seed(&[0x6b; 32]);
+        let derived = noise_static_of(&id);
+        let fresh = noise_static_public(&[0x6c; 32]);
+        let signed = || BINDS_SIGNED.with(|n| n.get());
+        let start = signed();
+        let first = own_bind(&id, &derived);
+        assert_eq!(first, encode_bind(&id, &derived).to_vec(), "a fresh one");
+        assert_eq!(own_bind(&id, &derived), first);
+        assert_eq!(signed() - start, 1, "the same bind is signed once");
+        let restatic = own_bind(&id, &fresh);
+        assert_ne!(restatic, first, "another static, another bind");
+        assert_eq!(restatic, encode_bind(&id, &fresh).to_vec());
+        let reidentity = own_bind(&other, &derived);
+        assert_ne!(reidentity, first, "another identity, another bind");
+        assert_eq!(reidentity, encode_bind(&other, &derived).to_vec());
+        assert_eq!(own_bind(&id, &derived), first);
+        assert_eq!(
+            verify_bind(&first, &derived, Some(&id.public_key_bytes())),
+            Ok(id.public_key_bytes())
+        );
+    }
+
+    /// A stranger that dials again and again costs the responder one
+    /// signing in all: the handshake still builds the bind the gate then
+    /// keeps from it, and that bind is the one kept (review batch 24).
+    #[tokio::test]
+    async fn a_strangers_dials_cost_the_responder_no_signing() {
+        let bob = Arc::new(Identity::from_seed(&[0x6d; 32]));
+        let expected = bob.public_key_bytes();
+        let stranger = Identity::from_seed(&[0x6e; 32]);
+        let mut costs = Vec::new();
+        for _ in 0..3 {
+            let (mut dialer, mut listener) = tokio::io::duplex(1 << 18);
+            let bob_c = bob.clone();
+            // The same thread (a current thread runtime): one counter.
+            let answer = tokio::spawn(async move {
+                let before = BINDS_SIGNED.with(|n| n.get());
+                let got = responder_handshake(&mut listener, &bob_c, None).await;
+                let cost = BINDS_SIGNED.with(|n| n.get()) - before;
+                drop(listener);
+                (got.map(|(ed, _, ours, ..)| (ed, ours)), cost)
+            });
+            // Never answered: the listener closes instead.
+            let dial = initiator_session(&mut dialer, &stranger, &expected, &[]).await;
+            assert!(dial.is_err());
+            let (got, cost) = answer.await.unwrap();
+            let (ed, ours) = got.unwrap();
+            assert_eq!(ed, stranger.public_key_bytes());
+            assert_eq!(ours, encode_bind(&bob, &noise_static_of(&bob)).to_vec());
+            costs.push(cost);
+        }
+        assert!(costs[0] <= 1, "{costs:?}");
+        assert_eq!(costs[1..], [0, 0], "{costs:?}");
     }
 
     /// Message 3 carries RLX1 only while route hints are live and only on a
