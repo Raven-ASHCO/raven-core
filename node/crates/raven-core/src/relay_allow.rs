@@ -651,12 +651,29 @@ pub fn is_relay_dir(dir: &Path) -> bool {
 
 /// Does a relay run in `dir` right now? It holds [`RELAY_LOCK_FILE`] for
 /// its whole life; taking it (and letting it go at once) means nobody does.
-pub fn relay_is_running(dir: &Path) -> bool {
-    if !dir.join(RELAY_LOCK_FILE).exists() {
-        return false;
+///
+/// `Err` (what was found and what to do, in plain words) when the lock is
+/// one [`crate::paths::DataDirLock`] refuses before SQLite opens it: not
+/// empty, with a journal beside it, which no Raven program leaves (security
+/// review 2026-11, WINLIN-1). No relay starts in such a folder, and
+/// `raven-node relay --check` prints that text instead of naming a relay to
+/// stop (`raven relay status` still reads the folder as in use).
+pub fn relay_is_running(dir: &Path) -> Result<bool, String> {
+    let lock = dir.join(RELAY_LOCK_FILE);
+    if !lock.exists() {
+        return Ok(false);
     }
-    crate::paths::DataDirLock::acquire_within(dir, RELAY_LOCK_FILE, std::time::Duration::ZERO)
-        .is_err()
+    if crate::paths::replayable_lock(&lock).unwrap_or(false) {
+        return Err(format!(
+            "a leftover SQLite journal was found beside the relay lock file {RELAY_LOCK_FILE}, \
+             and that lock file is not empty. No Raven program leaves that pair, so no relay \
+             starts in this folder. If no relay runs here, move both files out of the folder"
+        ));
+    }
+    Ok(
+        crate::paths::DataDirLock::acquire_within(dir, RELAY_LOCK_FILE, std::time::Duration::ZERO)
+            .is_err(),
+    )
 }
 
 #[cfg(test)]
@@ -1278,11 +1295,11 @@ mod tests {
     #[test]
     fn a_running_relay_is_told_by_its_lock() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!relay_is_running(dir.path()));
+        assert_eq!(relay_is_running(dir.path()), Ok(false));
         let held = crate::paths::DataDirLock::acquire(dir.path(), RELAY_LOCK_FILE).unwrap();
-        assert!(relay_is_running(dir.path()));
+        assert_eq!(relay_is_running(dir.path()), Ok(true));
         drop(held);
-        assert!(!relay_is_running(dir.path()));
+        assert_eq!(relay_is_running(dir.path()), Ok(false));
         const {
             assert!(RELAY_STATUS_STALE_MS > 3 * RELAY_STATUS_HEARTBEAT.as_millis() as u64);
         }
@@ -1292,7 +1309,8 @@ mod tests {
     /// this about the relay's folder, which another account (the relay's)
     /// controls, and the Linux kit ran that check as root. A journal planted
     /// beside its written lock is not replayed: the file the journal names
-    /// stays, and the folder reads as in use, so no relay starts in it.
+    /// stays, and the answer is the leftover journal and what to do, not a
+    /// running relay (none starts in that folder).
     #[test]
     fn a_planted_journal_in_a_relay_folder_deletes_nothing() {
         use crate::paths::lock_replay_test;
@@ -1302,6 +1320,23 @@ mod tests {
         lock_replay_test::plant_hot_journal(dir.path(), RELAY_LOCK_FILE, &victim);
         let running = relay_is_running(dir.path());
         lock_replay_test::assert_untouched(&victim);
-        assert!(running, "a lock that cannot be taken reads as in use");
+        let leftover = running.expect_err("a refused lock is not a running relay");
+        assert!(
+            leftover.starts_with("a leftover SQLite journal was found"),
+            "{leftover}"
+        );
+        assert!(dir
+            .path()
+            .join(format!("{RELAY_LOCK_FILE}-journal"))
+            .exists());
+        // A planted WAL is named the same way.
+        let dir = tempfile::tempdir().unwrap();
+        lock_replay_test::plant_wal(dir.path(), RELAY_LOCK_FILE);
+        let leftover = relay_is_running(dir.path()).expect_err("a planted WAL");
+        assert!(
+            leftover.starts_with("a leftover SQLite journal was found"),
+            "{leftover}"
+        );
+        assert!(!dir.path().join(format!("{RELAY_LOCK_FILE}-shm")).exists());
     }
 }

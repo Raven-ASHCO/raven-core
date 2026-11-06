@@ -799,11 +799,17 @@ pub(crate) fn check(cmd: &RelayCmd) -> (Vec<String>, i32) {
     if let Err(e) = refuse_profile_dir(&cmd.data_dir) {
         return folder(e);
     }
-    if relay_is_running(&cmd.data_dir) {
-        return folder(format!(
-            "a raven-node relay already runs in {} (one relay per folder): stop it first",
-            cmd.data_dir.display()
-        ));
+    match relay_is_running(&cmd.data_dir) {
+        Ok(false) => {}
+        Ok(true) => {
+            return folder(format!(
+                "a raven-node relay already runs in {} (one relay per folder): stop it first",
+                cmd.data_dir.display()
+            ))
+        }
+        // A leftover journal beside the lock (WINLIN-1): what was found and
+        // what to do, not a relay to stop.
+        Err(leftover) => return folder(format!("{}: {leftover}", cmd.data_dir.display())),
     }
     let addrs = match listen_plan(cmd) {
         Ok(plan) => plan.addrs,
@@ -1506,6 +1512,43 @@ pub(crate) mod tests {
         }
     }
 
+    /// Security review 2026-11, WINLIN-1: a relay lock that is not empty
+    /// with a journal beside it is refused before SQLite opens it, and
+    /// `--check` says that it found a leftover journal and what to do, not
+    /// that a relay runs. Exit 5 as before; both files stay as they were.
+    #[test]
+    fn check_names_a_leftover_journal_beside_the_relay_lock() {
+        if !raven_core::p2p_live_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(RELAY_LOCK_FILE);
+        let journal = dir.path().join(format!("{RELAY_LOCK_FILE}-journal"));
+        std::fs::write(&lock, [1u8; 512]).unwrap();
+        std::fs::write(&journal, b"X").unwrap();
+        let (lines, code) = check(&dedicated(dir.path(), "127.0.0.1:0"));
+        assert_eq!(code, 5, "{lines:?}");
+        let [line] = lines.as_slice() else {
+            panic!("one line: {lines:?}");
+        };
+        assert!(
+            line.contains("a leftover SQLite journal was found"),
+            "{line}"
+        );
+        assert!(line.contains("move both files out of the folder"), "{line}");
+        assert!(!line.contains("already runs"), "{line}");
+        let words = line
+            .strip_prefix(&format!("{}: ", dir.path().display()))
+            .unwrap_or_else(|| panic!("the folder first: {line}"));
+        assert!(
+            !words.contains(['-', '\'', '\u{2013}', '\u{2014}', '\u{2019}']),
+            "plain words: {words}"
+        );
+        assert_eq!(std::fs::read(&lock).unwrap(), [1u8; 512]);
+        assert_eq!(std::fs::read(&journal).unwrap(), b"X");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
     #[test]
     fn check_names_a_busy_port() {
         if !raven_core::p2p_live_enabled() {
@@ -1593,7 +1636,7 @@ pub(crate) mod tests {
         let mut cmd = dedicated(dir.path(), "127.0.0.1:0");
         cmd.status_sink = Some(sink.clone());
         let (relay_peer, tcp, _, stop, task) = start(cmd).await;
-        assert!(relay_is_running(dir.path()));
+        assert_eq!(relay_is_running(dir.path()), Ok(true));
         assert!(sink.lock().unwrap().is_some(), "the sink holds the status");
         let relay_peer: PeerId = relay_peer.parse().unwrap();
         let gate = GateHandle::default();
@@ -1647,7 +1690,11 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(ended, Ok(()));
         assert!(asked.elapsed() < Duration::from_secs(3));
-        assert!(!relay_is_running(dir.path()), "the folder lock is released");
+        assert_eq!(
+            relay_is_running(dir.path()),
+            Ok(false),
+            "the folder lock is released"
+        );
         assert!(
             sink.lock().unwrap().is_none(),
             "a stopped relay holds no status"

@@ -2413,7 +2413,11 @@ mod tests {
                 .await
                 .expect("the member is disconnected within 3 s");
         }
-        assert!(!relay_is_running(&friend_relay_dir(dd)), "lock released");
+        assert_eq!(
+            relay_is_running(&friend_relay_dir(dd)),
+            Ok(false),
+            "lock released"
+        );
         assert!(lock(&relay.sink).is_none());
         assert!(relay.ext_tx.borrow().is_empty());
         let off = relay.info(now_ms(), "", false).unwrap();

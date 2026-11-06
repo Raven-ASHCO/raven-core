@@ -838,25 +838,34 @@ const REPLAYABLE_LOCK: &str = "a SQLite journal or WAL file sits next to it and 
 /// another ordinary account owns (review KS-2), and the Linux relay kit runs
 /// `relay --check` as the relay's own account.
 fn refuse_replayable_lock(path: &Path, lock_file_name: &str) -> Result<(), String> {
-    let failed = |e: std::io::Error| format!("data-dir lock {lock_file_name}: {e}");
+    match replayable_lock(path) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(format!(
+            "lock file {lock_file_name} refused: {REPLAYABLE_LOCK}"
+        )),
+        Err(e) => Err(format!("data-dir lock {lock_file_name}: {e}")),
+    }
+}
+
+/// Is the lock database at `path` one [`refuse_replayable_lock`] refuses:
+/// not empty, with a `-journal` or `-wal` beside it? Looked at only, for a
+/// caller that tells that refusal from a lock another holder keeps
+/// ([`crate::relay_allow::relay_is_running`]).
+pub(crate) fn replayable_lock(path: &Path) -> std::io::Result<bool> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_file() && meta.len() == 0 => return Ok(()),
+        Ok(meta) if meta.file_type().is_file() && meta.len() == 0 => return Ok(false),
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(failed(e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
     }
     for suffix in ["-journal", "-wal"] {
         match std::fs::symlink_metadata(sqlite_sidecar(path, suffix)) {
-            Ok(_) => {
-                return Err(format!(
-                    "lock file {lock_file_name} refused: {REPLAYABLE_LOCK}"
-                ))
-            }
+            Ok(_) => return Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(failed(e)),
+            Err(e) => return Err(e),
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 impl DataDirLock {

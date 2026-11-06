@@ -4500,7 +4500,9 @@ pub(super) fn cmd_relay_status(data_dir: &Path) -> Result<(), String> {
     for (k, v) in allow_list_rows(&relay_allow::load_relay_allow(data_dir), false) {
         kv(&k, &v);
     }
-    let running = relay_allow::relay_is_running(data_dir);
+    // A refused lock (a leftover journal, WINLIN-1) reads as in use here, as
+    // before; `raven-node relay --check` names it.
+    let running = relay_allow::relay_is_running(data_dir).unwrap_or(true);
     match relay_allow::load_relay_status(data_dir)? {
         Some(st) => {
             kv(
