@@ -878,6 +878,29 @@ pub fn friend_keys(data_dir: &Path) -> HashSet<Key> {
         .collect()
 }
 
+/// The keys on this profile's block list. A list that cannot be read is
+/// [`GroupError::Store`], never "nobody is blocked".
+pub fn blocked_keys(data_dir: &Path) -> Result<HashSet<Key>, GroupError> {
+    let list = crate::chat_history::BlockList::load_checked(data_dir).map_err(GroupError::Store)?;
+    Ok(list
+        .pub_hex
+        .iter()
+        .filter_map(|k| wire::hex_n::<32>(&k.trim().to_ascii_lowercase()))
+        .collect())
+}
+
+/// This profile's friends and blocked keys as the group rules take them
+/// ([`rules::Contacts`]): the block list must read ([`blocked_keys`]: a send
+/// is refused, a received frame is not taken now and comes again), while an
+/// unreadable contact book is no friend ([`friend_keys`]).
+pub fn contacts(data_dir: &Path) -> Result<rules::Contacts, GroupError> {
+    let blocked = blocked_keys(data_dir)?;
+    Ok(rules::Contacts {
+        friends: friend_keys(data_dir),
+        blocked,
+    })
+}
+
 /// The petnames of this profile's friends, by key (empty for an unreadable
 /// book): what a group view shows for a member who is a friend.
 pub fn friend_names(data_dir: &Path) -> std::collections::HashMap<Key, String> {
@@ -934,14 +957,16 @@ pub fn deliver(
 
 /// Apply one received frame from the carrier peer `peer` to the group store
 /// (protocol §4.2). Asks raven-node for a scan when it left work.
-/// `Ok(true)`: handled (stored, held, a duplicate, or dropped as invalid),
-/// so it is ACKed. `Ok(false)`: a verified frame refused for lack of room
-/// (its author's share of the group's seen keys, its admin's active groups,
-/// the places for groups; [`rules::Applied::refused`]): not stored and not
-/// ACKed, so its sender sends it again later. A frame the store has no room
-/// for in bytes (its budget, after shedding held frames, done markers and
-/// intents) is dropped and counted, and `Ok(true)`, so it is ACKed rather
-/// than sent again until its horizon.
+/// `Ok(true)`: handled (stored, held, a duplicate, or dropped as invalid or
+/// as a blocked member's), so it is ACKed. `Ok(false)`: a verified frame
+/// refused for lack of room (its author's share of the group's seen keys,
+/// its admin's active groups, the places for groups;
+/// [`rules::Applied::refused`]): not stored and not ACKed, so its sender
+/// sends it again later. A frame the store has no room for in bytes (its
+/// budget, after shedding held frames, done markers and intents) is dropped
+/// and counted, and `Ok(true)`, so it is ACKed rather than sent again until
+/// its horizon. A block list that cannot be read is an error: nothing is
+/// taken (and so nothing ACKed) until it reads ([`contacts`]).
 pub fn ingest(
     data_dir: &Path,
     peer: &Key,
@@ -949,10 +974,10 @@ pub fn ingest(
     now_ms: u64,
 ) -> Result<bool, GroupError> {
     let me = local_identity_key(data_dir).ok_or(GroupError::NoIdentity)?;
-    let friends = friend_keys(data_dir);
+    let contacts = contacts(data_dir)?;
     let done = store::edit_received(data_dir, rules::Applied::default(), |file| {
         file.note_me(&me);
-        Ok(rules::apply(file, &me, peer, frame, &friends, now_ms))
+        Ok(rules::apply(file, &me, peer, frame, &contacts, now_ms))
     })?;
     if done.work {
         notify_work();
@@ -999,16 +1024,17 @@ pub fn deliver_pending(
 /// time, in one read and write of the group store ([`rules::apply_all`]):
 /// how many were handled (each one [`ingest`] answers `Ok(true)` for). When
 /// the store has no room in bytes for the change, the frames are dropped and
-/// counted as handled, as [`ingest`] drops one.
+/// counted as handled, as [`ingest`] drops one; a block list that cannot be
+/// read is an error, as for [`ingest`].
 pub fn ingest_all(data_dir: &Path, items: &[(Key, &GroupFrame, u64)]) -> Result<usize, GroupError> {
     if items.is_empty() {
         return Ok(0);
     }
     let me = local_identity_key(data_dir).ok_or(GroupError::NoIdentity)?;
-    let friends = friend_keys(data_dir);
+    let contacts = contacts(data_dir)?;
     let (handled, work) = store::edit_received(data_dir, (items.len(), false), |file| {
         file.note_me(&me);
-        Ok(rules::apply_all(file, &me, items, &friends))
+        Ok(rules::apply_all(file, &me, items, &contacts))
     })?;
     if work {
         notify_work();

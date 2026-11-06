@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::rules::{apply, SYNC_SPACING_MS};
+use super::rules::{Applied, Contacts, SYNC_SPACING_MS};
 use super::store::{
     self, find_in, line_after, GroupsFile, INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND,
     LINE_DELIVERED, LINE_FAILED, LINE_SENT, LINE_WAITING, STATUS_ACTIVE, STATUS_FORGOTTEN,
@@ -75,6 +75,22 @@ fn msg(author: u8, epoch: u32, body: &str, relay: &[u8]) -> GroupMsg {
 
 fn friends(of: &[u8]) -> HashSet<Key> {
     of.iter().map(|s| key(*s)).collect()
+}
+
+/// [`super::rules::apply`] with these `friends` and nobody blocked.
+fn apply(
+    file: &mut GroupsFile,
+    me: &Key,
+    peer: &Key,
+    frame: &GroupFrame,
+    friends: &HashSet<Key>,
+    now_ms: u64,
+) -> Applied {
+    let contacts = Contacts {
+        friends: friends.clone(),
+        blocked: HashSet::new(),
+    };
+    super::rules::apply(file, me, peer, frame, &contacts, now_ms)
 }
 
 /// `me` received the roster from its admin.
@@ -3057,4 +3073,187 @@ fn an_oversize_sealed_store_is_recovered_sealed() {
         raw.len()
     );
     assert_eq!(store::load(d).unwrap(), back);
+}
+
+// ------------------------------------------------------------------ blocks, forwards, leaves
+
+/// Puts exactly `keys` on this profile's block list.
+fn block(d: &Path, keys: &[u8]) {
+    crate::chat_history::BlockList {
+        pub_hex: keys.iter().map(|k| hex::encode(key(*k))).collect(),
+    }
+    .save(d)
+    .unwrap();
+}
+
+/// Profile 3, a friend of the admin (1) and of 2, in admin 1's group with 2,
+/// and 2 blocked.
+fn blocked_member_profile() -> tempfile::TempDir {
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann"), (2, "Bea")]);
+    let state = GroupFrame::State(roster(1, &[2, 3], 1));
+    assert!(ingest(d, &key(1), &state, NOW).unwrap());
+    block(d, &[2]);
+    dir
+}
+
+/// The message copies waiting in the store: each one's member and the relay
+/// list it asks that member to pass the message on to.
+fn waiting_copies(d: &Path) -> Vec<(String, Vec<Key>)> {
+    store::load(d).unwrap().groups[0]
+        .intents
+        .iter()
+        .filter_map(|i| match parse_frame(i.frame.as_bytes()) {
+            Some(GroupFrame::Msg(m)) => Some((i.to.clone(), m.relay)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// G5: a member this profile blocked is sent nothing, not even through a
+/// forward: it is in no copy's relay list, and its line fails at once.
+#[test]
+fn a_blocked_member_is_sent_nothing_not_even_through_a_forward() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = blocked_member_profile();
+    let d = dir.path();
+    // Another run holds the lock, so the copies wait in the store and the
+    // relay list each carries can be read.
+    let other = crate::paths::DataDirLock::acquire(d, park::RUN_LOCK_NAME_FOR_TESTS).unwrap();
+    let report = send(d, &id(3), &gid(), "hello", NOW + 1).unwrap();
+    drop(other);
+    assert_eq!(
+        waiting_copies(d),
+        vec![(hex::encode(key(1)), Vec::new())],
+        "one copy, to the admin, asking it to pass the message on to nobody"
+    );
+    assert_eq!((report.direct, report.relayed), (1, 0), "{report:?}");
+    let h = history(d, &gid(), None, 10).unwrap();
+    let line = h[0].lines.iter().find(|l| l.0 == key(2)).unwrap();
+    assert_eq!(
+        line.1, LINE_FAILED,
+        "the blocked member's line fails at once"
+    );
+}
+
+/// G5: a blocked member's message passed on by another member is dropped
+/// (and still ACKed) with no receipt to it; a receipt it signed marks
+/// nothing; its message's key is kept, so unblocking it does not bring the
+/// message back as new.
+#[test]
+fn a_blocked_members_messages_and_receipts_are_dropped() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = blocked_member_profile();
+    let d = dir.path();
+    let mine = send(d, &id(3), &gid(), "mine", NOW + 1).unwrap();
+    let theirs = msg_with_id(2, 1, "from the blocked member", [0x22; 16], &[]);
+    let frame = GroupFrame::Msg(theirs);
+    assert!(
+        ingest(d, &key(1), &frame, NOW + 2).unwrap(),
+        "handled (ACKed)"
+    );
+    let file = store::load(d).unwrap();
+    let g = &file.groups[0];
+    assert!(
+        g.messages.iter().all(|m| m.mine),
+        "not stored: {:?}",
+        g.messages
+    );
+    assert!(
+        !g.intents.iter().any(|i| i.kind == INTENT_RECEIPT),
+        "no receipt to it: {:?}",
+        g.intents
+    );
+    let mut receipt = GroupReceipt {
+        group: gid(),
+        of: mine.id,
+        epoch: 1,
+        from: [0; 32],
+        to: key(3),
+        at_ms: NOW + 3,
+        sig: [0; 64],
+        relay: Vec::new(),
+    };
+    receipt.sign(&id(2));
+    assert!(ingest(d, &key(1), &GroupFrame::Receipt(receipt), NOW + 3).unwrap());
+    let h = history(d, &gid(), None, 10).unwrap();
+    let line = h[0].lines.iter().find(|l| l.0 == key(2)).unwrap();
+    assert_ne!(line.1, LINE_DELIVERED, "its receipt marks nothing");
+    block(d, &[]);
+    assert!(ingest(d, &key(1), &frame, NOW + 4).unwrap());
+    let file = store::load(d).unwrap();
+    assert!(
+        file.groups[0].messages.iter().all(|m| m.mine),
+        "still a duplicate once unblocked"
+    );
+}
+
+/// G5: work recorded before a key was blocked does not go once it is: the
+/// receipt owed to it is not signed, and the forward it asked for is not
+/// parked.
+#[test]
+fn work_recorded_before_a_block_does_not_go_for_the_blocked_member() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann"), (2, "Bea"), (4, "Dee")]);
+    let state = GroupFrame::State(roster(1, &[2, 3, 4], 1));
+    assert!(ingest(d, &key(1), &state, NOW).unwrap());
+    let via_admin = msg_with_id(2, 1, "via the admin", [0x21; 16], &[]);
+    assert!(ingest(d, &key(1), &GroupFrame::Msg(via_admin), NOW + 1).unwrap());
+    let for_4 = msg_with_id(2, 1, "pass it on", [0x22; 16], &[4]);
+    assert!(ingest(d, &key(2), &GroupFrame::Msg(for_4), NOW + 1).unwrap());
+    assert_eq!(store::load(d).unwrap().groups[0].intents.len(), 2);
+    block(d, &[2]);
+    let run = park::process_intents(d, &id(3), NOW + 2);
+    assert!(
+        run.parked.is_empty(),
+        "nothing goes for the blocked member: {run:?}"
+    );
+    assert!(store::load(d).unwrap().groups[0].intents.is_empty());
+}
+
+/// G5 fails closed: while the block list cannot be read, a received frame
+/// is not taken (not ACKed, so it comes again), the copies waiting stay
+/// (none is given up and none goes), and a send is refused.
+#[test]
+fn an_unreadable_block_list_takes_nothing_and_sends_nothing() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(3);
+    let d = dir.path();
+    write_friends(d, &[(1, "Ann"), (2, "Bea")]);
+    let state = GroupFrame::State(roster(1, &[2, 3], 1));
+    assert!(ingest(d, &key(1), &state, NOW).unwrap());
+    let other = crate::paths::DataDirLock::acquire(d, park::RUN_LOCK_NAME_FOR_TESTS).unwrap();
+    let report = send(d, &id(3), &gid(), "before", NOW + 1).unwrap();
+    drop(other);
+    assert_eq!(report.parked, 0);
+    std::fs::write(crate::chat_history::blocked_path(d), b"not a block list").unwrap();
+    let m = msg_with_id(2, 1, "from 2", [0x22; 16], &[]);
+    assert!(
+        ingest(d, &key(1), &GroupFrame::Msg(m), NOW + 2).is_err(),
+        "not taken while the block list cannot be read"
+    );
+    let run = park::process_intents(d, &id(3), NOW + 3);
+    assert!(run.parked.is_empty(), "{run:?}");
+    let file = store::load(d).unwrap();
+    assert_eq!(file.groups[0].intents.len(), 2, "the copies still wait");
+    assert!(file.groups[0].messages.iter().all(|m| m.mine));
+    assert!(matches!(
+        send(d, &id(3), &gid(), "after", NOW + 4),
+        Err(GroupError::Store(_))
+    ));
 }

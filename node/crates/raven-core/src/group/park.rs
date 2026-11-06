@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use super::rules::{fail_line, remove_leaver};
+use super::rules::{drop_blocked_work, fail_line, remove_leaver};
 use super::store::{
     self, hex_key, line_after, Intent, INTENT_LEAVER, INTENT_RECEIPT, INTENT_SEND, LINE_WAITING,
 };
@@ -208,7 +208,9 @@ impl Pending {
 /// Turn the store's intents into parked copies: receipts are signed and
 /// leaves applied (the admin) under the store lock, then each copy is
 /// parked outside it, then the outcomes are written. Best effort: a store
-/// that cannot be read leaves everything for the next run.
+/// that cannot be read leaves everything for the next run, and so does a
+/// block list that cannot be read (nothing goes while it is not known who
+/// is blocked; [`drop_blocked_work`]).
 ///
 /// One run at a time (E2 r40: `raven group send` and raven-node's outbox
 /// scan each read the same intent and parked a copy of it, so the sender
@@ -224,6 +226,9 @@ pub fn process_intents(data_dir: &Path, identity: &Identity, now_ms: u64) -> Pen
     if crate::privacy::mode(data_dir) == crate::at_rest::Mode::Sealed {
         let _ = crate::at_rest::keys_load(data_dir);
     }
+    let Ok(blocked) = super::blocked_keys(data_dir) else {
+        return pending;
+    };
     let Ok(_run) = crate::paths::DataDirLock::acquire_within(data_dir, RUN_LOCK, RUN_LOCK_WAIT)
     else {
         return pending;
@@ -257,6 +262,7 @@ pub fn process_intents(data_dir: &Path, identity: &Identity, now_ms: u64) -> Pen
                 continue;
             };
             g.intents.retain(|i| i.kind != INTENT_LEAVER);
+            drop_blocked_work(g, &blocked);
             let epoch = g.roster().map_or(1, |r| r.epoch);
             for intent in &mut g.intents {
                 if intent.kind != INTENT_RECEIPT {

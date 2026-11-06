@@ -62,6 +62,31 @@ fn refused() -> Applied {
     }
 }
 
+/// This profile's contacts as the rules take them ([`super::contacts`]):
+/// its current friends and the keys it blocked. Nothing goes to a blocked
+/// key and nothing of it is taken (API.md, Chat controls): its messages
+/// and its receipts are dropped (still ACKed), no receipt is signed for
+/// it, and a message of this profile goes to it neither directly nor
+/// through a forward.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Contacts {
+    /// The current friends ([`super::friend_keys`]).
+    pub friends: HashSet<Key>,
+    /// The keys on the block list.
+    pub blocked: HashSet<Key>,
+}
+
+impl Contacts {
+    /// A current friend this profile has not blocked.
+    pub fn is_friend(&self, key: &Key) -> bool {
+        self.friends.contains(key) && !self.blocked.contains(key)
+    }
+
+    pub fn is_blocked(&self, key: &Key) -> bool {
+        self.blocked.contains(key)
+    }
+}
+
 fn send_intent(to: &Key, frame: &GroupFrame, line_of: Option<&[u8; 16]>, now_ms: u64) -> Intent {
     Intent {
         id: new_intent_id(),
@@ -78,17 +103,17 @@ fn send_intent(to: &Key, frame: &GroupFrame, line_of: Option<&[u8; 16]>, now_ms:
 }
 
 /// Apply `frame` from the carrier peer `peer` to `file` for this profile
-/// `me`; `friends` are this profile's current, unblocked friends.
+/// `me`, with this profile's friends and blocked keys `contacts`.
 pub fn apply(
     file: &mut GroupsFile,
     me: &Key,
     peer: &Key,
     frame: &GroupFrame,
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
     file.expire(now_ms);
-    let mut done = apply_frame(file, me, peer, frame, friends, now_ms);
+    let mut done = apply_frame(file, me, peer, frame, contacts, now_ms);
     // Expiry alone is a change worth saving too.
     done.changed = true;
     done
@@ -102,7 +127,7 @@ pub fn apply_all(
     file: &mut GroupsFile,
     me: &Key,
     items: &[(Key, &GroupFrame, u64)],
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
 ) -> (usize, bool) {
     if let Some(latest) = items.iter().map(|(_, _, at_ms)| *at_ms).max() {
         file.expire(latest);
@@ -110,7 +135,7 @@ pub fn apply_all(
     let mut handled = 0;
     let mut work = false;
     for (peer, frame, now_ms) in items {
-        let done = apply_frame(file, me, peer, frame, friends, *now_ms);
+        let done = apply_frame(file, me, peer, frame, contacts, *now_ms);
         handled += usize::from(!done.refused);
         work |= done.work;
     }
@@ -122,13 +147,13 @@ fn apply_frame(
     me: &Key,
     peer: &Key,
     frame: &GroupFrame,
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
     match frame {
-        GroupFrame::State(s) => apply_state(file, me, peer, s, friends, now_ms),
-        GroupFrame::Msg(m) => apply_msg(file, me, peer, m, frame, friends, now_ms),
-        GroupFrame::Receipt(r) => apply_receipt(file, me, peer, r, friends, now_ms),
+        GroupFrame::State(s) => apply_state(file, me, peer, s, contacts, now_ms),
+        GroupFrame::Msg(m) => apply_msg(file, me, peer, m, frame, contacts, now_ms),
+        GroupFrame::Receipt(r) => apply_receipt(file, me, peer, r, contacts, now_ms),
         GroupFrame::Leave(l) => apply_leave(file, me, peer, l, now_ms),
         GroupFrame::Sync(s) => apply_sync(file, me, peer, s, now_ms),
     }
@@ -179,7 +204,7 @@ fn apply_state(
     me: &Key,
     peer: &Key,
     state: &GroupState,
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
     if !state.verify() {
@@ -253,7 +278,7 @@ fn apply_state(
             done.changed = true;
         }
     }
-    done.merge(retry_held(file, me, &state.group, friends, now_ms));
+    done.merge(retry_held(file, me, &state.group, contacts, now_ms));
     done
 }
 
@@ -262,7 +287,7 @@ fn retry_held(
     file: &mut GroupsFile,
     me: &Key,
     group: &GroupId,
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
     let gid = hex::encode(group);
@@ -284,7 +309,7 @@ fn retry_held(
             continue;
         };
         if let GroupFrame::Msg(m) = &frame {
-            let mut d = apply_msg(file, me, &peer, m, &frame, friends, now_ms);
+            let mut d = apply_msg(file, me, &peer, m, &frame, contacts, now_ms);
             if d.refused {
                 // No room for its author yet: it waits again (it was ACKed
                 // when it was held).
@@ -311,13 +336,20 @@ fn apply_msg(
     peer: &Key,
     msg: &GroupMsg,
     frame: &GroupFrame,
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
     if msg.from == *me {
         return dropped(file);
     }
+    // A blocked member's message is dropped silently, whoever carries it:
+    // never held, stored, answered with a receipt or forwarded (still
+    // ACKed).
+    let blocked = contacts.is_blocked(&msg.from);
     let Some(g) = file.group_mut(&msg.group) else {
+        if blocked {
+            return Applied::default();
+        }
         // The roster may come later: a frame its author signed waits for it.
         if !msg.verify() {
             return dropped(file);
@@ -336,6 +368,9 @@ fn apply_msg(
         return dropped(file);
     };
     if !roster.has(&msg.from) {
+        if blocked {
+            return Applied::default();
+        }
         if g.was_removed(&msg.from) || msg.epoch <= roster.epoch || !msg.verify() {
             return dropped(file);
         }
@@ -365,6 +400,15 @@ fn apply_msg(
         || msg.sent_ms > now_ms.saturating_add(store::MAX_FUTURE_SKEW_MS)
     {
         return dropped(file);
+    }
+    if blocked {
+        // Its key is kept (while its author's share has room), so
+        // unblocking the member does not bring this message back as new.
+        let from = hex::encode(msg.from);
+        if g.author_share(&from, now_ms) < store::MAX_SEEN_PER_AUTHOR {
+            g.seen.push(&from, &id, msg.sent_ms);
+        }
+        return Applied::change(false);
     }
     // Its author's share of the group's room for message keys is full:
     // refused, not ACKed, so it comes again once some of the author's keys
@@ -424,7 +468,7 @@ fn apply_msg(
             if !roster.has(target)
                 || target == me
                 || *target == msg.from
-                || !friends.contains(target)
+                || !contacts.is_friend(target)
             {
                 continue;
             }
@@ -453,7 +497,7 @@ fn apply_receipt(
     me: &Key,
     peer: &Key,
     r: &GroupReceipt,
-    friends: &HashSet<Key>,
+    contacts: &Contacts,
     now_ms: u64,
 ) -> Applied {
     let Some(g) = file.group_mut(&r.group) else {
@@ -469,6 +513,11 @@ fn apply_receipt(
     if !roster.has(&r.from) || !r.verify() {
         return dropped(file);
     }
+    // A blocked member's receipt is dropped silently: it marks nothing and
+    // is not passed on (still ACKed).
+    if contacts.is_blocked(&r.from) {
+        return Applied::default();
+    }
     if r.to == *me {
         let of = hex::encode(r.of);
         let member = hex::encode(r.from);
@@ -480,7 +529,7 @@ fn apply_receipt(
     if *peer != r.from
         || !r.relay.contains(&r.to)
         || !roster.has(&r.to)
-        || !friends.contains(&r.to)
+        || !contacts.is_friend(&r.to)
         || !g.is_active()
     {
         return dropped(file);
@@ -874,7 +923,10 @@ pub struct SendReport {
 
 /// Send `body` to a group this profile is an active member of: one signed
 /// message, a copy for each member who is a friend, the others named in
-/// the forwarders' copies (design §4.1).
+/// the forwarders' copies (design §4.1). A member this profile blocked is
+/// sent nothing, not even through a forward: it is in no copy and no relay
+/// list, and its line fails at once. The block list must read (else
+/// [`GroupError::Store`], nothing is sent).
 pub fn send(
     data_dir: &Path,
     identity: &Identity,
@@ -887,7 +939,7 @@ pub fn send(
         return Err(GroupError::BadBody);
     }
     let me = identity.public_key_bytes();
-    let friends = super::friend_keys(data_dir);
+    let contacts = super::contacts(data_dir)?;
     let staged = crate::chat_history::list_staged_outbound_bodies(data_dir)
         .map(|s| s.len())
         .map_err(|e| GroupError::Store(e.to_string()))?;
@@ -907,12 +959,12 @@ pub fn send(
         let direct: Vec<Key> = targets
             .iter()
             .copied()
-            .filter(|k| friends.contains(k))
+            .filter(|k| contacts.is_friend(k))
             .collect();
         let relay: Vec<Key> = targets
             .iter()
             .copied()
-            .filter(|k| !friends.contains(k))
+            .filter(|k| !contacts.is_friend(k) && !contacts.is_blocked(k))
             .collect();
         if direct.is_empty() && !targets.is_empty() {
             return Err(GroupError::NoRoute);
@@ -941,17 +993,19 @@ pub fn send(
         let id = msg.id;
         let mut lines = Vec::new();
         for key in &targets {
-            let via = if direct.contains(key) {
-                VIA_DIRECT
+            let (via, state) = if contacts.is_blocked(key) {
+                (VIA_DIRECT, LINE_FAILED)
+            } else if direct.contains(key) {
+                (VIA_DIRECT, LINE_WAITING)
             } else {
-                VIA_RELAY
+                (VIA_RELAY, LINE_WAITING)
             };
             lines.push(Line {
                 member: hex::encode(key),
                 device: String::new(),
                 copy: String::new(),
                 via: via.into(),
-                state: LINE_WAITING.into(),
+                state: state.into(),
             });
         }
         g.messages.push(StoredMsg {
@@ -985,6 +1039,20 @@ pub fn send(
         relayed: relay_n,
         parked: pending.parked_for(&id),
     })
+}
+
+/// Work recorded before a key was blocked does not go once it is (API.md,
+/// Chat controls), checked as the intents are turned into copies
+/// ([`super::process_intents`]): a receipt owed to a blocked author is not
+/// signed, and a forward a blocked member asked for is not parked. A copy
+/// to a blocked key is refused by the park step itself.
+pub(crate) fn drop_blocked_work(g: &mut GroupRecord, blocked: &HashSet<Key>) {
+    if blocked.is_empty() {
+        return;
+    }
+    let is_blocked = |key: &str| hex_key(key).is_some_and(|k| blocked.contains(&k));
+    g.intents
+        .retain(|i| !is_blocked(&i.author) && !(i.kind == INTENT_RECEIPT && is_blocked(&i.to)));
 }
 
 /// Mark lines of messages that will never go (a member no longer reachable).

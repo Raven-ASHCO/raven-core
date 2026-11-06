@@ -194,6 +194,16 @@ member got the roster that removed it and is sent no later one); the admin
 answers with its roster, at most once per member and group every 10
 minutes.
 
+**Blocked keys** (the receiver's block list, a local choice nobody is
+told of): nothing of a blocked key is taken and nothing goes to it. A
+`msg` whose `from` is blocked is dropped, whoever carried it (ACKed, never
+held, shown, answered with a receipt or forwarded; its (`from`, `id`) is
+still remembered, so an unblock does not bring it back); a `receipt`
+signed by a blocked key is dropped; a blocked key is never a forward
+target, and no receipt is signed for it. A receiver that cannot read its
+block list takes no group frame (none is ACKed, so each comes again) and
+sends nothing until it can.
+
 ### 4.3 Held frames
 
 A held frame (only one whose signature verifies under its `from`) waits
@@ -212,7 +222,8 @@ not fit is ACKed and dropped (§4.2).
 
 - The author seals a `msg` only to members who are its own friends; it puts
   the others in `relay` in the copy to the admin when the admin is one of
-  those friends, else in every copy.
+  those friends, else in every copy. A member the author blocked gets no
+  copy and is in no `relay`: it is shown as not delivered (failed) at once.
 - Only the admin sends `state`; it adds only its own friends.
 - Every copy is an ordinary indexed-session Message with the 7-day message
   horizon; the pairwise ACK of a copy is that member's delivery receipt. A

@@ -241,9 +241,11 @@ raven-node).
   `waiting` (still on this computer, or passed on by another member and not confirmed yet), `sent`
   (left this computer, no receipt yet), `delivered` (that member's Raven confirmed it: a signed
   receipt) or `failed` (given up). `delivered`/`total` give "Delivered to 3 of 5". `via: "relay"`
-  marks a member reached through another member. A member's Raven takes at most 512 of one
-  author's messages a group within 7 days; past that it does not confirm the next copy, which
-  stays `sent` and is sent again until it is taken or its 7 days pass.
+  marks a member reached through another member. A member you blocked is sent nothing, not even
+  through another member: its entry is `failed` from the start, and its receipts are ignored. A
+  member's Raven takes at most 512 of one author's messages a group within 7 days; past that it
+  does not confirm the next copy, which stays `sent` and is sent again until it is taken or its 7
+  days pass.
 - **Leaving and removal.** `status` is `left` after `groups.leave` and `removed` when the admin
   removed you: the history stays, `groups.send` is `GROUP_NOT_MEMBER`.
 - **Forget** (`groups.forget`): a group you left or were removed from (or one with no other
