@@ -122,11 +122,16 @@ allowed in release builds by owner decision O4-10.
 - The connected socket filters by source address only, which another host on
   the network can forge, and NAT-PMP replies carry no nonce (INET-STUN-1,
   review of 2026-11-06). So the external IPv4 address a router reply names
-  is told to contacts (route hints DIRECT) only once a verified contact or a
-  relay this node holds a slot on saw this node at that very IP over a
-  connection this node dialled directly (auto-reach design §3.2); a forged
-  answer naming someone else's address is never told. The friend relay's own
-  UPnP addresses are a separate item (STRANGER-UPNP-2).
+  goes into route hints DIRECT only once a verified contact or a relay this
+  node holds a slot on saw this node at that very IP over a connection this
+  node dialled directly (auto-reach design §3.2); route hints never carry a
+  forged answer naming someone else's address. That control covers route
+  hints DIRECT only. Elsewhere a mapped address still goes out before anyone
+  saw it, open under STRANGER-UPNP-2: libp2p Identify names it (one of the
+  swarm's external addresses) to the peers it runs with (contacts, this
+  node's relays and its relay members), DCUtR offers it to a contact as a
+  candidate of the first tier in a hole punch, and the friend relay names
+  its own UPnP addresses (`upnp_addrs`) in its offer.
 - Logs and IPC name the protocol, ports, renewals and restarts only, never an
   IP address; no request carries a Raven identity, PeerId or contact.
 - Port-mapping state lives in memory; nothing about the router or a lease is

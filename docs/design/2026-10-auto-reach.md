@@ -124,7 +124,11 @@ this computer at that very IP:
 - A sighting vouches for its own IP only, for 24 hours (Identify asks again
   every minute on every open connection, so a relay slot keeps it fresh),
   and a network change drops every sighting at once. At most 8 IPs are kept;
-  IPv4 only, never a private or documentation address.
+  IPv4 only, never a private or documentation address. On a dual-stack
+  network a connection that runs over IPv6 (a relay slot or a contact
+  dialled at its IPv6 address) shows this computer's IPv6 address, which
+  vouches for nothing here: the IPv4 address waits for a connection over
+  IPv4 (§7).
 - The same rule holds for an IPv4 address the router reports (a NAT-PMP, PCP
   or UPnP mapping: answers anyone on this network can forge) or that an
   AutoNAT server confirmed: it goes into DIRECT only once seen at its IP.
@@ -457,6 +461,7 @@ back.
 | A friend moved and its old endpoint is stale | Its punches go to the old endpoint and fail until a link (LAN, relay, custody, a forward) brings its new hints; nothing serverless can tell a moved friend's new endpoint to a friend behind address-dependent filtering. |
 | Clocks more than a few seconds apart | Slots do not overlap; punches fail; the other paths work. |
 | A STUN server lies, or someone answers this computer's DNS for the servers' names or forges both servers' replies (or the router's NAT-PMP or UPnP answer) on its network | It can name an address of its own and change the class. Contacts are never told that address: no contact or relay sees this computer there (§3.2), so nothing goes into DIRECT, INET_DIRECT or a relay offer. It can make this node's own punches fail. (Corrected 2026-11-06, INET-STUN-1: this row used to say such a liar could change nothing about contacts, but two agreeing answers were enough, and every verified contact would have dialled the liar's host, showing it their IPs, dial times and PeerIds, and on Internet direct their identity keys.) |
+| Dual-stack network where the relay slots and the contacts this node dials are all reached over IPv6 | Their views name this computer's IPv6 address, so no IPv4 sighting comes (§3.2): the STUN address (IPv4) is not told, and IPv4-only friends cannot dial it directly or punch to it. IPv6 addresses (this computer's own) are told as before. Not done: dialling one relay slot over IPv4 to get that sighting. |
 | No contact or relay has seen this computer from outside yet (a new node; one whose contacts are all on its LAN or behind NATs; no relay slot) | Its public address is not told, so friends cannot dial it directly or punch to it, and its friend relay is not offered without `--external`. It stays reachable through Tor (the onion address in its card), a relay it holds a slot on (set by hand or offered by a friend: that relay's view counts within a minute of the reservation, and so makes the address seen), the LAN, friend custody, and the operator's `relay_external`. The first contact it dials directly over the internet does the same. **[OWNER] AR-5, open (§12):** this costs honest friends something. Two friends behind NATs, neither holding a relay slot and neither reachable directly by the other or by any other contact, never see each other from outside: neither tells its endpoint, so serverless punching between them (§5) never starts, and a friend relay behind a forwarded port is never offered without `--external`. Before INET-STUN-1 both happened on STUN's word alone. A check on the receiving side cannot close the gap: the receiver has no direct path to the sender either, so it has nothing of its own to compare the told address with. |
 
 ## 8. Wire and document changes
