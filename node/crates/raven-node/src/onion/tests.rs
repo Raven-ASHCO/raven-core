@@ -740,14 +740,18 @@ async fn one_circuit_cannot_take_every_onion_slot() {
 /// fresh try (a new isolation group) starts at once, with no pause, and
 /// delivers. The dials after it reuse that fresh group at once. Before,
 /// each of them met the dead circuit again (in the field: a 10 s timeout,
-/// a 2 s pause and a whole new rendezvous per dial).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// a 2 s pause and a whole new rendezvous per dial). In memory on the
+/// paused clock (`Knobs::memory`): a dial on a working circuit costs no
+/// time there (no connect delay, no latency), so the first dial takes the
+/// dead circuit's timeout exactly and each later one nothing ([`about`]).
+#[tokio::test(start_paused = true)]
 async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let stale = Duration::from_secs(3);
     let Some(f) = Friends::with(loopback::Knobs {
         stale,
         count: true,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -758,21 +762,24 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     let sealed = seal(f.a.path(), &f.alice, &f.key_ab, "past a dead circuit");
     let mut took = Vec::new();
     for _ in 0..3 {
-        let began = Instant::now();
+        let began = tokio::time::Instant::now();
         let replies = f.alice_redials_bob(&sealed).await.expect("delivered");
         took.push(began.elapsed());
         assert_eq!(raven_core::outbox::ack_frames(&replies).len(), 1);
     }
     let counts = loopback::Counts::read(&f.a.path().join(TOR_DIR));
     eprintln!("three dials past a dead shared circuit: {took:?}, {counts:?}");
-    assert!(took[0] >= stale, "{took:?} {counts:?}");
+    assert!(
+        about(took[0], stale),
+        "the first dial: one timeout, then the fresh try at once: {took:?} {counts:?}"
+    );
     assert!(
         took[0] < stale + proto::CONNECT_RETRY_PAUSE,
         "the fresh try waited after the timeout: {took:?} {counts:?}"
     );
     for t in &took[1..] {
         assert!(
-            *t < stale,
+            about(*t, Duration::ZERO),
             "a later dial met the dead circuit: {took:?} {counts:?}"
         );
     }
@@ -791,18 +798,21 @@ async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
 /// The stage record (speed groundwork, D1): each onion dial keeps one
 /// record of durations, its steps split where the time goes. Over a
 /// loopback Tor whose every connect takes `delay` and whose every byte
-/// arrives `latency` later (one round trip r = 2 x latency): the connect
-/// is at least `delay`, and Noise, the hellos and the receipt are one round
-/// trip each (never two), the frame write only local work. The connect's
-/// two parts add up to it. A send's check (no frames) has no write and no
-/// receipt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// arrives `latency` later (one round trip r = 2 x latency), in memory on
+/// the paused clock (`Knobs::memory`: local work takes no time there, so a
+/// step takes its model time exactly, give or take [`TICK`]): the connect
+/// is `delay`, and Noise, the hellos and the receipt are one round trip
+/// each (never two), the frame write no time (local work only). The
+/// connect's two parts add up to it. A send's check (no frames) has no
+/// write and no receipt.
+#[tokio::test(start_paused = true)]
 async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
     let _one_at_a_time = LAB_ONION.lock().await;
     let (delay, latency) = (Duration::from_millis(900), Duration::from_millis(200));
     let Some(f) = Friends::with(loopback::Knobs {
         delay,
         latency,
+        memory: true,
         ..loopback::Knobs::default()
     })
     .await
@@ -833,12 +843,12 @@ async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
     eprintln!("stage records: {records:?}");
     assert_eq!(records.len(), 2, "one record per dial: {records:?}");
     let ms = |d: Duration| u32::try_from(d.as_millis()).unwrap();
-    let (r, delay, slack) = (2 * ms(latency), ms(delay), 350);
-    // One round trip, give or take local work, never two.
+    let (r, delay, tick) = (2 * ms(latency), ms(delay), ms(TICK));
+    // One round trip exactly (timers end on a whole millisecond), never two.
     let one_trip = |step: &str, got: Option<u32>| {
         let got = got.unwrap_or_else(|| panic!("no {step}: {records:?}"));
         assert!(
-            (r..r + slack).contains(&got),
+            (r..r + tick).contains(&got),
             "{step} {got} ms, r {r}: {records:?}"
         );
     };
@@ -854,7 +864,7 @@ async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
     for record in [sent, checked] {
         let connect = record.connect_ms.expect("connect");
         assert!(
-            (delay..delay + slack).contains(&connect),
+            (delay..delay + tick).contains(&connect),
             "connect: {record:?}"
         );
         assert_eq!(
@@ -866,7 +876,7 @@ async fn the_tor_dial_timeline_splits_stream_link_and_receipt() {
         one_trip("hello", record.hello_ms);
     }
     one_trip("receipt", sent.receipt_ms);
-    assert!(sent.write_ms.expect("write") < slack, "{sent:?}");
+    assert!(sent.write_ms.expect("write") < tick, "local work: {sent:?}");
     assert_eq!(
         (checked.write_ms, checked.receipt_ms),
         (None, None),
