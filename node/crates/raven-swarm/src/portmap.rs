@@ -841,7 +841,9 @@ where
 /// vouched for: nothing is used (fail closed). A mapping once used stays
 /// used until libp2p-upnp ends it: its external IP is fixed when the
 /// gateway is found, and a network change makes a new behaviour. Events
-/// about no mapping (`GatewayNotFound`, `NonRoutableGateway`) pass at once.
+/// about no mapping (`GatewayNotFound`, `NonRoutableGateway`) pass at once;
+/// any other output is dropped (libp2p-upnp 0.7 has none; a debug build
+/// stops on one).
 pub struct VettedUpnp<U = upnp::tokio::Behaviour> {
     inner: U,
     check: Option<PublicIpCheck>,
@@ -948,7 +950,16 @@ where
                     external_addr,
                 }))
             }
-            other => Some(other),
+            ToSwarm::GenerateEvent(
+                event @ (upnp::Event::GatewayNotFound | upnp::Event::NonRoutableGateway),
+            ) => Some(ToSwarm::GenerateEvent(event)),
+            // libp2p-upnp 0.7 emits nothing else. A later release that adds
+            // an output (an external address candidate, a dial) is not
+            // vetted here, so what it adds is dropped until it is.
+            _ => {
+                debug_assert!(false, "an unexpected libp2p-upnp output was dropped");
+                None
+            }
         }
     }
 
@@ -1440,6 +1451,37 @@ mod tests {
             asked == before || asked == after,
             "the search takes another router"
         );
+    }
+
+    /// libp2p-upnp 0.7 emits mappings, their ends and the two events about
+    /// no mapping, nothing else (behaviour.rs). The two events pass at once;
+    /// any other output a later release may add (an external address
+    /// candidate, say, here at an IP the check vouches for) has not been
+    /// vetted, so it is dropped, and a debug build stops on it.
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "an unexpected libp2p-upnp output was dropped")
+    )]
+    async fn an_unknown_upnp_output_is_dropped() {
+        let (mut map, log) = stub_map(PortMapConfig {
+            public_ip: Some(PublicIpCheck::new(|_| true)),
+            ..PortMapConfig::upnp_only()
+        });
+        log.script.lock().unwrap().extend([
+            ToSwarm::GenerateEvent(upnp::Event::GatewayNotFound),
+            ToSwarm::GenerateEvent(upnp::Event::NonRoutableGateway),
+        ]);
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert_eq!(got, ["Upnp(GatewayNotFound)", "Upnp(NonRoutableGateway)"]);
+        log.script
+            .lock()
+            .unwrap()
+            .push_back(ToSwarm::NewExternalAddrCandidate(ma(
+                "/ip4/203.0.113.9/tcp/7423",
+            )));
+        let got = collect_until(&mut map, 1, |_| false).await;
+        assert!(got.is_empty(), "passed: {got:?}");
     }
 
     /// STRANGER-UPNP-2: libp2p-upnp takes the first SSDP answer from the
