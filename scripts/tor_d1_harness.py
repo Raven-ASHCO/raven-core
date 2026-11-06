@@ -29,7 +29,9 @@ Modes
     R for a fresh rendezvous, a circuit dropped after --sim-kept-s without
     use (Arti keeps one 10 min) and a Tor start of --sim-ready-ms. No Tor
     network and no Internet: every socket of the harness processes is
-    checked to be on loopback (lsof) after each restart.
+    checked to be on loopback (lsof) after each restart and after each run.
+    It refuses to start without lsof and ps, and stops when either fails or
+    lsof sees no socket of the lab processes while they run.
   real: real Tor through a debug raven-tor-helper (Arti). It refuses to
     start unless --real-tor is given AND the environment has
     RAVEN_D1_OWNER_OK=1: the owner says yes to each real run first.
@@ -40,7 +42,8 @@ Cases (n per arm; --n CASE=N or --n-all N to change)
   WC  warm circuit: a send every 60 s (dry 35 s), past WARM_IDLE 20 s and
       the 30 s idle limit of the listener, inside the kept circuit time, 60
   PW  prewarmed, patched arm only: contacts.warm typing 5 s before each WC
-      send, 30 (skipped while the engine has no contacts.warm, M3)
+      send, 30 (a run whose warm up did not start is discarded; skipped
+      with an engine that has no contacts.warm)
   CN  cold, new Tor life: a wake line in the netwatch lab file of S
       restarts its helper; send at once when Tor is ready (at_ready) and
       30 s after it (ready_30s), 30 each
@@ -101,7 +104,9 @@ only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import ipaddress
 import json
 import math
@@ -129,7 +134,9 @@ CASE_ORDER = ('AA', 'WL', 'WC', 'PW', 'CN', 'CI', 'ER')
 ARMS = ('base', 'patched', 'base_again')
 VARIANTS = ('plain', 'at_ready', 'ready_30s', 'keep_warm')
 OUTCOMES = ('ok', 'queued', 'failed')
-DISCARDS = ('restart', 'priming', 'carrier')
+# not_warmed: a PW run whose warm up did not start (contacts.warm answered
+# warming false), so it is no prewarmed send.
+DISCARDS = ('restart', 'priming', 'carrier', 'not_warmed')
 STATES = ('sending', 'sent', 'delivered', 'waiting', 'time_ran_out', 'not_sent_meet_first',
           'failed')
 CARRIERS = ('onion', 'lan', 'internet', 'p2p', 'p2p_direct', 'p2p_reversed', 'p2p_relayed',
@@ -147,7 +154,7 @@ SKIP_WHY = {
     'embedded_engine_without_tor': 'the embedded engine has no Tor in process',
 }
 ABORT_WHY = ('network_outside_loopback', 'interrupted', 'node_ended', 'worker_ended',
-             'tor_not_ready', 'setup_failed', 'harness_error')
+             'tor_not_ready', 'setup_failed', 'harness_error', 'loopback_check_failed')
 
 # Tor speed Stage A: its five lab switches (raven-core onion_gate.rs), every
 # gate false. W2 (WARM_LINK) changes the wire and needs both ends patched,
@@ -220,6 +227,9 @@ LOOPBACK_KNOBS = ('RAVEN_LAB_TOR_LOOPBACK_DELAY_MS', 'RAVEN_LAB_TOR_LOOPBACK_LAT
                   'RAVEN_LAB_TOR_LOOPBACK_READY_MS', 'RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT')
 LOCKED_FILE = ('RAVEN_IDENTITY_BACKEND', 'RAVEN_SESSION_BACKEND', 'RAVEN_PREKEY_BACKEND',
                'RAVEN_CHAT_HISTORY_BACKEND')
+# The tools the dry mode loopback check runs (refused without them).
+TOOLS = {'lsof': ('/usr/sbin/lsof', '/usr/bin/lsof', '/bin/lsof'),
+         'ps': ('/bin/ps', '/usr/bin/ps')}
 
 
 class Refused(Exception):
@@ -259,7 +269,8 @@ def common_env(caller: dict, lab: Path, mode: str, sim: dict | None,
     env.update({k: 'locked-file' for k in LOCKED_FILE})
     env.update({k: '0' for k in CLOSED_GATES})
     if mode == 'dry':
-        assert sim is not None
+        if sim is None:
+            raise Refused('the dry mode needs its simulated times')
         r = int(sim['r_ms'])
         env.update({
             'RAVEN_LAB_TOR_LOOPBACK': str(lab / 'tor-registry'),
@@ -271,7 +282,8 @@ def common_env(caller: dict, lab: Path, mode: str, sim: dict | None,
             'RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT': '1',
         })
     else:
-        assert tor_helper is not None
+        if tor_helper is None:
+            raise Refused('the real mode needs --tor-helper, a debug raven-tor-helper')
         env['RAVEN_TOR_HELPER'] = str(tor_helper)
     return env
 
@@ -354,15 +366,87 @@ def stage_a_refusal(env: dict, arm: str, patched: tuple, friend: bool) -> str:
     return ''
 
 
-def real_mode_refusal(real_tor: bool, env: dict) -> str:
-    """The real mode starts only with --real-tor AND RAVEN_D1_OWNER_OK=1
-    (exactly 1) in the environment; '' when it may start (or it is a dry
-    run)."""
-    if not real_tor:
+def real_mode_refusal(real: bool, env: dict) -> str:
+    """The real mode (`real`) starts only with RAVEN_D1_OWNER_OK=1 (exactly
+    1) in the environment, beside --real-tor; '' when it may start (or it is
+    a dry run)."""
+    if not real:
         return ''
     if env.get('RAVEN_D1_OWNER_OK') != '1':
         return ('the real mode needs the owner OK: --real-tor and RAVEN_D1_OWNER_OK=1 in '
                 'the environment')
+    return ''
+
+
+def tool(name: str) -> str | None:
+    """Where the tool `name` of TOOLS is (the PATH, then its usual places)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    return next((p for p in TOOLS[name] if os.path.isfile(p)), None)
+
+
+def tools_refusal(mode: str, find=tool) -> str:
+    """Why this computer cannot check the dry mode loopback rule, or '': it
+    needs lsof (each socket of the lab processes) and ps (the processes
+    below the nodes, the Tor helpers among them)."""
+    if mode != 'dry':
+        return ''
+    missing = [name for name in sorted(TOOLS) if not find(name)]
+    if missing:
+        return ('the dry mode needs lsof and ps to check every socket of its processes; '
+                'missing: ' + ', '.join(missing))
+    return ''
+
+
+def worker_refusal(env: dict, real: bool) -> str:
+    """Why the engine worker must not open the profile of `env`, or '': it
+    runs only as a run of this harness starts it, on a lab profile (the
+    lab erase root, with the profile and the home folder inside it; the
+    four locked file backends; Lab Test A; RAVEN_NODE_BIN at the lab path
+    that starts no node) and the Tor of its mode (dry: the loopback helper
+    of an absolute RAVEN_LAB_TOR_LOOPBACK and no Tor helper; `real`, as
+    the parent passed it on: an absolute RAVEN_TOR_HELPER)."""
+    root = env.get('RAVEN_LAB_ERASE_ROOT', '')
+    if not root or not os.path.isabs(root):
+        return 'the engine worker runs only under a lab folder (RAVEN_LAB_ERASE_ROOT)'
+    base = os.path.realpath(root)
+
+    def inside(key: str) -> bool:
+        value = env.get(key, '')
+        if not value or not os.path.isabs(value):
+            return False
+        path = os.path.realpath(value)
+        return path != base and os.path.commonpath([base, path]) == base
+
+    if not inside('RAVEN_DATA_DIR') or not inside('HOME'):
+        return 'the profile and the home folder of the engine worker must be in the lab folder'
+    if any(env.get(k) != 'locked-file' for k in LOCKED_FILE):
+        return 'the engine worker needs the lab locked file backends'
+    if env.get('RAVEN_LAB_TEST_A') != '1':
+        return 'the lab unlock is missing'
+    node = env.get('RAVEN_NODE_BIN', '')
+    if not node or os.path.realpath(node) != os.path.join(base, 'no-node-start'):
+        return 'the engine worker never starts a node of its own'
+    if real:
+        helper = env.get('RAVEN_TOR_HELPER', '')
+        if not helper or not os.path.isabs(helper) or 'RAVEN_LAB_TOR_LOOPBACK' in env:
+            return 'the real mode needs an absolute RAVEN_TOR_HELPER and no loopback helper'
+    else:
+        loop = env.get('RAVEN_LAB_TOR_LOOPBACK', '')
+        if not loop or not os.path.isabs(loop) or 'RAVEN_TOR_HELPER' in env:
+            return 'the dry mode needs an absolute RAVEN_LAB_TOR_LOOPBACK and no Tor helper'
+    return ''
+
+
+def engine_refusal(info) -> str:
+    """Why the engine that answered app.info with `info` must not run a lab
+    profile, or '': only a debug engine (build dev) may."""
+    if not isinstance(info, dict) or info.get('ok') is not True:
+        return 'the engine did not answer app.info'
+    result = info.get('result')
+    if not isinstance(result, dict) or result.get('build') != 'dev':
+        return 'not a debug engine'
     return ''
 
 
@@ -483,6 +567,8 @@ def build_refusal(bin_dir: Path, mode: str, engine: Path, embedded: Path | None,
         found = file_has(path, needles)
         missing = [n for n in needles if not found[n]]
         if missing:
+            if NODE_DEBUG in missing or DEBUG_OBJECTS in missing or OVERFLOW_CHECK in missing:
+                return f'{path.name} is not a debug build'
             if WARM_MODEL[0] in missing:
                 return f'{path.name} has no warm circuit model: build it from this tree'
             if ARTI_IN_PROCESS in missing:
@@ -795,7 +881,7 @@ def analyze(records: list) -> str:
                      f"{e['setup_sends']}, {e['elapsed_s']:.0f} s")
         lines.append(f"loopback checks {e['loopback_checks']}: {e['loopback_sockets']} sockets "
                      'seen, none past loopback' if e['loopback_checks'] else
-                     'loopback checks: none (a real run, or no lsof)')
+                     'loopback checks: none (a real run)')
     for a in aborts:
         lines.append(f"aborted: {a['why']}")
     lines.append('')
@@ -876,7 +962,8 @@ def analyze(records: list) -> str:
                  '95 percent upper rank is under 1000 ms (median: 20 of 30, 37 of 60; p90: 30 of '
                  '30, 59 of 60; p90 needs n 29 or more). Failed and queued sends count as over '
                  '1 s and are never dropped; discarded runs (the first after a restart, a '
-                 'priming send, another carrier) are not counted.')
+                 'priming send, another carrier, a prewarm that did not start) are not '
+                 'counted.')
     return '\n'.join(lines) + '\n'
 
 
@@ -1029,10 +1116,11 @@ class Worker:
     """The engine worker of S (this script's engine-worker command): one
     request per line on its stdin, one answer per line on its stdout."""
 
-    def __init__(self, lib: Path, env: dict, log_path: Path) -> None:
+    def __init__(self, lib: Path, env: dict, log_path: Path, real: bool) -> None:
         self.log = open_private(log_path)
         self.proc = subprocess.Popen(
-            [sys.executable, '-I', str(SCRIPT), 'engine-worker', '--lib', str(lib)],
+            [sys.executable, '-I', str(SCRIPT), 'engine-worker', '--lib', str(lib)]
+            + (['--real'] if real else []),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=env)
         self.buf = b''
         try:
@@ -1101,13 +1189,19 @@ class Worker:
         self.log.close()
 
 
-def descendants(pids: list) -> list:
-    """`pids` and every process below them (ps)."""
+def descendants(pids: list) -> list | None:
+    """`pids` and every process below them (ps); None when ps fails."""
+    ps = tool('ps')
+    if not ps:
+        return None
     try:
-        out = subprocess.run(['ps', '-A', '-o', 'pid=,ppid='], capture_output=True, text=True,
-                             timeout=20).stdout
+        got = subprocess.run([ps, '-A', '-o', 'pid=,ppid='], capture_output=True, text=True,
+                             timeout=20)
     except (OSError, subprocess.TimeoutExpired):
-        return list(pids)
+        return None
+    if got.returncode != 0:
+        return None
+    out = got.stdout
     children: dict = {}
     for line in out.splitlines():
         parts = line.split()
@@ -1145,6 +1239,24 @@ def outside_loopback(lsof_out: str) -> tuple:
     return seen, bad
 
 
+def loopback_refusal(returncode: int, listing: str, alive: int) -> tuple:
+    """The dry mode loopback check of one `lsof -nP -a -p PIDS -i` run over
+    `alive` live lab processes: (sockets seen, the ABORT_WHY word or '', the
+    message). It stops the run when lsof failed (a nonzero exit: it could
+    not list every process), when it saw no socket while lab processes run
+    (each raven-node listens: a listing of nothing proves nothing) and when
+    a socket reaches past loopback."""
+    seen, bad = outside_loopback(listing)
+    if returncode != 0:
+        return seen, 'loopback_check_failed', 'lsof failed: the loopback check could not run'
+    if alive and not seen:
+        return seen, 'loopback_check_failed', 'lsof saw no socket of the running lab processes'
+    if bad:
+        return (seen, 'network_outside_loopback',
+                f'{bad} sockets of the lab processes reach past loopback')
+    return seen, '', ''
+
+
 # ── The engine worker (one process per engine) ──────────────────────────────
 
 
@@ -1158,9 +1270,11 @@ def receipt_outcome(waited: bool, ui_ms: int, engine_ms: int) -> tuple:
     return 'ok', engine_ms
 
 
-def worker_main(lib_path: str) -> int:
-    """`engine-worker --lib LIB`: the engine of one profile (RAVEN_DATA_DIR)
-    through its C ABI. It answers app.info first and refuses a release
+def worker_main(lib_path: str, real: bool = False) -> int:
+    """`engine-worker --lib LIB [--real]`: the engine of one profile
+    (RAVEN_DATA_DIR) through its C ABI. It refuses unless a run of this
+    harness started it on a lab profile (worker_refusal; `real`: the parent
+    passed the real mode on), then answers app.info and refuses a release
     engine. Commands: call (one engine request), send (a timed send, numbers
     and fixed words only), idle (keep the event watcher going), quit."""
     import ctypes
@@ -1173,6 +1287,10 @@ def worker_main(lib_path: str) -> int:
         proto.write(json.dumps(obj) + '\n')
         proto.flush()
 
+    why = worker_refusal(dict(os.environ), real)
+    if why:
+        reply({'refused': why})
+        return 2
     try:
         lib = ctypes.CDLL(lib_path)
     except OSError:
@@ -1194,9 +1312,9 @@ def worker_main(lib_path: str) -> int:
         except ValueError:
             return {'ok': False, 'error': {'code': 'INTERNAL'}}
 
-    info = call('app.info', {})
-    if not info.get('ok') or (info.get('result') or {}).get('build') != 'dev':
-        reply({'refused': 'not a debug engine'})
+    why = engine_refusal(call('app.info', {}))
+    if why:
+        reply({'refused': why})
         return 2
     first = call('events.poll', {'after_seq': 0})
     state = {'seq': int((first.get('result') or {}).get('seq', 0) or 0)}
@@ -1352,6 +1470,7 @@ class Run:
 
     def __init__(self, args, caller: dict) -> None:
         self.args = args
+        self.caller = caller
         self.mode = 'real' if args.real_tor else 'dry'
         self.lab = Path(os.path.realpath(args.lab))
         self.bin_dir = Path(os.path.realpath(args.bin_dir))
@@ -1380,7 +1499,9 @@ class Run:
         self.intervals.update(args.interval)
         self.send_timeout = args.send_timeout_s or (120.0 if self.mode == 'dry' else 300.0)
         self.ready_timeout = 120.0 if self.mode == 'dry' else 900.0
-        self.common = common_env(caller, self.lab, self.mode, self.sim, self.tor_helper)
+        # The process environments: built only once refusal() let the run
+        # start (environments()).
+        self.common: dict = {}
         self.out: Out | None = None
         self.s_node: Node | None = None
         self.f_node: Node | None = None
@@ -1400,9 +1521,10 @@ class Run:
         self.prev_end: float | None = None
         self.t0 = time.monotonic()
 
-    # The checks before anything starts.
+    # The checks before anything starts. The real mode guard goes by the
+    # mode itself, whatever set it.
     def refusal(self) -> str:
-        why = real_mode_refusal(self.args.real_tor, os.environ)
+        why = real_mode_refusal(self.mode == 'real', self.caller)
         if why:
             return why
         why = lab_refusal(self.lab, Path.home())
@@ -1414,6 +1536,9 @@ class Run:
         why = timing_refusal(self.mode, self.intervals, self.kept_s)
         if why:
             return why
+        why = tools_refusal(self.mode)
+        if why:
+            return why
         if self.sim:
             if not all(0 < self.sim[k] <= SIM_MAX_MS for k in ('r_ms', 'rendezvous_ms',
                                                               'ready_ms')):
@@ -1421,6 +1546,11 @@ class Run:
             if not 0 < self.sim['kept_s'] <= SIM_KEPT_MAX_S:
                 return 'the simulated kept time is out of range'
         return ''
+
+    def environments(self) -> None:
+        """The environment every process of the run starts from (after
+        refusal() let the run start)."""
+        self.common = common_env(self.caller, self.lab, self.mode, self.sim, self.tor_helper)
 
     def guard_env(self, env: dict, arm: str, friend: bool) -> dict:
         if self.mode == 'dry':
@@ -1490,25 +1620,33 @@ class Run:
     def loopback_check(self) -> None:
         """Every process this run started now (and their children, the Tor
         helpers among them) is noted; in a dry run, each of their sockets
-        must be on loopback."""
+        must be on loopback, and a check that cannot run stops the run
+        (loopback_refusal)."""
         pids = [p.pid for p in self.processes()]
-        tree = descendants(pids) if pids else []
+        if not pids:
+            return
+        tree = descendants(pids)
+        if tree is None:
+            if self.mode == 'dry':
+                raise Aborted('loopback_check_failed',
+                              'ps failed: the loopback check could not run')
+            tree = pids
         self.started_pids.update(tree)
-        if self.mode != 'dry' or not tree:
+        if self.mode != 'dry':
             return
-        lsof = shutil.which('lsof') or ('/usr/sbin/lsof' if os.path.exists('/usr/sbin/lsof')
-                                         else None)
+        lsof = tool('lsof')
         if not lsof:
-            say('lsof not found: the loopback check is skipped')
-            return
-        got = subprocess.run([lsof, '-nP', '-a', '-p', ','.join(map(str, tree)), '-i'],
-                             capture_output=True, text=True, timeout=60)
-        seen, bad = outside_loopback(got.stdout)
+            raise Aborted('loopback_check_failed', 'lsof is gone: the loopback check could not run')
+        try:
+            got = subprocess.run([lsof, '-nP', '-a', '-p', ','.join(map(str, tree)), '-i'],
+                                 capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            raise Aborted('loopback_check_failed', 'lsof failed: the loopback check could not run')
+        seen, why, message = loopback_refusal(got.returncode, got.stdout, len(tree))
         self.lsof_checks += 1
         self.lsof_sockets += seen
-        if bad:
-            raise Aborted('network_outside_loopback',
-                          f'{bad} sockets of the lab processes reach past loopback')
+        if why:
+            raise Aborted(why, message)
 
     def write_netwatch(self, name: str) -> None:
         """A netwatch lab file afresh: one lab network up (a node reads a
@@ -1623,7 +1761,7 @@ class Run:
         assert self.s_node is not None
         env = worker_env(self.arm_env, self.s_node.profile, self.lab, False)
         self.worker = Worker(self.engine, self.guard_env(env, arm, False),
-                             self.lab / 'logs' / 's.engine.log')
+                             self.lab / 'logs' / 's.engine.log', self.mode == 'real')
 
     def start_sender(self, arm: str, embedded: bool, worker: bool = True) -> None:
         """S for a block: any S before it stopped, then its node (or the
@@ -1642,7 +1780,7 @@ class Run:
             offset = log.stat().st_size if log.exists() else 0
             env = worker_env(self.arm_env, self.s_node.profile, self.lab, True)
             self.worker = Worker(self.embedded, self.guard_env(env, arm, False),
-                                 self.lab / 'logs' / 's.embedded.log')
+                                 self.lab / 'logs' / 's.embedded.log', self.mode == 'real')
             self.worker.call('settings.set', {'receive': False})
             st = self.worker.call('node.start', timeout=240)
             if not st.get('ok') or (st.get('result') or {}).get('embedded') is not True:
@@ -1679,6 +1817,10 @@ class Run:
             got = self.worker.call('contacts.warm', {'address': self.f_address, 'why': 'typing'})
             if not got.get('ok'):
                 raise Aborted('harness_error', 'contacts.warm was refused')
+            if (got.get('result') or {}).get('warming') is not True and discard is None:
+                # No warm up started (a shut gate, Tor not ready): no
+                # prewarmed send.
+                discard = 'not_warmed'
         self.idle_until(send_at)
         if case == 'CN':
             lives, _ = self.lives.poll()
@@ -1705,6 +1847,8 @@ class Run:
         dials = self.stages.since_mark()
         lives, _ = self.lives.poll()
         self.prev_start, self.prev_end = start, end
+        # Once more after each run: every socket still on loopback.
+        self.loopback_check()
         if discard is None and res['carrier'] is not None and res['carrier'] != 'onion':
             discard = 'carrier'
         rec = {
@@ -1783,10 +1927,11 @@ class Run:
     def lingering(self) -> int:
         """Processes this run started that are still there (counted, never
         signalled)."""
-        if not self.started_pids:
+        ps = tool('ps')
+        if not self.started_pids or not ps:
             return 0
         try:
-            out = subprocess.run(['ps', '-A', '-o', 'pid='], capture_output=True, text=True,
+            out = subprocess.run([ps, '-A', '-o', 'pid='], capture_output=True, text=True,
                                  timeout=20).stdout
         except (OSError, subprocess.TimeoutExpired):
             return 0
@@ -1828,7 +1973,12 @@ def parse_counts(items: list, what: str, cast) -> dict:
     return out
 
 
-def run_main(args) -> int:
+def checked_args(args):
+    """The run arguments as a Run takes them, or Refused: first of all the
+    real mode without its Tor helper, before anything else is looked at or
+    built."""
+    if args.real_tor and not args.tor_helper:
+        raise Refused('the real mode needs --tor-helper, a debug raven-tor-helper')
     cases = [c.strip().upper() for c in args.cases.split(',') if c.strip()]
     if not cases or any(c not in CASE_ORDER for c in cases) or len(set(cases)) != len(cases):
         raise Refused('--cases takes a list of ' + ', '.join(CASE_ORDER))
@@ -1852,10 +2002,15 @@ def run_main(args) -> int:
         raise Refused('--send-timeout-s takes more than 0 and at most 3600 s')
     if not 0 <= args.er_pause_s <= 3600:
         raise Refused('--er-pause-s takes 0 to 3600 s')
-    run = Run(args, dict(os.environ))
+    return args
+
+
+def run_main(args) -> int:
+    run = Run(checked_args(args), dict(os.environ))
     why = run.refusal()
     if why:
         raise Refused(why)
+    run.environments()
     say(f'D1 harness, {run.mode} mode, lab {run.lab}')
     ok = False
     runs: list = []
@@ -2028,9 +2183,9 @@ def self_test() -> int:
           f'good accepted, {sum(refused)} of {len(bad_cases)} bad ones refused')
 
     # raven-node's stage lines become dial entries; nothing else does.
-    stage_line = json.dumps(dict(dial, purpose='check', frames=0, write_ms=None,
+    stage_text = json.dumps(dict(dial, purpose='check', frames=0, write_ms=None,
                                  receipt_ms=None))
-    parsed = dial_from_stage(json.loads(stage_line))
+    parsed = dial_from_stage(json.loads(stage_text))
     warm = dict(dial, prep_ms=None, connect_ms=None, circuit_ms=None, begin_ms=None,
                 noise_ms=None, hello_ms=None, write_ms=None)
     check('receipts',
@@ -2046,15 +2201,54 @@ def self_test() -> int:
           and links_opened([dial, warm, dict(dial, purpose='check')]) == 2,
           'a dial on a kept link opens no link')
 
-    # The real mode guard.
+    # The real mode guard: the owner OK, and the mode itself.
+    with tempfile.TemporaryDirectory() as tmp:
+        dry_args = checked_args(parser().parse_args(
+            ['run', '--bin-dir', str(Path(tmp) / 'bin'), '--lab', str(Path(tmp) / 'lab-1')]))
+        owner = real_mode_refusal(True, {})
+        run_dry = Run(dry_args, {})
+        dry_why = run_dry.refusal()
+        run_dry.mode = 'real'
+        forced = run_dry.refusal()
+        run_ok = Run(dry_args, {'RAVEN_D1_OWNER_OK': '1'})
+        run_ok.mode = 'real'
+        forced_ok = run_ok.refusal()
     check('real_guard',
           real_mode_refusal(False, {}) == ''
           and real_mode_refusal(False, {'RAVEN_D1_OWNER_OK': '1'}) == ''
-          and real_mode_refusal(True, {}) != ''
+          and owner != ''
           and real_mode_refusal(True, {'RAVEN_D1_OWNER_OK': '0'}) != ''
           and real_mode_refusal(True, {'RAVEN_D1_OWNER_OK': 'yes'}) != ''
-          and real_mode_refusal(True, {'RAVEN_D1_OWNER_OK': '1'}) == '',
-          '--real-tor and RAVEN_D1_OWNER_OK=1, both')
+          and real_mode_refusal(True, {'RAVEN_D1_OWNER_OK': '1'}) == ''
+          and dry_why not in ('', owner) and forced == owner
+          and forced_ok not in ('', owner),
+          '--real-tor and RAVEN_D1_OWNER_OK=1, both; a run in the real mode asks for the owner '
+          'OK whatever set the mode')
+
+    # --real-tor without --tor-helper: refused (exit 2) before any process
+    # environment is built.
+    built = []
+    real_common_env = common_env
+
+    def counted_env(*a, **k):
+        built.append(1)
+        return real_common_env(*a, **k)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        globals()['common_env'] = counted_env
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                rc = main(['run', '--bin-dir', str(Path(tmp) / 'bin'), '--lab',
+                           str(Path(tmp) / 'lab-1'), '--real-tor'])
+        except Exception as e:  # the old assert: a crash, no refusal
+            rc = type(e).__name__
+        finally:
+            globals()['common_env'] = real_common_env
+        nothing_made = not (Path(tmp) / 'lab-1').exists()
+    check('real_needs_helper',
+          rc == 2 and not built and nothing_made and '--tor-helper' in err.getvalue(),
+          f'exit {rc}, environments built {len(built)}')
 
     # The environments: nothing of the caller beyond CALLER_KEEP, the dry
     # mode on the loopback helper with the gates closed, Stage A only in the
@@ -2089,11 +2283,48 @@ def self_test() -> int:
           and common['RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS'] == '50'
           and common['RAVEN_LAB_TOR_LOOPBACK_KEPT_MS'] == '45000'
           and w_env['RAVEN_NODE_MODE'] == 'embedded' and w_env['RAVEN_DATA_DIR'] == '/lab/d1/s'
+          and s_base.get('RAVEN_LAB_TOR_STAGES') == '/lab/d1/raw/s-stages.jsonl'
           and 'RAVEN_LAB_TOR_STAGES' not in f_env
           and dry_env_refusal(real) != '' and 'RAVEN_LAB_TOR_LOOPBACK' not in real
           and dry_env_refusal(dict(common, RAVEN_LAB_ROUTE_HINTS='1')) != ''
           and dry_env_refusal(dict(common, RAVEN_LAB_TOR_LOOPBACK='rel/dir')) != '',
           f'leaked={leaked}')
+
+    # The engine worker: only on a lab profile as a run starts it, and only
+    # with a debug engine.
+    w_real = worker_env(sender_env(real, lab, 'base', DEFAULT_PATCHED), lab / 's', lab, False)
+    worker_bad = [
+        {k: v for k, v in w_env.items() if k != 'RAVEN_LAB_ERASE_ROOT'},
+        dict(w_env, RAVEN_LAB_ERASE_ROOT='lab/d1'),
+        dict(w_env, RAVEN_DATA_DIR='/x/.raven'),
+        dict(w_env, RAVEN_DATA_DIR='/lab/d1'),
+        dict(w_env, RAVEN_DATA_DIR='/lab/d1/../x'),
+        dict(w_env, HOME='/Users/someone'),
+        dict(w_env, RAVEN_IDENTITY_BACKEND='os'),
+        {k: v for k, v in w_env.items() if k != 'RAVEN_CHAT_HISTORY_BACKEND'},
+        dict(w_env, RAVEN_LAB_TEST_A='0'),
+        dict(w_env, RAVEN_NODE_BIN='/b/raven-node'),
+        {k: v for k, v in w_env.items() if k != 'RAVEN_NODE_BIN'},
+        dict(w_env, RAVEN_LAB_TOR_LOOPBACK='tor-registry'),
+        {k: v for k, v in w_env.items() if k != 'RAVEN_LAB_TOR_LOOPBACK'},
+        dict(w_env, RAVEN_TOR_HELPER='/b/raven-tor-helper'),
+    ]
+    worker_refused = [bool(worker_refusal(e, False)) for e in worker_bad]
+    worker_ok = (worker_refusal(w_env, False) == '' and worker_refusal(w_real, True) == ''
+                 and worker_refusal(w_env, True) != '' and worker_refusal(w_real, False) != ''
+                 and worker_refusal(dict(w_real, RAVEN_TOR_HELPER='raven-tor-helper'), True) != ''
+                 and all(worker_refused))
+    engines = [engine_refusal(info) for info in (
+        {'ok': True, 'result': {'build': 'dev', 'version': '0.1.1'}},
+        {'ok': True, 'result': {'build': 'release'}},
+        {'ok': True, 'result': {'build': 'Dev'}},
+        {'ok': True, 'result': None},
+        {'ok': False, 'error': {'code': 'INTERNAL'}},
+        {'ok': 'true', 'result': {'build': 'dev'}},
+        None)]
+    check('engine_worker', worker_ok and engines[0] == '' and all(engines[1:]),
+          f'{sum(worker_refused)} of {len(worker_bad)} worker environments refused; a release '
+          f'engine: {engines[1]}')
 
     # Ports: never 7420 to 7427 nor 17420.
     offers = iter([7420, 7423, 7427, 17420, 7421, 52001, 52001, 52002])
@@ -2165,6 +2396,7 @@ def self_test() -> int:
                 else:
                     rec.update(d1_ms=v, d1_ui_ms=v + 3)
                 out.write(rec)
+        out.write(dict(good, case='PW', arm='patched', seq=seq + 1, discard='not_warmed'))
         out.write({'type': 'skip', 'v': HARNESS_VERSION, 'case': 'PW', 'variant': 'plain',
                    'why': 'no_contacts_warm'})
         out.close()
@@ -2184,6 +2416,8 @@ def self_test() -> int:
               'median under 1 s: not supported (rank 20 of 30 is 1200 ms)',
               'WC plain patched: n 30 (ok 29, queued 0, failed 1)',
               'p90 under 1 s: not supported (rank 30 of 30 is failed or queued)',
+              'PW plain patched: n 0 (ok 0, queued 0, failed 0), discarded 1',
+              'discarded 5 (not_warmed 1, restart 4)',
               'skipped: PW plain')
     missing = [w for w in wanted if w not in text]
     check('analysis', not missing and bad_refused and not prose_refusal(text),
@@ -2215,6 +2449,24 @@ def self_test() -> int:
           'Tor lives counted, sockets past loopback found, the lab network a documentation '
           'range')
 
+    # The loopback check's decision on an lsof listing, and its tools.
+    header = lsof_ok.splitlines()[0] + '\n'
+    decisions = (loopback_refusal(0, lsof_ok, 3), loopback_refusal(0, lsof_bad, 3),
+                 loopback_refusal(1, '', 3), loopback_refusal(1, lsof_ok, 3),
+                 loopback_refusal(0, header, 3), loopback_refusal(0, '', 2))
+    words = [d[1] for d in decisions]
+    tools_ok = (tools_refusal('dry', lambda name: f'/usr/sbin/{name}') == ''
+                and tools_refusal('dry', lambda name: None) != ''
+                and 'ps' in tools_refusal('dry', lambda name: None if name == 'ps' else '/x')
+                and 'lsof' in tools_refusal('dry', lambda name: None if name == 'lsof' else '/x')
+                and tools_refusal('real', lambda name: None) == '')
+    check('loopback_decision',
+          words == ['', 'network_outside_loopback', 'loopback_check_failed',
+                    'loopback_check_failed', 'loopback_check_failed', 'loopback_check_failed']
+          and decisions[0][0] == 3 and all(w in ABORT_WHY for w in words if w) and tools_ok,
+          'past loopback, a failed lsof and no socket while the lab runs all stop the run; '
+          'the dry mode needs lsof and ps')
+
     # The build checks: markers across a chunk boundary.
     with tempfile.TemporaryDirectory() as tmp:
         blob = Path(tmp) / 'blob'
@@ -2222,6 +2474,61 @@ def self_test() -> int:
         has = file_has(blob, (NODE_DEBUG, OVERFLOW_CHECK))
     check('build_markers', has == {NODE_DEBUG: True, OVERFLOW_CHECK: False},
           'a marker across two chunks is found')
+
+    # The build folder: debug builds with this tree's lab hooks only, and no
+    # Tor helper next to raven-node in the dry mode.
+    with tempfile.TemporaryDirectory() as tmp:
+        b = Path(tmp) / 'bin'
+        b.mkdir()
+
+        def put(name: str, data: bytes) -> Path:
+            (b / name).write_bytes(b'\0' + data + b'\0')
+            return b / name
+
+        node_ok = NODE_DEBUG + b'.' + b'.'.join(WARM_MODEL)
+        put('raven-node', node_ok)
+        put('ash', DEBUG_OBJECTS + b'.' + OVERFLOW_CHECK)
+        engine = put(engine_name(), DEBUG_OBJECTS)
+        emb = put('embedded.lib', b'.'.join((DEBUG_OBJECTS, ARTI_IN_PROCESS) + WARM_MODEL))
+        helper = Path(tmp) / 'raven-tor-helper'
+        helper.write_bytes(DEBUG_OBJECTS + OVERFLOW_CHECK)
+        outcome = {'dry': build_refusal(b, 'dry', engine, emb, None),
+                   'real': build_refusal(b, 'real', engine, None, helper),
+                   'real_no_helper': build_refusal(b, 'real', engine, None, None)}
+        put('raven-tor-helper', DEBUG_OBJECTS + OVERFLOW_CHECK)
+        outcome['helper_beside'] = build_refusal(b, 'dry', engine, None, None)
+        (b / 'raven-tor-helper').unlink()
+        for name, data in (('node_release', b'.'.join(WARM_MODEL)),
+                           ('node_release_bare', b'release'),
+                           ('node_no_model', NODE_DEBUG)):
+            put('raven-node', data)
+            outcome[name] = build_refusal(b, 'dry', engine, None, None)
+        outcome['real_no_model'] = build_refusal(b, 'real', engine, None, helper)
+        put('raven-node', node_ok)
+        put('ash', DEBUG_OBJECTS)
+        outcome['ash_release'] = build_refusal(b, 'dry', engine, None, None)
+        put('ash', DEBUG_OBJECTS + b'.' + OVERFLOW_CHECK)
+        put('embedded.lib', b'.'.join((DEBUG_OBJECTS,) + WARM_MODEL))
+        outcome['embedded_no_tor'] = build_refusal(b, 'dry', engine, emb, None)
+        helper.write_bytes(DEBUG_OBJECTS)
+        outcome['helper_release'] = build_refusal(b, 'real', engine, None, helper)
+        engine.unlink()
+        outcome['no_engine'] = build_refusal(b, 'dry', engine, None, None)
+    wanted_words = {'dry': '', 'real': '', 'real_no_model': '',
+                    'real_no_helper': 'needs --tor-helper',
+                    'helper_beside': 'never has raven-tor-helper',
+                    'node_release': 'raven-node is not a debug build',
+                    'node_release_bare': 'raven-node is not a debug build',
+                    'node_no_model': 'raven-node has no warm circuit model',
+                    'ash_release': 'ash is not a debug build',
+                    'embedded_no_tor': 'has no Tor in process',
+                    'helper_release': 'raven-tor-helper is not a debug build',
+                    'no_engine': 'is not in the build folder'}
+    wrong = sorted(k for k, w in wanted_words.items()
+                   if (outcome[k] != '' if not w else w not in outcome[k]))
+    check('build_folder', not wrong,
+          f'wrong={wrong}' if wrong else f'{len(outcome) - 3} build folders refused, each for '
+          'its reason')
 
     # The words the harness prints.
     messages = message_texts(SCRIPT.read_text(encoding='utf-8'))
@@ -2290,9 +2597,7 @@ def self_test() -> int:
     return 0 if all(results) else 1
 
 
-def main(argv: list) -> int:
-    if argv == ['--self-test']:
-        return self_test()
+def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='tor_d1_harness.py', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command')
@@ -2321,6 +2626,14 @@ def main(argv: list) -> int:
     a.add_argument('--out')
     w = sub.add_parser('engine-worker', help='internal: the engine of one profile')
     w.add_argument('--lib', required=True)
+    w.add_argument('--real', action='store_true')
+    return p
+
+
+def main(argv: list) -> int:
+    if argv == ['--self-test']:
+        return self_test()
+    p = parser()
     args = p.parse_args(argv)
     try:
         if args.command == 'run':
@@ -2328,7 +2641,7 @@ def main(argv: list) -> int:
         if args.command == 'analyze':
             return analyze_main(args)
         if args.command == 'engine-worker':
-            return worker_main(args.lib)
+            return worker_main(args.lib, args.real)
     except Refused as e:
         print(f'refusing: {e}', file=sys.stderr)
         return 2
