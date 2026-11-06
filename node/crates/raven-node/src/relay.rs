@@ -794,6 +794,19 @@ fn store(sink: &Option<Arc<Mutex<Option<RelayStatusFile>>>>, status: Option<Rela
     }
 }
 
+/// The line for a folder whose relay lock is refused, the same from
+/// `--check` and from a start (round 2): a leftover journal beside the lock
+/// (WINLIN-1) as found, with what to do, else the relay that runs there.
+fn lock_refused(dir: &Path, leftover: Option<&str>) -> String {
+    match leftover {
+        Some(leftover) => format!("{}: {leftover}", dir.display()),
+        None => format!(
+            "a raven-node relay already runs in {} (one relay per folder): stop it first",
+            dir.display()
+        ),
+    }
+}
+
 /// `raven-node relay --check`: would this relay start? The gate, the folder
 /// and every listen port (probed as a start probes them), then the relay
 /// key and the allow-list, looked at only: nothing is created or changed,
@@ -813,15 +826,10 @@ pub(crate) fn check(cmd: &RelayCmd) -> (Vec<String>, i32) {
     }
     match relay_is_running(&cmd.data_dir) {
         Ok(false) => {}
-        Ok(true) => {
-            return folder(format!(
-                "a raven-node relay already runs in {} (one relay per folder): stop it first",
-                cmd.data_dir.display()
-            ))
-        }
+        Ok(true) => return folder(lock_refused(&cmd.data_dir, None)),
         // A leftover journal beside the lock (WINLIN-1): what was found and
         // what to do, not a relay to stop.
-        Err(leftover) => return folder(format!("{}: {leftover}", cmd.data_dir.display())),
+        Err(leftover) => return folder(lock_refused(&cmd.data_dir, Some(&leftover))),
     }
     let addrs = match listen_plan(cmd) {
         Ok(plan) => plan.addrs,
@@ -919,17 +927,16 @@ pub(crate) async fn run_relay(
     raven_core::paths::ensure_private_dir(&cmd.data_dir).map_err(RelayExit::Folder)?;
     refuse_profile_dir(&cmd.data_dir).map_err(RelayExit::Folder)?;
     // One relay per folder, for its whole life (`raven relay status` probes
-    // this lock to tell a stopped relay from a running one).
+    // this lock to tell a stopped relay from a running one). Refused, it
+    // says what `--check` says.
     let _instance = raven_core::paths::DataDirLock::acquire_within(
         &cmd.data_dir,
         RELAY_LOCK_FILE,
         Duration::from_secs(2),
     )
     .map_err(|_| {
-        RelayExit::Folder(format!(
-            "another raven-node relay already runs in {} (one relay per folder)",
-            cmd.data_dir.display()
-        ))
+        let leftover = relay_is_running(&cmd.data_dir).err();
+        RelayExit::Folder(lock_refused(&cmd.data_dir, leftover.as_deref()))
     })?;
     let key = load_or_create_relay_key(&cmd.data_dir).map_err(RelayExit::Other)?;
     let file = matches!(cmd.policy, PolicySource::File);
@@ -1610,6 +1617,59 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&lock).unwrap(), [1u8; 512]);
         assert_eq!(std::fs::read(&journal).unwrap(), b"X");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// Round 2 (the refused relay lock texts change the same way in the
+    /// other places): a start that its folder's lock refuses says what
+    /// `--check` says, exit 5 as before. A leftover journal beside the lock
+    /// (WINLIN-1) is named as found, with what to do, not as a relay to
+    /// stop; both files stay as they were.
+    #[tokio::test]
+    async fn a_start_names_a_leftover_journal_as_check_does() {
+        if !raven_core::p2p_live_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(RELAY_LOCK_FILE);
+        let journal = dir.path().join(format!("{RELAY_LOCK_FILE}-journal"));
+        std::fs::write(&lock, [1u8; 512]).unwrap();
+        std::fs::write(&journal, b"X").unwrap();
+        let (lines, code) = check(&dedicated(dir.path(), "127.0.0.1:0"));
+        assert_eq!(code, 5, "{lines:?}");
+        let err = run_relay(dedicated(dir.path(), "127.0.0.1:0"), std::future::pending())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), 5, "{err}");
+        assert_eq!(lines, [err.to_string()], "a start says what --check says");
+        assert!(!err.to_string().contains("already runs"), "{err}");
+        assert_eq!(std::fs::read(&lock).unwrap(), [1u8; 512]);
+        assert_eq!(std::fs::read(&journal).unwrap(), b"X");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// A second start in a folder whose relay runs says what `--check` says
+    /// there (exit 5): stop the one that runs first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_start_names_the_running_relay_as_check_does() {
+        if !raven_core::p2p_live_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, _, stop, task) = start(dedicated(dir.path(), "127.0.0.1:0")).await;
+        let (lines, code) = check(&dedicated(dir.path(), "127.0.0.1:0"));
+        assert_eq!(code, 5, "{lines:?}");
+        let err = run_relay(dedicated(dir.path(), "127.0.0.1:0"), std::future::pending())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), 5, "{err}");
+        assert_eq!(lines, [err.to_string()], "a start says what --check says");
+        assert!(err.to_string().ends_with("stop it first"), "{err}");
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("stopped within 5 s")
+            .unwrap();
+        assert_eq!(ended, Ok(()));
     }
 
     #[test]

@@ -206,7 +206,7 @@ relay_check_failed() {
       echo "relay kit: a listen port is busy or needs a privilege (lines above). A busy port (another program holds it, e.g. a web server on 443 or Raven itself on 7423): pick another port (RAVEN_RELAY_PORT=7428; 7424/7425 are a second Raven profile's, 7427 the friend relay's) or set RAVEN_RELAY_TCP443=off" >&2
       echo "relay kit: RAVEN_RELAY_TCP443=7443 fits only when the public TCP 443 is free for the relay and a router or a second IP maps it to 7443 here (or 443 needs a privilege here). Never redirect the 443 a web server serves: that takes the website down (docs/RELAY_KIT.md section 4)" >&2
       ;;
-    5) echo "relay kit: the relay folder cannot be used (line above): it holds a Raven profile, or a relay already runs in it (stop that one first); or the --wss certificate or key cannot be used" >&2 ;;
+    5) echo "relay kit: the relay folder cannot be used (line above): it holds a Raven profile, a relay already runs in it (stop that one first), or a leftover SQLite journal lies beside its lock file (no relay starts there: if none runs, move both files out of the folder); or the --wss certificate or key cannot be used" >&2 ;;
     *) echo "relay kit: raven-node relay --check failed (exit $rc)" >&2 ;;
   esac
   return 0

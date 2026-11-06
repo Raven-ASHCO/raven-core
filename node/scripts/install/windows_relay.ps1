@@ -322,7 +322,7 @@ if ($rc -ne 0) {
             Write-Host "relay kit: a listen port is busy (lines above; http.sys or IIS may hold 443). Pick another port (-Port 7428; 7424/7425 are a second Raven profile's, 7427 the friend relay's) or -Tcp443 off"
             Write-Host "relay kit: -Tcp443 7443 fits only when your router's public TCP 443 is free for the relay and maps it to 7443 here, never when it already goes to a web server"
         }
-        5 { Write-Host "relay kit: the relay folder cannot be used (line above): it holds a Raven profile, or a relay already runs in it (stop that one first)" }
+        5 { Write-Host "relay kit: the relay folder cannot be used (line above): it holds a Raven profile, a relay already runs in it (stop that one first), or a leftover SQLite journal lies beside its lock file (no relay starts there: if none runs, move both files out of the folder)" }
         default { Write-Host "relay kit: raven-node relay --check failed (exit $rc)" }
     }
     if ($wasRunning -and (Test-TaskExists)) {

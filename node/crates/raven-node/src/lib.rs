@@ -8431,6 +8431,47 @@ mod lifecycle_tests {
         assert!(paired >= 4, "{paired}");
     }
 
+    /// Round 2: the kit's exit 5 summary names each folder refusal that
+    /// `raven-node relay --check` names, the leftover SQLite journal beside
+    /// the relay lock included (WINLIN-1: not a relay to stop), in plain
+    /// words. The code stays 5.
+    #[test]
+    fn relay_kit_exit_5_names_a_leftover_journal() {
+        let root = repo_root();
+        let read = |rel: &str| std::fs::read_to_string(root.join(rel)).expect(rel);
+        let common = read("node/scripts/install/relay_common.sh");
+        let check_failed = common
+            .split("\nrelay_check_failed() {\n")
+            .nth(1)
+            .and_then(|b| b.split("\n}\n").next())
+            .expect("relay_check_failed");
+        let ps = read("node/scripts/install/windows_relay.ps1");
+        let line = |text: &str, start: &str| {
+            let found = text.lines().filter(|l| l.trim_start().starts_with(start));
+            let [one] = found.collect::<Vec<_>>()[..] else {
+                panic!("one {start:?} line");
+            };
+            one.to_string()
+        };
+        for five in [line(check_failed, "5) echo "), line(&ps, "5 { Write-Host ")] {
+            for words in [
+                "a Raven profile",
+                "a relay already runs in it",
+                "a leftover SQLite journal",
+                "move both files out of the folder",
+            ] {
+                assert!(five.contains(words), "{words:?} in {five}");
+            }
+            let said = five.split('"').nth(1).expect("a quoted text");
+            assert!(
+                !said
+                    .replace("--wss", "")
+                    .contains(['-', '\'', '\u{2013}', '\u{2014}', '\u{2019}']),
+                "plain words: {said}"
+            );
+        }
+    }
+
     /// The installers' firewall advice in `RAVEN_RELAY_TCP443=7443` mode:
     /// the box allows 7443 (where the router or a redirect delivers), and a
     /// VPS provider's firewall opens the public 443, not 7443.

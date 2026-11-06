@@ -4201,6 +4201,24 @@ pub(super) fn relay_state_line(running: bool, updated_at_ms: u64, now: u64) -> S
     }
 }
 
+/// The `state` row of `raven relay status` in a dedicated relay folder, from
+/// [`relay_allow::relay_is_running`] and the time of its last status. A lock
+/// that is refused (a leftover journal beside it, WINLIN-1) is no relay that
+/// runs: the row says what `raven-node relay --check` says (round 2).
+pub(super) fn relay_folder_state(
+    running: Result<bool, String>,
+    updated_at_ms: Option<u64>,
+    now: u64,
+) -> String {
+    match (running, updated_at_ms) {
+        (Err(leftover), _) => leftover,
+        (Ok(running), Some(at)) => relay_state_line(running, at, now),
+        (Ok(_), None) => {
+            "the relay has not run here yet: raven-node relay --data-dir <this folder>".into()
+        }
+    }
+}
+
 fn counts_line(c: &RelayCounts) -> String {
     format!(
         "reservations={} circuits={} refused_reservations={} refused_circuits={} \
@@ -4500,14 +4518,14 @@ pub(super) fn cmd_relay_status(data_dir: &Path) -> Result<(), String> {
     for (k, v) in allow_list_rows(&relay_allow::load_relay_allow(data_dir), false) {
         kv(&k, &v);
     }
-    // A refused lock (a leftover journal, WINLIN-1) reads as in use here, as
-    // before; `raven-node relay --check` names it.
-    let running = relay_allow::relay_is_running(data_dir).unwrap_or(true);
+    // A refused lock (a leftover journal, WINLIN-1) is named as
+    // `raven-node relay --check` names it, not as a relay that runs.
+    let running = relay_allow::relay_is_running(data_dir);
     match relay_allow::load_relay_status(data_dir)? {
         Some(st) => {
             kv(
                 "state",
-                &relay_state_line(running, st.updated_at_ms, now_ms()),
+                &relay_folder_state(running, Some(st.updated_at_ms), now_ms()),
             );
             kv("peer_id", &sanitize_terminal_line(&st.peer_id));
             kv(
@@ -4527,10 +4545,7 @@ pub(super) fn cmd_relay_status(data_dir: &Path) -> Result<(), String> {
                 ),
             );
         }
-        None => kv(
-            "state",
-            "the relay has not run here yet: raven-node relay --data-dir <this folder>",
-        ),
+        None => kv("state", &relay_folder_state(running, None, now_ms())),
     }
     Ok(())
 }
@@ -7959,6 +7974,32 @@ mod tests {
         );
         // A relay that never wrote a status (0) and is not running.
         assert!(relay_state_line(false, 0, now).starts_with("not running"));
+    }
+
+    /// Round 2: a dedicated relay folder whose lock is refused (a leftover
+    /// journal beside it, WINLIN-1) is no relay that runs: `raven relay
+    /// status` says what `raven-node relay --check` says, with a status file
+    /// or without one. Otherwise its state row reads as before.
+    #[test]
+    fn relay_status_names_a_leftover_journal_not_a_running_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = relay_allow::RELAY_LOCK_FILE;
+        std::fs::write(dir.path().join(lock), [1u8; 512]).unwrap();
+        std::fs::write(dir.path().join(format!("{lock}-journal")), b"X").unwrap();
+        let leftover = relay_allow::relay_is_running(dir.path()).expect_err("a leftover journal");
+        let now = 1_000_000_000;
+        for at in [Some(now - 5_000), None] {
+            let state = relay_folder_state(relay_allow::relay_is_running(dir.path()), at, now);
+            assert_eq!(state, leftover, "{at:?}");
+            assert!(!state.starts_with("running"), "{state}");
+        }
+        assert_eq!(
+            relay_folder_state(Ok(true), Some(now - 5_000), now),
+            "running"
+        );
+        assert!(relay_folder_state(Ok(false), Some(now - 5_000), now).starts_with("not running"));
+        assert!(relay_folder_state(Ok(false), None, now).starts_with("the relay has not run here"));
+        assert!(relay_folder_state(Ok(true), None, now).starts_with("the relay has not run here"));
     }
 
     #[test]

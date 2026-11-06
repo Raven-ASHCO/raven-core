@@ -663,7 +663,7 @@ pub fn is_relay_dir(dir: &Path) -> bool {
 /// empty, with a journal beside it, which no Raven program leaves (security
 /// review 2026-11, WINLIN-1). No relay starts in such a folder, and
 /// `raven-node relay --check` prints that text instead of naming a relay to
-/// stop (`raven relay status` still reads the folder as in use).
+/// stop (so do a refused start and `raven relay status`, round 2).
 pub fn relay_is_running(dir: &Path) -> Result<bool, String> {
     let lock = dir.join(RELAY_LOCK_FILE);
     if !lock.exists() {
