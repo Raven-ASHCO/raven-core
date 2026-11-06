@@ -1032,6 +1032,17 @@ impl Profile {
             "RAVEN_LAB_TOR_WARM_LINK",
             // Groups' lab unlock; no case sets it.
             "RAVEN_LAB_GROUPS",
+            // The engine's Tor tests' lab names (raven-client
+            // tests/net_tor.rs sets them in its own process): an ACK lost
+            // after the write, and the loopback helper's connect counts,
+            // latency, one circuit per service, bootstrap time and dead
+            // shared circuit; no case here sets them.
+            "RAVEN_LAB_CLOSE_BEFORE_ACK",
+            "RAVEN_LAB_TOR_LOOPBACK_COUNT",
+            "RAVEN_LAB_TOR_LOOPBACK_LATENCY_MS",
+            "RAVEN_LAB_TOR_LOOPBACK_ONE_CIRCUIT",
+            "RAVEN_LAB_TOR_LOOPBACK_READY_MS",
+            "RAVEN_LAB_TOR_LOOPBACK_STALE_MS",
         ] {
             cmd.env_remove(k);
         }
