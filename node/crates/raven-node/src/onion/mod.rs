@@ -383,18 +383,33 @@ async fn ready_connect_within(within: Duration) -> Option<(Route, [u8; proto::TO
             return Some(ready);
         }
         let left = until.saturating_duration_since(tokio::time::Instant::now());
-        if left.is_zero() || !starting(&status(), Instant::now() + left) {
+        let coming = TASK_COMING.load(std::sync::atomic::Ordering::Relaxed);
+        if left.is_zero() || !starting(&status(), coming, Instant::now() + left) {
             return None;
         }
         tokio::time::sleep(READY_LOOK.min(left)).await;
     }
 }
 
-/// The helper is starting, or starting again before `until`.
-fn starting(s: &Status, until: Instant) -> bool {
+/// This node runs the onion service task ([`run`]): set before its IPC
+/// server takes a request ([`task_coming`]). Until the task sets its first
+/// phase the status reads [`Phase::Off`], and a dial then waits for Tor as
+/// it does while Tor starts, instead of failing at once with
+/// [`ONION_NOT_READY`] (audit T7: a send at once after the node starts).
+static TASK_COMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The node is about to start the onion service task (see [`TASK_COMING`]).
+pub(crate) fn task_coming() {
+    TASK_COMING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The helper is starting, or starting again before `until`, or (`coming`)
+/// the onion service task has not set its first phase yet.
+fn starting(s: &Status, coming: bool, until: Instant) -> bool {
     match s.phase {
         Phase::Starting => true,
         Phase::Restarting => s.retry_at.is_none_or(|at| at <= until),
+        Phase::Off => coming,
         _ => false,
     }
 }

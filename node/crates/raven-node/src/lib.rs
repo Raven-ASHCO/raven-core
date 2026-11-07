@@ -5901,6 +5901,11 @@ pub(crate) async fn run_service(
     let fq = bridge_run::forward_queue_path(&data_dir);
     drop(ForwardQueue::open(&fq).map_err(|e| format!("service queue warmup failed: {e}"))?);
     let fwd = Some(fq);
+    // The onion service task starts below, after the IPC server: a send
+    // that comes first waits for its Tor (onion::task_coming).
+    if full {
+        onion::task_coming();
+    }
     let data_ipc = data_dir.clone();
     let in_process = !host.is_process();
     let mut ipc_task = tokio::spawn(async move {

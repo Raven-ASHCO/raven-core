@@ -923,6 +923,37 @@ fn ready_after(after: Duration, connect: SocketAddr) -> tokio::task::JoinHandle<
     })
 }
 
+/// Before the onion service task sets its first phase the status reads
+/// Off: a dial waits for Tor then only on a node that runs the task
+/// (`TASK_COMING`, set before its IPC server takes a request), so a send at
+/// once after the node starts is not refused at once (audit T7).
+#[test]
+fn off_counts_as_starting_only_while_the_task_is_coming() {
+    let until = Instant::now() + Duration::from_secs(8);
+    let off = Status::default();
+    assert_eq!(off.phase, Phase::Off);
+    assert!(starting(&off, true, until));
+    assert!(!starting(&off, false, until));
+    for phase in [
+        Phase::Ready,
+        Phase::Blocked,
+        Phase::CantStart,
+        Phase::NotBuilt,
+        Phase::OffMobileData,
+    ] {
+        let s = Status {
+            phase,
+            ..Status::default()
+        };
+        assert!(!starting(&s, true, until), "{phase:?}");
+    }
+    let s = Status {
+        phase: Phase::Starting,
+        ..Status::default()
+    };
+    assert!(starting(&s, false, until));
+}
+
 /// A send while Tor is still starting (the iPhone app back from the
 /// background, audit T7): the onion dial waits for Tor to be ready, a
 /// moment later, instead of failing at once with ONION_NOT_READY (the
