@@ -34,7 +34,7 @@ Rust helper: `raven_core::messaging_path` (`MessagingPath::{ServerlessRvn1, Lega
 
 | Label | Meaning |
 |-------|---------|
-| `daemon_presence` | `ipc_client::ipc_ping` over `ipc_endpoint`. Success: `present` (not `up`). Connect fail: `down`. `IpcEndpoint::Unsupported`: `blocked (reason=ipc_transport_missing)` — never a ✓. Windows: the per-user pipe `\\.\pipe\raven-node-<user SID>` only (never UDS); a pipe whose server runs as another user is refused. |
+| `daemon_presence` | `ipc_client::ipc_ping` over `ipc_endpoint`. Success: `present` (not `up`). Connect fail: `down`. `IpcEndpoint::Unsupported`: `blocked (reason=ipc_transport_missing)` — never a ✓. Windows: the per-user pipe `\\.\pipe\raven-node-<user SID>-<profile token>` only (never UDS; scripts/install/WINDOWS_SERVICE.md); a pipe whose server runs as another user is refused. |
 | `daemon_ready` | Presence plus Status, `raven_core::identity_usable` (mismatch ⇒ ready FAIL), queue/DB or `forward_pending`, `serverless_rvn1`. |
 | `send_path` | Default `not_ready (reason=not_probed)`. Never green from presence or ready. |
 

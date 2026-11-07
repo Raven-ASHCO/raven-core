@@ -605,8 +605,9 @@ if [[ "$(loginctl show-user "$LINGER_USER" -p Linger 2>/dev/null || true)" == "L
   echo "  Headless host? Run 'loginctl enable-linger $LINGER_USER' (or re-run with RAVEN_ENABLE_LINGER=1)."
 fi
 # Where the daemon really listens: a long data dir is served at
-# /tmp/raven-<uid>/raven-<hash>.sock, not at <data-dir>/raven-node.sock. Ask the
-# installed binary (`doctor` prints `ipc_endpoint=`) instead of guessing.
+# raven-<hash>.sock in $XDG_RUNTIME_DIR (in /tmp/raven-<uid> only when there is
+# none), not at <data-dir>/raven-node.sock (security review 2026-11, IPC-2). Ask
+# the installed binary (`doctor` prints `ipc_endpoint=`) instead of guessing.
 IPC_EP="$("${BIN_DIR}/raven" --data-dir "${DATA_DIR}" doctor 2>/dev/null \
   | sed -n 's/^[[:space:]]*ipc_endpoint=//p' | head -n1 || true)"
 echo "IPC sock: ${IPC_EP:-<unknown: run '${BIN_DIR}/raven --data-dir ${DATA_DIR} doctor' and look for ipc_endpoint=>}"

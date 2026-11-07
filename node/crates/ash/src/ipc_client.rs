@@ -1,7 +1,7 @@
 //! Platform IPC client: shared length-prefixed JSON I/O, cfg-gated connect.
 //!
 //! Unix connects a UDS; Windows connects the per-user pipe
-//! `\\.\pipe\raven-node-<SID>` and verifies the server runs as this user.
+//! `\\.\pipe\raven-node-<SID>-<profile token>` and verifies the server runs as this user.
 //! Framing is always [`encode_request`] / [`decode_response`] (`IPC_VERSION=1`).
 
 use std::io::{Read, Write};

@@ -619,7 +619,8 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "installed launchd agent ${LABEL}"
 echo "data-dir=${DATA_DIR}"
 # Where the daemon really listens: a long data dir is served at
-# /tmp/raven-<uid>/raven-<hash>.sock, not at <data-dir>/raven-node.sock. Ask the
+# raven-<hash>.sock in this user's own temporary folder (under /var/folders),
+# not at <data-dir>/raven-node.sock (security review 2026-11, IPC-2). Ask the
 # installed binary (`doctor` prints `ipc_endpoint=`) instead of guessing.
 IPC_EP="$("${BIN_DIR}/raven" --data-dir "${DATA_DIR}" doctor 2>/dev/null \
   | sed -n 's/^[[:space:]]*ipc_endpoint=//p' | head -n1 || true)"
