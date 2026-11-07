@@ -1540,7 +1540,8 @@ mod tests {
     }
 
     /// A mailbox fix only while learned custody is live: the gates closed
-    /// (a release build) give none, whatever the files say; with them
+    /// give none, whatever the files say (a release build follows its
+    /// production gates, which are open); with them
     /// open, a policy that never answered `raven custody use` is
     /// MailboxOff, one that said yes is NoFriend (no friend can take mail
     /// for this contact), one that said no or cannot be read is none.
@@ -1559,11 +1560,20 @@ mod tests {
         };
         set(None);
         if !cfg!(debug_assertions) {
-            // A release build ignores the per-thread overrides below (CI runs
-            // `reach_diag::` in release with every lab switch set): the gates
-            // hold, so no mail fix whatever the policy says.
-            assert_eq!(mail_path(dd, &local, &peer, NOW), MailPath::NoFix);
+            // A release build ignores the per-thread overrides below and every
+            // lab switch (CI runs `reach_diag::` in release with all of them
+            // set): the production gates decide. Friend custody and route
+            // hints are on in release, so the policy answers, as below.
+            let live = crate::custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED
+                && crate::route_hints::ROUTE_HINTS_PRODUCTION_ENABLED;
+            let gated = |path: MailPath| if live { path } else { MailPath::NoFix };
+            assert_eq!(
+                mail_path(dd, &local, &peer, NOW),
+                gated(MailPath::MailboxOff)
+            );
             set(Some(true));
+            assert_eq!(mail_path(dd, &local, &peer, NOW), gated(MailPath::NoFriend));
+            set(Some(false));
             assert_eq!(mail_path(dd, &local, &peer, NOW), MailPath::NoFix);
             return;
         }

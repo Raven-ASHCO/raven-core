@@ -377,6 +377,7 @@ if [[ "$mode" == switches ]]; then
   run_tests cargo test --locked --release -p raven-node --features nearby-radio --lib -- "${node_inert[@]}"
 else
   run_tests cargo test --locked --release -p raven-core --lib -- inert production_flag
-  run_tests cargo test --locked --release -p raven-node --bins -- inert production_flag
+  # raven-node's tests live in its library; its binaries have none.
+  run_tests cargo test --locked --release -p raven-node --lib -- inert production_flag
 fi
 [[ "$print_only" == 1 ]] || echo "release_inert_tests: PASS: $mode, $total release tests in $runs runs"
