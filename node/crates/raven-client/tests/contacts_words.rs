@@ -432,13 +432,27 @@ fn settings_are_checked_and_kept() {
     assert_eq!(got["reduced_motion"], true);
     assert_eq!(got["keep_chats_days"], Value::Null);
     assert_eq!(got["display_name"], "Desk D");
-    // An engine never answers with a field named like a secret.
+    // An engine never answers with a field named like a secret. Names only:
+    // the safety words are values, and one of them may be "seed".
     let r = raw(&again, "identity.me", json!({}));
+    let names = field_names(&r);
     for bad in ["seed", "private_key", "secret", "plaintext", "recovery"] {
         assert!(
-            !all_text(&r).to_lowercase().contains(&format!("{bad} ")),
+            !names.iter().any(|n| n.to_lowercase().ends_with(bad)),
             "{r}"
         );
+    }
+}
+
+/// Every field name in `v`, at any depth.
+fn field_names(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(items) => items.iter().flat_map(field_names).collect(),
+        Value::Object(map) => map
+            .iter()
+            .flat_map(|(k, v)| std::iter::once(k.clone()).chain(field_names(v)))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
