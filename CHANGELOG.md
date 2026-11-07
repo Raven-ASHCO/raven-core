@@ -6,6 +6,68 @@ nothing here has had an independent security review, and there are no downloads 
 
 ## Next version (not released yet)
 
+Most of the changes below come from our own security review of November 2026. It is not an
+independent review.
+
+### Privacy on this computer
+
+- In a sealed profile, the app channel's queue and its pairing records are now sealed like the rest
+  of the profile: a copy of the disk no longer shows which friend's device an app record or a pairing
+  attempt was for.
+- `raven erase` now overwrites the Tor helper's onion service keys and its introduction point keys,
+  and removes the helper's whole folder. It also removes the friend relay's lock, so the profile
+  folder goes too. On Linux it names the system journal among the places it cannot reach.
+- The Linux user service writes its lines to the profile's capped log, which erase removes, not to
+  the system journal.
+- Raven refuses a profile folder that another account owns.
+- The node's log writes control characters as escapes, so a text from a peer cannot start a line
+  that looks like Raven wrote it, or change your terminal.
+
+### Other accounts on the same computer
+
+- The node's local control endpoint can no longer be taken first by another account. For a long
+  data folder it now lives in a folder of your user alone (on macOS your own temporary folder, on
+  Linux `$XDG_RUNTIME_DIR`), and on Windows the pipe's name holds a random token of the profile.
+- raven-node and its Tor helper now prove themselves to each other on every stream. On macOS and
+  Linux they share a private socket pair that no other program gets. On Windows the helper's port
+  holds a bounded number of connections.
+- A release build no longer seals text for another program of your user (the SealUnderSession
+  request is lab only).
+- On a Mac, raven-node starts the Bluetooth helper only when its signature checks out as Raven's
+  nearby helper. The helper runs with the hardened runtime and an empty environment, and what it may
+  report is bounded.
+- The Windows installers give the program folder an access list of its own. The Linux relay
+  installer checks the relay folder as the relay account and refuses a planted SQLite journal.
+
+### The network and Tor
+
+- Raven tells your contacts a public address only after a contact or a relay saw you there. STUN
+  and router answers alone no longer decide it, so someone on your network cannot make your friends
+  dial an address of their choosing.
+- UPnP: Raven takes the gateway answer from your default router only, bounds what it reads from it,
+  and uses a mapping only at a public address a contact or relay saw.
+- A stranger who has your card can no longer keep your friends out by filling your onion service
+  with silent connections, and one contact cannot hold every place. The Tor helper keeps at most 64
+  rendezvous circuits and closes idle ones.
+- Raven remembers each contact's onion link key the first time they connect, and stops a Tor
+  connection that shows another key before it sends anything about you.
+- On the local network, one IPv6 host can no longer use up the places of its neighbours.
+
+### Groups
+
+- A blocked contact no longer takes part in your groups.
+- The group store is bounded in size and shared fairly between admins and authors, and a group can
+  be forgotten.
+- A member who is not your friend is marked as such.
+
+### For the apps and for people who build Raven
+
+- Next to the name of the friend who holds a message of yours, or of the group member who passed a
+  message on, the engine now says whether that is a friend you verified and have not blocked
+  (`via_friend`), so the apps never show anyone else as a friend.
+- Release builds refuse debug assertions, which would open lab switches. Every build uses the locked
+  dependency list, and our copies of outside libraries are checked against their published releases.
+
 ### Tor and mail friends
 
 - When Tor becomes usable (Raven started, the network changed, the computer woke, the iPhone app
