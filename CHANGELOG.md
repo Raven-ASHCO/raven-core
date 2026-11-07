@@ -79,6 +79,8 @@ independent review.
   app went to the background.
 - A message to a friend whose Tor connection died without notice gets a new connection after 6
   seconds instead of 12.
+- A message sent the moment Raven starts (the iPhone app opening, for one) waits a few seconds for
+  Tor and goes, instead of showing Waiting until the next try.
 - When Raven's own onion service stays unreachable while Tor still answers (two failed self-checks
   in a row, at least 12 minutes after Tor was ready, and no friend linked in for 10 minutes), Raven
   starts Tor again: at most once in 30 minutes and four times in 6 hours. Before, it stayed
