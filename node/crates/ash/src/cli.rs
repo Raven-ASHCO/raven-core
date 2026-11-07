@@ -18700,7 +18700,7 @@ fn cmd_doctor(data_dir: &Path, require_ready: bool, router: bool) {
     println!(
         "  ipc_transport: {}",
         match &ep {
-            IpcEndpoint::NamedPipe(_) => "named_pipe",
+            IpcEndpoint::NamedPipe(_) | IpcEndpoint::NoPipeYet => "named_pipe",
             IpcEndpoint::UnixSocket(_) => "uds",
             IpcEndpoint::Unsupported => "missing",
         }
@@ -18716,6 +18716,13 @@ fn cmd_doctor(data_dir: &Path, require_ready: bool, router: bool) {
         }
         IpcEndpoint::NamedPipe(_) => {
             println!("  file_present: raven-node.sock not_probed");
+        }
+        // No raven-node named this profile's pipe yet (review IPC-2).
+        IpcEndpoint::NoPipeYet => {
+            println!(
+                "  file_present: {} no",
+                raven_core::ipc::PIPE_TOKEN_FILE_NAME
+            );
         }
         IpcEndpoint::Unsupported => {
             println!("  file_present: ipc_endpoint not_probed");
@@ -19332,12 +19339,19 @@ pub_hex     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
                 reason: "ipc_transport_blocked".into()
             }
         );
-        // A folder of its own: on Windows the endpoint keeps the profile's
-        // pipe token there (review IPC-2).
+        // A folder of its own: on Windows raven-node keeps the profile's pipe
+        // token there, and a client that only asks makes none (review IPC-2).
         let dd = tempfile::tempdir().unwrap();
         let ep = ipc_endpoint(dd.path());
         if cfg!(windows) {
-            // Per-user pipe: `{WINDOWS_NAMED_PIPE}-{user SID}-{profile token}`.
+            assert_eq!(ep, IpcEndpoint::NoPipeYet);
+            assert!(ep.transport_available());
+            assert_eq!(std::fs::read_dir(dd.path()).unwrap().count(), 0);
+            // Once raven-node named it, the per-user pipe:
+            // `{WINDOWS_NAMED_PIPE}-{user SID}-{profile token}`.
+            #[cfg(windows)]
+            raven_core::ipc::windows_pipe_name(dd.path()).expect("the node's pipe name");
+            let ep = ipc_endpoint(dd.path());
             assert!(matches!(ep, IpcEndpoint::NamedPipe(_)));
             assert!(ep
                 .to_string()

@@ -362,6 +362,10 @@ fn connect_and_transact(
     match endpoint {
         IpcEndpoint::UnixSocket(path) => connect_unix(path, req, timeout, connect_budget),
         IpcEndpoint::NamedPipe(name) => connect_named_pipe(name, req, timeout),
+        // Windows: no raven-node named this profile's pipe yet (review IPC-2).
+        IpcEndpoint::NoPipeYet => Err(format!(
+            "{NOT_RUNNING}; {START_HINT} (no raven-node has named this profile's pipe yet)"
+        )),
         IpcEndpoint::Unsupported => Err("ipc_transport_missing".into()),
     }
 }
@@ -778,6 +782,22 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "ipc_transport_missing");
+    }
+
+    /// Review IPC-2: a Windows profile whose pipe no raven-node named yet
+    /// reads as a node that is not running, not as a missing transport.
+    #[test]
+    fn a_profile_with_no_pipe_yet_is_not_running() {
+        let err = connect_and_transact(
+            &IpcEndpoint::NoPipeYet,
+            &ping(),
+            IPC_IO_TIMEOUT,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(error_means_not_running(&err), "{err}");
+        assert!(err.contains(START_HINT), "{err}");
+        assert!(IpcEndpoint::NoPipeYet.transport_available());
     }
 
     #[test]

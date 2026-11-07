@@ -2419,8 +2419,10 @@ fn windows_pipe_name_from(
         .filter(|name| name.len() <= WINDOWS_PIPE_NAME_MAX)
 }
 
-/// This profile's pipe token, made on first use by whichever process asks
-/// first (the node, or a client before it starts the node). It is written
+/// This profile's pipe token, made on first use by raven-node as it starts
+/// (or a lab harness that names a node's pipe before it starts). A client
+/// never makes one ([`pipe_name_made`]): asking the node leaves nothing in
+/// the profile, and no folder after `raven erase`. It is written
 /// owner only (0600, or the owner only DACL on Windows) to a synced temp
 /// file and then linked into place, and a link never replaces a file: a
 /// reader finds no token or all of it, and two first starts agree on one.
@@ -2487,10 +2489,11 @@ fn read_pipe_token(path: &std::path::Path) -> Result<Option<String>, String> {
     }
 }
 
-/// The pipe of the raven-node that serves `data_dir`, as the node binds it
-/// and every client opens it ([`ipc_endpoint`]): this user's SID, the
-/// profile's token ([`pipe_token`], made here on first use) and, in a debug
-/// build, this process's [`LAB_IPC_PIPE_SUFFIX_ENV`].
+/// The pipe of the raven-node that serves `data_dir`, as the node binds it:
+/// this user's SID, the profile's token ([`pipe_token`], made here on first
+/// use) and, in a debug build, this process's [`LAB_IPC_PIPE_SUFFIX_ENV`].
+/// For raven-node (and the lab harnesses) only: a client opens the name the
+/// node made ([`ipc_endpoint`], [`windows_pipe_name_made`]).
 #[cfg(windows)]
 pub fn windows_pipe_name(data_dir: &std::path::Path) -> Result<String, String> {
     let suffix = std::env::var(LAB_IPC_PIPE_SUFFIX_ENV).ok();
@@ -2504,14 +2507,52 @@ pub fn windows_pipe_name_with_suffix(
     data_dir: &std::path::Path,
     suffix: Option<&str>,
 ) -> Result<String, String> {
-    static SID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let sid = SID
-        .get_or_init(|| win_pipe::current_user_sid().ok())
-        .as_deref()
-        .ok_or("cannot read the SID of this user")?;
     let token = pipe_token(data_dir)?;
-    windows_pipe_name_from(sid, &token, suffix, cfg!(debug_assertions))
+    windows_pipe_name_from(this_user_sid()?, &token, suffix, cfg!(debug_assertions))
         .ok_or_else(|| "no pipe name for this user and profile".to_string())
+}
+
+/// The pipe a client opens for `data_dir`'s raven-node: the name that node
+/// made ([`windows_pipe_name`]), read only. `Ok(None)`: no raven-node has
+/// named this profile's pipe (none has served it, or none since `raven
+/// erase`), so none serves it now. A client never makes a token, nor the
+/// profile's folder (review IPC-2).
+#[cfg(windows)]
+pub fn windows_pipe_name_made(data_dir: &std::path::Path) -> Result<Option<String>, String> {
+    let suffix = std::env::var(LAB_IPC_PIPE_SUFFIX_ENV).ok();
+    pipe_name_made(
+        data_dir,
+        this_user_sid()?,
+        suffix.as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+/// [`windows_pipe_name_made`] for `sid` (testable on every OS): `Ok(None)`
+/// when the profile has no token, an error for a file under its name that
+/// is none ([`read_pipe_token`]). Nothing is written.
+#[cfg(any(windows, test))]
+fn pipe_name_made(
+    data_dir: &std::path::Path,
+    sid: &str,
+    suffix: Option<&str>,
+    lab_build: bool,
+) -> Result<Option<String>, String> {
+    let Some(token) = read_pipe_token(&data_dir.join(PIPE_TOKEN_FILE_NAME))? else {
+        return Ok(None);
+    };
+    windows_pipe_name_from(sid, &token, suffix, lab_build)
+        .map(Some)
+        .ok_or_else(|| "no pipe name for this user and profile".to_string())
+}
+
+/// This user's SID, read once.
+#[cfg(windows)]
+fn this_user_sid() -> Result<&'static str, String> {
+    static SID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SID.get_or_init(|| win_pipe::current_user_sid().ok())
+        .as_deref()
+        .ok_or_else(|| "cannot read the SID of this user".to_string())
 }
 
 /// Keeps `data_dir`'s pipe token from being removed or replaced while the
@@ -2649,6 +2690,11 @@ pub enum IpcEndpoint {
     /// Per-user Windows named pipe (`{WINDOWS_NAMED_PIPE}-{user SID}`), with
     /// the profile's token since review IPC-2 (`windows_pipe_name`).
     NamedPipe(String),
+    /// Windows: no raven-node has named this profile's pipe yet (no
+    /// [`PIPE_TOKEN_FILE_NAME`]), so none serves it. Only raven-node makes
+    /// the token, as it starts: a client that only asks makes nothing in
+    /// the profile (review IPC-2). Clients read it as "not running".
+    NoPipeYet,
     /// No local IPC transport on this OS. Clients/doctor must fail closed
     /// (`ipc_transport_missing`) — never treat as a pass.
     Unsupported,
@@ -2659,6 +2705,7 @@ impl std::fmt::Display for IpcEndpoint {
         match self {
             IpcEndpoint::UnixSocket(p) => write!(f, "{}", p.display()),
             IpcEndpoint::NamedPipe(n) => write!(f, "{n}"),
+            IpcEndpoint::NoPipeYet => write!(f, "no_pipe_yet"),
             IpcEndpoint::Unsupported => write!(f, "ipc_transport_missing"),
         }
     }
@@ -2681,10 +2728,12 @@ pub fn ipc_endpoint(data_dir: &std::path::Path) -> IpcEndpoint {
     }
     #[cfg(windows)]
     {
-        match windows_pipe_name(data_dir) {
-            Ok(name) => IpcEndpoint::NamedPipe(name),
-            // No user SID or no pipe token → no name another account cannot
-            // guess. Fail closed.
+        // The name raven-node made, read only: a client makes no token.
+        match windows_pipe_name_made(data_dir) {
+            Ok(Some(name)) => IpcEndpoint::NamedPipe(name),
+            Ok(None) => IpcEndpoint::NoPipeYet,
+            // No user SID, or a file under the token's name that is none →
+            // no name another account cannot guess. Fail closed.
             Err(_) => IpcEndpoint::Unsupported,
         }
     }
@@ -5287,6 +5336,39 @@ mod tests {
         assert_eq!(names, [std::ffi::OsString::from(PIPE_TOKEN_FILE_NAME)]);
     }
 
+    /// Review IPC-2: a client only reads the name raven-node made. Before
+    /// one is made it finds none and makes nothing, no token and no folder
+    /// (a profile `raven erase` removed stays removed); then it finds the
+    /// node's name; a file under the token's name that is none is an error.
+    #[test]
+    fn a_client_reads_the_pipe_name_and_makes_nothing() {
+        let sid = "S-1-5-21-1004336348-1177238915-682003330-1001";
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("erased");
+        assert_eq!(pipe_name_made(&gone, sid, None, false), Ok(None));
+        assert!(!gone.exists(), "the profile's folder was made");
+        let dir = tmp.path().join("profile");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(pipe_name_made(&dir, sid, None, false), Ok(None));
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "a file was made"
+        );
+        let token = pipe_token(&dir).unwrap();
+        assert_eq!(
+            pipe_name_made(&dir, sid, None, false),
+            Ok(windows_pipe_name_for(sid, &token))
+        );
+        assert_eq!(
+            pipe_name_made(&dir, sid, Some("lab_1"), true),
+            Ok(windows_pipe_name_from(sid, &token, Some("lab_1"), true))
+        );
+        assert_eq!(pipe_name_made(&dir, "S-1-x", None, false).ok(), None);
+        std::fs::write(dir.join(PIPE_TOKEN_FILE_NAME), "short").unwrap();
+        assert!(pipe_name_made(&dir, sid, None, false).is_err());
+    }
+
     /// A file under the token's name that is no token (cut short, a link,
     /// open to others) is refused and never replaced.
     #[cfg(unix)]
@@ -5466,9 +5548,14 @@ mod tests {
     fn ipc_endpoint_selects_windows_named_pipe() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
+        // Before raven-node named its pipe a client finds none and makes no
+        // token (review IPC-2).
+        assert_eq!(ipc_endpoint(dir), IpcEndpoint::NoPipeYet);
+        assert!(IpcEndpoint::NoPipeYet.transport_available());
+        assert!(!dir.join(PIPE_TOKEN_FILE_NAME).exists());
+        let name = windows_pipe_name(dir).expect("current user SID and a token");
         let ep = ipc_endpoint(dir);
         assert_eq!(default_ipc_endpoint(dir), ep);
-        let name = windows_pipe_name(dir).expect("current user SID and a token");
         assert_eq!(ep, IpcEndpoint::NamedPipe(name.clone()));
         // The SID and the token this profile now keeps (review IPC-2).
         let sid = win_pipe::current_user_sid().expect("current user SID");
