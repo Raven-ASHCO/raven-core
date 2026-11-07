@@ -138,7 +138,7 @@ check_relay() {
     || fail "linux_relay.sh: the check does not start from no capabilities (check_caps=(--inh-caps=-all))"
   n_low="$(line_of "$step5" 'if [[ $low_port -eq 1 ]]; then' line)"
   in_order "linux_relay.sh: CAP_NET_BIND_SERVICE is not the only capability, given only when a port is below 1024" \
-    "$n_low" "$(line_of "$step5" 'check_caps=(--inh-caps=-all,+net_bind_service --ambient-caps=+net_bind_service)' line)"
+    "$n_low" "$(line_of "$step5" 'check_caps=("--inh-caps=-all,+net_bind_service" "--ambient-caps=+net_bind_service")' line)"
   n_check="$(line_of "$code" 'relay --check')"
   in_order "linux_relay.sh: low_port is not worked out once, before the check" \
     "$(line_of "$code" 'low_port=0' line)" "$n_check"
@@ -346,7 +346,7 @@ caught "root checks every install" check_relay "$RELAY" \
 caught "a folder without the account is checked as root" check_relay "$RELAY" \
   'elif as_root test -e "$STATE_DIR" || as_root test -L "$STATE_DIR"; then' 'elif false; then'
 caught "the check always has CAP_NET_BIND_SERVICE" check_relay "$RELAY" \
-  'check_caps=(--inh-caps=-all)' 'check_caps=(--inh-caps=-all,+net_bind_service --ambient-caps=+net_bind_service)'
+  'check_caps=(--inh-caps=-all)' 'check_caps=("--inh-caps=-all,+net_bind_service" "--ambient-caps=+net_bind_service")'
 caught "a third check runs" check_relay "$RELAY" \
   'as_root systemctl daemon-reload' 'as_root env "$RELAY_NODE_BIN" relay --check --data-dir "$STATE_DIR"\nas_root systemctl daemon-reload'
 

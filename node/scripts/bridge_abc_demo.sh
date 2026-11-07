@@ -53,7 +53,9 @@ echo "C pub (public only) ok"
 # Ensure bridge policy on for B
 "$ASH" --data-dir "$WORKDIR/b" node bridge on
 "$ASH" --data-dir "$WORKDIR/b" node store on
-"$ASH" --data-dir "$WORKDIR/b" status | tee "$WORKDIR/ash_status.txt"
+# The node policy rows (bridge, store, forward_q) are in `status --verbose`
+# only since 0.1.1.
+"$ASH" --data-dir "$WORKDIR/b" status --verbose | tee "$WORKDIR/ash_status.txt"
 grep -q 'bridge' "$WORKDIR/ash_status.txt"
 
 # The bridge writes its --write-lan-addr/--write-ble-addr files with
@@ -269,7 +271,7 @@ done
 echo "bridge logs hold no plaintext (lab cipher; see comment)"
 
 echo "=== ash status still safe ==="
-"$ASH" --data-dir "$WORKDIR/b" status | tee "$WORKDIR/ash_status2.txt"
+"$ASH" --data-dir "$WORKDIR/b" status --verbose | tee "$WORKDIR/ash_status2.txt"
 grep -q 'forward_q' "$WORKDIR/ash_status2.txt"
 # Explicit if/exit: errexit never fires on a `!`-negated command. The only
 # allowed mention is the fixed safety banner "(public bits only — never a seed)".

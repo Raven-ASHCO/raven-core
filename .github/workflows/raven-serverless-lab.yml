@@ -293,7 +293,7 @@ jobs:
     name: Full Braid Slice 2 lab (iOS)
     needs: tree-presence
     if: needs.tree-presence.outputs.ios_app == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/node/target/full-braid-ios-lab
@@ -383,7 +383,7 @@ jobs:
     name: Full Braid Task 0A macOS + iOS (0A.2–0A.4)
     needs: tree-presence
     if: needs.tree-presence.outputs.ios_app == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/node/target/full-braid-task0a-macos
@@ -502,7 +502,7 @@ jobs:
 
   mlkem768-incremental-neon:
     name: ML-KEM-768 incremental (NEON)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     needs: mlkem768-incremental-portable
     defaults:

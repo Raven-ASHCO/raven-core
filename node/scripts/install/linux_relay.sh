@@ -252,7 +252,8 @@ if relay_uid="$(id -u "$RELAY_USER" 2>/dev/null)"; then
   relay_gid="$(id -g "$RELAY_USER")"
   check_caps=(--inh-caps=-all)
   if [[ $low_port -eq 1 ]]; then
-    check_caps=(--inh-caps=-all,+net_bind_service --ambient-caps=+net_bind_service)
+    # One word each: setpriv's capability lists are comma separated.
+    check_caps=("--inh-caps=-all,+net_bind_service" "--ambient-caps=+net_bind_service")
   fi
   lib_new=0
   as_root test -d "$LIB_DIR" || lib_new=1
