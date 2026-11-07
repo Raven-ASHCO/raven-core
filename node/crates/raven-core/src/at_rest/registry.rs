@@ -605,6 +605,17 @@ pub const FILES: &[FileRule] = &[
     // a profile a relay ran in, they are Raven's like the rest (PP.16).
     rule("relay_status.json", Rule::RelayDirPlain),
     rule("relay_key.ed25519", Rule::RelayDirPlain),
+    // The friend relay's lock (relay_allow::RELAY_LOCK_FILE) in its folder:
+    // the lock patterns below match top level names only, so without these
+    // `raven erase` left the lock and the profile folder behind and called
+    // the lock a file Raven did not create (upgrade check 2026-11, F1).
+    plain(
+        "friend_relay/.relay.lock.sqlite",
+        "the friend relay's lock, an empty lock database",
+    ),
+    plain("friend_relay/.relay.lock.sqlite-wal", SQLITE_SIDECAR),
+    plain("friend_relay/.relay.lock.sqlite-shm", SQLITE_SIDECAR),
+    plain("friend_relay/.relay.lock.sqlite-journal", SQLITE_SIDECAR),
     // ── Patterns ──
     plain(
         ".send_*.lock.sqlite",

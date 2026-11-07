@@ -1164,6 +1164,30 @@ fn temp_files_of_interrupted_writes_go_with_ravens_folders() {
     assert_eq!(std::fs::read(&witness.1).unwrap(), [0; 32]);
 }
 
+/// Upgrade check 2026-11, F1: the friend relay's lock (and a leftover
+/// sidecar of it) in `friend_relay/` is Raven's. Erase deletes it and the
+/// folder, and calls nothing in the profile a file Raven did not create.
+#[test]
+fn the_friend_relays_lock_goes_with_its_folder() {
+    let _windows = ForTests::on();
+    let dir = sealed_profile();
+    let dd = canonical(&dir);
+    std::fs::create_dir(dd.join("friend_relay")).unwrap();
+    let lock = format!("friend_relay/{}", crate::relay_allow::RELAY_LOCK_FILE);
+    let journal = format!("{lock}-journal");
+    std::fs::write(dd.join(&lock), []).unwrap();
+    std::fs::write(dd.join(&journal), []).unwrap();
+    let p = plan(&dd).unwrap();
+    for name in [&lock, &journal] {
+        assert!(p.data_files.contains(&dd.join(name)), "{name}: {p:?}");
+    }
+    assert!(p.left_unknown.is_empty(), "{p:?}");
+    let report = erase(&dd);
+    assert!(report.finished && report.folder_removed, "{report:?}");
+    assert!(report.left_unknown.is_empty(), "{report:?}");
+    assert!(!dd.exists());
+}
+
 /// Review KS-1 (interim) and TOR-7: once the onion service ran, the Tor
 /// helper's keystore holds the service's key, each time period's keys and
 /// the intro points' keys (seven levels below the profile). Every one is
