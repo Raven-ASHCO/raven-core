@@ -402,13 +402,18 @@ fn send_notes_only_an_open_alert_about_that_contact() {
 fn verify_names_the_contact_as_one_shell_word() {
     let mut c = contact(0x5a, "Sara", true);
     assert_eq!(verify_arg(&c).as_deref(), Some("--petname=Sara"));
+    // A POSIX shell's quoting here; PowerShell's (Windows) in the next test.
     c.petname = "Sara K. (work)".into();
     assert_eq!(
-        verify_arg(&c).as_deref(),
+        verify_arg_for(&c, false).as_deref(),
         Some("--petname=\"Sara K. (work)\"")
     );
+    assert_eq!(verify_arg(&c), verify_arg_for(&c, cfg!(windows)));
     c.petname = "a\"b$c`d".into();
-    assert_eq!(verify_arg(&c).as_deref(), Some("--petname='a\"b$c`d'"));
+    assert_eq!(
+        verify_arg_for(&c, false).as_deref(),
+        Some("--petname='a\"b$c`d'")
+    );
     c.petname = String::new();
     assert_eq!(verify_arg(&c).as_deref(), Some("--tag=sara"));
     c.public_tag = String::new();
@@ -457,7 +462,7 @@ fn verify_hint_keeps_any_name_one_safe_word() {
         ("Ali & Sara", "--petname=\"Ali & Sara\""),
     ] {
         c.petname = petname.into();
-        assert_eq!(verify_arg(&c).as_deref(), Some(arg), "{petname}");
+        assert_eq!(verify_arg_for(&c, false).as_deref(), Some(arg), "{petname}");
     }
 }
 

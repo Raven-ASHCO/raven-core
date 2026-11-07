@@ -181,8 +181,9 @@ fn lock_now_and_the_idle_lock_use_lock_v2() {
         text.contains("Raven keeps running but forgets its keys"),
         "{text}"
     );
+    // Before the line ends on every OS (Windows names its account first).
     assert!(
-        text.contains("Anyone who can log in as you can open them"),
+        text.contains("Anyone who can log in as you can open"),
         "{text}"
     );
     let jobs = node_jobs(&testkit::press(&mut app, KeyCode::Enter));

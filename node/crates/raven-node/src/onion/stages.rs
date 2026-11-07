@@ -530,12 +530,19 @@ mod tests {
     /// file, the shared clock alone (a reading between two taken around
     /// it); one over any other carrier reads neither the lab file nor the
     /// clock, and with no lab file the clock is not read. A release build
-    /// writes nothing.
+    /// writes nothing, and neither does a computer with no clock to share
+    /// (Windows).
     #[test]
     fn a_message_stored_over_tor_adds_one_clock_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f-stages.jsonl");
         let lab = || Some(path.clone());
+        if cfg!(not(unix)) {
+            assert_eq!(shared_clock_ns(), None);
+            stored_with(ArrivedVia::Tor, lab, shared_clock_ns);
+            assert!(!path.exists(), "no line without a shared clock");
+            return;
+        }
         let before = shared_clock_ns().expect("a shared clock");
         stored_with(ArrivedVia::Tor, lab, shared_clock_ns);
         let after = shared_clock_ns().unwrap();

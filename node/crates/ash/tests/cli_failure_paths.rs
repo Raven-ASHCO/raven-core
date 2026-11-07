@@ -1226,10 +1226,21 @@ fn lock_holds_until_unlock_and_listen_refuses() {
         .env("RAVEN_LAB_LOGIN_ITEM_TOOLS", &tools);
     let o = run_bounded(c, 60);
     assert_eq!(code(&o), 0, "{}", text(&o.stderr));
+    // A profile whose keys are in the passphrase vault (a Unix other than
+    // macOS without a usable Secret Service, a CI runner among them) is
+    // really locked; a keychain or DPAPI one is stopped.
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios")))]
+    let vault = raven_core::keystore_select::uses_vault(dir.path(), false).unwrap_or(false);
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"))))]
+    let vault = false;
     assert_eq!(
         text(&o.stdout).lines().collect::<Vec<_>>(),
         [
-            "Raven is stopped.",
+            if vault {
+                "Raven is locked."
+            } else {
+                "Raven is stopped."
+            },
             "Run `raven unlock` to start it again. If Raven is open in another window, close \
              it too. Clear your terminal too: its scrollback may show messages."
         ]

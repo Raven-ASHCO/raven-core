@@ -121,8 +121,16 @@ fn status_lines_say_states_only() {
 
 #[test]
 fn the_helper_is_found_next_to_raven_node_or_by_a_lab_switch() {
-    let exe = PathBuf::from("/opt/raven/raven-node");
-    let helper = PathBuf::from(format!(
+    // An absolute path on this OS (on Windows one with a drive).
+    let abs = |p: &str| {
+        PathBuf::from(if cfg!(windows) {
+            format!("C:{p}")
+        } else {
+            p.into()
+        })
+    };
+    let exe = abs("/opt/raven/raven-node");
+    let helper = abs(&format!(
         "/opt/raven/{HELPER_EXECUTABLE}{}",
         std::env::consts::EXE_SUFFIX
     ));
@@ -136,8 +144,8 @@ fn the_helper_is_found_next_to_raven_node_or_by_a_lab_switch() {
     assert_eq!(
         Launcher::find_with(
             false,
-            Some("/tmp/reg".into()),
-            Some("/tmp/other".into()),
+            Some(abs("/tmp/reg")),
+            Some(abs("/tmp/other")),
             Some(exe.clone()),
             only(helper.clone())
         ),
@@ -149,10 +157,10 @@ fn the_helper_is_found_next_to_raven_node_or_by_a_lab_switch() {
     );
     // Debug: the loopback registry first (absolute only), then the variable.
     assert_eq!(
-        Launcher::find_with(true, Some("/tmp/reg".into()), None, Some(exe.clone()), all),
+        Launcher::find_with(true, Some(abs("/tmp/reg")), None, Some(exe.clone()), all),
         Some(Launcher::Loopback {
             exe: exe.clone(),
-            dir: "/tmp/reg".into()
+            dir: abs("/tmp/reg")
         })
     );
     assert_eq!(
@@ -166,8 +174,8 @@ fn the_helper_is_found_next_to_raven_node_or_by_a_lab_switch() {
         Some(Launcher::Exe(helper.clone()))
     );
     assert_eq!(
-        Launcher::find_with(true, None, Some("/x/helper".into()), Some(exe.clone()), all),
-        Some(Launcher::Exe("/x/helper".into()))
+        Launcher::find_with(true, None, Some(abs("/x/helper")), Some(exe.clone()), all),
+        Some(Launcher::Exe(abs("/x/helper")))
     );
     // A relative or missing helper path is no helper.
     assert_eq!(
