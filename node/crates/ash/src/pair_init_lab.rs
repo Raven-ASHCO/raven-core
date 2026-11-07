@@ -5139,16 +5139,19 @@ mod tests {
     /// stagger and its answer carries the send.
     #[test]
     fn a_hanging_lan_route_does_not_hold_the_next_direct_route_back() {
+        // Bounds well clear of a busy CI runner's late wakeups (up to about
+        // a second seen on macOS) and of what the old order would take.
         let (done, started, took) = round(&[(3_000, false), (50, true)], None, 1_500);
         assert_eq!(done, [(1, true)]);
         assert_eq!(started, [0, 1]);
-        assert!(took < Duration::from_millis(1_000), "{took:?}");
+        assert!(took < Duration::from_millis(2_000), "{took:?}");
         // Nobody answers: every failure is reported, and the round lasts as
-        // long as the slowest probe, not their sum.
-        let (mut done, _, took) = round(&[(600, false), (600, false)], None, 1_500);
+        // long as the slowest probe (2.2 s with the stagger), not their sum
+        // (4 s).
+        let (mut done, _, took) = round(&[(2_000, false), (2_000, false)], None, 1_500);
         done.sort_unstable();
         assert_eq!(done, [(0, false), (1, false)]);
-        assert!(took < Duration::from_millis(1_150), "{took:?}");
+        assert!(took < Duration::from_millis(3_400), "{took:?}");
     }
 
     /// E2 r9 #1: Tor's head start only for a friend seen on the LAN lately

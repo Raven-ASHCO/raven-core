@@ -7112,10 +7112,13 @@ pub(crate) mod test_rig {
         pub(crate) lock_probe: Mutex<Option<(PathBuf, [u8; 32])>>,
         pub(crate) lock_free_during_dial: AtomicBool,
         /// Set by a test: at its next dial, `raven send` takes this A data
-        /// dir's send lock for that peer and keeps it this long (in a thread
-        /// of its own, [`Self::lock_holder`]).
+        /// dir's send lock for that peer and keeps it until the test lets
+        /// go (drops the sender in [`Self::lock_holder`]), at most this long
+        /// (in a thread of its own).
         pub(crate) hold_lock: Mutex<Option<(PathBuf, [u8; 32], Duration)>>,
-        pub(crate) lock_holder: Mutex<Option<std::thread::JoinHandle<()>>>,
+        #[allow(clippy::type_complexity)]
+        pub(crate) lock_holder:
+            Mutex<Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>)>>,
         /// RSR1 frames dialled (session reset queries).
         pub(crate) rsr1_frames: AtomicUsize,
         /// With `lock_probe` set: dials made, and dials made while the send
@@ -7196,15 +7199,17 @@ pub(crate) mod test_rig {
             self.rsr1_frames.fetch_add(rsr1, Ordering::SeqCst);
             if let Some((dir, peer, hold)) = self.hold_lock.lock().unwrap().take() {
                 let (taken, held) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel::<()>();
                 let holder = std::thread::spawn(move || {
                     let lock = PeerSendLock::acquire_within(&dir, &peer, Duration::ZERO)
                         .expect("`raven send` takes the lock");
                     let _ = taken.send(());
-                    std::thread::sleep(hold);
+                    // Until the test lets go, however slow the runner.
+                    let _ = released.recv_timeout(hold);
                     drop(lock);
                 });
                 held.recv().expect("the lock is held");
-                *self.lock_holder.lock().unwrap() = Some(holder);
+                *self.lock_holder.lock().unwrap() = Some((holder, release));
             }
             if let Some((dir, peer)) = self.lock_probe.lock().unwrap().clone() {
                 let free = PeerSendLock::acquire_within(&dir, &peer, Duration::ZERO).is_ok();
@@ -9490,10 +9495,12 @@ mod tests {
         rig.set(UP);
         rig.stage("recorded later", DAY);
         let ctx = rig.ctx();
+        // Held past the record phase's wait (LOCK_WAIT * 5): until this
+        // attempt is over, however slow the runner, and let go below.
         *rig.net.hold_lock.lock().unwrap() = Some((
             rig.a.path().to_path_buf(),
             rig.bob_pub,
-            LOCK_WAIT * 5 + Duration::from_secs(2),
+            Duration::from_secs(120),
         ));
         let due = rig.due();
         let outcome = only(&attempt_peer(&ctx, &rig.bob_pub, &due, &[]));
@@ -9509,8 +9516,15 @@ mod tests {
         apply_outcome(&mut entry, outcome, t, now_ms());
         assert_eq!(entry.failures, 0, "a busy lock is no failure");
         assert_eq!(entry.next_due, t + LOCK_BUSY_RETRY.max(MIN_RETRY));
-        let holder = rig.net.lock_holder.lock().unwrap().take();
-        holder.expect("the lock was held").join().unwrap();
+        let (holder, release) = rig
+            .net
+            .lock_holder
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the lock was held");
+        drop(release);
+        holder.join().unwrap();
         // Bob is gone now: only the kept ACK can deliver it, and nothing
         // is dialled for it.
         rig.set(DOWN);
