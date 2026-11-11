@@ -23,17 +23,19 @@ s37 (also by default) checks what `ash status` says about the last delivery
 to a contact: a LAST DELIVERY row naming its petname and the path in words
 ('same network (LAN)'), never an address, gone once raven-node restarts (it is
 kept in memory only); `ash doctor` says `reach_class: off` without a p2p host.
-s90 and s93 (also by default; cutoff pack CP.6, release behaviour): s90, a
+s90 and s93 (also by default; cutoff pack CP.6): s90 (route hints held by
+the debug close, RAVEN_LAB_ROUTE_HINTS=0: a release build has them on since
+2026-10-29, and with them Bob's own hint would repair the address at once), a
 verified contact's saved address turned into a black hole (and, without an
 IPv6 route, an address with no route): the sends are queued quickly with a
 deadline on this computer's clock (its own zone only), nothing goes while he stays
 silent, and his own link delivers each exactly once within 10 s
 (lan_seen.json holds where he came from); s93, a first message to a contact
-whose address is dead: NOT SENT within 6 s with the first-message rule ('a
-first message needs you and Bob both online', E1), nothing waiting (its two
-nodes keep the horizon held; under RAVEN_FAULT_HORIZON=1 a third node with
-the horizon parks the same first message: HORIZON_PARKED, waiting in its
-outbox).
+whose address is dead: with the horizon held (the debug close,
+RAVEN_LAB_HORIZON=0) it is NOT SENT within 6 s with the first-message rule
+('a first message needs you and Bob both online', E1), nothing waiting; a
+third node with the horizon (release behaviour since 2026-10-29) parks the
+same first message: HORIZON_PARKED, waiting in its outbox.
 s95 (also by default; cutoff pack CP.5, release behaviour): a node listening
 on loopback says in `ash status` that friends cannot reach it ('ONLY THIS
 COMPUTER'), and one set to listen on an address that is not on this computer
@@ -160,9 +162,11 @@ profile took a notice and a release from Bob, imported one and agreed a pair
 seed with Bob: the erase leaves none of the Phase 6 files either.
 
 Exit 0 only when every selected scenario passes. s05 (lost receiver state)
-is a known open item, and so is s04 (port change) without route hints.
-RAVEN_FAULT_HINTS=1 turns on route hints (RRH1, the debug switch
-RAVEN_LAB_ROUTE_HINTS=1) for every ash and raven-node: s04 passes (Bob's
+is a known open item. Route hints (RRH1) are on in a release build since
+2026-10-29, so s04 (port change) passes by default; without them (the debug
+close RAVEN_LAB_ROUTE_HINTS=0) it is a known open item too.
+RAVEN_FAULT_HINTS=1 sets the debug switch RAVEN_LAB_ROUTE_HINTS=1 for every
+ash and raven-node and selects the hint scenarios: s04 passes (Bob's
 first link tells Alice his new port: learned_by_inbound, and `raven send`
 saves it back: saved_lan_dial), and it adds s04b (Bob back on a new port
 sends nothing: his announce link tells Alice, and her queued message
@@ -466,7 +470,7 @@ scenario's own (RAVEN_LAB_LAN_BEACON_BUS=<root>/bus, whose line names
 <root>/net1): every datagram stays on 127.0.0.1 ephemeral ports, never UDP
 7420 or a real interface. A Sniffer registers on such a bus like a node and
 hears every datagram. Scenarios whose contacts must not find each other on
-one LAN run without it (without_beacon): s90 (release behaviour), s15, s32b,
+one LAN run without it (without_beacon): s90 (route hints held), s15, s32b,
 s34 and s34c, s89, s92 and s98 (a path that is tried only when the LAN
 cannot reach the contact, or a network that dies while the contact's node
 runs on), and the p2p, friend relay and custody families (peers on other
@@ -1589,10 +1593,13 @@ ENV = privacy_env(harness_env(os.environ), OUT)
 OFFLINE = os.environ.get('RAVEN_FAULT_OFFLINE') == '1'
 if OFFLINE:
     ENV.update(RAVEN_LAB_OFFLINE='1', RAVEN_LAB_NOISE_PIN='1')
-# Route hints are held in this build (ROUTE_HINTS_PRODUCTION_ENABLED=false):
-# RAVEN_FAULT_HINTS=1 turns on the debug switch for every ash and raven-node
-# process (each reads it itself). ENV_NO_HINTS is a node without it (s04c,
-# and s90, which records release behaviour).
+# Route hints are on in a release build since 2026-10-29
+# (ROUTE_HINTS_PRODUCTION_ENABLED=true), so every node made from ENV has them.
+# RAVEN_FAULT_HINTS=1 still sets the debug switch for every ash and raven-node
+# process (each reads it itself) and selects the hint scenarios. ENV_NO_HINTS
+# is a node with them held by the debug close (RAVEN_LAB_ROUTE_HINTS=0): the
+# build from before the switch-on, or one whose hints a security notice holds
+# (s04c's old peer, and s90, which records what RAVEN does without them).
 HINTS = os.environ.get('RAVEN_FAULT_HINTS') == '1'
 # The LAN beacon is held in this build (LAN_BEACON_PRODUCTION_ENABLED=false):
 # RAVEN_FAULT_BEACON=1 (Phase 3 P3.12) turns on its debug switch for every
@@ -1615,11 +1622,13 @@ RENEW = os.environ.get('RAVEN_FAULT_RENEW') == '1'
 if RENEW:
     ENV['RAVEN_LAB_SESSION_RENEWAL'] = '1'
 RENEWED_LINE = 'raven-node renewal: renewed a session ('
-# The long message horizon is held in this build
-# (LONG_HORIZON_PRODUCTION_ENABLED=false): RAVEN_FAULT_HORIZON=1 (Phase 5
-# P5.9) turns on its debug switch RAVEN_LAB_HORIZON=1, with the Lab Test A
-# unlock it needs, for every ash and raven-node (every env made from ENV), so
-# any other list runs with the horizon on, and selects s60, s60b and s60c.
+# The long message horizon is on in a release build since 2026-10-29
+# (LONG_HORIZON_PRODUCTION_ENABLED=true), so every node made from ENV has it.
+# RAVEN_FAULT_HORIZON=1 (Phase 5 P5.9) still sets its debug switch
+# RAVEN_LAB_HORIZON=1, with the Lab Test A unlock, for every ash and
+# raven-node (every env made from ENV), and selects s60, s60b and s60c and
+# s94's parked half. without_horizon() is a node with it held by the debug
+# close (RAVEN_LAB_HORIZON=0).
 HORIZON = os.environ.get('RAVEN_FAULT_HORIZON') == '1'
 if HORIZON:
     ENV.update(RAVEN_LAB_HORIZON='1', RAVEN_LAB_TEST_A='1')
@@ -1670,14 +1679,18 @@ def without_beacon(env: dict) -> dict:
 
 
 def without_horizon(env: dict) -> dict:
-    """`env` with the long message horizon and the letters held, as a release
-    build holds them: for a scenario that records release behaviour (s93)
-    when RAVEN_FAULT_HORIZON=1 or RAVEN_FAULT_LETTER=1 gives every env made
-    from ENV their switches."""
-    return {k: v for k, v in env.items() if k not in ('RAVEN_LAB_HORIZON', 'RAVEN_LAB_LETTER')}
+    """`env` with the long message horizon and the letters held by the debug
+    close (RAVEN_LAB_HORIZON=0, which closes the gate whatever else is set):
+    a release build has the horizon on since 2026-10-29, and a security
+    notice can hold it. For a scenario that records what RAVEN does without
+    it (s93, s94's default half), also when RAVEN_FAULT_HORIZON=1 or
+    RAVEN_FAULT_LETTER=1 gives every env made from ENV their switches."""
+    held = {k: v for k, v in env.items() if k != 'RAVEN_LAB_LETTER'}
+    held['RAVEN_LAB_HORIZON'] = '0'
+    return held
 
 
-ENV_NO_HINTS = dict(ENV)
+ENV_NO_HINTS = dict(ENV, RAVEN_LAB_ROUTE_HINTS='0')
 if HINTS:
     ENV['RAVEN_LAB_ROUTE_HINTS'] = '1'
 # s04c's optional pre-RRH1 build (a directory holding its ash and
@@ -2993,9 +3006,9 @@ def lan_locate(asker: Node, other: Node, wait_ms: int = 1500) -> list:
 
 
 def nearby_row(node: Node) -> str:
-    """The `nearby search` row of the node's `raven lan status` ('' when
-    none)."""
-    return status_row(node.ash('lan', 'status').stdout, 'nearby search') or ''
+    """The `LAN search` row (the LAN beacon's) of the node's `raven lan
+    status` ('' when none)."""
+    return status_row(node.ash('lan', 'status').stdout, 'LAN search') or ''
 
 
 # RAVEN_LAN_BEACON_V1 §3-§5: the only datagram lengths. A query is 160
@@ -7262,7 +7275,7 @@ def lan_seen_entry(node: Node, other: Node) -> dict | None:
 
 
 def s90_stale_address_inbound_learns(root: Path) -> dict:
-    """Cutoff M2 and the inbound sighting (release behaviour, no switch).
+    """Cutoff M2 and the inbound sighting (no switch; route hints held).
     Alice and Bob are verified and share a session; then Alice's saved
     address for Bob becomes a black hole (192.0.2.10 on his real port) and,
     where this computer has no IPv6 route, also an address with no route
@@ -7273,7 +7286,8 @@ def s90_stale_address_inbound_learns(root: Path) -> dict:
     nothing is delivered. Then Bob sends to Alice: her raven-node records
     where he came from (lan_seen.json) and delivers each queued message
     exactly once within 10 s of his link. Route hints stay off for both
-    (ENV_NO_HINTS), also under RAVEN_FAULT_HINTS=1: with them Bob's RRH1
+    (ENV_NO_HINTS: the debug close; a release build has them on since
+    2026-10-29), also under RAVEN_FAULT_HINTS=1: with them Bob's RRH1
     names his real port, and the silent part would deliver at once. So does
     the LAN beacon, which RAVEN_FAULT_BEACON=1 leaves off here
     (without_beacon: Alice's beacon would find Bob's real port)."""
@@ -7516,15 +7530,14 @@ def s92_name_route_while_away(root: Path) -> dict:
 
 
 def s93_first_message_unreachable(root: Path) -> dict:
-    """Cutoff M2 (release behaviour, no switch): a first message to a
-    contact with no session, at an address where nothing listens, is NOT
-    SENT within 6 s with the first-message rule `raven contact list` says
-    too ('a first message needs you and Bob both online'; E1), and nothing
-    waits in the outbox. Alice and Bob run with the horizon held
-    (without_horizon), as a release build holds it. With the
-    horizon on (RAVEN_FAULT_HORIZON=1 or RAVEN_FAULT_LETTER=1; Phase 5 P5.8)
-    Carol sends the same first message and it is parked instead: QUEUED
-    with HORIZON_PARKED within 6 s, waiting in her outbox."""
+    """Cutoff M2 (no switch): a first message to a contact with no
+    session, at an address where nothing listens. With the horizon held
+    (Alice and Bob: without_horizon, the debug close) it is NOT SENT within
+    6 s with the first-message rule `raven contact list` says too ('a first
+    message needs you and Bob both online'; E1), and nothing waits in the
+    outbox. With the horizon on (release behaviour since 2026-10-29; Phase 5
+    P5.8) Carol sends the same first message and it is parked instead:
+    QUEUED with HORIZON_PARKED within 6 s, waiting in her outbox."""
     held = without_horizon(ENV)
     a, b = Node('a', root, held), Node('b', root, held)
     a.init(); b.init()
@@ -7538,19 +7551,18 @@ def s93_first_message_unreachable(root: Path) -> dict:
         and 'secure connection with Bob ended' not in out
         and outbox.startswith('Nothing waiting') and 'queued' not in outbox,
         send=(rc, status_word(out), round(send_s, 1)), send_text=out[-600:], outbox=outbox[-300:])
-    if ENV.get('RAVEN_LAB_HORIZON') == '1':
-        c = Node('c', root)
-        c.init()
-        c.start()
-        c.add(b, 'bob', f'127.0.0.1:{free_tcp_port()}')
-        rc2, out2, send2_s = c.send('bob', 's93-m2')
-        outbox2 = c.outbox()
-        res.update(
-            ok=res['ok'] and status_word(out2) == 'QUEUED' and send2_s <= 6
-            and 'HORIZON_PARKED' in out2 and 'Nothing was queued' not in out2
-            and 'waiting' in outbox2 and 's93-m2' in outbox2,
-            horizon_send=(rc2, status_word(out2), round(send2_s, 1)),
-            horizon_text=out2[-600:], horizon_outbox=outbox2[-300:])
+    c = Node('c', root)
+    c.init()
+    c.start()
+    c.add(b, 'bob', f'127.0.0.1:{free_tcp_port()}')
+    rc2, out2, send2_s = c.send('bob', 's93-m2')
+    outbox2 = c.outbox()
+    res.update(
+        ok=res['ok'] and status_word(out2) == 'QUEUED' and send2_s <= 6
+        and 'HORIZON_PARKED' in out2 and 'Nothing was queued' not in out2
+        and 'waiting' in outbox2 and 's93-m2' in outbox2,
+        horizon_send=(rc2, status_word(out2), round(send2_s, 1)),
+        horizon_text=out2[-600:], horizon_outbox=outbox2[-300:])
     return res
 
 
@@ -7803,18 +7815,34 @@ def s98_cable_link_local(root: Path) -> dict:
 # first links record the noise pins the held-recipient announce needs) and a
 # free default LAN port, so no node ever guesses 7420.
 def walk_env(hints: bool) -> dict:
-    """s96/s97's node environment, route hints on or off."""
-    env = dict(CUSTODY_ENV, RAVEN_LAB_NOISE_PIN='1',
-               RAVEN_LAB_LAN_DEFAULT_PORT=str(free_tcp_port()))
-    if hints:
-        env['RAVEN_LAB_ROUTE_HINTS'] = '1'
-    else:
-        env.pop('RAVEN_LAB_ROUTE_HINTS', None)
-    return env
+    """s96/s97's node environment, route hints on or off (off is the debug
+    close: a build has them on since 2026-10-29, so leaving the switch out
+    no longer holds them)."""
+    return dict(CUSTODY_ENV, RAVEN_LAB_NOISE_PIN='1',
+                RAVEN_LAB_LAN_DEFAULT_PORT=str(free_tcp_port()),
+                RAVEN_LAB_ROUTE_HINTS='1' if hints else '0')
 
 
 # A custody fetch that brought an ACK (raven-node custody.rs).
 ACK_VIA_CUSTODIAN = re.compile(r'custody: fetched messages=\d+ acks=[1-9]')
+
+
+def open_store_ro(path, timeout: float = 10):
+    """A read-only connection to one of a node's SQLite stores. The SQLite
+    that macOS ships (3.54 on macOS 27) refuses a read-only open of a WAL
+    store whose `-shm` file is not there, which is every moment the node
+    does not have the store open; nobody writes then, so that case reads the
+    file as it is (immutable). Raises sqlite3.Error as `connect` does."""
+    import sqlite3
+    con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=timeout)
+    try:
+        con.execute('SELECT count(*) FROM sqlite_master').fetchall()
+        return con
+    except sqlite3.OperationalError:
+        con.close()
+        if os.path.exists(f'{path}-shm'):
+            raise
+    return sqlite3.connect(f'file:{path}?immutable=1', uri=True, timeout=timeout)
 
 
 def custody_rows(node: Node) -> list | None:
@@ -7831,7 +7859,7 @@ def custody_rows(node: Node) -> list | None:
     if not path.exists():
         return []
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+        con = open_store_ro(path, 10)
         try:
             cols = [r[1] for r in con.execute('PRAGMA table_info(custody_objects_v1)')]
             if 'kh_object_digest' in cols:
@@ -7865,7 +7893,7 @@ def custody_objects(node: Node) -> list | None:
     import sqlite3
     path = node.dir / 'friend_custody.sqlite'
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+        con = open_store_ro(path, 10)
         try:
             rows = con.execute('SELECT kh_object_digest, rso1, meta FROM custody_objects_v1').fetchall()
         finally:
@@ -7888,7 +7916,7 @@ def custody_released(node: Node) -> list | None:
     import sqlite3
     path = node.dir / 'friend_custody.sqlite'
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+        con = open_store_ro(path, 10)
         try:
             cols = [r[1] for r in con.execute('PRAGMA table_info(custody_released_v1)')]
             rows = con.execute('SELECT * FROM custody_released_v1').fetchall()
@@ -8286,7 +8314,8 @@ def s127_friend_back_after_minutes(root: Path) -> dict:
     away = 150
     time.sleep(away)
     before = a.outbox()
-    b.env = {k: v for k, v in b.env.items() if k != 'RAVEN_LAB_ROUTE_HINTS'}
+    # Without route hints is the debug close now (a build has them on).
+    b.env = dict(b.env, RAVEN_LAB_ROUTE_HINTS='0')
     b.start(port=b_port)
     t_back = time.time()
     arrived: dict = {}
@@ -8429,8 +8458,10 @@ def s97_three_people_two_rooms(root: Path) -> dict:
     port again) and Alice: the ACKs reach Alice through Carol (her 3
     messages delivered), and Carol holds nothing unreleased. Variant on a
     fresh trio (late/): room 1 at t0, Alice's message is left with Carol;
-    the clock moves to t0 + 25 h while Alice's node runs elsewhere: the
-    message expired on the way (a day's session), and her outbox and
+    the clock moves to t0 + 7 days and an hour while Alice's node runs
+    elsewhere (the long message horizon, on in a build since 2026-10-29,
+    keeps a message for 7 days; before it a day's session was the end): the
+    message expired on the way, and her outbox and
     history say so (`outbox status`: state expired; the row: `expired ...
     last: Raven stopped trying: this message waited too long`), never
     silence. Room 2 only then, Carol (a new port)
@@ -8537,9 +8568,10 @@ def s97_three_people_two_rooms(root: Path) -> dict:
     late_held = wait_for(lambda: (held_for(lc, lb, late_now()) or 0) >= 1, 60)
     late_mid = item_id(la, 's97-late')
     lc.stop()
-    # A day later, Alice still on (elsewhere): her message ran out of time.
+    # A week and an hour later (the long message horizon is 7 days), Alice
+    # still on (elsewhere): her message ran out of time.
     since = log_size(la)
-    late_clock.advance(25 * hour)
+    late_clock.advance((7 * 24 + 1) * hour)
     late_woke = wait_log(la, LabClock.WOKE, 15, since)
     late_state = wait_state(la, late_mid, 'expired', 60)
     late_outbox = la.outbox()
@@ -8847,7 +8879,7 @@ def last_sent_envelope(node: Node) -> bytes | None:
     import sqlite3
     path = node.dir / 'indexed_sessions.sqlite'
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+        con = open_store_ro(path, 10)
         try:
             columns = {r[1] for r in con.execute('PRAGMA table_info(endpoint_outbox)')}
             keyed = 'kh_envelope' in columns
@@ -8873,7 +8905,7 @@ def session_heads(node: Node) -> int | None:
     import sqlite3
     path = node.dir / 'indexed_sessions.sqlite'
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+        con = open_store_ro(path, 10)
         try:
             return int(con.execute('SELECT COUNT(*) FROM indexed_session_heads').fetchone()[0])
         finally:
@@ -9252,7 +9284,7 @@ def ledger_kinds(node: Node) -> list:
     if not path.exists():
         return []
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=5)
+        con = open_store_ro(path, 5)
         try:
             return [k for (k,) in con.execute(
                 'SELECT kind FROM sec_alerts UNION ALL SELECT kind FROM sec_counts')]
@@ -10067,10 +10099,13 @@ def copy_files(src: Path, dst: Path) -> None:
 
 
 def peer_id_of(node: Node) -> str:
-    """`node`'s own PeerId (the `p2p=` of its card; no p2p host needed)."""
-    out = node.ash('whoami', '--card', '--via', CARD_VIA).stdout
-    m = re.search(r' p2p=(12D3KooW\w+)', out)
-    assert m, out
+    """`node`'s own PeerId (the `p2p=` of its card; no p2p host needed). A
+    card names a PeerId only under the lab unlock (`--via` is refused
+    without it), so this one command gets it whatever the node's own
+    environment holds."""
+    r = node.ash('whoami', '--card', '--via', CARD_VIA, extra_env=dict(RAVEN_LAB_TEST_A='1'))
+    m = re.search(r' p2p=(12D3KooW\w+)', r.stdout)
+    assert m, r.stdout + r.stderr
     return m.group(1)
 
 
@@ -10101,7 +10136,7 @@ def record_keys_naming(profile: Path, own: Node, friend: Node) -> list:
         return []
     candidates = set()
     try:
-        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+        con = open_store_ro(path, 10)
         try:
             stored = {bytes(r[0]) for r in
                       con.execute('SELECT record_key FROM indexed_session_heads')}
@@ -10600,15 +10635,16 @@ def s94_session_expired_while_apart(root: Path) -> dict:
     clock moves 25 h ahead: their session ended a day after its PairInit.
     Alice's node starts again (its prune drops the session) and she sends 3
     messages while Bob is still away; then Bob comes back on his port.
-    Horizon gate closed (by default, release behaviour): each send is NOT
-    SENT with CP.6's text (the secure connection with Bob ended), her
-    history holds no `queued` row for them, and nothing reaches Bob. With
-    RAVEN_FAULT_HORIZON=1: each is queued (parked), and after the re-pair all
-    3 reach Bob exactly once and in order within 90 s, delivered in her
-    history."""
+    Horizon held (by default: both run without_horizon, the debug close):
+    each send is NOT SENT with CP.6's text (the secure connection with Bob
+    ended), her history holds no `queued` row for them, and nothing reaches
+    Bob. With RAVEN_FAULT_HORIZON=1 (release behaviour since 2026-10-29):
+    each is queued (parked), and after the re-pair all 3 reach Bob exactly
+    once and in order within 90 s, delivered in her history."""
     clock = LabClock(root / 'lab.clock')
-    a = Node('a', root, env=clock.env(ENV))
-    b = Node('b', root, env=clock.env(ENV))
+    env = ENV if HORIZON else without_horizon(ENV)
+    a = Node('a', root, env=clock.env(env))
+    b = Node('b', root, env=clock.env(env))
     a.init(); b.init()
     a.start(); b.start()
     a.add_pinned(b, 'bob')
@@ -11428,8 +11464,9 @@ def s97b_two_friends_ran_out(root: Path) -> dict:
 
 
 # ------------------------------------------------- Bluetooth nearby (Phase 5)
-# The nearby carrier (protocol/RAVEN_NEARBY_LINK_V1.md) is held in this build
-# (NEARBY_PRODUCTION_ENABLED=false). RAVEN_FAULT_NEARBY=1 (P5.28) selects
+# The nearby carrier (protocol/RAVEN_NEARBY_LINK_V1.md) is on in a macOS build
+# (NEARBY_PRODUCTION_ENABLED, since 2026-10) and held on Linux and Windows.
+# RAVEN_FAULT_NEARBY=1 (P5.28) selects
 # s63-s67 and s72-s74 (s67 and s67b also need RAVEN_FAULT_CUSTODY=1); their nodes run
 # with the nearby lab switch (RAVEN_LAB_NEARBY=1 with the Lab Test A unlock)
 # on one fake Bluetooth ether: the scenario's own `raven-node nearby-ether`
@@ -11437,9 +11474,11 @@ def s97b_two_friends_ran_out(root: Path) -> dict:
 # pair meets once on the LAN first (nearby admits a verified contact by the
 # certificate an earlier link left: RNL1 §0), then every saved LAN address is
 # turned into a dead port, with no LAN beacon, internet or p2p: nearby is the
-# only path.
+# only path. No route hints either, by the debug close (ENV_NO_HINTS): a build
+# has them on since 2026-10-29, and a hint from the LAN meeting names the
+# friend's live listener, so the dead saved address would not hold the LAN.
 NEARBY = os.environ.get('RAVEN_FAULT_NEARBY') == '1'
-NEARBY_ENV = without_beacon(dict(ENV, RAVEN_LAB_TEST_A='1', RAVEN_LAB_NEARBY='1'))
+NEARBY_ENV = without_beacon(dict(ENV_NO_HINTS, RAVEN_LAB_TEST_A='1', RAVEN_LAB_NEARBY='1'))
 NEARBY_TAGS = {'a': 'alice', 'b': 'bob', 'c': 'carol', 'd': 'dave'}
 # The node's counts-only delivery line for the nearby carrier.
 NEARBY_DELIVERED = re.compile(r'raven-node outbox: delivered \d+ \(nearby_dial')
@@ -11492,8 +11531,9 @@ def nearby_status(node: Node) -> str:
 
 
 def nearby_on_air(node: Node) -> bool:
-    """`raven nearby status` says the radio is on (the engine runs)."""
-    return bool(re.search(r'^\s*bluetooth\s+on\b', nearby_status(node), re.M))
+    """`raven nearby status` says the radio is on (the engine runs). The row
+    is `radio` (it was `bluetooth` in older builds)."""
+    return bool(re.search(r'^\s*(?:radio|bluetooth)\s+on\b', nearby_status(node), re.M))
 
 
 def nearby_nodes(root: Path, hub: EtherHub, names: str = 'ab', env: dict | None = None,
@@ -11643,12 +11683,14 @@ def s65_nearby_radio_off_on(root: Path) -> dict:
 def s66_nearby_stale_session_repaired(root: Path) -> dict:
     """Phase 5 (P5.28; the plan's s53): Alice and Bob met (a session),
     then 25 h pass (one LabClock for both) while they are apart; their LAN
-    addresses are dead. With no link up, Alice's message is refused cleanly
-    (NOT SENT: the secure connection ended; nothing waits, nothing reaches
-    Bob). `raven nearby on @bob` makes her computer findable; once Bob's
-    radio connected, her next send sets up a new session over nearby (a
-    PairInit on the nearby link, RNL1 §7) and is delivered exactly once, and
-    Bob's reply comes back over it."""
+    addresses are dead and the day's session ended. With no link up, Alice's
+    message waits (QUEUED: the long message horizon, on in a build since
+    2026-10-29, keeps it; before it the send was refused, NOT SENT, and
+    nothing waited). Her node, with mail waiting for Bob, finds him over
+    nearby, and `raven nearby on @bob` makes her computer findable: a new
+    session is set up over nearby (a PairInit on the nearby link, RNL1 §7),
+    the waiting message and her next send are each delivered exactly once,
+    and Bob's reply comes back over it."""
     clock = LabClock(root / 'lab.clock')
     hub = EtherHub(root)
     a, b = nearby_nodes(root, hub, env=clock.env(NEARBY_ENV))
@@ -11661,22 +11703,25 @@ def s66_nearby_stale_session_repaired(root: Path) -> dict:
     for n in (a, b):
         assert wait_until(lambda: nearby_on_air(n), 30) is not None, nearby_status(n)
     rc, out, _ = a.send('bob', 's66-stale')
-    refused = status_word(out)
+    waits = status_word(out)
     time.sleep(5)
     staged = 's66-stale' in a.outbox()
     on = a.ash('nearby', 'on', '@bob', '--for', '30m')
     linked = wait_until(lambda: nearby_connected(a) >= 1, 60, 1)
+    stale = wait_until(lambda: count(b.inbox(), 's66-stale') == 1, 60, 1)
     word = status_word(a.send('bob', 's66-again')[1])
     arrived = wait_until(lambda: count(b.inbox(), 's66-again') == 1, 60, 1)
     reply = status_word(b.send('alice', 's66-reply')[1])
     back = wait_until(lambda: count(a.inbox(), 's66-reply') == 1, 60, 1)
     time.sleep(3)
     return dict(
-        ok=pruned is not None and refused == 'NOT_SENT' and not staged
-        and count(b.inbox(), 's66-stale') == 0 and on.returncode == 0
-        and linked is not None and arrived is not None and back is not None
+        ok=pruned is not None and waits == 'QUEUED' and on.returncode == 0
+        and linked is not None and stale is not None
+        and arrived is not None and back is not None
+        and count(b.inbox(), 's66-stale') == 1
         and count(b.inbox(), 's66-again') == 1 and count(a.inbox(), 's66-reply') == 1,
-        pruned_s=pruned, stale_send=refused, stale_text=out[-300:], staged=staged,
+        pruned_s=pruned, stale_send=waits, stale_text=out[-300:], staged=staged,
+        stale_arrived_s=took(stale),
         nearby_on=(on.stdout + on.stderr)[-200:], linked_s=took(linked), again=word,
         arrived_s=took(arrived), reply=reply, reply_s=took(back))
 
@@ -12070,9 +12115,11 @@ def learning_env(on: bool, tag: str, tune: str = LEARNING_TUNE,
     RAVEN_LAB_NET_TAG: the network learning keys what it learns by), no
     LAN beacon (it would find a listener past a dead proxy) and no route
     hints (LinkProxy tells a probe from a message dial by its records; an
-    RRH1 would be one more), and learning on with `tune` or off."""
-    env = without_beacon(dict(base or ENV_NO_HINTS, RAVEN_LAB_TEST_A='1', RAVEN_LAB_NET_TAG=tag))
-    env.pop('RAVEN_LAB_ROUTE_HINTS', None)
+    RRH1 would be one more, and a hint names the listener past the proxy),
+    and learning on with `tune` or off. No route hints is the debug close
+    (RAVEN_LAB_ROUTE_HINTS=0): a build has them on since 2026-10-29."""
+    env = without_beacon(dict(base or ENV_NO_HINTS, RAVEN_LAB_TEST_A='1', RAVEN_LAB_NET_TAG=tag,
+                              RAVEN_LAB_ROUTE_HINTS='0'))
     for key in LEARNING_KEYS:
         env.pop(key, None)
     if on:
