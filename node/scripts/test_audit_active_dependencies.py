@@ -466,14 +466,66 @@ class RepositoryLockTests(unittest.TestCase):
              "secret-service 2.0.2"],
         )
 
-    def test_the_policy_accepts_only_the_rsa_timing_advisory(self) -> None:
+    RSA_TIMING = ("RUSTSEC-2023-0071", "rsa", "0.9.10")
+    SQLITE_WAL = ("RUSTSEC-2026-0459", "libsqlite3-sys", "0.38.2")
+
+    def lock_users(self, packages: list[dict], name: str) -> set[str]:
+        """The packages of the lock that name `name` as a dependency."""
+        return {p["name"] for p in packages if any(d.split(" ")[0] == name for d in p["dependencies"])}
+
+    def test_the_policy_accepts_only_the_rsa_timing_and_sqlite_wal_advisories(self) -> None:
+        policy = audit.load_policy(audit.DEFAULT_POLICY)
+        self.assertEqual(set(policy.active), {self.RSA_TIMING, self.SQLITE_WAL})
         # rsa 0.9.10 reaches the build only through Arti, which only verifies
         # RSA signatures; RUSTSEC-2023-0071 needs private key operations.
+        self.assertIn("verif", policy.active[self.RSA_TIMING]["reachability"])
+
+    def test_the_sqlite_wal_acceptance_holds_only_for_ravens_own_stores(self) -> None:
+        # RUSTSEC-2026-0459 needs a database file and a -wal file that a less
+        # trusted party wrote. The acceptance holds only while SQLite reaches
+        # the build through rusqlite for the two users its text reviews:
+        # raven-core (Raven's own stores) and Arti's tor-dirmgr (the Tor
+        # directory cache), both inside the private data directory. A third
+        # user fails here and is reviewed first. The fix (SQLite 3.54.0 in
+        # libsqlite3-sys 0.39.0) needs rusqlite 0.41, which tor-dirmgr does
+        # not accept, so the entry is short on purpose and is reviewed again
+        # when Arti moves or the vendored fork carries the newer SQLite.
         policy = audit.load_policy(audit.DEFAULT_POLICY)
-        self.assertEqual(set(policy.active), {("RUSTSEC-2023-0071", "rsa", "0.9.10")})
-        entry = policy.active[("RUSTSEC-2023-0071", "rsa", "0.9.10")]
-        self.assertIn("verif", entry["reachability"])
-        self.assertEqual(policy.inactive, {})
+        entry = policy.active[self.SQLITE_WAL]
+        for words in ("private data directory", "raven-core", "tor-dirmgr", "tor/cache"):
+            self.assertIn(words, entry["reachability"])
+        for words in ("libsqlite3-sys 0.39.0", "rusqlite 0.41", "tor-dirmgr"):
+            self.assertIn(words, entry["reason"])
+        packages = lock_packages((self.NODE / "Cargo.lock").read_text(encoding="utf-8"))
+        self.assertEqual([p["version"] for p in packages if p["name"] == "libsqlite3-sys"],
+                         ["0.38.2+raven.sqlcipher.4.17.0"])
+        self.assertEqual(self.lock_users(packages, "libsqlite3-sys"), {"rusqlite"})
+        self.assertEqual(self.lock_users(packages, "rusqlite"), {"raven-core", "tor-dirmgr"})
+        self.assertEqual(self.lock_users(packages, "tor-dirmgr"), {"arti-client"})
+
+    def test_the_policy_excepts_only_the_lock_only_crypto_bigint_advisory(self) -> None:
+        # RUSTSEC-2026-0387 is fixed only in crypto-bigint 0.7.6, which
+        # elliptic-curve 0.13 cannot use. The exception holds only while the
+        # lock names crypto-bigint 0.5.5 for nothing but the optional NIST
+        # curve key types of Arti's key format crate, which no Raven build
+        # turns on (the audit itself checks that it is in no build graph).
+        policy = audit.load_policy(audit.DEFAULT_POLICY)
+        key = ("RUSTSEC-2026-0387", "crypto-bigint", "0.5.5")
+        self.assertEqual(set(policy.inactive), {key})
+        self.assertIn("elliptic-curve 0.13.8", policy.inactive[key]["reason"])
+        packages = lock_packages((self.NODE / "Cargo.lock").read_text(encoding="utf-8"))
+
+        def users(name: str) -> set[str]:
+            return self.lock_users(packages, name)
+
+        self.assertEqual([p["version"] for p in packages if p["name"] == "crypto-bigint"], ["0.5.5"])
+        self.assertEqual(users("crypto-bigint"), {"elliptic-curve"})
+        curves = {"p256", "p384", "p521"}
+        self.assertEqual(users("elliptic-curve"), curves | {"ecdsa", "primeorder"})
+        self.assertEqual(users("ecdsa"), curves)
+        self.assertEqual(users("primeorder"), curves)
+        for curve in sorted(curves):
+            self.assertEqual(users(curve), {"ssh-key-fork-arti"}, curve)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,14 @@
 {
   "schema": 1,
-  "inactive_vulnerability_exceptions": [],
+  "inactive_vulnerability_exceptions": [
+    {
+      "advisory_id": "RUSTSEC-2026-0387",
+      "package": "crypto-bigint",
+      "version": "0.5.5",
+      "review_by": "2027-05-01",
+      "reason": "crypto-bigint 0.5.5 is in Cargo.lock only because elliptic-curve 0.13.8 names it, and elliptic-curve is there only for p256 0.13.2, p384 0.13.1 and p521 0.13.3 (with ecdsa 0.16.9 and primeorder 0.13.6), the optional NIST curve key types of ssh-key-fork-arti 0.6.7, the key file format crate of Arti 0.47.0. No Raven build turns those key types on: with every feature and every target, ssh-key-fork-arti is built with alloc, default, ecdsa, rand_core, rsa and std, and its ecdsa feature is only the sec1 encoding. So none of these crates is compiled into a Raven binary and no secret of Raven reaches the affected operations. RUSTSEC-2026-0387 (timing differences in operations meant to be constant time) is fixed only in crypto-bigint 0.7.6, which elliptic-curve 0.13 cannot use, so the lock entry cannot be moved. Security review 2026-11. Review again by review_by, or as soon as Arti moves to an elliptic-curve release built on crypto-bigint 0.7.6 or later. If a build ever turns one of these key types on, the audit fails it as an active vulnerability whatever this entry says."
+    }
+  ],
   "active_vulnerability_acceptances": [
     {
       "advisory_id": "RUSTSEC-2023-0071",
@@ -9,6 +17,14 @@
       "review_by": "2027-02-05",
       "reachability": "rsa reaches the build only through Arti (tor-llcrypto, tor-key-forge and ssh-key-fork-arti). Raven runs Arti as a Tor client and onion service (arti-client features onion-service-client and onion-service-service, no relay), where Arti uses RSA only to verify signatures with public keys (relay and directory authority identity keys). RUSTSEC-2023-0071 (the Marvin attack) recovers a private key from the timing of private key operations; Raven holds no RSA private key and makes no RSA decryption or signature (its onion service keys are ed25519).",
       "reason": "No rsa release fixes it (the advisory lists no patched version), and rsa is a required dependency of Arti 0.47.0, so it cannot be dropped without dropping the Tor carrier. Security review 2026-11 (DEP-2). Review again by review_by, or as soon as a patched rsa release or an Arti release without rsa exists."
+    },
+    {
+      "advisory_id": "RUSTSEC-2026-0459",
+      "package": "libsqlite3-sys",
+      "version": "0.38.2",
+      "review_by": "2027-01-11",
+      "reachability": "libsqlite3-sys reaches the build only through rusqlite 0.40.2, which two crates use: raven-core for Raven's stores, and tor-dirmgr 0.47.0 (Arti) for the Tor directory cache. Shipped builds compile the ordinary SQLite 3.53.2 amalgamation of the vendored fork (node/third_party/libsqlite3-sys-raven, byte for byte that of crates.io libsqlite3-sys 0.38.2); its frozen SQLCipher 4.17.0 amalgamation (SQLite 3.53.3) is compiled only by the lab feature full-braid-durable-lab, which a release build refuses. RUSTSEC-2026-0459 (CVE-2026-119375): SQLite before 3.54.0 can return uninitialized page cache memory to the queries of a process that opens a database file together with a -wal file whose page size differs from the database's, so it exposes only a process that opens database files a less trusted party could have written. Every database Raven opens is one of its own stores, under a fixed name inside its private data directory (RAVEN_DATA_DIR, else ASH_DATA_DIR, else the default in the user's home), which Raven creates owner only (mode 0700 with files 0600 on Unix, an owner only DACL on Windows). Arti's directory cache is its own database under tor/cache in that same directory (on Unix Arti also refuses a directory others can write); what the Tor network sends goes into its rows, never into the file or its -wal as such. No code path attaches, imports, restores or deserializes a database from another place, and nothing a friend sends is written to disk as a database or -wal file. So only a party that can already write files in the user's private data directory can set up the mismatch: local malware or a taken unlocked device, which the threat model puts out of scope (docs/THREAT_MODEL.md 3.7 and 3.16).",
+      "reason": "The fix is SQLite 3.54.0, which ships in libsqlite3-sys 0.39.0, and only rusqlite 0.41 and later use that. tor-dirmgr accepts rusqlite below 0.41 only (0.47.0 here, and 0.48.0, the newest Arti, the same), and a build holds one libsqlite3-sys (links = sqlite3), so no lock bump can take the fix while the Tor carrier is in the build. What remains is to carry the SQLite 3.54 amalgamation in the vendored fork under rusqlite 0.40.2. That moves the fork off its byte for byte pin to the crates.io 0.38.2 archive (node/scripts/verify_sqlcipher_fork_ordinary_sqlite_upstream.sh and the pins in its build script), so it is a reviewed change of its own and not part of this entry. Security review 2026-11. Review again by review_by (two months, not the three allowed), or as soon as an Arti release accepts rusqlite 0.41 or the fork carries SQLite 3.54."
     }
   ],
   "non_registry_packages": [

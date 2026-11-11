@@ -551,10 +551,17 @@ impl Bus for DbusBus {
         _max_rx: usize,
     ) {
         let _rt = self.rt.enter();
-        let (Ok(reader), Ok(fd)) = (
-            AsyncFd::with_interest(notify, Interest::READABLE),
-            AsyncFd::with_interest(write, Interest::WRITABLE),
-        ) else {
+        // SAFETY: each socket is an `OwnedFd` of this process (`own_fd`'s own
+        // copy) and moves into its `AsyncFd`, which alone owns it from here:
+        // it stays open, and the same descriptor, until that `AsyncFd` is
+        // dropped.
+        let registered = unsafe {
+            (
+                AsyncFd::register_with_interest(notify, Interest::READABLE),
+                AsyncFd::register_with_interest(write, Interest::WRITABLE),
+            )
+        };
+        let (Ok(reader), Ok(fd)) = registered else {
             self.shared.push(Cmd::Down(conn));
             return;
         };
