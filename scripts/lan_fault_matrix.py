@@ -1911,7 +1911,7 @@ class Node:
         route hints are on and `via` is a relay, `raven-card/3` (`relay=`)."""
         r = self.ash('whoami', '--card', '--via', via)
         kinds = [('raven-card/2 ', ' via=')]
-        if self.env.get('RAVEN_LAB_ROUTE_HINTS') == '1':
+        if self.env.get('RAVEN_LAB_ROUTE_HINTS') != '0':
             kinds.append(('raven-card/3 ', ' relay='))
         line = next((l for l in r.stdout.splitlines()
                      for prefix, field in kinds if l.startswith(prefix) and field in l), '')
