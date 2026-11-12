@@ -155,6 +155,10 @@ pub(crate) struct Pending {
     /// a suspended app at will), and left out of the chats while this send
     /// runs ([`Inner::keep_until_sent`]).
     pub kept: Option<String>,
+    /// The id that row had before it took the message's own
+    /// ([`Inner::own_row_named`]): a history read before the change still
+    /// holds a row under it, which is left out of the chats too.
+    pub kept_before: Option<String>,
 }
 
 /// What the last observation saw, to tell what changed.
@@ -548,6 +552,15 @@ fn state_of(
     {
         return (State::NotSentMeetFirst, None);
     }
+    // The row that kept a send of this run as not sent has the message's
+    // own id from just before the send writes over it
+    // ([`Inner::own_row_named`]): it says `failed` until then.
+    if history == Some("failed")
+        && !matches!(ob, "failed" | "cancelled")
+        && pending.is_some_and(|p| matches!(p.job, Job::Queued | Job::Running))
+    {
+        return (State::Sending, None);
+    }
     if matches!(history, Some("failed" | "cancelled")) || matches!(ob, "failed" | "cancelled") {
         return (State::Failed, None);
     }
@@ -621,17 +634,19 @@ fn bind(book: &mut MessageBook, history: &[ChatHistoryEntry]) {
 }
 
 /// The history rows that keep this run's waiting sends as not sent
-/// ([`Pending::kept`]), lower case.
+/// ([`Pending::kept`]), and the ids such rows had before they took their
+/// message's own ([`Pending::kept_before`]), lower case.
 fn kept_rows(book: &MessageBook) -> HashSet<String> {
     book.pendings
         .iter()
-        .filter_map(|p| p.kept.as_deref())
+        .flat_map(|p| [p.kept.as_deref(), p.kept_before.as_deref()])
+        .flatten()
         .map(str::to_ascii_lowercase)
         .collect()
 }
 
 /// Every message: the history's rows in written order, then this session's
-/// sends that have no row.
+/// sends that have no row (in this read of the history).
 fn views(
     book: &mut MessageBook,
     history: &[ChatHistoryEntry],
@@ -641,6 +656,8 @@ fn views(
 ) -> Vec<View> {
     bind(book, history);
     let kept = kept_rows(book);
+    // This run's sends that a row of this read stands for.
+    let mut with_row: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(history.len() + book.pendings.len());
     for e in history {
         let mid = e.message_id_hex.to_ascii_lowercase();
@@ -682,6 +699,9 @@ fn views(
             .get(&mid)
             .and_then(|id| book.pendings.iter().find(|p| &p.id == id))
             .cloned();
+        if let Some(p) = &pending {
+            with_row.insert(p.id.clone());
+        }
         // The deadline the outbox applies (with the long message horizon
         // live, 7 days after it was written, not its envelope's day: E1).
         let item = outbox.items.get(&mid).cloned().map(|mut i| {
@@ -772,7 +792,13 @@ fn views(
             pending,
         });
     }
-    for p in book.pendings.iter().filter(|p| p.bound_mid.is_none()) {
+    // A send that still runs shows without its row too: this read of the
+    // history can be older than the row's change of id.
+    for p in book
+        .pendings
+        .iter()
+        .filter(|p| p.bound_mid.is_none() || (p.job != Job::Done && !with_row.contains(&p.id)))
+    {
         let (state, until_ms) = state_of(None, None, Some(p), now_ms);
         let path = match &p.outcome {
             Some(Outcome::Delivered { path }) if !path.text.is_empty() => Some(path.clone()),
@@ -1375,6 +1401,7 @@ impl Inner {
                 via: None,
                 finished: None,
                 kept: None,
+                kept_before: None,
             };
             if let Some(observed) = book.observed.as_mut() {
                 observed
@@ -1384,6 +1411,9 @@ impl Inner {
             book.pendings.push(p.clone());
             p
         };
+        // Taken: on this computer from here on, whenever the app ends (a
+        // quit right after Send, a crash, iOS ending the app).
+        self.keep_until_sent(&pending.id);
         self.emit(
             "send_started",
             json!({"id": pending.id, "address": pending.address}),
@@ -1540,7 +1570,7 @@ impl Inner {
             &format!("{id} started after {} ms", job.2.as_millis()),
         );
         let began = Instant::now();
-        let (outcome, raw) = self.send_now(&job.0, &job.1);
+        let (outcome, raw) = self.send_now(id, &job.0, &job.1);
         send_note(
             &job.0,
             &format!(
@@ -1579,8 +1609,10 @@ impl Inner {
         let _ = self.refresh(Duration::ZERO);
     }
 
-    /// Keeps the send `id`, while it waits unsent, as a not-sent row of the
-    /// history (`record_not_sent`, as a message nothing was written for):
+    /// Keeps the send `id`, from the moment it is taken
+    /// ([`Self::messages_send`]) and while it waits unsent, as a not-sent
+    /// row of the history (`record_not_sent`, as a message nothing was
+    /// written for):
     /// the app's next launch shows it with its text and Send again when the
     /// app is ended before it goes (iOS ends a suspended app at will, and a
     /// send that lives only in this engine's memory goes with it: no row,
@@ -1591,15 +1623,13 @@ impl Inner {
     /// ([`Self::drop_kept`]). Nothing for a send that ended, has its row or
     /// is kept already, and nothing while the profile can't be opened.
     pub(crate) fn keep_until_sent(&self, id: &str) {
-        let (peer, body, written) = {
+        let wanted = |p: &Pending| p.kept.is_none() && p.bound_mid.is_none() && p.job != Job::Done;
+        let peer = {
             let book = lock(&self.book);
-            let Some(p) = book.pendings.iter().find(|p| p.id == id) else {
-                return;
-            };
-            if p.kept.is_some() || p.bound_mid.is_some() || p.job == Job::Done {
-                return;
+            match book.pendings.iter().find(|p| p.id == id) {
+                Some(p) if wanted(p) => p.peer.clone(),
+                _ => return,
             }
-            (p.peer.clone(), p.body.clone(), p.created_ms)
         };
         let dir = match (self.open(), self.data_dir()) {
             (Ok(()), Ok(dir)) => dir.to_path_buf(),
@@ -1608,25 +1638,57 @@ impl Inner {
                 return;
             }
         };
-        let Ok(mid) = bridge::record_not_sent(&dir, &peer, &body, written) else {
-            send_note(&peer, &format!("{id} could not be kept as not sent"));
-            return;
-        };
-        let kept = {
+        // Named before it is written: no look at the history between the
+        // two takes the row for a message of another program.
+        let mid = bridge::fresh_row_id();
+        let (body, written) = {
             let mut book = lock(&self.book);
             match book.pendings.iter_mut().find(|p| p.id == id) {
-                Some(p) if p.kept.is_none() && p.bound_mid.is_none() && p.job != Job::Done => {
+                Some(p) if wanted(p) => {
                     p.kept = Some(mid.clone());
-                    true
+                    (p.body.clone(), p.created_ms)
                 }
-                _ => false,
+                _ => return,
             }
         };
-        if kept {
+        let wrote = bridge::record_not_sent_as(&dir, &peer, &body, written, &mid).is_ok();
+        // Its keeping row still, or its own row by now (it ended meanwhile
+        // with nothing written: `keep_unsent`)?
+        let (stands, orphan) = {
+            let mut book = lock(&self.book);
+            let (keeps, owns) =
+                book.pendings
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map_or((false, false), |p| {
+                        (
+                            p.kept.as_deref() == Some(mid.as_str()),
+                            p.bound_mid.as_deref() == Some(mid.as_str()),
+                        )
+                    });
+            if !wrote && (keeps || owns) {
+                // No such row: the send is as it was before.
+                if let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) {
+                    if keeps {
+                        p.kept = None;
+                    } else {
+                        p.bound_mid = None;
+                    }
+                }
+                if owns {
+                    book.alias.remove(&mid);
+                }
+            }
+            (wrote && (keeps || owns), wrote && !keeps && !owns)
+        };
+        if stands {
             send_note(&peer, &format!("{id} kept as not sent until it goes"));
-        } else {
-            // It ended (or was kept) meanwhile: its own row stands.
+        } else if orphan {
+            // It ended on a row of its own meanwhile, or its keeping row
+            // took the message's id as this one was written: this one goes.
             delete_row(&dir, &peer, &mid);
+        } else {
+            send_note(&peer, &format!("{id} could not be kept as not sent"));
         }
         self.invalidate_history();
     }
@@ -1646,6 +1708,56 @@ impl Inner {
         for id in ids {
             self.keep_until_sent(&id);
         }
+    }
+
+    /// The send `id` is about to write its stage and its own history row
+    /// under the message id `mid` (hex; told on the send's thread, which
+    /// holds the outbound stage lock and no history lock): the row that
+    /// kept it as not sent takes that id, where it stands, so that the send
+    /// writes over the same row and the history holds the message once
+    /// wherever the app ends. The book changes first: no look at the
+    /// history between the two shows the row as another program's message.
+    /// Nothing for a send that is not kept or has its row.
+    fn own_row_named(&self, id: &str, mid: &str) {
+        let mid = mid.to_ascii_lowercase();
+        let (peer, kept) = {
+            let mut book = lock(&self.book);
+            let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) else {
+                return;
+            };
+            if p.bound_mid.is_some() {
+                return;
+            }
+            let Some(kept) = p.kept.take() else {
+                return;
+            };
+            p.kept_before = Some(kept.clone());
+            p.bound_mid = Some(mid.clone());
+            let peer = p.peer.clone();
+            book.alias.insert(mid.clone(), id.to_owned());
+            (peer, kept)
+        };
+        let renamed = match self.data_dir() {
+            Ok(dir) => bridge::rename_not_sent(dir, &peer, &kept, &mid),
+            Err(e) => Err(e.detail),
+        };
+        if !matches!(renamed, Ok(true)) {
+            // No row took the id: the send's own row is found as any row
+            // (`bind`), and a keeping row that is still there goes when the
+            // send ends on its own (`drop_kept`).
+            let mut book = lock(&self.book);
+            book.alias.remove(&mid);
+            if let Some(p) = book.pendings.iter_mut().find(|p| p.id == id) {
+                p.bound_mid = None;
+                p.kept_before = None;
+                if renamed.is_err() {
+                    p.kept = Some(kept);
+                }
+            }
+            drop(book);
+            send_note(&peer, &format!("{id} writes a row of its own"));
+        }
+        self.invalidate_history();
     }
 
     /// The send `id` ended on a row of its own: the row that kept it while
@@ -1723,7 +1835,7 @@ impl Inner {
         self.invalidate_history();
     }
 
-    fn send_now(&self, peer: &str, body: &str) -> (Outcome, String) {
+    fn send_now(&self, id: &str, peer: &str, body: &str) -> (Outcome, String) {
         // The profile as an operation opens it: refused while an erase or a
         // key change is unfinished (profile.rs).
         if let Err(e) = self.open() {
@@ -1748,7 +1860,18 @@ impl Inner {
             }
             return (Outcome::NodeUnavailable, why);
         }
-        match bridge::send_to_contact(&dir, &identity, peer, body) {
+        // The row that keeps it takes the message's id just before the send
+        // writes under it: one row for the message, wherever the app ends.
+        let own_id: bridge::OwnIdNote = {
+            let me = self.me.clone();
+            let id = id.to_owned();
+            Box::new(move |mid: &[u8; 16]| {
+                if let Some(inner) = me.upgrade() {
+                    inner.own_row_named(&id, &hex::encode(mid));
+                }
+            })
+        };
+        match bridge::send_to_contact_noting(&dir, &identity, peer, body, own_id) {
             Ok(done) => {
                 {
                     let _guard = lock(&self.contacts_lock);
@@ -2364,6 +2487,7 @@ mod tests {
             via: None,
             finished: None,
             kept: None,
+            kept_before: None,
         }
     }
 
@@ -2484,6 +2608,210 @@ mod tests {
     /// later: a send that has not gone yet is kept as a
     /// not-sent row, so the next launch shows it with its text; in this run
     /// the send itself shows, once.
+    /// The rows of the history file, as (id, direction, delivery, text).
+    fn rows_of(dir: &std::path::Path) -> Vec<(String, String, String, String)> {
+        raven_core::chat_history::ChatHistory::load(dir)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| (e.message_id_hex, e.direction, e.delivery, e.body))
+            .collect()
+    }
+
+    #[test]
+    fn a_taken_send_is_one_row_from_the_first_moment_to_the_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Inner::new(Ok(dir.path().to_path_buf()));
+        let peer = "ab".repeat(32);
+        let own = "cd".repeat(16);
+        lock(&inner.book).pendings.push(Pending {
+            peer: peer.clone(),
+            ..pending(Job::Queued, None)
+        });
+        let shown = |rows: &[ChatHistoryEntry]| -> Vec<(String, State)> {
+            let mut book = lock(&inner.book);
+            views(&mut book, rows, &OutboxSnap::default(), &[], 2)
+                .into_iter()
+                .map(|v| (v.id, v.state))
+                .collect()
+        };
+        let read = || {
+            raven_core::chat_history::ChatHistory::load(dir.path())
+                .unwrap()
+                .entries
+        };
+        let sending = [("pending-1".to_owned(), State::Sending)];
+
+        // Taken: a not-sent row keeps it (what a quit now leaves behind).
+        inner.keep_until_sent("pending-1");
+        let kept = lock(&inner.book).pendings[0].kept.clone().expect("kept");
+        assert_eq!(
+            rows_of(dir.path()),
+            [(kept.clone(), "out".into(), "failed".into(), "hi".into())]
+        );
+        let before = read();
+        assert_eq!(shown(&before), sending);
+
+        // Its turn: the send names its message, the row takes that id.
+        lock(&inner.book).pendings[0].job = Job::Running;
+        inner.own_row_named("pending-1", &own.to_ascii_uppercase());
+        assert_eq!(
+            rows_of(dir.path()),
+            [(own.clone(), "out".into(), "failed".into(), "hi".into())]
+        );
+        {
+            let book = lock(&inner.book);
+            let p = &book.pendings[0];
+            assert_eq!(p.kept, None);
+            assert_eq!(p.kept_before.as_deref(), Some(kept.as_str()));
+            assert_eq!(p.bound_mid.as_deref(), Some(own.as_str()));
+        }
+        // One bubble that reads Sending, on the new read and on one from
+        // before the change (the old id is nobody else's message).
+        assert_eq!(shown(&read()), sending);
+        assert_eq!(shown(&before), sending);
+        assert_eq!(shown(&[]), sending);
+
+        // The send's own write lands on the same row.
+        raven_core::persist_lan_chat_history(
+            dir.path(),
+            "out",
+            &[0xab; 32],
+            &[0xcd; 16],
+            1,
+            "queued",
+            b"hi",
+        )
+        .unwrap();
+        assert_eq!(
+            rows_of(dir.path()),
+            [(own.clone(), "out".into(), "queued".into(), "hi".into())]
+        );
+        {
+            let mut book = lock(&inner.book);
+            let p = &mut book.pendings[0];
+            p.job = Job::Done;
+            p.outcome = Some(Outcome::Waiting {
+                background: true,
+                connect: false,
+            });
+        }
+        inner.keep_unsent("pending-1");
+        inner.drop_kept("pending-1");
+        assert_eq!(
+            rows_of(dir.path()).len(),
+            1,
+            "nothing more written or taken away"
+        );
+        assert_eq!(shown(&read()), [("pending-1".to_owned(), State::Waiting)]);
+    }
+
+    #[test]
+    fn a_taken_send_that_writes_nothing_ends_on_its_keeping_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Inner::new(Ok(dir.path().to_path_buf()));
+        lock(&inner.book).pendings.push(Pending {
+            peer: "ab".repeat(32),
+            ..pending(Job::Queued, None)
+        });
+        inner.keep_until_sent("pending-1");
+        let kept = lock(&inner.book).pendings[0].kept.clone().expect("kept");
+        {
+            let mut book = lock(&inner.book);
+            let p = &mut book.pendings[0];
+            p.job = Job::Done;
+            p.outcome = Some(Outcome::NotSent { meet_first: false });
+        }
+        inner.keep_unsent("pending-1");
+        inner.drop_kept("pending-1");
+        assert_eq!(
+            rows_of(dir.path()),
+            [(kept.clone(), "out".into(), "failed".into(), "hi".into())]
+        );
+        let rows = raven_core::chat_history::ChatHistory::load(dir.path())
+            .unwrap()
+            .entries;
+        let mut book = lock(&inner.book);
+        assert_eq!(book.pendings[0].bound_mid.as_deref(), Some(kept.as_str()));
+        let shown = views(&mut book, &rows, &OutboxSnap::default(), &[], 2);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(
+            (shown[0].id.as_str(), shown[0].state),
+            ("pending-1", State::Failed)
+        );
+    }
+
+    #[test]
+    fn a_send_with_no_keeping_row_goes_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Inner::new(Ok(dir.path().to_path_buf()));
+        let peer = "ab".repeat(32);
+        lock(&inner.book).pendings.push(Pending {
+            peer: peer.clone(),
+            ..pending(Job::Running, None)
+        });
+        // Not kept: the send's word changes nothing.
+        inner.own_row_named("pending-1", &"cd".repeat(16));
+        {
+            let book = lock(&inner.book);
+            let p = &book.pendings[0];
+            assert_eq!(
+                (&p.kept, &p.kept_before, &p.bound_mid),
+                (&None, &None, &None)
+            );
+            assert!(book.alias.is_empty());
+        }
+        assert!(rows_of(dir.path()).is_empty());
+
+        // Kept, and the keeping row is gone when the send names its message:
+        // the send is unbound again and finds its row as any send does.
+        lock(&inner.book).pendings[0].job = Job::Queued;
+        inner.keep_until_sent("pending-1");
+        let kept = lock(&inner.book).pendings[0].kept.clone().expect("kept");
+        delete_row(dir.path(), &peer, &kept);
+        inner.own_row_named("pending-1", &"cd".repeat(16));
+        let book = lock(&inner.book);
+        let p = &book.pendings[0];
+        assert_eq!(
+            (&p.kept, &p.kept_before, &p.bound_mid),
+            (&None, &None, &None)
+        );
+        assert!(book.alias.is_empty());
+    }
+
+    #[test]
+    fn a_send_is_not_kept_while_the_profile_cannot_be_opened() {
+        let inner = Inner::new(Err("no profile in this test".into()));
+        lock(&inner.book).pendings.push(pending(Job::Queued, None));
+        inner.keep_until_sent("pending-1");
+        assert_eq!(lock(&inner.book).pendings[0].kept, None);
+    }
+
+    #[test]
+    fn a_keeping_row_under_the_messages_id_reads_sending_while_the_send_runs() {
+        let running = pending(Job::Running, None);
+        assert_eq!(
+            state_of(Some("failed"), None, Some(&running), 2).0,
+            State::Sending
+        );
+        let queued = pending(Job::Queued, None);
+        assert_eq!(
+            state_of(Some("failed"), None, Some(&queued), 2).0,
+            State::Sending
+        );
+        // Ended, or not this run's send: the row's word stands.
+        let ended = pending(Job::Done, Some(Outcome::NotSent { meet_first: false }));
+        assert_eq!(
+            state_of(Some("failed"), None, Some(&ended), 2).0,
+            State::Failed
+        );
+        assert_eq!(state_of(Some("failed"), None, None, 2).0, State::Failed);
+        assert_eq!(
+            state_of(Some("cancelled"), None, Some(&running), 2).0,
+            State::Failed
+        );
+    }
+
     #[test]
     fn a_send_unfinished_at_the_pause_is_kept_as_not_sent() {
         let dir = tempfile::tempdir().unwrap();

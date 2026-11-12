@@ -763,6 +763,29 @@ pub fn send_to_contact(
     })
 }
 
+/// What [`send_to_contact_noting`] tells the new message's id to, once.
+pub type OwnIdNote = Box<dyn FnOnce(&[u8; 16])>;
+
+/// [`send_to_contact`], and `own_id` is told once, on this thread, the new
+/// message's id just before the send writes the message's stage and its own
+/// history row (queued, with its text) under it: before the message is
+/// dialled, and never when the send writes no row. The send holds the
+/// outbound stage lock around it and no history lock: the one told may
+/// write the history and must not wait for another send. The engine keeps
+/// a message as not sent from the moment it takes it, so a quit loses
+/// nothing, and gives that row the message's id on this word
+/// ([`rename_not_sent`]): the send then writes over the same row.
+pub fn send_to_contact_noting(
+    data_dir: &Path,
+    id: &Identity,
+    pub_hex: &str,
+    text: &str,
+    own_id: OwnIdNote,
+) -> Result<Delivered, String> {
+    let _noting = super::pair_init_lab::OwnIdNoteGuard::set(own_id);
+    send_to_contact(data_dir, id, pub_hex, text)
+}
+
 /// cli.rs's `run_send` with the identity given instead of loaded.
 fn run_send(
     data_dir: &Path,
@@ -843,10 +866,35 @@ pub fn record_not_sent(
     text: &str,
     written_ms: u64,
 ) -> Result<String, String> {
+    let mid = fresh_row_id();
+    record_not_sent_as(data_dir, pub_hex, text, written_ms, &mid)?;
+    Ok(mid)
+}
+
+/// A new random message id (hex) for a row the engine writes itself: it
+/// names the row before it writes it, so that no look at the history between
+/// the two takes the row for a message of another program.
+pub fn fresh_row_id() -> String {
     use rand::RngCore;
-    let peer = super::parse_pub_hex(pub_hex)?;
     let mut mid = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut mid);
+    hex::encode(mid)
+}
+
+/// [`record_not_sent`] under the message id `mid` (hex, from
+/// [`fresh_row_id`]).
+pub fn record_not_sent_as(
+    data_dir: &Path,
+    pub_hex: &str,
+    text: &str,
+    written_ms: u64,
+    mid: &str,
+) -> Result<(), String> {
+    let peer = super::parse_pub_hex(pub_hex)?;
+    let mid: [u8; 16] = hex::decode(mid)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| "not a message id".to_owned())?;
     raven_core::persist_lan_chat_history(
         data_dir,
         "out",
@@ -855,8 +903,34 @@ pub fn record_not_sent(
         written_ms,
         raven_core::outbox::HISTORY_FAILED,
         text.as_bytes(),
-    )?;
-    Ok(hex::encode(mid))
+    )
+}
+
+/// Gives the kept row `from` of the friend `pub_hex` (a row of
+/// [`record_not_sent_as`]) the message id `to` (both hex) in one history
+/// write: the row keeps its place and its text. When a row `to` is there
+/// already, `from` goes. Says whether a row `from` was found.
+pub fn rename_not_sent(
+    data_dir: &Path,
+    pub_hex: &str,
+    from: &str,
+    to: &str,
+) -> Result<bool, String> {
+    let peer = hex::encode(super::parse_pub_hex(pub_hex)?);
+    let id = |mid: &str| -> Result<String, String> {
+        let bytes: [u8; 16] = hex::decode(mid)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| "not a message id".to_owned())?;
+        Ok(hex::encode(bytes))
+    };
+    raven_core::chat_history::ChatHistory::rename_outbound_row(
+        data_dir,
+        &peer,
+        &id(from)?,
+        &id(to)?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// `raven outbox retry <mid>`: raven-node tries the waiting message now.

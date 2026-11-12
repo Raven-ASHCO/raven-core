@@ -650,6 +650,65 @@ impl ChatHistory {
         Ok(u32::try_from(removed).unwrap_or(u32::MAX))
     }
 
+    /// Gives the outbound row `from` of the friend `peer_pub_hex` the message
+    /// id `to` (both hex) in one write under the same lock as append: the
+    /// row keeps its place, its text, its delivery and its stamps. When a
+    /// row `to` is there already, it stays as it is and `from` goes. Says
+    /// whether a row `from` was found (an empty `to` renames nothing and
+    /// says no). The app engine keeps a message as not
+    /// sent under an id of its own from the moment it takes it, and gives
+    /// that row the message's own id just before the send writes under it:
+    /// the history then holds the message exactly once wherever the process
+    /// ends.
+    pub fn rename_outbound_row(
+        data_dir: &Path,
+        peer_pub_hex: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, ChatHistoryError> {
+        Self::rename_outbound_row_with_protector(
+            data_dir,
+            peer_pub_hex,
+            from,
+            to,
+            &PlatformChatHistoryProtector::default(),
+        )
+    }
+
+    fn rename_outbound_row_with_protector(
+        data_dir: &Path,
+        peer_pub_hex: &str,
+        from: &str,
+        to: &str,
+        protector: &dyn ChatHistoryProtector,
+    ) -> Result<bool, ChatHistoryError> {
+        let to = truncate_sanitized(to, MAX_MESSAGE_ID_CHARS).to_ascii_lowercase();
+        if to.is_empty() {
+            return Ok(false);
+        }
+        prepare_history(data_dir, protector, false);
+        let _lock = HistoryLock::acquire(data_dir)?;
+        let mut history = Self::load_unlocked(data_dir, protector)?;
+        let row = |e: &ChatHistoryEntry, mid: &str| {
+            e.direction == "out"
+                && e.peer_pub_hex.eq_ignore_ascii_case(peer_pub_hex)
+                && e.message_id_hex.eq_ignore_ascii_case(mid)
+        };
+        let Some(position) = history.entries.iter().position(|e| row(e, from)) else {
+            return Ok(false);
+        };
+        if from.eq_ignore_ascii_case(&to) {
+            return Ok(true);
+        }
+        if history.entries.iter().any(|e| row(e, &to)) {
+            history.entries.remove(position);
+        } else {
+            history.entries[position].message_id_hex = to;
+        }
+        history.save_unlocked(data_dir, protector)?;
+        Ok(true)
+    }
+
     /// The retention pass (privacy pack PP.9): deletes the rows kept since
     /// before `cutoff_ms` ([`ChatHistoryEntry::kept_since_ms`]), both
     /// directions, except the outbound rows of messages still waiting to be
@@ -3965,6 +4024,90 @@ mod tests {
             stored_at_ms: None,
             id_conflict: false,
         }
+    }
+
+    #[test]
+    fn a_renamed_outbound_row_keeps_its_place_and_is_never_doubled() {
+        let dir = tempdir().unwrap();
+        let protector = TestProtector::new(9);
+        let row = |mid: &str, direction: &str, body: &str, delivery: &str| ChatHistoryEntry {
+            message_id_hex: mid.into(),
+            direction: direction.into(),
+            delivery: delivery.into(),
+            preview: body.into(),
+            body: body.into(),
+            ..sample_entry()
+        };
+        let append = |entry: ChatHistoryEntry| {
+            ChatHistory::append_persisted_with_protector(dir.path(), entry, &protector).unwrap();
+        };
+        let rename = |peer: &str, from: &str, to: &str| {
+            ChatHistory::rename_outbound_row_with_protector(dir.path(), peer, from, to, &protector)
+                .unwrap()
+        };
+        let rows = || -> Vec<(String, String, String, String)> {
+            ChatHistory::load_with_protector(dir.path(), &protector)
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|e| (e.message_id_hex, e.direction, e.body, e.delivery))
+                .collect()
+        };
+        let friend = "ABCDEF0123456789";
+        let kept = "000102030405060708090a0b0c0d0e0f";
+        let own = "f0e0d0c0b0a090807060504030201000";
+        append(row(&"1".repeat(32), "out", "first", "delivered"));
+        append(row(kept, "out", "kept text", "failed"));
+        append(row(
+            kept,
+            "in",
+            "a received row under the same id",
+            "delivered",
+        ));
+        append(row(&"2".repeat(32), "out", "last", "queued"));
+
+        // The row takes the new id where it stands. The received row under
+        // the same id and the rows around it are not touched.
+        assert!(rename(
+            friend,
+            &kept.to_ascii_uppercase(),
+            &own.to_ascii_uppercase()
+        ));
+        let renamed = rows();
+        assert_eq!(renamed.len(), 4);
+        assert_eq!(
+            renamed[1],
+            (
+                own.into(),
+                "out".into(),
+                "kept text".into(),
+                "failed".into()
+            )
+        );
+        assert_eq!((renamed[2].0.as_str(), renamed[2].1.as_str()), (kept, "in"));
+        assert_eq!(renamed[0].2, "first");
+        assert_eq!(renamed[3].2, "last");
+
+        // The send's own write then lands on that one row.
+        append(row(own, "out", "kept text", "queued"));
+        let queued = rows();
+        assert_eq!(queued.len(), 4);
+        assert_eq!(queued[1].3, "queued");
+
+        // No such row, another friend's row, or no new id: nothing changes.
+        assert!(!rename(friend, kept, own));
+        assert!(!rename("0000000000000000", own, kept));
+        assert!(!rename(friend, own, ""));
+        assert_eq!(rows(), queued);
+        // Its own id again: found, and nothing changes.
+        assert!(rename(friend, own, own));
+        assert_eq!(rows(), queued);
+
+        // A row under the new id is there already: it stays, the old goes.
+        append(row(kept, "out", "kept text", "failed"));
+        assert_eq!(rows().len(), 5);
+        assert!(rename(friend, kept, own));
+        assert_eq!(rows(), queued);
     }
 
     #[test]

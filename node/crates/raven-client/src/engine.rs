@@ -74,6 +74,10 @@ type MarkStamps = [Stamp; 2];
 #[derive(Default)]
 pub(crate) struct Caches {
     history: Option<(Stamp, Arc<Vec<ChatHistoryEntry>>)>,
+    /// Goes up each time the cached history is forgotten: a read that began
+    /// before keeps nothing (its rows may be older than the write that
+    /// forgot it, under a stamp that write did not change).
+    history_turn: u64,
     contacts: Option<(ContactStamps, Arc<Vec<ContactView>>)>,
     outbox: Option<(Instant, Arc<OutboxSnap>)>,
     marks: Option<(MarkStamps, Arc<ReadMarks>)>,
@@ -490,7 +494,12 @@ impl Inner {
         self.events.set_locked(locked);
         if locked {
             keys.identity = None;
-            *lock(&self.caches) = Caches::default();
+            let mut caches = lock(&self.caches);
+            *caches = Caches {
+                history_turn: caches.history_turn.wrapping_add(1),
+                ..Caches::default()
+            };
+            drop(caches);
             if let Ok(dir) = self.data_dir() {
                 raven_core::at_rest::forget_cached_keys(dir);
                 raven_core::keystore_vault::forget_process_key(dir);
@@ -642,23 +651,34 @@ impl Inner {
         self.identity()?;
         let dir = self.data_dir()?;
         let stamp = Stamp::of(&raven_core::chat_history::history_path(dir));
-        if let Some((cached, entries)) = &lock(&self.caches).history {
-            if *cached == stamp {
-                return Ok(Arc::clone(entries));
+        let turn = {
+            let caches = lock(&self.caches);
+            if let Some((cached, entries)) = &caches.history {
+                if *cached == stamp {
+                    return Ok(Arc::clone(entries));
+                }
             }
-        }
+            caches.history_turn
+        };
         let entries = Arc::new(
             ChatHistory::load(dir)
                 .map(|h| h.without_group_copies().entries)
                 .map_err(|e| history_error(dir, &e.to_string()))?,
         );
-        self.keep_cached(|c| c.history = Some((stamp, Arc::clone(&entries))));
+        self.keep_cached(|c| {
+            if c.history_turn == turn {
+                c.history = Some((stamp, Arc::clone(&entries)));
+            }
+        });
         Ok(entries)
     }
 
-    /// Forget the cached history: the next read loads it again.
+    /// Forget the cached history: the next read loads it again, and a read
+    /// that is loading it now keeps nothing.
     pub(crate) fn invalidate_history(&self) {
-        lock(&self.caches).history = None;
+        let mut caches = lock(&self.caches);
+        caches.history = None;
+        caches.history_turn = caches.history_turn.wrapping_add(1);
     }
 
     /// The saved friends (with their blocked state), read again only when

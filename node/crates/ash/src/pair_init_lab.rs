@@ -233,6 +233,56 @@ fn send_note(peer: &[u8; 32], line: &str) {
     }
 }
 
+/// What the app engine asks to be told once: the id of this thread's new
+/// message, just before the send writes the message's stage and its own
+/// history row under it. The engine keeps a message as not sent, under an
+/// id of its own, from the moment it takes it; on this word it gives that
+/// row the message's id (`ChatHistory::rename_outbound_row`), so that the
+/// send's own write lands on the same row and a process end at any point
+/// leaves the message in the history exactly once.
+pub(super) type OwnIdNote = Box<dyn FnOnce(&[u8; 16])>;
+
+thread_local! {
+    /// Per thread, as a send runs on its caller's thread. No terminal
+    /// command sets one.
+    static OWN_ID_NOTE: std::cell::RefCell<Option<OwnIdNote>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Holds this thread's note for one send (the engine,
+/// `engine_bridge::send_to_contact_noting`): a note the send never called,
+/// as it wrote no row, goes with it.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+pub(super) struct OwnIdNoteGuard(());
+
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+impl OwnIdNoteGuard {
+    pub(super) fn set(note: OwnIdNote) -> Self {
+        OWN_ID_NOTE.with(|slot| *slot.borrow_mut() = Some(note));
+        Self(())
+    }
+}
+
+impl Drop for OwnIdNoteGuard {
+    fn drop(&mut self) {
+        let unused = OWN_ID_NOTE.with(|slot| slot.borrow_mut().take());
+        drop(unused);
+    }
+}
+
+/// The new message has its id `mid`, and the send is about to write its
+/// stage and its history row under it: tell whoever asked, once. The send
+/// holds the outbound stage lock here and no history lock, so the one told
+/// may write the history (the order of the send's own write) and must not
+/// wait for another send.
+fn tell_own_id(mid: &[u8; 16]) {
+    // Taken out before it runs: it is told once, and may not come back here.
+    let note = OWN_ID_NOTE.with(|slot| slot.borrow_mut().take());
+    if let Some(note) = note {
+        note(mid);
+    }
+}
+
 /// How long a send waits for raven-node's `ContactReach` (it answers from
 /// memory); an older or busy one: the send probes as before.
 const CONTACT_REACH_WAIT: Duration = Duration::from_millis(700);
@@ -3335,6 +3385,7 @@ fn park_new_message_for(
         }
         Err(e) => return Err(not_sent_nothing_queued(ctx, &e.redacted_display())),
     }
+    tell_own_id(&mid);
     if let Err(e) = raven_core::ensure_outbound_queued_history_under_send_guard(
         &guard,
         device,
@@ -3639,6 +3690,12 @@ fn send_indexed_text(
                 let compose = history_queue_text.borrow();
                 let session = *dial_session.borrow();
                 *failed_binding.borrow_mut() = Some((session, *digest, env.message_id));
+                if compose.is_some() {
+                    // The new message (an earlier one's dial brings no
+                    // text: its row is there since its own send), before
+                    // its stage and its row are written.
+                    tell_own_id(&env.message_id);
+                }
                 let stage_result = match stage_guard.borrow().as_ref() {
                     Some(guard) => raven_core::ensure_outbound_queued_history_under_send_guard(
                         guard,
