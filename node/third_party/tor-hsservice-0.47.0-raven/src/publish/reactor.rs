@@ -881,16 +881,26 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
         let reupload_when = self.imm.runtime.now() + duration;
         let time_period = period.params.time_period();
 
-        info!(
-            time_period=?time_period,
-            "reuploading descriptor in {}",
-            humantime::format_duration(duration),
-        );
-
-        inner.reupload_timers.push(ReuploadTimer {
+        // Raven (RAVEN_DELTA.md): a time period that already waits for a
+        // reupload keeps that timer, the earlier one, and gets no second.
+        let timer = ReuploadTimer {
             period: time_period,
             when: reupload_when,
-        });
+        };
+        let same_period = |a: &ReuploadTimer, b: &ReuploadTimer| a.period == b.period;
+        if crate::raven_delta::push_unless_waiting(&mut inner.reupload_timers, timer, same_period)
+        {
+            info!(
+                time_period=?time_period,
+                "reuploading descriptor in {}",
+                humantime::format_duration(duration),
+            );
+        } else {
+            debug!(
+                time_period=?time_period,
+                "descriptor reupload already scheduled",
+            );
+        }
 
         let mut upload_results = vec![];
         for upload_res in results.hsdir_result {

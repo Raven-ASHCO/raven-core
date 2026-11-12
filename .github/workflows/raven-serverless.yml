@@ -472,10 +472,12 @@ jobs:
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
             cargo test --locked -p raven-node --lib -- onion:: tor_race
           # Tor in process (the iOS app) and Raven's arti-client patch: Tor off
-          # when the Tor network finds it too old, and on Wi-Fi only; the Arti
+          # when the Tor network finds it too old, and on Wi-Fi only; Raven's
+          # tor-hsservice patch (one reupload timer per time period); the Arti
           # client settings (a BEGIN gives up after 6 s) and the connect tries.
           cargo test --locked -p raven-node --features tor-embedded --lib -- \
-            onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
+            onion::tests::the_arti_patch onion::tests::the_hsservice_patch \
+            onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
             onion::arti:: onion::proto::
           # The helper channel with Tor in process (the iOS app): the helper is
           # handed its end of the channel, and onion streams both ways ride it.
@@ -1082,10 +1084,12 @@ jobs:
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
             cargo test --locked -p raven-node --lib -- onion:: tor_race
           # Tor in process (the iOS app) and Raven's arti-client patch: Tor off
-          # when the Tor network finds it too old, and on Wi-Fi only; the Arti
+          # when the Tor network finds it too old, and on Wi-Fi only; Raven's
+          # tor-hsservice patch (one reupload timer per time period); the Arti
           # client settings (a BEGIN gives up after 6 s) and the connect tries.
           cargo test --locked -p raven-node --features tor-embedded --lib -- \
-            onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
+            onion::tests::the_arti_patch onion::tests::the_hsservice_patch \
+            onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
             onion::arti:: onion::proto::
           # The helper channel with Tor in process (the iOS app): the helper is
           # handed its end of the channel, and onion streams both ways ride it.
@@ -1349,10 +1353,12 @@ jobs:
           RAVEN_LAB_TEST_A=1 RAVEN_LAB_TOR=1 \
             cargo test --locked -p raven-node --lib -- onion:: tor_race
           # Tor in process (the iOS app) and Raven's arti-client patch: Tor off
-          # when the Tor network finds it too old, and on Wi-Fi only; the Arti
+          # when the Tor network finds it too old, and on Wi-Fi only; Raven's
+          # tor-hsservice patch (one reupload timer per time period); the Arti
           # client settings (a BEGIN gives up after 6 s) and the connect tries.
           cargo test --locked -p raven-node --features tor-embedded --lib -- \
-            onion::tests::the_arti_patch onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
+            onion::tests::the_arti_patch onion::tests::the_hsservice_patch \
+            onion::tests::a_tor_too_old onion::tests::tor_on_wifi_only \
             onion::arti:: onion::proto::
           # The helper channel with Tor in process (the iOS app): the helper is
           # handed its end of the channel, and onion streams both ways ride it.

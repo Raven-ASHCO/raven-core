@@ -72,6 +72,7 @@ mod ipt_set;
 mod keys;
 mod pow;
 mod publish;
+pub mod raven_delta;
 mod rend_handshake;
 mod replay;
 mod req;

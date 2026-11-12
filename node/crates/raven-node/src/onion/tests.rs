@@ -1666,6 +1666,71 @@ async fn the_arti_patch_tells_the_helper_instead_of_exiting() {
     assert!(life.said.load(std::sync::atomic::Ordering::Acquire));
 }
 
+/// Raven's tor-hsservice patch (third_party/tor-hsservice-0.47.0-raven): the
+/// descriptor publisher keeps one reupload timer per time period.
+///
+/// The publisher's timers, played minute by minute for two days of one time
+/// period. Every upload result asks for a timer 60 to 120 minutes on. A
+/// timer that fires causes a reupload to every HsDir. Once an hour something
+/// else causes an upload to one HsDir (a new consensus moved it). Upstream
+/// kept every timer it was asked for (`keep_every_timer`), so each of those
+/// hourly uploads left one more behind, and each of them came back as a
+/// whole reupload every 60 to 120 minutes (two that fire in the same minute
+/// become one again, which is all that bounds their number).
+#[cfg(feature = "tor")]
+#[test]
+fn the_hsservice_patch_keeps_one_reupload_timer_per_time_period() {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    /// (timers left, uploads in the last hour, longest wait between two
+    /// reuploads to every HsDir in minutes).
+    fn two_days(keep_every_timer: bool) -> (usize, usize, u64) {
+        const PERIOD: u8 = 7;
+        let mut timers: BinaryHeap<Reverse<(u64, u8)>> = BinaryHeap::new();
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut ask = |timers: &mut BinaryHeap<Reverse<(u64, u8)>>, now: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let timer = Reverse((now + 60 + (seed >> 33) % 61, PERIOD));
+            tor_hsservice::raven_delta::push_unless_waiting(timers, timer, |a, b| {
+                !keep_every_timer && a.0 .1 == b.0 .1
+            });
+        };
+        let (mut last_hour, mut whole_at, mut longest) = (0, 0, 0);
+        ask(&mut timers, 0);
+        for now in 1..=48 * 60_u64 {
+            let mut fired = false;
+            while timers.peek().is_some_and(|timer| timer.0 .0 <= now) {
+                timers.pop();
+                fired = true;
+            }
+            if fired {
+                longest = longest.max(now - whole_at);
+                whole_at = now;
+            }
+            // Uploads within a minute of each other are one upload (Arti's
+            // rate limit), with one result.
+            if fired || now % 60 == 0 {
+                ask(&mut timers, now);
+                last_hour += usize::from(now > 47 * 60);
+            }
+        }
+        (timers.len(), last_hour, longest)
+    }
+
+    let (timers, last_hour, _) = two_days(true);
+    assert!(
+        timers >= 10 && last_hour >= 8,
+        "upstream: {timers} timers, {last_hour} uploads"
+    );
+    let (timers, last_hour, longest) = two_days(false);
+    assert_eq!(timers, 1);
+    assert!(last_hour <= 3, "{last_hour} uploads in the last hour");
+    assert!(longest <= 120, "an HsDir waited {longest} minutes");
+}
+
 /// Tor is on in release builds (since 2026-10): raven-node's Status carries
 /// its line, and so its start percentage, without a lab switch (the apps'
 /// progress bar reads it from the engine's `network.status`).

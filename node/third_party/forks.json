@@ -125,8 +125,15 @@
       },
       "why": "one descriptor reupload timer per time period: upstream adds one on every upload result and each fires an upload of its own, so an onion service that stays up uploads its descriptor more and more often (RAVEN_DELTA.md)",
       "delta": {
-        "modified": {},
-        "added": {},
+        "modified": {
+          "Cargo.toml": "7a83c8cb19d1d0d7d3b9297fecf8a2de3d69810c394ed466dcf3b8e0cc7d9229",
+          "src/lib.rs": "7fa48e11f69c13549f485a1a1a563e60c10ee32ba521e750c6799cb7a227e447",
+          "src/publish/reactor.rs": "fccdf711e3428acbde1b7e653a34380719645ad9fbbcb5f00d8a58f07686e893"
+        },
+        "added": {
+          "RAVEN_DELTA.md": "adb109cfb94c0ad22b0c5028ef0beea14a3d3dfa1f48f6f6f6d611d7742fba68",
+          "src/raven_delta.rs": "93310464d150246da772f0052c9ae2eeef700d1f03de8152b8c719b58bb35664"
+        },
         "removed": [
           "Cargo.lock"
         ]
