@@ -1667,6 +1667,10 @@ where
     // The contact's verified offer: a live link (the session renewer; a
     // no-op for its own dials and while it does not run).
     crate::renewal::note_live_link(expected, crate::renewal::LiveLink::Outbound);
+    // It answered our signed hello with its own identity: it accepts this
+    // node, so a route the outbox set aside because a dial once closed
+    // after our hello is planned again.
+    crate::outbox::peer_accepted(expected);
     // It is reachable: what waits for it goes now, whatever this dial is for
     // (E1; nothing while the outbox's own attempt for it runs). Not on a
     // send's check (T13 a): the send's message dial follows at once and

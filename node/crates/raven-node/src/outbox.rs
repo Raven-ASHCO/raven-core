@@ -137,6 +137,9 @@ const IDLE_REFRESH_EMPTY: Duration = crate::lan_direct::DURABLE_PRUNE_INTERVAL;
 /// After any attempt that did not finish an object, it waits at least this
 /// long (no hot loop, even past its expiry when the store keeps failing).
 const MIN_RETRY: Duration = RETRY_BASE;
+/// How old a p2p route's first hang-up after our signed hello must be before
+/// a second one counts as the contact's answer ([`Entry::closed_once`]).
+const P2P_CLOSE_RECHECK: Duration = Duration::from_secs(2);
 /// How long one attempt waits for `raven send` (or another attempt) to release
 /// the peer's send lock before it steps back.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
@@ -375,6 +378,18 @@ pub(crate) struct Entry {
     /// and any send or app submit to it). Each dial there stops at message 2
     /// again. In memory only.
     pub(crate) pin_blocked: Vec<OutboxRoute>,
+    /// The routes among `blocked_routes` that are there because the far end
+    /// closed after our signed hello (LINK_NOT_ACCEPTED). Unlike a wrong
+    /// identity this says something about the contact, not about the
+    /// address, so a link on which the contact itself authenticates takes
+    /// it back ([`Inner::forget_not_accepted`]). In memory only.
+    pub(crate) not_accepted: Vec<OutboxRoute>,
+    /// p2p routes whose dial the far end closed once after our signed hello,
+    /// and when: a node re-homing its p2p host or shutting down looks like
+    /// a refusal once, so such a route is blocked only when a later dial, at
+    /// least [`P2P_CLOSE_RECHECK`] after the first, ends the same way. In
+    /// memory only.
+    pub(crate) closed_once: Vec<(OutboxRoute, Instant)>,
     /// The route (as planned) that last took this object's frames without a
     /// verified ACK coming back on that dial: the next attempt starts at the
     /// route after it and tries it last (G3). Plan order when `None` or no
@@ -415,6 +430,32 @@ pub(crate) struct Entry {
 const OUTCOME_KINDS_MAX: usize = 8;
 
 impl Entry {
+    /// Every blocked route is planned again (an explicit kick).
+    fn forget_blocks(&mut self) {
+        self.blocked_routes.clear();
+        self.blocked_code = "";
+        self.pin_blocked.clear();
+        self.not_accepted.clear();
+        self.closed_once.clear();
+    }
+
+    /// The contact accepted this node on a link: the routes blocked because
+    /// the far end closed after our signed hello are planned again. A route
+    /// where another identity answered stays blocked.
+    fn forget_not_accepted(&mut self) {
+        self.closed_once.clear();
+        if self.not_accepted.is_empty() {
+            return;
+        }
+        let gone = std::mem::take(&mut self.not_accepted);
+        self.blocked_routes.retain(|r| !gone.contains(r));
+        self.blocked_code = if self.blocked_routes.is_empty() {
+            ""
+        } else {
+            code::WRONG_IDENTITY
+        };
+    }
+
     /// One more attempt that ended as `code` ([`Entry::outcomes`]).
     fn count_outcome(&mut self, code: &'static str) {
         if let Some((_, n)) = self.outcomes.iter_mut().find(|(c, _)| *c == code) {
@@ -481,6 +522,8 @@ impl Entry {
             blocked_routes: Vec::new(),
             blocked_code: "",
             pin_blocked: Vec::new(),
+            not_accepted: Vec::new(),
+            closed_once: Vec::new(),
             unacked_route: None,
             refusals: 0,
             first_refusal: None,
@@ -604,6 +647,11 @@ struct Inner {
     /// route hints) while an attempt was in flight: what that attempt found
     /// is cleared too once it is applied. Only ever peers in flight.
     clear_pins_after: HashSet<[u8; 32]>,
+    /// The contact authenticated on a link ([`Inner::forget_not_accepted`])
+    /// while an attempt was in flight: a hang-up after our hello that the
+    /// attempt found is forgotten too once it is applied. Only ever peers
+    /// in flight.
+    accepted_after: HashSet<[u8; 32]>,
     /// In flight when the network changed: the route that attempt found
     /// silent is old-network evidence (G3), not recorded.
     net_changed: HashSet<[u8; 32]>,
@@ -737,6 +785,18 @@ pub(crate) fn peer_seen(peer: &[u8; 32]) {
     }
     drop(inner);
     ob.wake.notify_one();
+}
+
+/// `peer` authenticated itself on a dial of ours, of any purpose: it accepts
+/// this node, so the routes blocked because the far end once closed after
+/// our signed hello are planned again ([`Inner::forget_not_accepted`]).
+/// Schedules nothing by itself ([`peer_back`] does).
+pub(crate) fn peer_accepted(peer: &[u8; 32]) {
+    let ob = outbox();
+    let mut inner = lock(&ob.inner);
+    if inner.running {
+        inner.forget_not_accepted(peer);
+    }
 }
 
 /// A sign that `peer` is back (E1: a friend's node came back after a few
@@ -1425,9 +1485,7 @@ impl Inner {
             if peer.is_none_or(|p| *p == entry.recipient) {
                 entry.next_due = entry.next_due.min(due(&entry.recipient));
                 if explicit {
-                    entry.blocked_routes.clear();
-                    entry.blocked_code = "";
-                    entry.pin_blocked.clear();
+                    entry.forget_blocks();
                 }
             }
         }
@@ -1625,6 +1683,7 @@ impl Inner {
         // for it before (M0) is worth a try again, whether or not this link
         // earns a dial-back (the next attempt tries it).
         self.clear_pin_blocks(peer);
+        self.forget_not_accepted(peer);
         if !self.dialback_allowed(peer, now) {
             return self.back_now(peer, now);
         }
@@ -1744,6 +1803,23 @@ impl Inner {
         self.last_custody_kick = Some(now);
         self.custody_kick_pending = None;
         self.kick_now(None, false, now);
+    }
+
+    /// `peer` itself just authenticated on a link with this node (its
+    /// inbound link, or a dial of ours it answered with its identity): it
+    /// accepts this node, so a hang-up after our signed hello
+    /// (LINK_NOT_ACCEPTED) is taken back and those routes are planned again
+    /// (full check 2026-11-11: two nodes re-homed in the same second, the
+    /// dial closed mid-handshake, and the message waited for the next send
+    /// although the two talked a minute later). An attempt in flight
+    /// forgets what it found too, once it is applied.
+    fn forget_not_accepted(&mut self, peer: &[u8; 32]) {
+        for entry in self.entries.values_mut().filter(|e| e.recipient == *peer) {
+            entry.forget_not_accepted();
+        }
+        if self.in_flight.contains(peer) {
+            self.accepted_after.insert(*peer);
+        }
     }
 
     /// Forget the routes where another key answered for `peer` (M0). An
@@ -2136,7 +2212,16 @@ impl Inner {
                     if !entry.blocked_routes.contains(route) {
                         entry.blocked_routes.push(route.clone());
                     }
+                    if *why == code::LINK_NOT_ACCEPTED && !entry.not_accepted.contains(route) {
+                        entry.not_accepted.push(route.clone());
+                    }
+                    entry.closed_once.retain(|(r, _)| r != route);
                     entry.blocked_code = why;
+                }
+            }
+            for route in report.closed_once.get(digest).into_iter().flatten() {
+                if !entry.closed_once.iter().any(|(r, _)| r == route) {
+                    entry.closed_once.push((route.clone(), now));
                 }
             }
             // A mismatch found before the network changed is the old
@@ -2244,9 +2329,14 @@ impl Inner {
         }
         if self.clear_blocks.remove(peer) {
             for entry in self.entries.values_mut().filter(|e| e.recipient == *peer) {
-                entry.blocked_routes.clear();
-                entry.blocked_code = "";
-                entry.pin_blocked.clear();
+                entry.forget_blocks();
+            }
+        }
+        // The contact authenticated on a link while this attempt ran: a
+        // hang-up it found goes too.
+        if self.accepted_after.remove(peer) {
+            for entry in self.entries.values_mut().filter(|e| e.recipient == *peer) {
+                entry.forget_not_accepted();
             }
         }
         // The contact's inbound link or new route hints cleared its noise pin
@@ -2524,6 +2614,9 @@ pub(crate) struct PeerReport {
     /// again until the network or the contact says otherwise
     /// ([`Entry::pin_blocked`]).
     pub(crate) pin_blocked: HashMap<[u8; 32], Vec<OutboxRoute>>,
+    /// p2p routes whose dial the far end closed after our signed hello for
+    /// the first time for an object ([`Entry::closed_once`]): retried.
+    pub(crate) closed_once: HashMap<[u8; 32], Vec<OutboxRoute>>,
     /// Objects a route took on this attempt's dial without a verified ACK on
     /// it, with that route (as planned): it goes last next time (G3).
     pub(crate) unacked: HashMap<[u8; 32], OutboxRoute>,
@@ -3832,6 +3925,9 @@ struct Candidate {
     first_refusal: Option<Instant>,
     /// The route whose dial the peer closed on it (session reset query).
     refused_on: Option<OutboxRoute>,
+    /// p2p routes the far end closed on once before, long enough ago
+    /// ([`Entry::closed_once`]): the next such hang-up blocks the route.
+    closed_before: Vec<OutboxRoute>,
     /// No direct route, kept only for friend custody: the hold reason.
     held_why: Option<&'static str>,
     /// Custodians that took it in this attempt.
@@ -4708,6 +4804,12 @@ fn attempt_peer_inner(
                 refusals: entry.refusals,
                 first_refusal: entry.first_refusal,
                 refused_on: None,
+                closed_before: entry
+                    .closed_once
+                    .iter()
+                    .filter(|(_, t)| mono.saturating_duration_since(*t) >= P2P_CLOSE_RECHECK)
+                    .map(|(r, _)| r.clone())
+                    .collect(),
                 held_why,
                 custody_new: Vec::new(),
                 custody_forwarded: false,
@@ -5074,6 +5176,24 @@ fn attempt_peer_inner(
                     let c = &mut candidates[i];
                     c.dialled_over(planned.carrier);
                     c.lan_on_net |= on_net;
+                    // A p2p dial the far end closed after our signed hello
+                    // is its answer only the second time
+                    // (`Entry::closed_once`): a node re-homing its p2p host
+                    // looks the same once. The first is a link that closed
+                    // early, retried like one.
+                    let why = if why == code::LINK_NOT_ACCEPTED
+                        && planned.carrier == OutboxCarrier::P2p
+                        && !is_noise_pin_mismatch(&e)
+                        && !c.closed_before.contains(planned)
+                    {
+                        let once = report.closed_once.entry(c.digest).or_default();
+                        if !once.contains(planned) {
+                            once.push(planned.clone());
+                        }
+                        code::CLOSED_EARLY
+                    } else {
+                        why
+                    };
                     // A refusal on one route says more than a transport failure
                     // on another (say, a stale learned address): keep it, so the
                     // refusal count and the reported reason stay right. Not
@@ -6911,6 +7031,7 @@ impl Drop for RunningGuard {
         inner.in_flight_messages.clear();
         inner.net_changed.clear();
         inner.clear_pins_after.clear();
+        inner.accepted_after.clear();
         inner.back_after.clear();
         drop(inner);
         // Its identity goes with it (a lock, Lock v2).
@@ -11794,6 +11915,102 @@ mod tests {
         }
         rig.set(UP);
         assert!(matches!(only(&rig.attempt()), Outcome::Delivered { .. }));
+    }
+
+    /// Full check 2026-11-11 (matrix s48): a relay woke, both nodes re-homed
+    /// their p2p host in the same second and Alice's dial closed after her
+    /// signed hello. One such hang-up on p2p is not Bob's answer: the route
+    /// is tried again and blocked only when a later dial ends the same way.
+    /// A block of that kind goes when Bob himself authenticates on a link,
+    /// also while an attempt is in flight; a wrong-identity block stays.
+    #[test]
+    fn a_p2p_hang_up_blocks_only_the_second_time_and_the_contacts_own_link_takes_it_back() {
+        if !lab_backends() {
+            return;
+        }
+        let rig = Rig::new(0xe3);
+        let l = lan("192.168.1.20:7420");
+        let p = contacts_p2p(rig.a.path(), &rig.bob_pub, &l.dial);
+        rig.set(UP);
+        rig.set_route(l.clone(), DOWN);
+        rig.set_route(p.clone(), NOT_ACCEPTED);
+        let ctx = AttemptCtx {
+            p2p_live: on,
+            ..rig.ctx()
+        };
+        let mid = rig.stage("after the relay woke", DAY);
+        rig.record(&mid, CarrierChoice::Auto, &[]);
+        let mut inner = schedule(&rig, Instant::now());
+        let digest = *inner.entries.keys().next().unwrap();
+        let attempt = |inner: &mut Inner| {
+            let work = inner.take_due(Instant::now() + RETRY_MAX * 2).remove(0);
+            let report = attempt_peer(&ctx, &work.peer, &work.entries, &work.acks);
+            (work.peer, report)
+        };
+        let round = |inner: &mut Inner| {
+            let (peer, report) = attempt(inner);
+            let outcome = report.outcomes[&digest].clone();
+            inner.apply(&peer, report, Instant::now(), now_ms());
+            outcome
+        };
+        let p2p_dials = |rig: &Rig| rig.dialled().iter().filter(|r| **r == p).count();
+        let age = |inner: &mut Inner| {
+            let e = inner.entries.get_mut(&digest).unwrap();
+            assert_eq!(e.closed_once.len(), 1);
+            e.closed_once[0].1 = Instant::now().checked_sub(P2P_CLOSE_RECHECK).unwrap();
+        };
+
+        // The first hang-up, and one right after it: remembered, not blocked.
+        for dials in 1..=2 {
+            assert!(!matches!(round(&mut inner), Outcome::Held(_)));
+            let e = &inner.entries[&digest];
+            assert!(e.blocked_routes.is_empty() && e.not_accepted.is_empty());
+            assert_eq!(e.closed_once.len(), 1);
+            assert_eq!(e.closed_once[0].0, p);
+            assert_eq!(p2p_dials(&rig), dials);
+        }
+        // Later it ends the same way: now it is the contact's answer.
+        age(&mut inner);
+        round(&mut inner);
+        let e = inner.entries.get_mut(&digest).unwrap();
+        assert_eq!(e.blocked_routes, vec![p.clone()]);
+        assert_eq!(e.not_accepted, vec![p.clone()]);
+        assert_eq!(e.blocked_code, code::LINK_NOT_ACCEPTED);
+        assert!(e.closed_once.is_empty());
+        // Another identity answered on the LAN route (as a bind mismatch).
+        e.blocked_routes.push(l.clone());
+        round(&mut inner);
+        assert_eq!(p2p_dials(&rig), 3, "a blocked route is not dialled");
+
+        // Bob authenticates on a link: the hang-up is taken back, the other
+        // identity's route is not.
+        inner.peer_seen_now(&rig.bob_pub, Instant::now());
+        let e = &inner.entries[&digest];
+        assert_eq!(e.blocked_routes, vec![l.clone()]);
+        assert!(e.not_accepted.is_empty());
+        assert_eq!(e.blocked_code, code::WRONG_IDENTITY);
+
+        // The same while an attempt that finds the second hang-up is in
+        // flight: what it found is forgotten once it is applied.
+        round(&mut inner);
+        assert_eq!(p2p_dials(&rig), 4);
+        age(&mut inner);
+        let (peer, report) = attempt(&mut inner);
+        assert!(report.blocked.contains_key(&digest));
+        inner.forget_not_accepted(&rig.bob_pub);
+        inner.apply(&peer, report, Instant::now(), now_ms());
+        let e = &inner.entries[&digest];
+        assert_eq!(e.blocked_routes, vec![l.clone()]);
+        assert!(e.not_accepted.is_empty() && inner.accepted_after.is_empty());
+
+        // Bob is done re-homing: the message goes over that very route.
+        rig.set_route(p.clone(), UP);
+        assert_eq!(
+            round(&mut inner),
+            Outcome::Delivered {
+                carrier: Some(OutboxCarrier::P2p)
+            }
+        );
     }
 
     /// M0: another key answered at Bob's address (a noise pin mismatch). The
