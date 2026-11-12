@@ -1424,6 +1424,97 @@ fn a_copy_is_parked_for_a_friend_and_never_for_a_stranger() {
         .unwrap();
 }
 
+/// Two runs may park for one friend one after the other while the second
+/// one's clock is the older (it was read before the run waited its turn):
+/// the copies still leave in the order they were parked in.
+#[test]
+fn a_copy_parked_under_an_older_clock_still_goes_after_the_one_before_it() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(1);
+    let d = dir.path();
+    write_friends(d, &[(2, "Bea")]);
+    let mut mids = Vec::new();
+    for (n, at) in [(1, NOW + 500), (2, NOW), (3, NOW + 100), (4, NOW + 900)] {
+        let text = GroupFrame::Msg(msg(1, 1, &format!("copy {n}"), &[])).encode();
+        let park::Parked::Yes { mid, .. } = park::park_copy(d, &key(2), &text, at) else {
+            panic!("not parked");
+        };
+        mids.push(mid);
+    }
+    let parked = crate::IndexedSessionStore::open(d)
+        .unwrap()
+        .parked_for_recipient(&key(2))
+        .unwrap();
+    let order: Vec<[u8; 16]> = parked.iter().map(|row| row.message_id).collect();
+    assert_eq!(order, mids);
+    let times: Vec<u64> = parked.iter().map(|row| row.created_at_ms).collect();
+    assert_eq!(times, [NOW + 500, NOW + 500, NOW + 500, NOW + 900]);
+}
+
+/// A burst of messages while the friend is busy (raven-node holds its send
+/// lock): no later message's copy is parked in a run in which an earlier
+/// one had to wait, so the friend gets them in the order they were sent.
+#[test]
+fn a_friend_whose_copy_waits_takes_no_later_copy_in_the_same_run() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(1);
+    let d = dir.path();
+    write_friends(d, &[(2, "Bea")]);
+    let gid = create(d, &id(1), "Team", &[(key(2), "Bea".into())], NOW).unwrap();
+    let _ = park::process_intents(d, &id(1), NOW + 1);
+    // Three messages wait as intents (another run holds the run lock).
+    let other = crate::paths::DataDirLock::acquire(d, park::RUN_LOCK_NAME_FOR_TESTS).unwrap();
+    for n in 1..=3u64 {
+        let report = send(d, &id(1), &gid, &format!("burst {n}"), NOW + 1 + n).unwrap();
+        assert_eq!((report.direct, report.parked), (1, 0));
+    }
+    drop(other);
+    // The friend's send lock is busy for longer than two waits for it and
+    // free before a third one ends.
+    let (held, ready) = std::sync::mpsc::channel();
+    let path = d.to_path_buf();
+    let busy = std::thread::spawn(move || {
+        let lock = crate::outbox::PeerSendLock::acquire_within(
+            &path,
+            &key(2),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        held.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(750));
+        drop(lock);
+    });
+    ready.recv().unwrap();
+    let run = park::process_intents(d, &id(1), NOW + 10);
+    assert_eq!((run.parked.len(), run.waiting), (0, 3));
+    busy.join().unwrap();
+    // The next run parks all three, in the order they were sent.
+    let run = park::process_intents(d, &id(1), NOW + 11);
+    assert_eq!((run.parked.len(), run.waiting), (3, 0));
+    let sent: Vec<[u8; 16]> = history(d, &gid, None, 10)
+        .unwrap()
+        .iter()
+        .filter(|m| m.body.starts_with("burst "))
+        .map(|m| m.copies[0].1)
+        .collect();
+    assert_eq!(sent.len(), 3);
+    let parked: Vec<[u8; 16]> = crate::IndexedSessionStore::open(d)
+        .unwrap()
+        .parked_for_recipient(&key(2))
+        .unwrap()
+        .iter()
+        .map(|row| row.message_id)
+        .filter(|mid| sent.contains(mid))
+        .collect();
+    assert_eq!(parked, sent);
+}
+
 #[test]
 fn ingest_reads_this_profiles_key_and_asks_raven_node_for_work() {
     use std::sync::atomic::{AtomicUsize, Ordering};

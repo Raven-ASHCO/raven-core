@@ -120,7 +120,17 @@ pub fn park_copy(data_dir: &Path, member: &Key, text: &str, now_ms: u64) -> Park
         mid = rand::random();
     }
     let deadline = message_deadline(now_ms);
-    match sessions.park_outbound(&device, &mid, None, now_ms, deadline, now_ms) {
+    // Parked rows go out by their creation time, then by the order they
+    // were parked in. A run's `now_ms` may be older than the time of a copy
+    // another run parked for the friend meanwhile (it was taken before the
+    // run waited for the run lock), so this copy is never dated before the
+    // newest one still parked for the friend: copies leave in the order
+    // they were parked in.
+    let created_ms = match sessions.parked_for_recipient(&device) {
+        Ok(rows) => rows.last().map_or(now_ms, |r| r.created_at_ms.max(now_ms)),
+        Err(e) => return Parked::Later(e.redacted_display()),
+    };
+    match sessions.park_outbound(&device, &mid, None, created_ms, deadline, now_ms) {
         Ok(true) => {}
         Ok(false) => return Parked::Later("the copy could not be parked".into()),
         Err(e) => return Parked::Later(e.redacted_display()),
@@ -330,11 +340,22 @@ pub fn process_intents(data_dir: &Path, identity: &Identity, now_ms: u64) -> Pen
         return pending;
     };
     let mut outcomes: Vec<(GroupId, String, Parked)> = Vec::new();
+    // A friend whose copy must wait (busy, full) takes no later copy in
+    // this run: a later message would otherwise be parked, and so sent,
+    // before the one that waits. The intents keep their order for the next
+    // run.
+    let mut waits: HashSet<&str> = HashSet::new();
     for (gid, intent) in &todo {
         let outcome = match hex_key(&intent.to) {
+            Some(_) if waits.contains(intent.to.as_str()) => {
+                Parked::Later("an earlier copy for the friend waits".into())
+            }
             Some(to) => park_copy(data_dir, &to, &intent.frame, now_ms),
             None => Parked::Never("bad target".into()),
         };
+        if matches!(outcome, Parked::Later(_)) {
+            waits.insert(intent.to.as_str());
+        }
         outcomes.push((*gid, intent.id.clone(), outcome));
     }
     let written = store::edit(data_dir, |file| {
