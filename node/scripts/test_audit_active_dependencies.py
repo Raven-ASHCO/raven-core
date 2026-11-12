@@ -463,7 +463,7 @@ class RepositoryLockTests(unittest.TestCase):
         self.assertEqual(
             sorted(f"{name} {version}" for name, version in audited.forks.values()),
             ["arti-client 0.47.0", "igd-next 0.17.1", "libsqlite3-sys 0.38.2", "saturating-time 0.5.0",
-             "secret-service 2.0.2"],
+             "secret-service 2.0.2", "tor-hsservice 0.47.0"],
         )
 
     RSA_TIMING = ("RUSTSEC-2023-0071", "rsa", "0.9.10")

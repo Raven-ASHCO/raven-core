@@ -7549,8 +7549,6 @@ dependencies = [
 [[package]]
 name = "tor-hsservice"
 version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55809560d9295dcc2ee77002c5a4275d1f5f5a54203de7cd6acb52215f5344bd"
 dependencies = [
  "amplify",
  "async-trait",

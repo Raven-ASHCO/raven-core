@@ -17,6 +17,7 @@ exclude = [
     "third_party/saturating-time-0.5.0-raven",
     "third_party/arti-client-0.47.0-raven",
     "third_party/igd-next-0.17.1-raven",
+    "third_party/tor-hsservice-0.47.0-raven",
 ]
 
 [workspace.package]
@@ -65,3 +66,8 @@ arti-client = { path = "third_party/arti-client-0.47.0-raven" }
 # responses (STRANGER-UPNP-1: a stranger on the LAN could abort raven-node
 # with a deeply nested description; third_party/igd-next-0.17.1-raven/RAVEN_DELTA.md).
 igd-next = { path = "third_party/igd-next-0.17.1-raven" }
+# Tor carrier: tor-hsservice 0.47.0 with one descriptor reupload timer per
+# time period. Upstream adds a timer on every upload result and each fires an
+# upload of its own, so a service that stays up uploads its descriptor more
+# and more often (third_party/tor-hsservice-0.47.0-raven/RAVEN_DELTA.md).
+tor-hsservice = { path = "third_party/tor-hsservice-0.47.0-raven" }

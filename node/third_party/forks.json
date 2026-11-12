@@ -115,6 +115,24 @@
       }
     },
     {
+      "path": "node/third_party/tor-hsservice-0.47.0-raven",
+      "lock_name": "tor-hsservice",
+      "lock_version": "0.47.0",
+      "upstream": {
+        "name": "tor-hsservice",
+        "version": "0.47.0",
+        "crate_sha256": "55809560d9295dcc2ee77002c5a4275d1f5f5a54203de7cd6acb52215f5344bd"
+      },
+      "why": "one descriptor reupload timer per time period: upstream adds one on every upload result and each fires an upload of its own, so an onion service that stays up uploads its descriptor more and more often (RAVEN_DELTA.md)",
+      "delta": {
+        "modified": {},
+        "added": {},
+        "removed": [
+          "Cargo.lock"
+        ]
+      }
+    },
+    {
       "path": "node/third_party/libsqlite3-sys-raven",
       "lock_name": "libsqlite3-sys",
       "lock_version": "0.38.2+raven.sqlcipher.4.17.0",
