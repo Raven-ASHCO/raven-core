@@ -1431,7 +1431,21 @@ async fn handle_event(
             let new_stage = life.progress(pct, stage, tor_says, now);
             // Ready from Tor's cache, and only now Tor relays answered.
             if life.relays_came_after_ready() {
-                tor_relays_after_ready();
+                tor_relays_after_ready(life.since_ready(now));
+            } else if new_stage && life.waits_for_relays() {
+                // Where a Tor that is ready only from its cache stands. On
+                // a network that keeps it from its relays nothing else said
+                // why every dial failed (an iPhone on mobile data, W5
+                // 2026-11-14: ready after 1 s, the first relay after 5 min).
+                eprintln!(
+                    "raven-node onion: Tor: ready from its cache, no relay yet ({}{}, {} s \
+                     after ready)",
+                    life.stage().unwrap_or("-"),
+                    life.tor_says()
+                        .map(|w| format!(", Tor says: {w}"))
+                        .unwrap_or_default(),
+                    life.since_ready(now).map_or(0, |d| d.as_secs())
+                );
             }
             if new_stage && !life.is_ready() {
                 // A few lines per start: where a slow or stuck start is.
@@ -1656,15 +1670,16 @@ thread_local! {
 /// ([`crate::outbox::tor_back`], at most once a minute), and mail friends
 /// are asked for what they hold ([`crate::custody::tor_ready`]). Once per
 /// helper life ([`Life::relays_came_after_ready`]); counts only in the log.
-fn tor_relays_after_ready() {
+fn tor_relays_after_ready(after: Option<Duration>) {
     #[cfg(test)]
     TOR_RELAYS_CALLS.with(|n| n.set(n.get() + 1));
     let woke = crate::outbox::tor_back().unwrap_or(0);
     crate::custody::tor_ready();
     eprintln!(
         "raven-node onion: Tor: relays reached after a ready from cache; retrying what waits \
-         for {woke} contact{} over Tor and asking mail friends now",
-        if woke == 1 { "" } else { "s" }
+         for {woke} contact{} over Tor and asking mail friends now ({} s after ready)",
+        if woke == 1 { "" } else { "s" },
+        after.map_or(0, |d| d.as_secs())
     );
 }
 

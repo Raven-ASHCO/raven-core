@@ -363,6 +363,20 @@ while the phone sleeps. Every start of the embedded node (after a pause, for
 a mail check) begins as a new process does: what waits is due within 5 s
 and no route is left out of a send for an old failure.
 
+**Tor learns each network anew.** Arti learns how long circuits take and
+keeps that across starts: on a fast network a circuit in about 1.4 s, a
+one-hop one in a sixth of that, counted from before the connection to the
+guard is opened. Carried to a slower network those times abandoned every
+connection: an iPhone that had learned on Wi-Fi reached no relay on mobile
+data for minutes and no friend after that (2026-11-14), until Arti reset
+itself after 18 of 20 failed circuits, 7 minutes in. So the Tor helper
+removes the learned file (`circuit_timeouts.json`) at each of its starts, on
+every system: a Tor life begins with Tor's own first timeouts, as a new
+installation does, and the node starts a new life at every network change.
+While a Tor that is ready only from its cache has reached no relay, the
+node's log says where it stands ("ready from its cache, no relay yet"), and
+the line that says relays were reached says after how many seconds.
+
 Tor stops with the node on `node.pause` (the onion service is unreachable
 while the app is in the background) and is not started for a mail check.
 Real Arti in process has bootstrapped and published its onion service on

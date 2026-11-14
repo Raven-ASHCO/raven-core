@@ -216,6 +216,17 @@ impl Life {
         true
     }
 
+    /// It said ready from Arti's cache and no Tor relay has answered since
+    /// ([`Self::relays_came_after_ready`] ends that).
+    pub(crate) fn waits_for_relays(&self) -> bool {
+        self.relays_at_ready == Some(false)
+    }
+
+    /// Since it said ready.
+    pub(crate) fn since_ready(&self, now: Instant) -> Option<Duration> {
+        self.ready_at.map(|r| now.saturating_duration_since(r))
+    }
+
     pub(crate) fn pong(&mut self, now: Instant) {
         self.last_pong = now;
         self.pongs = self.pongs.saturating_add(1);

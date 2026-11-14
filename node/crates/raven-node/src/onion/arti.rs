@@ -218,6 +218,7 @@ where
     if config.fresh_state {
         set_guard_state_aside(&state_dir);
     }
+    forget_learned_timeouts(&state_dir);
     upload_rounds::install(events.clone());
     let obsolete = watch_too_old();
 
@@ -290,6 +291,31 @@ fn set_guard_state_aside(state_dir: &Path) {
         let _ = std::fs::remove_dir_all(&aside);
         let _ = std::fs::rename(&guards, &aside);
     }
+}
+
+/// Arti's learned circuit build times (`circuit_timeouts.json` in its state)
+/// removed, so every Tor life starts with Tor's own first timeouts and
+/// learns the network it is on.
+///
+/// Arti keeps what it learned across lives: on a fast network that is a
+/// circuit in about 1.4 s (a one-hop one in a sixth of it), and a build is
+/// abandoned soon after. The time runs from before the connection to the
+/// guard is opened, and a new life has no connection yet. On a slower
+/// network the connection alone takes longer: each try is abandoned, the
+/// guard is marked as down for 30 s and more, and onion circuits time out,
+/// until 18 of 20 circuits have failed and Arti starts over by itself. An
+/// iPhone that had learned on Wi-Fi reached no relay on mobile data for 5
+/// minutes and no friend after that (W5, 2026-11-14), while the same
+/// iPhone, newly installed, had worked there (W4, 2026-11-02). Nothing is
+/// lost with the file: a life learns again from its own circuits, and
+/// raven-node starts a new life whenever the network changes.
+fn forget_learned_timeouts(state_dir: &Path) {
+    let _ = std::fs::remove_file(
+        state_dir
+            .join("state")
+            .join("state")
+            .join("circuit_timeouts.json"),
+    );
 }
 
 async fn tor_main(
@@ -1111,6 +1137,27 @@ fn onion_text(hs_id: &tor_hscrypto::pk::HsId) -> String {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    /// A Tor life starts without the circuit build times an earlier life
+    /// learned (on another network, maybe): the file goes, the guards and
+    /// everything else of Arti's state stay; no file is no error.
+    #[test]
+    fn a_tor_life_starts_without_learned_circuit_timeouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state").join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let learned = state.join("circuit_timeouts.json");
+        let guards = state.join("guards.json");
+        std::fs::write(&learned, br#"{"version":1,"current_timeout":1365}"#).unwrap();
+        std::fs::write(&guards, b"{}").unwrap();
+
+        forget_learned_timeouts(dir.path());
+        assert!(!learned.exists());
+        assert!(guards.exists());
+        forget_learned_timeouts(dir.path());
+        forget_learned_timeouts(&dir.path().join("no-such-folder"));
+        assert!(guards.exists());
+    }
 
     /// Audit S9: Raven opens onion streams only, so its Tor client builds
     /// no exit circuits ahead of need (Arti's defaults keep two for ports
