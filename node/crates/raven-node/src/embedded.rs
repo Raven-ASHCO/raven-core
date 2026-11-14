@@ -292,6 +292,11 @@ fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
     forget_last_life();
     open_profile(&dir)?;
     open_log(&dir);
+    // From here the node writes to sockets whose other end may be closed:
+    // an error, never the app's end (raven_core::sigpipe).
+    if raven_core::sigpipe::ignore_if_default() {
+        eprintln!("raven-node: SIGPIPE had its default action in this app; now ignored");
+    }
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let (done_tx, done_rx) = mpsc::channel::<String>();
     let workers = config.workers.max(1);

@@ -322,7 +322,11 @@ fn in_own_process(name: &str) {
         .env(OWN_PROCESS_ENV, name)
         .status()
         .expect("start the scenario's process");
-    assert!(status.success(), "{name} failed: its output is above");
+    // The status says so when a signal ended it.
+    assert!(
+        status.success(),
+        "{name} failed ({status}): its output is above"
+    );
 }
 
 /// This process runs the scenario `name` ([`in_own_process`]); nothing
@@ -1259,6 +1263,82 @@ fn paused_check_after_an_empty_fetch() {
     assert!(a.has_incoming(&b, HELD), "{}", a.log());
     let st = a.ok("node.status", json!({}));
     assert_eq!(st["state"], "paused", "{st}");
+}
+
+/// Whether a write to a closed socket or pipe is only an error in this
+/// process (SIGPIPE's action is "ignore").
+#[cfg(unix)]
+fn sigpipe_is_ignored() -> bool {
+    // SAFETY: with no new action, sigaction only fills `now`, plain data.
+    unsafe {
+        let mut now: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut now) == 0
+            && now.sa_sigaction == libc::SIG_IGN
+    }
+}
+
+/// A program that hangs up before its answer leaves the node writing to a
+/// closed connection (a send gives its Tor check 25 s, then queues the
+/// message and hangs up: T3 a). In a Rust program that write is an error
+/// the node drops. In an app whose `main` is not Rust (the iPhone app's is
+/// Swift) SIGPIPE still has its default action, and the write ended the app
+/// without a word: no panic, no crash report (two iPhones, 2026-11-14:
+/// "App terminated due to signal 13" 25 s after a send to a friend Tor did
+/// not reach). The engine sets SIGPIPE to "ignore" as a Rust program's
+/// start does, and the node's in-process connections raise none.
+#[cfg(unix)]
+#[test]
+fn a_program_that_hangs_up_before_its_answer_does_not_end_the_app() {
+    in_own_process("hangup_before_the_answer");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "run in a process of its own by a_program_that_hangs_up_before_its_answer_does_not_end_the_app"]
+fn hangup_before_the_answer() {
+    if !own_process("hangup_before_the_answer") {
+        return;
+    }
+    // As an app whose `main` is not Rust starts: the Rust runtime set
+    // "ignore" before this test program's `main`.
+    // SAFETY: sets one signal's action in a process that runs this test only.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    assert!(!sigpipe_is_ignored());
+    embedded_env();
+    std::env::set_var("RAVEN_LAB_TEST_A", "1");
+    std::env::set_var("RAVEN_LAB_TOR", "0");
+    std::env::remove_var("RAVEN_LAB_TOR_LOOPBACK");
+    let root = common::short_dir();
+    let dir = root.path().join("a");
+    let a = Peer::new(
+        "A",
+        dir.clone(),
+        Box::new(Client::with_data_dir(dir.clone())),
+    );
+    let _stops = StopsNode(&a);
+    a.start();
+
+    // Ask and hang up at once, again and again: the node's answer finds
+    // nobody.
+    let ping = raven_core::encode_request(&raven_core::ipc::IpcRequest::Ping {
+        v: raven_core::ipc::IPC_VERSION,
+    })
+    .unwrap();
+    for _ in 0..200 {
+        let mut asked = raven_core::ipc::inproc::connect(&dir)
+            .expect("the node runs in this process")
+            .expect("it takes a connection");
+        asked.write_all(&ping).unwrap();
+        drop(asked);
+    }
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Still here, and the node still answers.
+    let st = a.ok("node.status", json!({}));
+    assert_eq!(st["running"], true, "{st}\n{}", a.log());
+    assert!(sigpipe_is_ignored(), "the engine left SIGPIPE's default");
 }
 
 /// Real Arti inside an engine's process (feature `tor-embedded`) until Tor

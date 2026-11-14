@@ -18,6 +18,14 @@
 //!
 //! One endpoint per profile per process: a second registration for the same
 //! profile is refused (the node's instance lock refuses a second node too).
+//!
+//! Either end may be closed before the other writes: a program that gives
+//! up waiting hangs up before the node's answer, a node that stops closes
+//! under a program's request. That write is an error (`BrokenPipe`), never
+//! SIGPIPE: both ends are told so where the system can say it per socket
+//! (Apple systems; std does it for the sockets it opens, not for a pair),
+//! since the process a pair lives in is an app whose `main` may not be Rust
+//! ([`crate::sigpipe`]).
 
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -113,7 +121,12 @@ pub fn connect(data_dir: &Path) -> Option<io::Result<UnixStream>> {
             ))
         });
     };
-    let (client, server) = match UnixStream::pair() {
+    let pair = UnixStream::pair().and_then(|(client, server)| {
+        no_sigpipe(&client)?;
+        no_sigpipe(&server)?;
+        Ok((client, server))
+    });
+    let (client, server) = match pair {
         Ok(pair) => pair,
         Err(e) => return Some(Err(e)),
     };
@@ -126,11 +139,81 @@ pub fn connect(data_dir: &Path) -> Option<io::Result<UnixStream>> {
     })
 }
 
+/// No SIGPIPE from a write to `sock` once its peer is closed (the module's
+/// words above).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn no_sigpipe(sock: &UnixStream) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let on: libc::c_int = 1;
+    // SAFETY: an int option on an open socket.
+    let set = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&on as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if set == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Elsewhere no socket can say it: the process ignores SIGPIPE (a Rust
+/// program from its start, an app through [`crate::sigpipe`]).
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn no_sigpipe(_sock: &UnixStream) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::sync::mpsc;
+
+    /// A write to an end whose peer is closed is an error in a process
+    /// where SIGPIPE has its default action (an app whose `main` is not
+    /// Rust), never the signal that ends it. Either end: the node answers a
+    /// program that hung up; a program asks a node that closed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_write_to_a_closed_end_is_an_error_not_a_signal() {
+        crate::sigpipe::testing::run_child(module_path!(), "closed_end_child");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn closed_end_child() {
+        if !crate::sigpipe::testing::child_with_default(module_path!(), "closed_end_child") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("s");
+        let (tx, rx) = mpsc::channel::<UnixStream>();
+        let tx = Mutex::new(tx);
+        let _reg = register(
+            &profile,
+            Box::new(move |s| tx.lock().unwrap().send(s).map_err(|mpsc::SendError(s)| s)),
+        )
+        .unwrap();
+
+        let client = connect(&profile).expect("registered").unwrap();
+        let mut server = rx.recv().unwrap();
+        drop(client);
+        let err = server.write_all(b"answer").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+
+        let mut client = connect(&profile).expect("registered").unwrap();
+        drop(rx.recv().unwrap());
+        let err = client.write_all(b"request").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        // The signal's action was the default all along.
+        assert_eq!(crate::sigpipe::testing::action(), libc::SIG_DFL);
+    }
 
     /// A connect reaches the registered acceptor with a working pair; a
     /// second registration for the same profile (any spelling) is refused;

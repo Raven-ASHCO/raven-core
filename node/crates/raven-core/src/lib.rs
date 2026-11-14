@@ -173,6 +173,7 @@ pub mod security_sense;
 pub mod security_words;
 pub mod session_renewal;
 pub mod session_reset;
+pub mod sigpipe;
 pub mod sqlite_rebuild;
 pub mod store_object;
 pub mod stun;

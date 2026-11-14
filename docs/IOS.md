@@ -56,6 +56,19 @@ Why not the socket file:
 The node still takes its instance lock (`raven-node.sock.lock` in the
 profile): one node per profile, embedded or not.
 
+**A write to a closed connection is an error, never the app's end.** A write
+to a socket whose other end is closed raises SIGPIPE, whose default action
+ends the process with no panic and no crash report. A Rust program ignores
+the signal from its start; an app whose `main` is Swift does not. A program
+that gives up waiting hangs up before the node's answer (a send gives its
+Tor check 25 s, then queues the message), and the node's answer to that
+closed pair ended the app (two iPhones, 2026-11-14: "App terminated due to
+signal 13"). So both ends of every pair carry `SO_NOSIGPIPE`, and the
+embedded node sets SIGPIPE to "ignore" at its start if the app left the
+default (`raven_core::sigpipe`; a handler the app installed stays). The
+node's log then says "SIGPIPE had its default action in this app; now
+ignored".
+
 ### 1.2 One node per process
 
 The service keeps process-wide state (the p2p host, the custody park map,

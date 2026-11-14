@@ -40,6 +40,11 @@ serde_json = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 
+# SIGPIPE's action, set as an app whose main is not Rust starts with it and
+# read back (tests/embedded.rs). Already in Cargo.lock: no new crate.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 # The embedded node end to end (two engines, each in a process of its own,
 # no raven-node program): tests/embedded.rs.
 [[test]]
