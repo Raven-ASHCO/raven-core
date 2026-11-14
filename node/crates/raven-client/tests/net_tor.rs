@@ -702,6 +702,21 @@ fn tor_a_message_whose_stream_drops_after_the_write_is_delivered_on_the_second_t
     if !tor_lab_ready() {
         return;
     }
+    // Kept Tor links are on in release builds since 2026-11-14. With them a
+    // message rides its check's link, and one whose stream drops goes again
+    // inside the same send dial: no dial of its own fails, and the log line
+    // this test ends on is not written. Its nodes run without them (a debug
+    // build closes the gate with its switch set to 0).
+    struct WithoutKeptLinks;
+    impl Drop for WithoutKeptLinks {
+        fn drop(&mut self) {
+            std::env::remove_var(raven_core::onion_gate::LAB_TOR_WARM);
+        }
+    }
+    // The lab environment clears every lab switch once, at its first use.
+    common::lab_env();
+    std::env::set_var(raven_core::onion_gate::LAB_TOR_WARM, "0");
+    let _without = WithoutKeptLinks;
     let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
     let (a, b) = (&peers[0], &peers[1]);
     a.befriend(b, Some(&cards[1]));
@@ -743,6 +758,71 @@ fn tor_a_message_whose_stream_drops_after_the_write_is_delivered_on_the_second_t
             .any(|l| l.contains("raven-node send: ") && l.contains("message (1 frame), failed")),
         "{log}"
     );
+}
+
+/// The same drop as release builds run since 2026-11-14, with kept Tor
+/// links: B's raven-node drops the link of the next message it takes before
+/// the ACK goes back. Which link carried the message is a matter of timing
+/// (its check's link, kept for it, or a dial of its own). Either way it is
+/// delivered, B shows it once (it took the message before it dropped the
+/// link, and A sent the same message again), and the next one is delivered.
+#[test]
+fn tor_a_message_whose_stream_drops_arrives_once_with_kept_links() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    b.stop();
+    std::env::set_var("RAVEN_LAB_CLOSE_BEFORE_ACK", "1");
+    b.start();
+    std::env::remove_var("RAVEN_LAB_CLOSE_BEFORE_ACK");
+    wait_tor_ready(b);
+
+    let began = Instant::now();
+    let m = a.send_until(
+        b,
+        "its stream drops",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(150),
+    );
+    eprintln!(
+        "a dropped stream after the write, kept links: {} in {:?}",
+        m["state"],
+        began.elapsed()
+    );
+    assert_eq!(
+        m["state"],
+        "delivered",
+        "{m}\n--- A ---\n{}\n--- B ---\n{}",
+        a.service_log(),
+        b.service_log()
+    );
+    assert!(b.wait_incoming(a, "its stream drops", Duration::from_secs(30)));
+    let next = a.send_until(
+        b,
+        "the one after it",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(150),
+    );
+    assert_eq!(next["state"], "delivered", "{next}\n{}", a.service_log());
+    assert!(b.wait_incoming(a, "the one after it", Duration::from_secs(30)));
+    // Both are in B's chat by now: the first one once.
+    let history = b.ok(
+        "messages.history",
+        json!({"address": a.address(), "limit": 50}),
+    );
+    let times = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["direction"] == "in" && m["text"] == "its stream drops")
+        .count();
+    assert_eq!(times, 1, "{history}\n--- B ---\n{}", b.service_log());
 }
 
 /// T1 (b, c) of the Tor messaging audit (2026-11): B's raven-node drops

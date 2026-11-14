@@ -706,6 +706,11 @@ mod tests {
             "entries.bin",
             "the offline release tool's log folder (P6.46), never in a profile",
         ),
+        (
+            "raven-node/src/onion/arti.rs",
+            "circuit_timeouts.json",
+            "Arti's own file under tor/ (the rule tor/**), named only to remove it",
+        ),
     ];
 
     #[derive(Debug, PartialEq, Eq)]
