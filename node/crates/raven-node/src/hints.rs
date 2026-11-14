@@ -1568,6 +1568,16 @@ fn own_lan_addrs(
             }
         }
     }
+    // A 169.254 address is on a link nobody hands addresses on: a cable
+    // between two computers, and also the cable of an iPhone plugged into
+    // this one. Beside an address on a real network it is told to nobody:
+    // a friend with such a link of its own kept it and dialled into that
+    // link for 5 s before the message went (W5, 2026-11-14). Alone, it is
+    // all a friend on that cable can dial.
+    let v4_link_local = |a: &SocketAddr| matches!(a.ip(), IpAddr::V4(v4) if v4.is_link_local());
+    if found.iter().any(|a| !v4_link_local(a)) {
+        found.retain(|a| !v4_link_local(a));
+    }
     // Stable: equal keys keep the listeners' and the system's order.
     found.sort_by_key(SocketAddr::is_ipv6);
     found
@@ -3398,6 +3408,23 @@ mod tests {
                 "{listeners:?} lab {lab}"
             );
         }
+
+        // A 169.254 address (a cable with no router; an iPhone on this
+        // computer's cable) is told only when it is all there is.
+        let wildcard = [at("0.0.0.0:7531")];
+        let with_wifi = [
+            ifaddr("en7", "169.254.31.7", 9),
+            ifaddr("en0", "192.168.7.5", 4),
+        ];
+        assert_eq!(
+            texts(own_lan_addrs(&wildcard, &with_wifi, false)),
+            vec!["192.168.7.5:7531"]
+        );
+        let cable_only = [ifaddr("en7", "169.254.31.7", 9)];
+        assert_eq!(
+            texts(own_lan_addrs(&wildcard, &cable_only, false)),
+            vec!["169.254.31.7:7531"]
+        );
     }
 
     /// LAN_ADDR (spec §16, owner decision 2026-10-30): a verified contact

@@ -234,9 +234,15 @@ pub fn is_on_this_computer(ip: IpAddr) -> Option<bool> {
 /// Whether `ip` is on one of this computer's own networks: loopback, an
 /// IPv6 link-local address (its zone names the interface), or an address
 /// inside the network of one of this computer's addresses (by its prefix;
-/// /24 or /64 when the system gave none). None when the interfaces can't be
-/// read. A LAN address a contact was only seen at is dialled only when it
-/// is (E2: a router's address in front of two friends).
+/// /24 or /64 when the system gave none) on an interface that is up. None
+/// when the interfaces can't be read. A LAN address a contact was only seen
+/// at is dialled only when it is (E2: a router's address in front of two
+/// friends).
+///
+/// An interface that is down is no network this computer is on: Windows
+/// gives every adapter with nothing plugged in an automatic 169.254 address
+/// with a /16 prefix, and with those counted every 169.254 address a friend
+/// told was "ours", kept, and dialled for 5 s (W5, 2026-11-14).
 pub fn on_our_networks(ip: IpAddr) -> Option<bool> {
     Some(on_networks_in(&read().ok()?, ip))
 }
@@ -247,19 +253,21 @@ pub fn on_networks_in(all: &[LocalAddr], ip: IpAddr) -> bool {
     if ip.is_loopback() || is_v6_link_local(ip) {
         return true;
     }
-    all.iter().any(|a| match (a.ip.to_canonical(), ip) {
-        (IpAddr::V4(net), IpAddr::V4(ip)) => {
-            let bits = if a.prefix == 0 { 24 } else { a.prefix.min(32) };
-            let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
-            u32::from(net) & mask == u32::from(ip) & mask
-        }
-        (IpAddr::V6(net), IpAddr::V6(ip)) if !is_v6_link_local(IpAddr::V6(net)) => {
-            let bits = if a.prefix == 0 { 64 } else { a.prefix.min(128) };
-            let mask = u128::MAX.checked_shl(128 - u32::from(bits)).unwrap_or(0);
-            u128::from(net) & mask == u128::from(ip) & mask
-        }
-        _ => false,
-    })
+    all.iter()
+        .filter(|a| a.up)
+        .any(|a| match (a.ip.to_canonical(), ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let bits = if a.prefix == 0 { 24 } else { a.prefix.min(32) };
+                let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) if !is_v6_link_local(IpAddr::V6(net)) => {
+                let bits = if a.prefix == 0 { 64 } else { a.prefix.min(128) };
+                let mask = u128::MAX.checked_shl(128 - u32::from(bits)).unwrap_or(0);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        })
 }
 
 fn is_v6_link_local(ip: IpAddr) -> bool {
@@ -1165,6 +1173,25 @@ mod tests {
             assert_eq!(on_networks_in(&all, ip(addr)), on, "{addr}");
         }
         assert!(!on_networks_in(&[], ip("192.168.0.50")));
+
+        // An adapter with nothing plugged in (Windows: an automatic
+        // 169.254 address, /16) is no network of ours; the same adapter up
+        // (a cable to another computer) is.
+        let unplugged = LocalAddr {
+            up: false,
+            ..at("169.254.10.20", 16)
+        };
+        let wifi = at("192.168.0.16", 24);
+        assert!(!on_networks_in(
+            &[wifi.clone(), unplugged.clone()],
+            ip("169.254.77.1")
+        ));
+        assert!(on_networks_in(
+            &[wifi.clone(), unplugged],
+            ip("192.168.0.50")
+        ));
+        let cable = at("169.254.10.20", 16);
+        assert!(on_networks_in(&[wifi, cable], ip("169.254.77.1")));
     }
 
     #[test]
