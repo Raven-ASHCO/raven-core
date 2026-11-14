@@ -108,7 +108,7 @@ changes. Fields marked `?` may be missing.
 | `settings.set` | `{...partial Settings}` | `Settings` |
 | `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool, locked?: true}` (see Events) |
 | `events.wait` | `{after_seq, timeout_ms?}` | as `events.poll`; with nothing new it waits up to `timeout_ms` (at most and by default 25000) and answers as soon as an event comes (see Events) |
-| `contacts.warm` | `{address, why: "open" \| "typing"}` | `{warming: bool, why?}` (lab, the warm gate: warms the Tor path to a verified friend before a send, when a chat with it opens or the user types in it; nothing is sent early; see "Warm-ups") |
+| `contacts.warm` | `{address, why: "open" \| "typing"}` | `{warming: bool, why?}` (the warm gate, on in release builds since 2026-11-14: warms the Tor path to a verified friend before a send, when a chat with it opens or the user types in it; nothing is sent early; see "Warm-ups") |
 | `privacy.state` | – | `{available: bool, encrypted: bool, locked: bool}` (`encrypted`: the privacy pack encrypts this profile; `locked`: `raven lock` stopped Raven; `available` is false until the apps offer the privacy actions, which they then show with the Preview label) |
 | `privacy.lock` / `privacy.unlock` | – | `{state}` (`unlock` clears a `raven lock` and answers as `profile.state`) |
 | `privacy.encrypt` | – | `{state}` (encrypts everything Raven stores on this computer) |
@@ -387,7 +387,7 @@ Architecture, lifecycle and limits:
 ### Warm-ups (Tor, lab)
 
 `contacts.warm` warms the Tor path to a verified friend before the user sends (speed design M3;
-only while the warm gate is open, which no release build does): `why: "open"` when a chat with the
+only while the warm gate is open; release builds have it on since 2026-11-14): `why: "open"` when a chat with the
 friend opens, `why: "typing"` when the user starts typing in it. A chat open probes the friend's
 rendezvous circuit (the friend's Tor refuses the probe and its raven-node sees nothing); typing
 opens an onion link with no message on it, which the send then rides. Nothing is sent early: the

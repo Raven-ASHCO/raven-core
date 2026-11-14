@@ -53,10 +53,14 @@ Tor: v3 onion service of the receiver, Tor client of the sender (both outbound o
 - With the gate closed a node starts no Tor helper, publishes no onion service, makes no onion
   dial, prints no `onion=` card field and sends no RRH1 ONION entry. Its plans are exactly those
   of a build without the carrier.
-- The Tor speed Stage A gates (`onion_gate::ONION_WARM_PRODUCTION_ENABLED` and four more, all
-  false; lab switches `RAVEN_LAB_TOR_WARM` and so on with the Lab Test A unlock, debug builds
-  only; a hold each) open only while this one is. Only W1 with its pipelining (§10), the connect
-  hedge with fresh first and the batch hedge (§6, §9) act yet; none changes a frame.
+- The Tor speed Stage A gates open only while this one is, and a security notice can hold
+  each. Two are on in release builds since 2026-11-14 (the owner's decision after the six-device
+  field test; not independently reviewed): `onion_gate::ONION_WARM_PRODUCTION_ENABLED` (W1 with
+  its pipelining, keep warm and the app's warm-up, §10) and
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` (the connect hedge with fresh first and the batch
+  hedge, §6, §9); a debug build closes either with its lab switch (`RAVEN_LAB_TOR_WARM`,
+  `RAVEN_LAB_TOR_HEDGE`) set to 0. The other three are false (lab switches with the Lab Test A
+  unlock, debug builds only) and do not act. None changes a frame.
 - Under the warm gate the probe (§6, bit 1), keep warm and the resume warm-up (§10) act too;
   none changes a frame.
 
@@ -235,8 +239,8 @@ and talks to it over three channels:
      use (or builds one first); nothing reaches the contact's node. A probe that fails is
      answered as a connect would be and moves the contact to a new isolation group, as a first
      try that timed out does; it has no hedge and no second try.
-   - A node sets flags only while `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (false;
-     lab switch `RAVEN_LAB_TOR_HEDGE` with the Lab Test A unlock, debug builds only, hold
+   - A node sets flags only while `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` is open (on in
+     release builds since 2026-11-14; a debug build closes it with `RAVEN_LAB_TOR_HEDGE=0`; hold
      `feature/onion-hedge`); otherwise 0, which asks what version 2 asked.
 3. **Inbound (a stream to `forward`).** For every accepted onion stream the helper opens a stream
    to the node and writes `proof[32] || circuit (u64 BE)` in its hello (below); then the stream
@@ -341,7 +345,8 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   service before the friend's node restarted. Nothing else differs (same guards, same
   anonymity).
 - **Hedge and fresh first** (Tor speed Stage A; gate
-  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED = false`, lab switch `RAVEN_LAB_TOR_HEDGE`, §6
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED = true` since 2026-11-14, closed in a debug build
+  by `RAVEN_LAB_TOR_HEDGE=0`, §6
   item 2 flags). A first try with no stream after 2 s gets the fresh try beside it, in a new
   isolation group, when 12 s or more are left; the first stream wins and the other try is
   ended. A first try in the contact's group on a dead rendezvous circuit then costs 2 s instead
@@ -372,8 +377,8 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
 - A rendezvous circuit is kept by Arti for 10 minutes after its last use, then closed; the
   helper closes a rendezvous circuit of its service after 10 minutes without a stream (§5).
 - Channel padding `reduced`.
-- W1, kept links (Tor speed Stage A; gate `onion_gate::ONION_WARM_PRODUCTION_ENABLED = false`,
-  lab switch `RAVEN_LAB_TOR_WARM` with the Lab Test A unlock, debug builds only, hold
+- W1, kept links (Tor speed Stage A; gate `onion_gate::ONION_WARM_PRODUCTION_ENABLED = true`
+  since 2026-11-14, closed in a debug build by `RAVEN_LAB_TOR_WARM=0`, hold
   `feature/onion-warm`; open only while §1's gate is): a program's send keeps the dialer's link
   after a batch that got every reply it waited for, for the next batch to the same contact,
   within 20 s of that batch, 120 s of the link's dial and 56 frames, at most 4 links (2 on the

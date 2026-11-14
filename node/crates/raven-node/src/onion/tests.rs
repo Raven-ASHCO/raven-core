@@ -759,6 +759,7 @@ async fn one_circuit_cannot_take_every_onion_slot() {
 #[tokio::test(start_paused = true)]
 async fn after_a_dead_shared_circuit_later_dials_reuse_the_fresh_one() {
     let _one_at_a_time = LAB_ONION.lock().await;
+    let _without = ProcessGatesShut::now();
     let stale = Duration::from_secs(3);
     let Some(f) = Friends::with(loopback::Knobs {
         stale,
@@ -1838,6 +1839,25 @@ fn about(took: Duration, want: Duration) -> bool {
     took >= want && took < want + TICK
 }
 
+/// The process's own warm and hedge gates shut while this lives
+/// ([`warm::PROCESS_GATES_SHUT`]): for a test of the dialer without them (a
+/// release build has them on since 2026-11-14), and for one that measures
+/// with a pool and a keeper of its own.
+struct ProcessGatesShut;
+
+impl ProcessGatesShut {
+    fn now() -> Self {
+        warm::PROCESS_GATES_SHUT.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ProcessGatesShut {
+    fn drop(&mut self) {
+        warm::PROCESS_GATES_SHUT.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// A pool of one test's own, with `limits` and its own gate switch (open):
 /// no other test's lock, network change or helper end empties it.
 fn test_pool(
@@ -2759,6 +2779,7 @@ fn kept_circuit_knobs() -> loopback::Knobs {
 #[tokio::test(start_paused = true)]
 async fn keep_warm_keeps_the_rendezvous_past_the_kept_span() {
     let _one_at_a_time = LAB_ONION.lock().await;
+    let _without = ProcessGatesShut::now();
     let Some(f) = Friends::with(kept_circuit_knobs()).await else {
         return;
     };
@@ -2962,6 +2983,7 @@ async fn resume_prewarm_respects_tor_wifi_only() {
 #[tokio::test(start_paused = true)]
 async fn pause_drops_every_warm_link_and_probe() {
     let _one_at_a_time = LAB_ONION.lock().await;
+    let _without = ProcessGatesShut::now();
     let Some(f) = Friends::with(kept_circuit_knobs()).await else {
         return;
     };

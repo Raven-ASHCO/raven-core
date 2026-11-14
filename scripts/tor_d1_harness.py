@@ -59,9 +59,11 @@ Cases (n per arm; --n CASE=N or --n-all N to change)
       0.9 of the kept time, as every 6 to 9 min against the 10 of Arti)
   ER  embedded resume (the tor-embedded engine, --embedded-engine): pause
       and resume the node in the worker process, then send at once, 30
-Arms: base (no Stage A switch) and patched (the Stage A lab switches of
---patched, by default RAVEN_LAB_TOR_WARM and RAVEN_LAB_TOR_HEDGE, read only
-with RAVEN_LAB_TEST_A=1 in a debug build; every gate stays false). They
+Arms: base (no Stage A gate open) and patched (the Stage A gates of
+--patched open, by default RAVEN_LAB_TOR_WARM and RAVEN_LAB_TOR_HEDGE, their
+lab switches set to 1 with RAVEN_LAB_TEST_A=1 in a debug build). Release
+builds have those two on (since 14 November 2026), so the base arm and F close them
+with their switches set to 0 (a debug build reads that). They
 alternate ABAB in blocks of --block runs (10); S restarts for each block and
 the first run after a restart is discarded. F keeps base.
 
@@ -165,14 +167,18 @@ SKIP_WHY = {
 ABORT_WHY = ('network_outside_loopback', 'interrupted', 'node_ended', 'worker_ended',
              'tor_not_ready', 'setup_failed', 'harness_error', 'loopback_check_failed')
 
-# Tor speed Stage A: its five lab switches (raven-core onion_gate.rs), every
-# gate false. W2 (WARM_LINK) changes the wire and needs both ends patched,
-# while F keeps base here: only the dialer side ones are allowed.
+# Tor speed Stage A: its five lab switches (raven-core onion_gate.rs). W2
+# (WARM_LINK) changes the wire and needs both ends patched, while F keeps
+# base here: only the dialer side ones are allowed.
 STAGE_A = {'WARM': 'RAVEN_LAB_TOR_WARM', 'HEDGE': 'RAVEN_LAB_TOR_HEDGE',
            'EARLY': 'RAVEN_LAB_TOR_EARLY', 'OPTIMISTIC': 'RAVEN_LAB_TOR_OPTIMISTIC',
            'WARM_LINK': 'RAVEN_LAB_TOR_WARM_LINK'}
 DIALER_SIDE = ('WARM', 'HEDGE', 'EARLY', 'OPTIMISTIC')
 DEFAULT_PATCHED = ('WARM', 'HEDGE')
+# The gates release builds have on (since 14 November 2026): whoever is not asked to
+# open one closes it with its switch set to 0 (the base arm, F, and a
+# patched arm that names only the other).
+RELEASE_ON = ('WARM', 'HEDGE')
 
 CASES = {
     'AA': {'arms': ('base', 'base_again'), 'variants': ('plain',), 'n': 30,
@@ -309,11 +315,14 @@ def sender_env(common: dict, lab: Path, arm: str, patched: tuple,
                keep_warm_ms: int | None = None) -> dict:
     """S's raven-node: its stage record file, its netwatch lab file and,
     in the patched arm only, the Stage A lab switches of `patched` and keep
-    warm's lab knob when `keep_warm_ms` is given (KEEP_WARM_KNOB)."""
+    warm's lab knob when `keep_warm_ms` is given (KEEP_WARM_KNOB). A gate
+    of RELEASE_ON that the arm does not open is closed."""
     env = dict(common)
     for name in STAGE_A.values():
         env.pop(name, None)
     env.pop(KEEP_WARM_KNOB, None)
+    for key in RELEASE_ON:
+        env[STAGE_A[key]] = '0'
     if arm == 'patched':
         for key in patched:
             env[STAGE_A[key]] = '1'
@@ -325,12 +334,15 @@ def sender_env(common: dict, lab: Path, arm: str, patched: tuple,
 
 
 def friend_env(common: dict, lab: Path) -> dict:
-    """F's raven-node: base always, its own netwatch lab file and its own
-    stage record file (its stored lines, for D1 peer)."""
+    """F's raven-node: base always (the gates of RELEASE_ON closed), its
+    own netwatch lab file and its own stage record file (its stored lines,
+    for D1 peer)."""
     env = dict(common)
     for name in STAGE_A.values():
         env.pop(name, None)
     env.pop(KEEP_WARM_KNOB, None)
+    for key in RELEASE_ON:
+        env[STAGE_A[key]] = '0'
     env['RAVEN_LAB_TOR_STAGES'] = str(lab / 'raw' / 'f-stages.jsonl')
     env['RAVEN_LAB_NETWATCH_EVENTS'] = str(lab / 'f.netwatch')
     return env
@@ -378,16 +390,21 @@ def dry_env_refusal(env: dict) -> str:
 
 def stage_a_refusal(env: dict, arm: str, patched: tuple, friend: bool) -> str:
     """Why `env` opens a Stage A gate it should not, or '': only S's
-    patched arm sets the switches of `patched`, always with the lab
-    unlock; F never sets one."""
-    on = {key for key, name in STAGE_A.items() if env.get(name) is not None}
+    patched arm opens the gates of `patched` (switch 1, always with the lab
+    unlock); F opens none; and every gate of RELEASE_ON that is not opened
+    is closed (switch 0)."""
+    values = {key: env.get(name) for key, name in STAGE_A.items()
+              if env.get(name) is not None}
+    if any(v not in ('0', '1') for v in values.values()):
+        return 'a Stage A switch with another value than 0 or 1'
+    on = {key for key, v in values.items() if v == '1'}
     want = set(patched) if (arm == 'patched' and not friend) else set()
     if on != want:
         return 'the Stage A switches are not those of the arm'
+    if {key for key, v in values.items() if v == '0'} != set(RELEASE_ON) - want:
+        return 'a gate that release builds have on is not closed for this arm'
     if on and env.get('RAVEN_LAB_TEST_A') != '1':
         return 'a Stage A switch without the lab unlock'
-    if any(env.get(STAGE_A[key]) != '1' for key in on):
-        return 'a Stage A switch with another value than 1'
     knob = env.get(KEEP_WARM_KNOB)
     if knob is not None:
         if friend or arm != 'patched' or not knob.isdigit():
@@ -2432,7 +2449,15 @@ def self_test() -> int:
                 and s_patched['RAVEN_LAB_TOR_WARM'] == '1' == s_patched['RAVEN_LAB_TOR_HEDGE']
                 and all(STAGE_A[k] not in s_patched for k in ('EARLY', 'OPTIMISTIC',
                                                                'WARM_LINK'))
-                and all(name not in f_env for name in STAGE_A.values()))
+                and all(e[STAGE_A[k]] == '0' for e in (s_base, f_env) for k in RELEASE_ON)
+                and all(STAGE_A[k] not in e for e in (s_base, f_env)
+                        for k in ('EARLY', 'OPTIMISTIC', 'WARM_LINK'))
+                and sender_env(common, lab, 'patched', ('WARM',))[STAGE_A['HEDGE']] == '0'
+                and stage_a_refusal(sender_env(common, lab, 'patched', ('WARM',)), 'patched',
+                                    ('WARM',), False) == ''
+                and stage_a_refusal({k: v for k, v in s_base.items()
+                                     if k != STAGE_A['HEDGE']}, 'base',
+                                    DEFAULT_PATCHED, False) != '')
     real = common_env(caller, lab, 'real', None, Path('/b/raven-tor-helper'))
     check('environments',
           not leaked and envs_ok and stage_ok and common['HOME'] == '/lab/d1/home'

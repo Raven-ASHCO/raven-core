@@ -1102,7 +1102,12 @@ are all off.
 | A friend who keeps mail (custody, §3.7a T4) | Who left mail for whom and when, sizes, and the signed envelope until release or expiry; on a direct link the depositor's and the fetcher's IP addresses | Keeping and using custody are each person's choice, off by default; never message content |
 | Bluetooth radio range (macOS, after `raven nearby enable`) | §1.1: a random-looking per-pair UUID while there is something to send, the random Bluetooth address, timing and sizes; a connecting device sees the computer's Bluetooth name | §1.1 and its table |
 
-**Onion warm-ups (gated off: `ONION_WARM_PRODUCTION_ENABLED = false`).**
+**Onion warm-ups and kept links (on in release builds since 2026-11-14:
+`ONION_WARM_PRODUCTION_ENABLED = true`; not independently reviewed).** After
+a send over Tor the dialer keeps its link to that contact for up to 20 s
+without a batch and 120 s in all (§10): the contact's node sees one link
+stay open instead of a new one per message, and a watcher of this node's
+Tor traffic sees a little more of it stay up after a message.
 Keep warm and the app's warm-ups (`RAVEN_ONION_CARRIER_V1.md` §10) run for
 verified contacts that are not blocked, and only while a conversation goes
 on. A chat open, keep warm and the resume warm-up only probe the contact's

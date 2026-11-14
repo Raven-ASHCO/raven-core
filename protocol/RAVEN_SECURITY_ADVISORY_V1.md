@@ -265,9 +265,9 @@ check **after** its own gate, so it can only close.
 | `feature/offline-lan` | `lan_gate::OFFLINE_LAN_PRODUCTION_ENABLED` |
 | `feature/onion` | `onion_gate::ONION_PRODUCTION_ENABLED` |
 | `feature/onion-early` | `onion_gate::ONION_EARLY_PRODUCTION_ENABLED` (Tor speed Stage A, held) |
-| `feature/onion-hedge` | `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` (Tor speed Stage A, held) |
+| `feature/onion-hedge` | `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` (Tor speed Stage A, on since 2026-11-14) |
 | `feature/onion-optimistic` | `onion_gate::ONION_OPTIMISTIC_PRODUCTION_ENABLED` (Tor speed Stage A, held) |
-| `feature/onion-warm` | `onion_gate::ONION_WARM_PRODUCTION_ENABLED` (Tor speed Stage A, held) |
+| `feature/onion-warm` | `onion_gate::ONION_WARM_PRODUCTION_ENABLED` (Tor speed Stage A, on since 2026-11-14) |
 | `feature/onion-warm-link` | `onion_gate::ONION_WARM_LINK_PRODUCTION_ENABLED` (Tor speed Stage A, held) |
 | `feature/p2p` | `p2p_gate::P2P_PRODUCTION_ENABLED` |
 | `feature/pair-seed` | `security_gate::PAIR_SEED_PRODUCTION_ENABLED` |

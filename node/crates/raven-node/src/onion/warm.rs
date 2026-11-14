@@ -4,7 +4,8 @@
 //! link of 3 round trips r: the stream, Noise messages 1 and 2, message 3
 //! with our hello against the friend's hello and offer) and the message's
 //! own link (4r), 7r in all. With the warm gate open
-//! ([`raven_core::onion_gate::onion_warm_live`], false in release builds) a
+//! ([`raven_core::onion_gate::onion_warm_live`]; on in release builds since
+//! 2026-11-14) a
 //! link is kept after a batch that left it clean, and the next batch to the
 //! same friend rides it: the message then rides its check's link (a first
 //! send costs 4r), and a send within [`WARM_IDLE`] of the last batch costs
@@ -51,7 +52,8 @@
 //! change, the end of a Tor helper's life and the embedded node's pause.
 //!
 //! **Hedges** (speed design M5; the hedge gate
-//! [`raven_core::onion_gate::onion_hedge_live`], false in release builds):
+//! [`raven_core::onion_gate::onion_hedge_live`], on in release builds since
+//! 2026-11-14):
 //! the pool also says which connect flags a dial asks the helper for
 //! ([`WarmPool::connect_flags`]): a hedge, or fresh first when the last
 //! link to that onion service failed a moment ago ([`WarmPool::link_failed`]).
@@ -604,12 +606,40 @@ pub(crate) fn warm_refusal(data_dir: &Path, contact: &[u8; 32]) -> Option<Skip> 
     (!unblocked).then_some("blocked")
 }
 
+/// Shuts the process's own gates ([`WARM`], [`KEEP`]) for a test that
+/// measures the dialer as it is without them, or with a pool and a keeper
+/// of its own beside which the process's keeper must not probe the same
+/// friend. The onion tests run one at a time, so one switch serves them.
+#[cfg(test)]
+pub(crate) static PROCESS_GATES_SHUT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The warm gate as the process's own pool and keeper read it
+/// ([`raven_core::onion_gate::onion_warm_live`]).
+fn process_warm_live() -> bool {
+    #[cfg(test)]
+    if PROCESS_GATES_SHUT.load(Ordering::SeqCst) {
+        return false;
+    }
+    raven_core::onion_gate::onion_warm_live()
+}
+
+/// The hedge gate as the process's own pool reads it
+/// ([`raven_core::onion_gate::onion_hedge_live`]).
+fn process_hedge_live() -> bool {
+    #[cfg(test)]
+    if PROCESS_GATES_SHUT.load(Ordering::SeqCst) {
+        return false;
+    }
+    raven_core::onion_gate::onion_hedge_live()
+}
+
 /// The process's kept links: the sends programs make over Tor
 /// (`crate::ipc_server`, [`crate::onion::dial_with_meta`]).
 pub(crate) static WARM: WarmPool = WarmPool::new(
     LIMITS,
-    Gate::Live(raven_core::onion_gate::onion_warm_live),
-    Gate::Live(raven_core::onion_gate::onion_hedge_live),
+    Gate::Live(process_warm_live),
+    Gate::Live(process_hedge_live),
 );
 
 /// Why every kept link closes ([`flush`]).
@@ -1588,12 +1618,8 @@ fn jitter((low, high): (Duration, Duration)) -> Duration {
 
 /// The process's keep warm: the conversations of this process's profile,
 /// its probes through [`WARM`]'s gates.
-pub(crate) static KEEP: KeepWarm = KeepWarm::made(
-    KEEP_LIMITS,
-    Gate::Live(raven_core::onion_gate::onion_warm_live),
-    &WARM,
-    true,
-);
+pub(crate) static KEEP: KeepWarm =
+    KeepWarm::made(KEEP_LIMITS, Gate::Live(process_warm_live), &WARM, true);
 
 #[cfg(test)]
 mod tests {

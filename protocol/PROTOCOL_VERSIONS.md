@@ -144,6 +144,31 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-14, release posture: kept Tor links and hedges are on)
+
+A release posture change of the onion dialer, not of the wire format: no
+frame layout, entry type, caps bit, card field or vector changed, and the
+listener is unchanged. The owner's decision of 2026-11-14 after the
+six-device field test (W5.5t, real Tor between three computers): a message
+took 6 to 14 s as shipped (48 of 48 delivered) and, with the two gates
+open, about 1 to 2 s inside a conversation and 3 to 5 s after a 30 s pause
+(48 of 48 delivered); the first send after a node start stays the slow one.
+Not independently reviewed.
+
+- **Onion Carrier V1 (draft).** [`RAVEN_ONION_CARRIER_V1.md`](RAVEN_ONION_CARRIER_V1.md)
+  §1, §6, §9 and §10: `onion_gate::ONION_WARM_PRODUCTION_ENABLED` and
+  `onion_gate::ONION_HEDGE_PRODUCTION_ENABLED` are `true`. Kept links with
+  their pipelining, keep warm and the app's warm-up, and the connect hedge,
+  fresh first and the batch hedge act in release builds. A debug build
+  closes either with its lab switch set to 0 (`RAVEN_LAB_TOR_WARM`,
+  `RAVEN_LAB_TOR_HEDGE`); a security notice can still hold each
+  (`feature/onion-warm`, `feature/onion-hedge`). Before, both `false` and
+  lab only; the entries below describe them as they were then.
+- **Security Advisory V1 (draft).** [`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md):
+  the feature table says "on since 2026-11-14" for those two ids.
+- The other three Stage A gates (early frames, optimistic data, the two-way
+  warm link) stay `false`.
+
 ## Freeze record changes (2026-11-06, security review 2026-11: the Tor helper's channel)
 
 A change of the local helper protocol (between raven-node and its Tor helper

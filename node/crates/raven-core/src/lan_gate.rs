@@ -346,6 +346,10 @@ mod tests {
             assert!(crate::portmap_gate::STUN_DISCOVERY_PRODUCTION_ENABLED);
             assert!(crate::portmap_gate::SERVERLESS_PUNCH_PRODUCTION_ENABLED);
             assert!(crate::ONION_PRODUCTION_ENABLED);
+            // Tor speed, Stage A: warm links and hedges, on since 2026-11-14
+            // (the owner's decision after the six-device field test).
+            assert!(crate::onion_gate::ONION_WARM_PRODUCTION_ENABLED);
+            assert!(crate::onion_gate::ONION_HEDGE_PRODUCTION_ENABLED);
             assert!(crate::group::GROUPS_PRODUCTION_ENABLED);
             assert!(crate::NEARBY_PRODUCTION_ENABLED == cfg!(target_os = "macos"));
             assert!(crate::app_channel::APP_CHANNEL_PRODUCTION_ENABLED);
@@ -399,10 +403,8 @@ mod tests {
             assert!(!crate::security_gate::RELEASE_BUNDLE_PRODUCTION_ENABLED);
             assert!(!crate::security_gate::MESH_UPDATE_PRODUCTION_ENABLED);
             // Tor speed, Stage A (security and speed report 2026-11-05 §7):
-            // warm links, hedges, early frames, optimistic data and the
-            // two-way warm link, each before its D1 measurement and review.
-            assert!(!crate::onion_gate::ONION_WARM_PRODUCTION_ENABLED);
-            assert!(!crate::onion_gate::ONION_HEDGE_PRODUCTION_ENABLED);
+            // early frames, optimistic data and the two-way warm link, each
+            // before its measurement and review.
             assert!(!crate::onion_gate::ONION_EARLY_PRODUCTION_ENABLED);
             assert!(!crate::onion_gate::ONION_OPTIMISTIC_PRODUCTION_ENABLED);
             assert!(!crate::onion_gate::ONION_WARM_LINK_PRODUCTION_ENABLED);
@@ -440,6 +442,8 @@ mod tests {
         assert!(crate::portmap_gate::stun_discovery_live_enabled());
         assert!(crate::portmap_gate::serverless_punch_live_enabled());
         assert!(crate::onion_live_enabled());
+        assert!(crate::onion_gate::onion_warm_live());
+        assert!(crate::onion_gate::onion_hedge_live());
         assert!(crate::group::group_live_enabled());
         assert!(crate::app_channel::app_channel_live_enabled());
         assert_eq!(
@@ -458,8 +462,6 @@ mod tests {
         assert!(!lan_noise_pin_live());
         assert!(!lan_auto_live());
         assert!(!crate::learning::learning_live());
-        assert!(!crate::onion_gate::onion_warm_live());
-        assert!(!crate::onion_gate::onion_hedge_live());
         assert!(!crate::onion_gate::onion_early_live());
         assert!(!crate::onion_gate::onion_optimistic_live());
         assert!(!crate::onion_gate::onion_warm_link_live());

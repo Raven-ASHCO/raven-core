@@ -16,12 +16,17 @@
 //! touch the Tor network sets that, so none of them touches it by accident.
 //!
 //! **Tor speed, Stage A** (security and speed report 2026-11-05 §7, speed
-//! design M1 to M10): five more gates, every one false, on top of this one.
+//! design M1 to M10): five more gates on top of this one. The first two
+//! are on in release builds since 2026-11-14 (the owner's decision after the
+//! six-device field test: on real Tor between three computers a message took
+//! 6 to 14 s as shipped and about 1 s inside a conversation with them, 96 of
+//! 96 delivered; not independently reviewed); the other three are false.
 //! Each opens only while the onion carrier itself is live
-//! ([`onion_live_enabled`]), then with its const or, in a debug build with
-//! the Lab Test A unlock, its own lab switch
-//! ([`crate::pair_init::lab_switch`]; a release build reads neither), and a
-//! security notice can hold each (its `FEATURE_ONION_*` id in
+//! ([`onion_live_enabled`]), then with its const as
+//! [`crate::pair_init::lab_gate`] reads it (a release build follows the
+//! const alone; a debug build closes an open gate with its lab switch set
+//! to "0" and opens a held one with the Lab Test A unlock and its switch),
+//! and a security notice can hold each (its `FEATURE_ONION_*` id in
 //! [`crate::suite_registry`]; close only):
 //! - [`ONION_WARM_PRODUCTION_ENABLED`] (`RAVEN_LAB_TOR_WARM`): the dialer
 //!   keeps a link open after a send's check or message for the next batch
@@ -63,16 +68,18 @@ pub fn onion_live_enabled() -> bool {
     )
 }
 
-// ── Tor speed, Stage A (all held) ────────────────────────────────────────
+// ── Tor speed, Stage A (two on, three held) ──────────────────────────────
 
 /// W1 (speed design M1): an app's send over Tor leaves its link open for
 /// the next batch to the same friend, within `WARM_IDLE` 20 s of the last
 /// batch and `WARM_AGE` 120 s of the link (raven-node `onion::warm`); also
 /// the keep-warm probes, the warm-ups and pipelined sends that build on it
-/// (M2, M3, M8, M10). Held until the D1 measurement and a review.
-pub const ONION_WARM_PRODUCTION_ENABLED: bool = false;
-/// Connect and batch hedges and fresh-first (speed design M5). Held.
-pub const ONION_HEDGE_PRODUCTION_ENABLED: bool = false;
+/// (M2, M3, M8, M10). On in release builds since 2026-11-14 (the module's
+/// words above); the dialer's side only, no wire change.
+pub const ONION_WARM_PRODUCTION_ENABLED: bool = true;
+/// Connect and batch hedges and fresh-first (speed design M5). On in
+/// release builds since 2026-11-14, with the warm links.
+pub const ONION_HEDGE_PRODUCTION_ENABLED: bool = true;
 /// The message in the link's first flight: early frames with F4 (speed
 /// design M7). Held.
 pub const ONION_EARLY_PRODUCTION_ENABLED: bool = false;
@@ -94,27 +101,27 @@ pub const LAB_TOR_OPTIMISTIC: &str = "RAVEN_LAB_TOR_OPTIMISTIC";
 /// [`ONION_WARM_LINK_PRODUCTION_ENABLED`]'s lab switch.
 pub const LAB_TOR_WARM_LINK: &str = "RAVEN_LAB_TOR_WARM_LINK";
 
-/// A Stage A gate: the onion carrier live, then `production` or (a debug
-/// build with the Lab Test A unlock) the lab switch `switch`, then no hold
-/// on `feature` (close only).
+/// A Stage A gate: the onion carrier live, then its const as
+/// [`crate::pair_init::lab_gate`] reads it with the lab switch `switch` (a
+/// release build: the const alone; a debug build: "0" closes an open gate,
+/// the Lab Test A unlock with the switch opens a held one), then no hold on
+/// `feature` (close only).
 fn speed_gate(production: bool, switch: &str, feature: &str) -> bool {
     speed_gate_value(
-        production,
         onion_live_enabled(),
-        || crate::pair_init::lab_switch(switch),
+        || crate::pair_init::lab_gate(production, switch),
         || crate::suite_policy::hold_allows(feature),
     )
 }
 
-/// [`speed_gate`] from its inputs: the switch is asked only below a live
-/// carrier with the const off, the hold only for a gate that is open.
+/// [`speed_gate`] from its inputs: the gate's own value is asked only below
+/// a live carrier, the hold only for a gate that is open.
 fn speed_gate_value(
-    production: bool,
     onion: bool,
-    switch: impl FnOnce() -> bool,
+    gate: impl FnOnce() -> bool,
     hold_allows: impl FnOnce() -> bool,
 ) -> bool {
-    crate::p2p_gate::gate_value(production, onion, switch) && hold_allows()
+    onion && gate() && hold_allows()
 }
 
 /// Live W1 warm links ([`ONION_WARM_PRODUCTION_ENABLED`]).
@@ -236,16 +243,16 @@ mod tests {
     // ── Tor speed, Stage A ──────────────────────────────────────────────
 
     #[test]
-    fn onion_warm_production_flag_is_off() {
+    fn onion_warm_production_flag_is_on() {
         const {
-            assert!(!ONION_WARM_PRODUCTION_ENABLED);
+            assert!(ONION_WARM_PRODUCTION_ENABLED);
         }
     }
 
     #[test]
-    fn onion_hedge_production_flag_is_off() {
+    fn onion_hedge_production_flag_is_on() {
         const {
-            assert!(!ONION_HEDGE_PRODUCTION_ENABLED);
+            assert!(ONION_HEDGE_PRODUCTION_ENABLED);
         }
     }
 
@@ -294,9 +301,39 @@ mod tests {
         assert_eq!(live(), want, "{switch}");
     }
 
+    /// A gate that is on in release builds, in both builds: a release
+    /// build follows the carrier and the hold and reads no switch ("0" does
+    /// not close it there); a debug build follows exactly its environment
+    /// (its switch set to "0" closes it) and changes none of it.
+    fn open_speed_gate_follows_its_const(switch: &str, live: fn() -> bool, feature: &str) {
+        let on = || onion_live_enabled() && crate::suite_policy::hold_allows(feature);
+        if !cfg!(debug_assertions) {
+            // Edition 2021: plain calls. No release test needs it unset.
+            std::env::set_var(switch, "0");
+            assert_eq!(live(), on(), "{switch} closed its gate in a release build");
+            return;
+        }
+        let set = std::env::var(switch).ok();
+        let want = onion_live_enabled()
+            && crate::pair_init::lab_gate_value(
+                true,
+                true,
+                crate::pair_init::lab_test_a_enabled(),
+                set.as_deref(),
+            )
+            && crate::suite_policy::hold_allows(feature);
+        assert_eq!(live(), want, "{switch}");
+        assert!(!crate::pair_init::lab_gate_value(
+            true,
+            true,
+            true,
+            Some("0")
+        ));
+    }
+
     #[test]
-    fn onion_warm_is_inert_in_release_builds() {
-        speed_gate_is_inert(
+    fn onion_warm_follows_its_const_and_the_close_switch() {
+        open_speed_gate_follows_its_const(
             LAB_TOR_WARM,
             onion_warm_live,
             crate::suite_registry::FEATURE_ONION_WARM,
@@ -304,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn onion_hedge_is_inert_in_release_builds() {
-        speed_gate_is_inert(
+    fn onion_hedge_follows_its_const_and_the_close_switch() {
+        open_speed_gate_follows_its_const(
             LAB_TOR_HEDGE,
             onion_hedge_live,
             crate::suite_registry::FEATURE_ONION_HEDGE,
@@ -339,30 +376,32 @@ mod tests {
         );
     }
 
-    /// A Stage A gate opens only on a live onion carrier, with its const or
-    /// its switch, and a hold closes it; nothing opens it over a hold or a
-    /// closed carrier, and the switch is never asked while the const is on
-    /// or the carrier is closed.
+    /// A Stage A gate opens only on a live onion carrier, with its own
+    /// gate (the const, or what a debug build's switch makes of it), and a
+    /// hold closes it; nothing opens it over a hold or a closed carrier.
+    /// The gate is never asked below a closed carrier, the hold never for
+    /// a gate that is shut.
     #[test]
-    fn speed_gates_need_the_carrier_their_switch_and_no_hold() {
-        for production in [false, true] {
-            for onion in [false, true] {
-                for switch in [false, true] {
-                    for allows in [false, true] {
-                        let mut asked = false;
-                        let got = speed_gate_value(
-                            production,
-                            onion,
-                            || {
-                                asked = true;
-                                switch
-                            },
-                            || allows,
-                        );
-                        let case = format!("{production} {onion} {switch} {allows}");
-                        assert_eq!(got, onion && (production || switch) && allows, "{case}");
-                        assert_eq!(asked, onion && !production, "{case}");
-                    }
+    fn speed_gates_need_the_carrier_their_gate_and_no_hold() {
+        for onion in [false, true] {
+            for gate in [false, true] {
+                for allows in [false, true] {
+                    let (mut gate_asked, mut hold_asked) = (false, false);
+                    let got = speed_gate_value(
+                        onion,
+                        || {
+                            gate_asked = true;
+                            gate
+                        },
+                        || {
+                            hold_asked = true;
+                            allows
+                        },
+                    );
+                    let case = format!("{onion} {gate} {allows}");
+                    assert_eq!(got, onion && gate && allows, "{case}");
+                    assert_eq!(gate_asked, onion, "{case}");
+                    assert_eq!(hold_asked, onion && gate, "{case}");
                 }
             }
         }
@@ -373,38 +412,45 @@ mod tests {
     #[test]
     fn every_speed_gate_has_its_switch_and_hold() {
         use crate::suite_registry::feature_for_gate;
+        // The gate, its switch, its hold id, and whether release builds
+        // have it on.
         let gates = [
             (
                 "ONION_WARM_PRODUCTION_ENABLED",
                 LAB_TOR_WARM,
                 "feature/onion-warm",
+                true,
             ),
             (
                 "ONION_HEDGE_PRODUCTION_ENABLED",
                 LAB_TOR_HEDGE,
                 "feature/onion-hedge",
+                true,
             ),
             (
                 "ONION_EARLY_PRODUCTION_ENABLED",
                 LAB_TOR_EARLY,
                 "feature/onion-early",
+                false,
             ),
             (
                 "ONION_OPTIMISTIC_PRODUCTION_ENABLED",
                 LAB_TOR_OPTIMISTIC,
                 "feature/onion-optimistic",
+                false,
             ),
             (
                 "ONION_WARM_LINK_PRODUCTION_ENABLED",
                 LAB_TOR_WARM_LINK,
                 "feature/onion-warm-link",
+                false,
             ),
         ];
         let mut switches = std::collections::BTreeSet::new();
-        for (gate, switch, id) in gates {
+        for (gate, switch, id, on) in gates {
             let feature = feature_for_gate(gate).unwrap_or_else(|| panic!("{gate}: no feature"));
             assert_eq!(feature.id, id);
-            assert!(!feature.production, "{gate}");
+            assert_eq!(feature.production, on, "{gate}");
             assert!(feature.holdable(), "{gate}");
             assert!(switch.starts_with("RAVEN_LAB_TOR_"), "{switch}");
             assert_ne!(switch, LAB_TOR);

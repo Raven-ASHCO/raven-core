@@ -456,16 +456,24 @@ fn field_names(v: &Value) -> Vec<String> {
     }
 }
 
-/// Speed design M3 (`contacts.warm`): with the warm gate shut, as in every
-/// release build, nothing warms and the answer says why in one word; a
-/// friend not verified or blocked is refused before anything else, a
-/// stranger is no contact, and `why` is open or typing only. No raven-node
-/// is asked (none runs here). The setting `typing_warm_on_mobile_data` is
-/// on for the desktop until it is set, and kept once set.
+/// Speed design M3 (`contacts.warm`): with the warm gate shut nothing warms
+/// and the answer says why in one word; a friend not verified or blocked is
+/// refused before anything else, a stranger is no contact, and `why` is
+/// open or typing only. No raven-node is asked (none runs here). The
+/// setting `typing_warm_on_mobile_data` is on for the desktop until it is
+/// set, and kept once set.
+///
+/// Release builds have the gate on since 2026-11-14; a debug build closes
+/// it with its lab switch set to 0, which this test does (no other test of
+/// this program asks for a warm-up). A release build reads no switch: there
+/// the word for a verified friend is not checked, only that nothing warms.
 #[test]
 fn contacts_warm_warms_nothing_with_the_gate_shut_or_for_a_friend_not_verified_or_blocked() {
     let a = profile("Desk W");
     let b = profile("Desk X");
+    // After the profiles: their lab environment clears the lab switches once.
+    std::env::set_var(raven_core::onion_gate::LAB_TOR_WARM, "0");
+    let shut = cfg!(debug_assertions);
     ok(
         &a.client,
         "contacts.add",
@@ -492,7 +500,11 @@ fn contacts_warm_warms_nothing_with_the_gate_shut_or_for_a_friend_not_verified_o
     );
     assert_eq!(matched["result"], "match", "{matched}");
     for why in ["open", "typing"] {
-        assert_eq!(warm(why), json!({"warming": false, "why": "off"}), "{why}");
+        let answer = warm(why);
+        assert_eq!(answer["warming"], false, "{why}: {answer}");
+        if shut {
+            assert_eq!(answer, json!({"warming": false, "why": "off"}), "{why}");
+        }
     }
     ok(
         &a.client,
@@ -505,7 +517,9 @@ fn contacts_warm_warms_nothing_with_the_gate_shut_or_for_a_friend_not_verified_o
         "contacts.unblock",
         json!({"address": b.me["address"]}),
     );
-    assert_eq!(warm("open")["why"], "off");
+    if shut {
+        assert_eq!(warm("open")["why"], "off");
+    }
     for bad in [json!("hover"), json!(""), json!(1)] {
         assert_eq!(
             err(

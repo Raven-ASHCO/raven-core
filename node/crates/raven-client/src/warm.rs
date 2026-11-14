@@ -1,5 +1,6 @@
 //! `contacts.warm` (speed design M3; the warm gate
-//! `raven_core::onion_gate::onion_warm_live`, false in release builds): the
+//! `raven_core::onion_gate::onion_warm_live`, on in release builds since
+//! 2026-11-14): the
 //! app says a chat with a friend opened (`why: "open"`) or that the user
 //! types in it (`why: "typing"`), and the engine asks the profile's
 //! raven-node to warm its Tor path to that friend ahead of the send (IPC
