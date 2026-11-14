@@ -913,6 +913,17 @@ impl RouteFails {
         }
     }
 
+    /// Forget `contact`'s failed LAN routes at the address `ip`, whatever
+    /// the port.
+    fn answered_from(&mut self, contact: &[u8; 32], ip: IpAddr) {
+        if let Some((_, routes)) = self.by.get_mut(contact) {
+            routes.retain(|r| r.carrier != OutboxCarrier::Lan || !dial_is_at(&r.dial, ip));
+            if routes.is_empty() {
+                self.by.remove(contact);
+            }
+        }
+    }
+
     /// Forget every contact's failed routes on `carrier`.
     fn carrier_back(&mut self, carrier: OutboxCarrier) {
         for (_, routes) in self.by.values_mut() {
@@ -1004,6 +1015,24 @@ pub(crate) fn carrier_worked(contact: &[u8; 32], carrier: OutboxCarrier) {
     if carrier == OutboxCarrier::Onion {
         with_tor_reached(|r| r.reached(*contact, Instant::now()));
     }
+}
+
+/// The dial string `dial` (`192.0.2.7:7420`, `[2001:db8::7]:7420`) names
+/// the address `ip`.
+fn dial_is_at(dial: &str, ip: IpAddr) -> bool {
+    dial.trim()
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().to_canonical() == ip.to_canonical())
+}
+
+/// `contact` opened an authenticated LAN link to this node from `ip`: it is
+/// at that address now (it came onto this network, or its Raven started),
+/// so its LAN route there is news as failed no more. The next send keeps
+/// that route in its race instead of leaving it out, or queueing without a
+/// dial, for the rest of [`ROUTE_FAIL_FRESH`]. Its other routes stay, route
+/// by route (E2 r40).
+pub(crate) fn lan_heard_from(contact: &[u8; 32], ip: IpAddr) {
+    with_fails(|f| f.answered_from(contact, ip));
 }
 
 /// Our own Tor self-check reached our onion service: Tor works here, so no
@@ -2299,6 +2328,22 @@ mod failed_route_tests {
             .collect();
         assert_eq!(left, ["lan_dial"]);
         route_answered(&contact, OutboxCarrier::Lan, "192.0.2.7:7420");
+        assert!(failed_routes(&contact).is_empty());
+        // The friend's own link from that address clears its LAN route
+        // there, whatever the port it came from; its LAN route at another
+        // address and its Tor route stay.
+        route_failed(&contact, OutboxCarrier::Lan, "192.0.2.7:7420", "timed out");
+        route_failed(&contact, OutboxCarrier::Lan, "192.0.2.99:7420", "timed out");
+        route_failed(&contact, OutboxCarrier::Onion, "onion:ab", "timed out");
+        lan_heard_from(&contact, "192.0.2.7".parse().unwrap());
+        let mut left: Vec<String> = failed_routes(&contact)
+            .into_iter()
+            .map(|r| format!("{} {}", r.carrier, r.dial))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["lan_dial 192.0.2.99:7420", "onion_dial onion:ab"]);
+        lan_heard_from(&contact, "192.0.2.99".parse().unwrap());
+        route_answered(&contact, OutboxCarrier::Onion, "onion:ab");
         assert!(failed_routes(&contact).is_empty());
         // `raven learning reset` forgets them too, for one contact or all.
         route_failed(&contact, OutboxCarrier::Lan, "192.0.2.7:7420", "timed out");

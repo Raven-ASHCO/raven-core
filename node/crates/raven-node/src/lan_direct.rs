@@ -1526,9 +1526,12 @@ async fn handle_inbound_with<S: AsyncRead + AsyncWrite + Unpin>(
         crate::renewal::note_live_link(&remote_ed, crate::renewal::LiveLink::Inbound);
         // Why it could not be reached no longer holds.
         crate::delivery_paths::heard(&remote_ed);
-        // Seen on this network (`raven status`, P3.C6).
+        // Seen on this network (`raven status`, P3.C6), and at that
+        // address now: a send's dial there that failed moments ago is news
+        // no more.
         if let Some(ip) = source {
             crate::delivery_paths::lan_link(&remote_ed, ip);
+            crate::delivery_paths::lan_heard_from(&remote_ed, ip);
         }
     }
     write_cipher(&mut stream, &mut transport, &local).await?;
