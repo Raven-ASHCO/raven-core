@@ -641,7 +641,12 @@ pub fn send_to_contact(
         .find(|c| c.pub_hex.eq_ignore_ascii_case(pub_hex.trim()))
         .ok_or_else(|| "that friend is not saved on this computer".to_string())?;
     let choice = super::CarrierChoice::Auto;
-    let p2p_live = raven_core::p2p_live_enabled();
+    // As `raven send` and the terminal app plan (field test E3): p2p only
+    // while this profile's raven-node runs a libp2p host, Bluetooth only
+    // while the user has it on. Planned without asking, every send from an
+    // app dialled a friend's PeerId with no host to dial from, and tried
+    // Bluetooth after it was switched off.
+    let p2p_live = raven_core::p2p_live_enabled() && super::p2p_host_on(data_dir);
     let hidden = super::hides_ip_from(data_dir, contact);
     // A PeerId its route hints name is planned like a saved one.
     let learned_p2p = super::learned_peer_id(data_dir, contact, p2p_live);
@@ -675,7 +680,7 @@ pub fn send_to_contact(
         super::with_nearby_route(
             &planned,
             choice,
-            raven_core::nearby_live_enabled(),
+            super::nearby_on(data_dir),
             super::plan_contact_routes_with(
                 data_dir,
                 &planned,
