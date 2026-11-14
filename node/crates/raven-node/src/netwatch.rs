@@ -3171,6 +3171,60 @@ mod tests {
         assert_eq!(has_network_in(Some(&v6)), Some(true));
     }
 
+    /// iOS, where the kind of network the app reports stands in for the
+    /// default routes' fingerprint ([`reported_path_tag`]), on an iPhone
+    /// with Wi-Fi and mobile data both up. Leaving Wi-Fi for mobile data
+    /// starts Tor over at once (a network that only went away would wait
+    /// out the hold first) and re-homes the p2p host; so does Wi-Fi coming
+    /// while on mobile data. An address that changes on mobile data while
+    /// Wi-Fi carries the traffic restarts nothing: Tor stays, the p2p host
+    /// is only nudged.
+    #[test]
+    fn an_iphone_between_wifi_and_mobile_data() {
+        use crate::p2p::Rehome;
+        let t0 = Instant::now();
+        let (wifi, mobile) = ("192.168.0.16/24", "10.20.30.40/32");
+        let on = |nets: &[&str], kind: &str| {
+            let mut st = baseline(t0, nets);
+            st.egress(tag(kind), t0 + secs(5));
+            let mut tor = TorHold::default();
+            tor.baseline(&st.view());
+            (st, tor)
+        };
+        let decided = |st: &mut NetState, tor: &mut TorHold| match settle_when_due(st).1 {
+            Some(Settled::Changed(c)) => (c.clone(), tor.changed(&c, &st.view())),
+            s => panic!("{s:?}"),
+        };
+        let t = t0 + secs(60);
+        // Out of the house: Wi-Fi goes, the app says mobile data.
+        let (mut st, mut tor) = on(&[wifi, mobile], "wifi");
+        st.event(down(wifi), t);
+        st.egress(tag("cellular"), t + secs(1));
+        let (c, step) = decided(&mut st, &mut tor);
+        assert_eq!((c.added, c.removed, c.networks), (0, 1, 1), "{c:?}");
+        assert!(c.egress_moved && c.paths_stale(), "{c:?}");
+        assert_eq!(step, TorStep::Restart, "not held: the traffic moved");
+        assert_eq!(p2p_action(&c), P2pAction::Rehome(Rehome::Network));
+        // Home again: Wi-Fi comes, the app says Wi-Fi.
+        let (mut st, mut tor) = on(&[mobile], "cellular");
+        st.event(up(wifi), t);
+        st.egress(tag("wifi"), t + secs(1));
+        let (c, step) = decided(&mut st, &mut tor);
+        assert_eq!((c.added, c.removed, c.networks), (1, 0, 2), "{c:?}");
+        assert!(c.egress_moved && c.paths_stale(), "{c:?}");
+        assert_eq!(step, TorStep::Restart);
+        // On Wi-Fi, mobile data gets another address: not this phone's way out.
+        let (mut st, mut tor) = on(&[wifi, mobile], "wifi");
+        st.event(down(mobile), t);
+        st.event(up("10.20.31.41/32"), t);
+        st.egress(tag("wifi"), t + secs(1));
+        let (c, step) = decided(&mut st, &mut tor);
+        assert_eq!((c.added, c.removed, c.networks), (1, 1, 2), "{c:?}");
+        assert!(c.egress_kept && !c.paths_stale(), "{c:?}");
+        assert_eq!(step, TorStep::Nothing);
+        assert_eq!(p2p_action(&c), P2pAction::Nudge);
+    }
+
     /// iOS: the interfaces as this task reads them itself. The first
     /// reading tells every address; a later one tells what came and went
     /// since; a reading that fails, or finds the same, tells nothing; the
