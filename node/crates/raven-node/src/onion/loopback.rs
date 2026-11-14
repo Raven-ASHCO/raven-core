@@ -1054,6 +1054,7 @@ mod tests {
             forward: forward_addr.to_string(),
             port: raven_core::onion::ONION_VIRTUAL_PORT,
             fresh_state: false,
+            fresh_timeouts: false,
         };
         stdin
             .write_all(proto::line(&config).as_bytes())

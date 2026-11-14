@@ -50,6 +50,7 @@ impl Helper {
             forward: forward_addr.to_string(),
             port: raven_core::onion::ONION_VIRTUAL_PORT,
             fresh_state: false,
+            fresh_timeouts: false,
         };
         stdin
             .write_all(proto::line(&config).as_bytes())
@@ -284,6 +285,7 @@ async fn a_helper_of_another_version_is_refused_with_a_clear_error() {
         forward: "127.0.0.1:9".into(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     };
     let task = tokio::spawn(supervise(
         Arc::new(OtherVersion(Arc::clone(&starts))),

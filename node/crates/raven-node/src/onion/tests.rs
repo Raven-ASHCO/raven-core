@@ -327,6 +327,7 @@ async fn side_with(dir: &Path, registry: &Path, knobs: loopback::Knobs) -> Side 
         forward: forward.to_string(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     };
     stdin
         .write_all(proto::line(&config).as_bytes())
@@ -1235,6 +1236,7 @@ async fn one_life(fake: Fake) -> (End, Blame, Duration, String) {
         forward: "127.0.0.1:9".into(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     };
     let started = tokio::time::Instant::now();
     let mut restarts = Restarts::default();
@@ -1347,6 +1349,7 @@ async fn a_friends_tor_link_makes_status_say_reachable_before_arti_does() {
         forward: "127.0.0.1:9".into(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     };
     let data_dir = dir.path().to_path_buf();
     let life = tokio::spawn(async move {
@@ -1387,6 +1390,7 @@ async fn a_self_check_that_reaches_the_service_makes_status_say_reachable() {
         forward: "127.0.0.1:9".into(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     };
     let data_dir = dir.path().to_path_buf();
     let links = FRIEND_LINKS.load(std::sync::atomic::Ordering::Relaxed);
@@ -1461,6 +1465,7 @@ async fn every_helper_life_gets_a_fresh_token() {
         forward: "127.0.0.1:9".into(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     };
     let task = tokio::spawn(supervise(
         Arc::new(TokenRecorder(Arc::clone(&seen))),
@@ -1565,6 +1570,7 @@ fn test_config(dir: &Path) -> proto::Config {
         forward: "127.0.0.1:9".into(),
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        fresh_timeouts: false,
     }
 }
 

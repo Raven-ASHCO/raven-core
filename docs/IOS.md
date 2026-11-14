@@ -363,19 +363,25 @@ while the phone sleeps. Every start of the embedded node (after a pause, for
 a mail check) begins as a new process does: what waits is due within 5 s
 and no route is left out of a send for an old failure.
 
-**Tor learns each network anew.** Arti learns how long circuits take and
-keeps that across starts: on a fast network a circuit in about 1.4 s, a
-one-hop one in a sixth of that, counted from before the connection to the
-guard is opened. Carried to a slower network those times abandoned every
-connection: an iPhone that had learned on Wi-Fi reached no relay on mobile
-data for minutes and no friend after that (2026-11-14), until Arti reset
-itself after 18 of 20 failed circuits, 7 minutes in. So the Tor helper
-removes the learned file (`circuit_timeouts.json`) at each of its starts, on
-every system: a Tor life begins with Tor's own first timeouts, as a new
-installation does, and the node starts a new life at every network change.
-While a Tor that is ready only from its cache has reached no relay, the
-node's log says where it stands ("ready from its cache, no relay yet"), and
-the line that says relays were reached says after how many seconds.
+**Tor's learned timings stay only where they fit.** Arti learns how long
+circuits take and keeps that across starts: on a fast network a circuit in
+about 1.4 s, a one-hop one in a sixth of that, counted from before the
+connection to the guard is opened. Where they fit they make Tor quick: a
+circuit that is slow to build is given up after a second or two and built
+again. Carried to a slower network they abandoned every connection: an
+iPhone that had learned on Wi-Fi reached no relay on mobile data for minutes
+and no friend after that (2026-11-14), until Arti reset itself after 18 of
+20 failed circuits, 7 minutes in. Dropping them at every start was tried
+the same day and was worse on a good network: with Tor's first timeouts
+(60 s) one slow relay held a first connection past the 25 s a send waits.
+So the node asks the Tor helper to start without them
+(`circuit_timeouts.json` removed) only where they may not fit: after a
+network change, when the app says the iPhone is on mobile data, after a
+start that stalled or a service that stayed unreachable, and when a helper
+that is ready from its cache with them reaches no relay within 6 s (it then
+starts over at once, without them). The node's log says where a Tor that is
+ready only from its cache stands ("ready from its cache, no relay yet"),
+and the line that says relays were reached says after how many seconds.
 
 Tor stops with the node on `node.pause` (the onion service is unreachable
 while the app is in the background) and is not started for a mail check.

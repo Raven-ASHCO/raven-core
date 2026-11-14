@@ -875,6 +875,10 @@ pub(crate) async fn run_with(data_dir: PathBuf, spawner: Arc<dyn Spawn>) -> Resu
         forward,
         port: raven_core::onion::ONION_VIRTUAL_PORT,
         fresh_state: false,
+        // A first life keeps what Tor learned (it fits the network a
+        // device is mostly on), except on mobile data, where the app said
+        // so before the node started.
+        fresh_timeouts: raven_core::net_path::current() == raven_core::net_path::PathKind::Cellular,
     };
     match supervise_on(spawner, config, current_token, data_dir, identity, forwards).await {}
 }
@@ -1102,6 +1106,7 @@ async fn supervise_on(
         }
         let next = restarts.ended(end, started.elapsed(), &blame);
         config.fresh_state = next.fresh_state;
+        config.fresh_timeouts = next.fresh_timeouts;
         let retry_at = (!next.wait.is_zero()).then(|| Instant::now() + next.wait);
         update_status(|s| {
             (s.phase, s.why) = match blame {
@@ -1157,7 +1162,7 @@ async fn run_once(
         kill(&mut proc);
         return (End::Exited, Life::new(now_for_watchdogs()));
     }
-    let mut life = Life::new(now_for_watchdogs());
+    let mut life = Life::new(now_for_watchdogs()).fresh_timings(config.fresh_timeouts);
     let mut stdout = LineReader::new(proc.stdout);
     let mut stderr = proc.stderr.map(LineReader::new);
     let mut obsolete = false;

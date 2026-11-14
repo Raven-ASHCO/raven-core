@@ -125,6 +125,12 @@ pub struct Config {
     /// repeated bootstraps that ended blocked (Arti issue #2534).
     #[serde(default)]
     pub fresh_state: bool,
+    /// Start without the circuit build times an earlier life learned
+    /// (Arti's `circuit_timeouts.json` removed): asked after a network
+    /// change, on mobile data, and after a life that those times kept from
+    /// its relays or its onion service ([`crate::onion::watch`]).
+    #[serde(default)]
+    pub fresh_timeouts: bool,
 }
 
 /// raven-node to the helper, after [`Config`].
@@ -937,6 +943,7 @@ mod tests {
             forward: "127.0.0.1:5000".into(),
             port: 7422,
             fresh_state: false,
+            fresh_timeouts: false,
         };
         let text = line(&config);
         assert_eq!(text.matches('\n').count(), 1);
@@ -944,9 +951,11 @@ mod tests {
             serde_json::from_str::<Config>(text.trim_end()).unwrap(),
             config
         );
-        // An older config line without fresh_state still reads.
+        // An older config line without fresh_state or fresh_timeouts
+        // still reads.
         let old = r#"{"v":1,"state_dir":"s","token":"t","forward":"f","port":1}"#;
-        assert!(!serde_json::from_str::<Config>(old).unwrap().fresh_state);
+        let read = serde_json::from_str::<Config>(old).unwrap();
+        assert!(!read.fresh_state && !read.fresh_timeouts);
         for ev in [
             Event::Progress {
                 pct: 45,

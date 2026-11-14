@@ -218,7 +218,9 @@ where
     if config.fresh_state {
         set_guard_state_aside(&state_dir);
     }
-    forget_learned_timeouts(&state_dir);
+    if config.fresh_timeouts {
+        forget_learned_timeouts(&state_dir);
+    }
     upload_rounds::install(events.clone());
     let obsolete = watch_too_old();
 
@@ -294,8 +296,15 @@ fn set_guard_state_aside(state_dir: &Path) {
 }
 
 /// Arti's learned circuit build times (`circuit_timeouts.json` in its state)
-/// removed, so every Tor life starts with Tor's own first timeouts and
-/// learns the network it is on.
+/// removed, so this Tor life starts with Tor's own first timeouts and
+/// learns the network it is on. raven-node asks for it
+/// (`Config::fresh_timeouts`) where the learned times may not fit: after a
+/// network change, on mobile data, and after a life they kept from its
+/// relays or its onion service. Where they fit they stay: with them a
+/// circuit that is slow to build is given up after a second or two and
+/// built again, and a first connection to a friend took 9 to 20 s on the
+/// iPhones; with Tor's first timeouts (60 s) one slow relay held it past
+/// the 25 s a send waits (2026-11-14, both ways tried the same day).
 ///
 /// Arti keeps what it learned across lives: on a fast network that is a
 /// circuit in about 1.4 s (a one-hop one in a sixth of it), and a build is
@@ -307,8 +316,7 @@ fn set_guard_state_aside(state_dir: &Path) {
 /// iPhone that had learned on Wi-Fi reached no relay on mobile data for 5
 /// minutes and no friend after that (W5, 2026-11-14), while the same
 /// iPhone, newly installed, had worked there (W4, 2026-11-02). Nothing is
-/// lost with the file: a life learns again from its own circuits, and
-/// raven-node starts a new life whenever the network changes.
+/// lost with the file: a life learns again from its own circuits.
 fn forget_learned_timeouts(state_dir: &Path) {
     let _ = std::fs::remove_file(
         state_dir
@@ -1200,6 +1208,7 @@ mod tests {
             forward: "127.0.0.1:9".into(),
             port: 4242,
             fresh_state: false,
+            fresh_timeouts: false,
         };
         let line = |config: Config| proto::line(&config);
         let refused = [

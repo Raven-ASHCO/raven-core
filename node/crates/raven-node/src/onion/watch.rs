@@ -57,6 +57,12 @@ pub(crate) const RESTART_MAX: Duration = Duration::from_secs(10 * 60);
 pub(crate) const STABLE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// Stuck bootstraps in a row before a fresh guard state.
 pub(crate) const FRESH_STATE_AFTER: u32 = 3;
+/// A helper that said ready from its cache and kept the circuit build times
+/// an earlier life learned must reach a Tor relay within this, or it starts
+/// over without them ([`End::NoRelay`]). On a network they fit, a relay
+/// answers within a second; on a slower one every try was given up before
+/// the connection to the guard stood, for minutes.
+pub(crate) const RELAYS_WAIT: Duration = Duration::from_secs(6);
 /// Up to this percent no directory is in yet.
 const EARLY_PCT: u8 = 15;
 /// The longest helper error text kept.
@@ -85,6 +91,9 @@ pub(crate) enum End {
     /// Ready, but our onion service stayed unreachable while the helper
     /// answered its pings ([`repair_due`]).
     Unreachable,
+    /// Ready from its cache with the circuit build times an earlier life
+    /// learned, and no Tor relay answered within [`RELAYS_WAIT`].
+    NoRelay,
 }
 
 impl End {
@@ -92,7 +101,27 @@ impl End {
     pub(crate) fn immediate(self) -> bool {
         matches!(
             self,
-            Self::NetworkChanged | Self::Woke | Self::MobileData | Self::Unreachable
+            Self::NetworkChanged
+                | Self::Woke
+                | Self::MobileData
+                | Self::Unreachable
+                | Self::NoRelay
+        )
+    }
+
+    /// The next life starts without the circuit build times this one
+    /// learned or kept (`proto::Config::fresh_timeouts`): the network is
+    /// another one, or those times kept this life from its relays, its
+    /// start or its onion service. A helper that woke, hung or stopped
+    /// says nothing about them.
+    pub(crate) fn fresh_timeouts(self) -> bool {
+        matches!(
+            self,
+            Self::NetworkChanged
+                | Self::Unreachable
+                | Self::NoRelay
+                | Self::BootstrapBudget
+                | Self::ProgressStall
         )
     }
 
@@ -113,6 +142,7 @@ impl End {
             Self::Woke => "woke from sleep",
             Self::MobileData => "on mobile data (Tor on Wi-Fi only)",
             Self::Unreachable => "our onion service stayed unreachable",
+            Self::NoRelay => "no Tor relay answered with the times learned before",
         }
     }
 }
@@ -151,6 +181,9 @@ pub(crate) struct Life {
     error: Option<(String, bool)>,
     /// A panic on its stderr.
     crashed: bool,
+    /// It started with the circuit build times an earlier life learned
+    /// (not asked to forget them: `proto::Config::fresh_timeouts`).
+    learned_timings: bool,
 }
 
 impl Life {
@@ -167,7 +200,15 @@ impl Life {
             tor_says: None,
             error: None,
             crashed: false,
+            learned_timings: true,
         }
+    }
+
+    /// This life was started without the circuit build times an earlier
+    /// one learned: [`End::NoRelay`] never ends it.
+    pub(crate) fn fresh_timings(mut self, fresh: bool) -> Self {
+        self.learned_timings = !fresh;
+        self
     }
 
     /// A progress event: new progress (a higher percent, or a later stage)
@@ -292,8 +333,17 @@ impl Life {
         if now.saturating_duration_since(self.last_pong) >= PING_DEAD {
             return Some(End::Unresponsive);
         }
-        if self.ready_at.is_some() {
-            return None;
+        if let Some(ready) = self.ready_at {
+            // Ready from the cache, its stage says that no relay has
+            // answered, and the learned times are in use: over, to start
+            // without them. (A helper that tells no stage says nothing
+            // about its relays.)
+            let no_relay = self.waits_for_relays()
+                && self
+                    .stage
+                    .is_some_and(|stage| !proto::relays_reached(stage));
+            let waited = now.saturating_duration_since(ready) >= RELAYS_WAIT;
+            return (self.learned_timings && no_relay && waited).then_some(End::NoRelay);
         }
         if now.saturating_duration_since(self.started) >= BOOTSTRAP_MAX {
             return Some(End::BootstrapBudget);
@@ -761,6 +811,8 @@ pub(crate) struct Next {
     pub(crate) wait: Duration,
     /// Start with a fresh guard state.
     pub(crate) fresh_state: bool,
+    /// Start without the learned circuit build times ([`End::fresh_timeouts`]).
+    pub(crate) fresh_timeouts: bool,
     /// The network kept Tor out ([`BLOCKED_RETRY_MIN`] backoff).
     pub(crate) blocked: bool,
 }
@@ -780,6 +832,7 @@ impl Restarts {
             return Next {
                 wait: Duration::ZERO,
                 fresh_state: false,
+                fresh_timeouts: end.fresh_timeouts(),
                 blocked: false,
             };
         }
@@ -805,6 +858,7 @@ impl Restarts {
         Next {
             wait,
             fresh_state,
+            fresh_timeouts: end.fresh_timeouts(),
             blocked: network,
         }
     }
@@ -891,6 +945,64 @@ pub(crate) fn repair_due(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper that says ready from its cache with the circuit build
+    /// times an earlier life learned must reach a relay within
+    /// [`RELAYS_WAIT`]; one started without them, or one whose relays
+    /// answered, is never ended for it. The life after it starts without
+    /// them, at once and as no failure; so does one after a network change
+    /// or an unreachable service, and none after a wake or a helper that
+    /// stopped (W5, 2026-11-14: an iPhone that had learned on Wi-Fi reached
+    /// no relay on mobile data for 5 minutes).
+    #[test]
+    fn learned_timings_that_keep_tor_from_its_relays_are_dropped() {
+        let t = Instant::now();
+        let ready_from_cache = |fresh: bool| {
+            let mut life = Life::new(t).fresh_timings(fresh);
+            life.progress(100, Some("connecting"), None, t);
+            life.ready(t + Duration::from_secs(1));
+            life
+        };
+        let learned = ready_from_cache(false);
+        assert_eq!(learned.check(t + Duration::from_secs(6)), None);
+        assert_eq!(
+            learned.check(t + Duration::from_secs(1) + RELAYS_WAIT),
+            Some(End::NoRelay)
+        );
+        // Started without them: it waits for its relays as long as it
+        // takes (here until just before a ping would be missed).
+        let late = t + Duration::from_secs(50);
+        let fresh = ready_from_cache(true);
+        assert_eq!(fresh.check(late), None);
+        // Relays answered in time: nothing to drop.
+        let mut reached = ready_from_cache(false);
+        reached.progress(100, Some("usable"), None, t + Duration::from_secs(2));
+        assert!(reached.relays_came_after_ready());
+        assert_eq!(reached.check(late), None);
+        // A helper that tells no stage says nothing about its relays.
+        let mut silent = Life::new(t);
+        silent.ready(t + Duration::from_secs(1));
+        assert_eq!(silent.check(late), None);
+
+        assert!(End::NoRelay.immediate());
+        for (end, fresh) in [
+            (End::NoRelay, true),
+            (End::NetworkChanged, true),
+            (End::Unreachable, true),
+            (End::BootstrapBudget, true),
+            (End::ProgressStall, true),
+            (End::Woke, false),
+            (End::Exited, false),
+            (End::Unresponsive, false),
+            (End::MobileData, false),
+        ] {
+            assert_eq!(end.fresh_timeouts(), fresh, "{end:?}");
+            let next = Restarts::default().ended(end, Duration::from_secs(30), &Blame::Restart);
+            assert_eq!(next.fresh_timeouts, fresh, "{end:?}");
+        }
+        let next = Restarts::default().ended(End::NoRelay, RELAYS_WAIT, &Blame::Restart);
+        assert_eq!((next.wait, next.blocked), (Duration::ZERO, false));
+    }
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
@@ -1498,7 +1610,9 @@ mod tests {
     }
 
     /// A repair restarts at once (no backoff), is no failure and keeps the
-    /// guard state; nobody is blamed.
+    /// guard state; nobody is blamed. The next life starts without the
+    /// learned circuit build times, which may be what kept the service
+    /// unreachable.
     #[test]
     fn a_repair_restarts_at_once_and_is_no_failure() {
         let mut r = Restarts::default();
@@ -1510,6 +1624,7 @@ mod tests {
             Next {
                 wait: Duration::ZERO,
                 fresh_state: false,
+                fresh_timeouts: true,
                 blocked: false
             }
         );
