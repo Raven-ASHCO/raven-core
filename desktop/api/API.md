@@ -103,7 +103,7 @@ changes. Fields marked `?` may be missing.
 | `node.pause` | `{nearby?: "keep" \| "stop"}` | `NodeStatus` + `{was_running, nearby: "kept" \| "stopped", note?}` (embedded node only: the app went to the background; `nearby: "keep"` keeps Bluetooth nearby in a small background node; see "Embedded node") |
 | `node.resume` | – | `NodeStatus` (embedded node only: the app is open again) |
 | `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms, names: [name]}` (embedded node only: one bounded fetch from friends, for iOS background refresh; `names`: the friends it asked, by your names for them) |
-| `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}` (embedded node only: the kind of network the device uses, from the iOS app's `NWPathMonitor`; with `tor_wifi_only` on, Tor stays off on `cellular`) |
+| `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}` (embedded node only: the kind of network the device uses, from the iOS app's `NWPathMonitor`; with `tor_wifi_only` on, Tor stays off on `cellular`; at every report, changed kind or not, the node looks at the device's networks again and acts on what changed as on any network change, docs/IOS.md section 6) |
 | `settings.get` | – | `Settings` |
 | `settings.set` | `{...partial Settings}` | `Settings` |
 | `events.poll` | `{after_seq}` | `{seq, events: [Event], reset: bool, locked?: true}` (see Events) |

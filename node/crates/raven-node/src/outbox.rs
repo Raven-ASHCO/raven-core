@@ -7021,6 +7021,28 @@ pub(crate) fn after_unlock() {
     let _ = kick(None, false, false);
 }
 
+/// Set when a node starts in a process where one ran before
+/// ([`new_life`]): the next worker forgets what the last one remembered.
+static NEW_LIFE: AtomicBool = AtomicBool::new(false);
+
+/// A node starts in a process that ran one before (the embedded node after
+/// `node.pause`, a mail check's small node): what the last worker remembered
+/// was learned before, maybe on another network, and its waits were counted
+/// on a clock that stands still while the device sleeps. The next worker
+/// starts as after a network change ([`Inner::network_changed`]): every
+/// object and owed ACK on a fresh backoff and due within
+/// [`NETWORK_SPREAD`], no route remembered as silent. Blocked routes stay
+/// (the contact's own answers).
+#[cfg_attr(not(all(unix, feature = "embedded")), allow(dead_code))]
+pub(crate) fn new_life() {
+    NEW_LIFE.store(true, AtomicOrdering::SeqCst);
+}
+
+/// Whether [`new_life`] was called since the last worker took it (once).
+fn take_new_life() -> bool {
+    NEW_LIFE.swap(false, AtomicOrdering::SeqCst)
+}
+
 struct RunningGuard;
 
 impl Drop for RunningGuard {
@@ -7048,6 +7070,9 @@ async fn run_loop(ctx: Arc<AttemptCtx>) -> Result<(), String> {
         inner.sibling_wake = sibling_wake_live();
         if AFTER_UNLOCK.swap(false, AtomicOrdering::SeqCst) {
             inner.kick_restart(None, false, false, Instant::now());
+        }
+        if take_new_life() {
+            inner.network_changed(Instant::now());
         }
     }
     let _running = RunningGuard;
@@ -10863,6 +10888,19 @@ mod tests {
         let e = &inner.entries[&[1; 32]];
         assert_eq!(e.failures, 1);
         assert!(e.next_due >= t0 + MIN_RETRY, "backs off");
+    }
+
+    /// A node that starts where one ran before (the embedded node after a
+    /// pause) tells the next worker once ([`new_life`]); that worker then
+    /// starts as after a network change (the test below).
+    #[test]
+    fn a_new_life_is_taken_once_by_the_next_worker() {
+        // The only test that touches the flag (no test runs the worker).
+        assert!(!take_new_life());
+        new_life();
+        new_life();
+        assert!(take_new_life(), "the next worker forgets the last one's waits");
+        assert!(!take_new_life(), "once");
     }
 
     /// G1 + G5: a network change starts every contact's backoff over and

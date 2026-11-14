@@ -98,6 +98,18 @@
 //!   failed watcher is never polled again (if-watch repeats its error on every
 //!   poll). The baseline survives a reopen, so a change made while no watcher
 //!   ran is still noticed.
+//! - **iOS (the embedded node):** the OS's address-change channel is not for
+//!   apps there (if-watch's SCDynamicStore; the live test on an iPhone saw
+//!   no change reported), so this task reads the interfaces itself
+//!   ([`polled_events`]: `getifaddrs` at the start, whenever the app reports
+//!   the network with `network.path` ([`reported`]), and every
+//!   [`READ_POLL`]); what came and went since the last reading are its
+//!   events, and everything above applies to them. The kind of network the
+//!   app last reported (`wifi`, `cellular`, ...) stands in for the default
+//!   routes' fingerprint ([`reported_path_tag`]): Wi-Fi to mobile data is a
+//!   `default route moved` change even while both keep their addresses, and
+//!   an address that comes or goes on the network not in use (mobile data
+//!   beside Wi-Fi) restarts nothing.
 //!
 //! Not a carrier and not gated: it opens no port and sends nothing (the
 //! default-route reading binds a UDP socket for a moment, beside a p2p host
@@ -152,6 +164,9 @@ const WAKE_SLACK: Duration = Duration::from_secs(30);
 /// How often the default routes' fingerprint is read while something needs
 /// it (and right before each decision).
 const EGRESS_POLL: Duration = Duration::from_secs(30);
+/// Where this task reads the interfaces itself ([`polled_events`]): how
+/// often, besides at each report from the app ([`reported`]).
+const READ_POLL: Duration = Duration::from_secs(30);
 /// A lab `egress` line carries 1 to this many lowercase hex digits.
 const LAB_EGRESS_MAX: usize = 64;
 /// A network gone with nothing in its place restarts the Tor helper only
@@ -690,6 +705,11 @@ impl Probes {
             wake_clock: !lab,
             wall: Box::new(raven_core::clock::now),
             egress: Box::new(move || {
+                // iOS: the kind of network the app reports stands in for
+                // it, always (the only reading there).
+                if cfg!(target_os = "ios") && !lab {
+                    return reported_path_tag();
+                }
                 egress_needed(
                     lab,
                     crate::p2p::host_running(),
@@ -741,12 +761,16 @@ pub(crate) enum Hint {
     /// pings, and no other connection answered one since (an open direct
     /// connection to anyone else was given one ping round to answer first).
     RelayLoss,
+    /// The app reported the network ([`reported`]): the default routes'
+    /// fingerprint is read now, not at its next poll.
+    Reported,
 }
 
 /// The hints waiting for the driver.
 struct Side {
     notify: Notify,
     relay_loss: AtomicBool,
+    reported: AtomicBool,
 }
 
 impl Side {
@@ -754,12 +778,14 @@ impl Side {
         Self {
             notify: Notify::new(),
             relay_loss: AtomicBool::new(false),
+            reported: AtomicBool::new(false),
         }
     }
 
     fn hint(&self, h: Hint) {
         match h {
             Hint::RelayLoss => self.relay_loss.store(true, Ordering::SeqCst),
+            Hint::Reported => self.reported.store(true, Ordering::SeqCst),
         }
         self.notify.notify_one();
     }
@@ -774,6 +800,99 @@ fn side() -> &'static Side {
 /// watcher is reopened waits for it; hints before the baseline are nothing.
 pub(crate) fn hint(h: Hint) {
     side().hint(h);
+}
+
+/// Wakes [`polled_events`] for a reading now.
+static READ_NOW: Notify = Notify::const_new();
+
+/// The app told the embedded node the network it uses (`network.path`, at
+/// every change and when it comes to the front): where this task reads the
+/// interfaces itself (iOS, [`polled_events`]) it reads them now, and the
+/// kind the app said is read as the default routes' fingerprint now
+/// ([`reported_path_tag`]). Elsewhere the OS's watcher has told the change
+/// already, and nothing here waits for the app.
+#[cfg_attr(not(all(unix, feature = "embedded")), allow(dead_code))]
+pub(crate) fn reported() {
+    READ_NOW.notify_one();
+    side().hint(Hint::Reported);
+}
+
+/// The kind of network the app last reported, as the default routes'
+/// fingerprint: `None` while nobody said (nothing is read), `Some(None)`
+/// while it says there is no network (no default route), else the kind's
+/// word.
+fn reported_path_tag() -> Option<Option<String>> {
+    path_tag(raven_core::net_path::current())
+}
+
+/// [`reported_path_tag`] of `kind` (pure).
+fn path_tag(kind: raven_core::net_path::PathKind) -> Option<Option<String>> {
+    use raven_core::net_path::PathKind;
+    match kind {
+        PathKind::Unknown => None,
+        PathKind::Offline => Some(None),
+        kind => Some(Some(kind.word().to_string())),
+    }
+}
+
+/// Every address of every interface that is up, with its prefix
+/// ([`raven_core::netifs::read`]: `getifaddrs`); an address whose prefix the
+/// system does not say is a network of its own. `None`: the reading failed
+/// (the last one stands). [`tracked`] sorts out what counts.
+fn read_addrs() -> Option<Vec<IpNet>> {
+    let addrs = raven_core::netifs::read().ok()?;
+    Some(
+        addrs
+            .into_iter()
+            .filter(|a| a.up)
+            .filter_map(|a| {
+                let max = if a.ip.is_ipv4() { 32 } else { 128 };
+                let prefix = if a.prefix == 0 { max } else { a.prefix.min(max) };
+                IpNet::new(a.ip, prefix).ok()
+            })
+            .collect(),
+    )
+}
+
+/// The interfaces read by this task itself, as an event stream (iOS, where
+/// the OS has no address-change channel for an app): `read` at the start,
+/// then at every `nudge` ([`reported`]) and every `poll`; each address that
+/// came since the last reading is an `Up`, each one gone a `Down`. A reading
+/// that fails changes nothing. It never ends.
+fn polled_events<R>(
+    read: R,
+    nudge: &'static Notify,
+    poll: Duration,
+) -> impl Stream<Item = io::Result<NetEvent>> + Send
+where
+    R: FnMut() -> Option<Vec<IpNet>> + Send,
+{
+    futures::stream::unfold(
+        (read, BTreeSet::<IpNet>::new(), VecDeque::new(), true),
+        move |(mut read, mut known, mut queue, mut first)| async move {
+            loop {
+                if let Some(ev) = queue.pop_front() {
+                    return Some((Ok(ev), (read, known, queue, first)));
+                }
+                if !first {
+                    tokio::select! {
+                        () = nudge.notified() => {}
+                        () = tokio::time::sleep(poll) => {}
+                    }
+                }
+                first = false;
+                let Some(now) = read() else { continue };
+                let now: BTreeSet<IpNet> = now.into_iter().take(MAX_ADDRS).collect();
+                for gone in known.difference(&now) {
+                    queue.push_back(NetEvent::If(IfEvent::Down(*gone)));
+                }
+                for came in now.difference(&known) {
+                    queue.push_back(NetEvent::If(IfEvent::Up(*came)));
+                }
+                known = now;
+            }
+        },
+    )
 }
 
 /// The default routes' fingerprint is read only while something acts on it:
@@ -844,6 +963,11 @@ where
                     probes.read_egress(state, now);
                     state.path_loss(now);
                 }
+                // The app reported the network: where its kind stands in
+                // for the default routes' fingerprint, a move is seen now.
+                if side.reported.swap(false, Ordering::SeqCst) {
+                    probes.read_egress(state, Instant::now());
+                }
             }
             _ = tick.tick() => {
                 let now = Instant::now();
@@ -906,6 +1030,11 @@ fn open_source() -> io::Result<Events> {
     if let Some(path) = lab_events_path() {
         eprintln!("raven-node netwatch: lab events (debug build)");
         return Ok(Box::pin(lab_events(path)));
+    }
+    // iOS: no address-change channel for an app; this task reads the
+    // interfaces itself.
+    if cfg!(target_os = "ios") {
+        return Ok(Box::pin(polled_events(read_addrs, &READ_NOW, READ_POLL)));
     }
     // Inside the runtime: the Linux backend registers its socket with it.
     let watcher = if_watch::tokio::IfWatcher::new()?;
@@ -3040,5 +3169,129 @@ mod tests {
         assert_eq!(has_network_in(Some(&[net("10.0.0.0/24")])), Some(true));
         let v6 = [net("169.254.7.7/16"), net("2001:db8:1::/64")];
         assert_eq!(has_network_in(Some(&v6)), Some(true));
+    }
+
+    /// iOS: the interfaces as this task reads them itself. The first
+    /// reading tells every address; a later one tells what came and went
+    /// since; a reading that fails, or finds the same, tells nothing; the
+    /// app's report brings the next reading forward.
+    #[tokio::test(start_paused = true)]
+    async fn polled_readings_tell_what_came_and_went() {
+        static NUDGE: Notify = Notify::const_new();
+        let wifi = net("192.0.2.10/24");
+        let mobile = net("198.51.100.4/32");
+        let other_wifi = net("203.0.113.9/24");
+        let readings: Arc<Mutex<VecDeque<Option<Vec<IpNet>>>>> =
+            Arc::new(Mutex::new(VecDeque::from([
+                Some(vec![wifi, mobile]),
+                None,
+                Some(vec![mobile, wifi]),
+                Some(vec![other_wifi, mobile]),
+            ])));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let read = {
+            let (readings, reads) = (Arc::clone(&readings), Arc::clone(&reads));
+            move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                readings.lock().unwrap().pop_front().flatten()
+            }
+        };
+        let mut events = Box::pin(polled_events(read, &NUDGE, READ_POLL));
+        let t0 = Instant::now();
+        let next = |ev: Option<io::Result<NetEvent>>| ev.unwrap().unwrap();
+        assert_eq!(next(events.next().await), NetEvent::If(IfEvent::Up(wifi)));
+        assert_eq!(next(events.next().await), NetEvent::If(IfEvent::Up(mobile)));
+        assert_eq!(Instant::now(), t0, "the first reading is made at once");
+        // The failed reading and the equal one tell nothing; the fourth
+        // tells the move to another Wi-Fi, three polls after the first.
+        assert_eq!(next(events.next().await), NetEvent::If(IfEvent::Down(wifi)));
+        assert_eq!(
+            next(events.next().await),
+            NetEvent::If(IfEvent::Up(other_wifi))
+        );
+        assert_eq!(Instant::now(), t0 + READ_POLL * 3);
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+        // The app reports the network: read now, not a poll later.
+        readings.lock().unwrap().push_back(Some(vec![other_wifi]));
+        NUDGE.notify_one();
+        let told = tokio::time::timeout(secs(1), events.next()).await;
+        assert_eq!(
+            next(told.expect("read at the report")),
+            NetEvent::If(IfEvent::Down(mobile))
+        );
+    }
+
+    /// iOS: the kind of network the app reports stands in for the default
+    /// routes' fingerprint, and the report is read at once. The same kind
+    /// again is nothing; Wi-Fi to mobile data with every address still
+    /// there is a `default route moved` change two seconds later, not at
+    /// the next poll.
+    #[tokio::test(start_paused = true)]
+    async fn the_apps_report_is_read_at_once_and_a_new_kind_is_a_route_move() {
+        assert_eq!(path_tag(raven_core::net_path::PathKind::Unknown), None);
+        assert_eq!(
+            path_tag(raven_core::net_path::PathKind::Offline),
+            Some(None),
+            "no default route"
+        );
+        assert_eq!(
+            path_tag(raven_core::net_path::PathKind::Cellular),
+            Some(tag("cellular"))
+        );
+        let t0 = Instant::now();
+        let side = Arc::new(Side::new());
+        let current = Arc::new(Mutex::new(tag("wifi")));
+        let reads: Arc<Mutex<Vec<Instant>>> = Arc::default();
+        let egress = {
+            let (current, reads) = (Arc::clone(&current), Arc::clone(&reads));
+            move || {
+                reads.lock().unwrap().push(Instant::now());
+                Some(current.lock().unwrap().clone())
+            }
+        };
+        let mut probes = Probes {
+            wake_clock: false,
+            wall: Box::new(SystemTime::now),
+            egress: Box::new(egress),
+            seen: Box::new(|_| {}),
+            link_local: false,
+        };
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<io::Result<NetEvent>>();
+        let (seen, mut on) = recorder();
+        let task = {
+            let side = Arc::clone(&side);
+            tokio::spawn(async move {
+                let mut state = NetState::new(false);
+                state.resync(Instant::now());
+                watch_events(&mut rx, &mut state, &side, &mut probes, &mut on).await
+            })
+        };
+        tx.unbounded_send(Ok(NetEvent::If(up("192.168.0.16/24"))))
+            .unwrap();
+        tx.unbounded_send(Ok(NetEvent::If(up("10.20.30.40/32"))))
+            .unwrap();
+        // A report with the same kind: read, and nothing to act on.
+        tokio::time::sleep_until(t0 + secs(12)).await;
+        side.hint(Hint::Reported);
+        // Mobile data now; both networks keep their addresses.
+        tokio::time::sleep_until(t0 + secs(21)).await;
+        *current.lock().unwrap() = tag("cellular");
+        side.hint(Hint::Reported);
+        tokio::time::sleep_until(t0 + secs(29)).await;
+        drop(tx);
+        let err = task.await.unwrap();
+        assert!(err.to_string().contains("ended"), "{err}");
+        let reads = reads.lock().unwrap().clone();
+        assert!(reads.contains(&(t0 + secs(12))), "{reads:?}");
+        assert!(reads.contains(&(t0 + secs(21))), "{reads:?}");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0], (t0 + QUIET, Settled::Baseline { networks: 2 }));
+        assert_eq!(seen[1].0, t0 + secs(21) + QUIET, "{seen:?}");
+        assert!(
+            matches!(&seen[1].1, Settled::Changed(c)
+                if c.cause == Cause::Route && c.egress_moved && c.networks == 2),
+            "{seen:?}"
+        );
     }
 }

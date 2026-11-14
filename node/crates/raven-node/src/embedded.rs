@@ -289,6 +289,7 @@ fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
     }
     // A small node gives way to the one asked for.
     stop_locked(STOP_WAIT);
+    forget_last_life();
     open_profile(&dir)?;
     open_log(&dir);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -310,6 +311,26 @@ fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
         thread: Some(thread),
     });
     wait_ready(&dir)
+}
+
+/// A node starts in this process, maybe not the first: what an earlier one
+/// remembered about reaching friends (the ways that failed "lately", who was
+/// seen on this network, how long each queued message still waits) was
+/// learned before the app left the front, maybe on another network, and its
+/// ages are kept on a clock that stands still while the device sleeps: two
+/// minutes "ago" may be last night. A send then left the best way out of
+/// its race, or queued without dialling. The new node starts as a new
+/// process does, with none of it; netwatch's first view is its baseline, so
+/// nothing else would say that the network may be another one.
+fn forget_last_life() {
+    crate::delivery_paths::network_changed();
+    crate::outbox::new_life();
+}
+
+/// The app reported the network it uses (`network.path`): netwatch looks at
+/// the interfaces and at the kind it said now ([`crate::netwatch::reported`]).
+pub fn network_reported() {
+    crate::netwatch::reported();
 }
 
 /// The service on a runtime of its own; what ended it, in words.

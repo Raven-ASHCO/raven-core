@@ -668,8 +668,11 @@ impl Inner {
     /// `network.path {type}` (embedded node only): the kind of network the
     /// device uses now, as the iOS app's `NWPathMonitor` reports it (`wifi`,
     /// `wired`, `cellular`, `other`, `offline`, `unknown`). The node keeps
-    /// Tor off on `cellular` while the setting `tor_wifi_only` is on. Extra
-    /// field `changed`.
+    /// Tor off on `cellular` while the setting `tor_wifi_only` is on, and
+    /// at every report it looks at the device's networks again: what
+    /// changed is acted on as any network change is (what waits is tried
+    /// again, what failed on the old network is forgotten, Tor starts over
+    /// on stale paths). Extra field `changed` (the kind).
     pub(crate) fn network_path(&self, args: &Args) -> OpResult {
         let word = args.str("type")?;
         let kind = raven_core::net_path::PathKind::parse(word).ok_or_else(|| {
@@ -681,6 +684,11 @@ impl Inner {
             return Err(embedded_only_op("network.path"));
         }
         let changed = raven_core::net_path::set(kind);
+        // The node looks at the network now, changed kind or not (Wi-Fi to
+        // another Wi-Fi keeps the kind): on iOS nothing else tells it that
+        // the network changed (raven-node netwatch).
+        #[cfg(feature = "embedded-node")]
+        crate::embedded::network_reported();
         Ok(json!({"path": kind.word(), "changed": changed}))
     }
 

@@ -94,7 +94,7 @@ has:
 | `node.pause` | – | `NodeStatus` + `{was_running}`: the node stopped cleanly and stays stopped |
 | `node.resume` | – | `NodeStatus`: the pause ends and the node starts as `node.start` starts it |
 | `mail.check` | `{budget_ms?}` | `{custody: "on" \| "off", started_node, completed, new_messages, elapsed_ms, names}`: `names`, the friends it asked, by your names for them |
-| `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}`: the kind of network the device uses (section 6) |
+| `network.path` | `{type: "wifi" \| "wired" \| "cellular" \| "other" \| "offline" \| "unknown"}` | `{path, changed}`: the kind of network the device uses; at every report the node looks at the device's networks again (section 6) |
 | `messages.handoff` | `{budget_ms?}` | `{handed, left, delivered, holders, custody, completed, elapsed_ms}`: what waits goes to friends who hold mail now (section 3; API.md "Hand-off") |
 
 What the app shows about friends who carry mail comes from API.md's fields:
@@ -133,10 +133,13 @@ signal: its pid is the app's own).
    starts the node locked. `lock.unlock` after Face ID opens it; with the
    node not started yet (the app starts none while asleep), the unlock
    starts it first. Then
-   `profile.state`, and `identity.create` for a new profile; `node.start`
-   (or `node.resume` after a pause). Start an
+   `profile.state`, and `identity.create` for a new profile. Start an
    `NWPathMonitor` and call `network.path` with the current kind of network
-   now and at every change (section 6: Tor on Wi-Fi only).
+   before the node starts (with Tor on Wi-Fi only, a node started on mobile
+   data would start Tor before it was told), then `node.start` (or
+   `node.resume` after a pause), and `network.path` again at every path
+   update, also one that keeps the kind (section 6: Tor on Wi-Fi only,
+   network changes).
 2. **To the background** (`sceneDidEnterBackground`): inside
    `beginBackgroundTask`, first let a send still `sending` end, and unless
    the lock came down and Raven sleeps, wait for a quick return: both
@@ -321,6 +324,32 @@ when the path uses the cellular interface, `wifi`, `wired`, `other`,
 ("Tor: off on mobile data", `tor.phase` `off_mobile_data`); a running one
 ends within two seconds; on Wi-Fi Tor starts again.
 
+**Network changes.** On a computer raven-node hears from the OS when its
+addresses change (netwatch) and then tries again what waits, forgets what
+failed on the old network, re-homes the p2p host and starts Tor over on
+stale paths. An iOS app has no such channel (if-watch's SCDynamicStore is
+not for apps; the live test on an iPhone saw no change reported), so there
+the node reads the interfaces itself (`getifaddrs`): when it starts, every
+30 s, and at once at every `network.path` report. What came and went since
+the last reading goes through the same rules as on a computer (debounce,
+gap, the 30 s hold before Tor starts over after a network that only went
+away). The kind the app reports stands in for the default routes'
+fingerprint: Wi-Fi to mobile data is a change even while both keep their
+addresses, and an address that changes on the network not in use (mobile
+data beside Wi-Fi) restarts nothing. So the app calls `network.path` at
+every `NWPathMonitor` update, also one that keeps the kind (from one Wi-Fi
+to another), and before `node.start` at a launch. The node says nothing
+about addresses to the app, and logs counts only.
+
+**A new start in the same process.** After `node.pause` the node's memory
+of the last minutes (which routes of a friend failed "lately", who was seen
+on this network, how long each queued message still waits) is not kept for
+the next start: it was learned before the app left the front, maybe on
+another network, and its ages are counted on a clock that stands still
+while the phone sleeps. Every start of the embedded node (after a pause, for
+a mail check) begins as a new process does: what waits is due within 5 s
+and no route is left out of a send for an old failure.
+
 Tor stops with the node on `node.pause` (the onion service is unreachable
 while the app is in the background) and is not started for a mail check.
 Real Arti in process has bootstrapped and published its onion service on
@@ -466,6 +495,7 @@ node stays paused, `node.resume`, and a direct delivery again.
 | Raven passphrase against the data-protection keychain (`cku` back after a remove, marker `ios-keychain`) | – | `on_ios_the_keys_move_between_the_keychain_and_the_vault` (not run yet) | not yet |
 | Lock v2 held while the embedded node is stopped (`lock.now`, then a locked start) | `lock_v2_embedded` | not yet | not yet |
 | `RavenClient.xcframework` (release) linked by Xcode's clang into a C program: new identity in the Keychain, node started, paused, mail check, resumed, stopped | – | `simulator_smoke.sh` | not yet |
+| netwatch reading the interfaces itself, the app's `network.path` report read at once, a new start forgetting the last one's failures | `netwatch::tests::polled_readings_tell_what_came_and_went`, `the_apps_report_is_read_at_once_and_a_new_kind_is_a_route_move`, `outbox::tests::a_new_life_is_taken_once_by_the_next_worker` (injected readings: the iOS branch itself is compiled for iOS only) | not yet | not yet |
 | Local Network permission, background refresh, file protection, App Store signing | – | – | not yet |
 | Bluetooth nearby | – | no Bluetooth | not built |
 

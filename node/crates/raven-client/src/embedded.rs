@@ -103,6 +103,12 @@ pub(crate) fn nearby_permission() -> Option<&'static str> {
     node::nearby_permission()
 }
 
+/// The app reported the network it uses (`network.path`): the node looks
+/// at it now.
+pub(crate) fn network_reported() {
+    node::network_reported();
+}
+
 /// The pause ends; the caller starts the node (through the CLI's start).
 /// The background node (Bluetooth kept) stops first, so that start is the
 /// full node's.
