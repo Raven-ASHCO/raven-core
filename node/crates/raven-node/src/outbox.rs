@@ -10899,7 +10899,10 @@ mod tests {
         assert!(!take_new_life());
         new_life();
         new_life();
-        assert!(take_new_life(), "the next worker forgets the last one's waits");
+        assert!(
+            take_new_life(),
+            "the next worker forgets the last one's waits"
+        );
         assert!(!take_new_life(), "once");
     }
 

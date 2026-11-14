@@ -847,7 +847,11 @@ fn read_addrs() -> Option<Vec<IpNet>> {
             .filter(|a| a.up)
             .filter_map(|a| {
                 let max = if a.ip.is_ipv4() { 32 } else { 128 };
-                let prefix = if a.prefix == 0 { max } else { a.prefix.min(max) };
+                let prefix = if a.prefix == 0 {
+                    max
+                } else {
+                    a.prefix.min(max)
+                };
                 IpNet::new(a.ip, prefix).ok()
             })
             .collect(),
