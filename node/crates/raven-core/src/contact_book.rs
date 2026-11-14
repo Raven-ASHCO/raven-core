@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -234,6 +235,8 @@ fn read_stable(path: &Path, max: u64) -> std::io::Result<CachedFile> {
 struct DirState {
     /// Every read of the book refuses with this ([`hold`]).
     held: Option<String>,
+    /// When that hold began ([`wait_while_fresh_hold`]).
+    held_at: Option<Instant>,
     /// [`enable_process_cache`] was called.
     cache: bool,
     book: Option<CachedFile>,
@@ -303,9 +306,52 @@ pub fn hold(data_dir: &Path, why: &str) {
     let state = register(data_dir);
     let mut st = lock_state(&state);
     st.held = Some(why.to_owned());
+    st.held_at = Some(Instant::now());
     st.book = None;
     st.blocked = None;
     st.generation += 1;
+}
+
+/// A hold younger than this is a key load in flight ([`wait_while_fresh_hold`]).
+pub const FRESH_HOLD: Duration = Duration::from_secs(5);
+/// How often [`wait_while_fresh_hold`] looks again.
+const HOLD_POLL: Duration = Duration::from_millis(20);
+
+/// For a program that runs raven-node inside its own process (the embedded
+/// node of the iPhone app): the node holds the book for the moment its
+/// at-rest key loads at its start, and a command of the program that reads
+/// the book in that moment would be refused as if the keychain were missing
+/// (seen 2026-11-14: a words check a moment after the node started). Waits,
+/// at most `max`, while the book is held by a hold younger than
+/// [`FRESH_HOLD`]. A hold that stays (a key load that failed keeps it for
+/// minutes) and a profile that Lock v2 locked are not waited for. Returns
+/// whether the book is open in this process now.
+pub fn wait_while_fresh_hold(data_dir: &Path, max: Duration) -> bool {
+    let Some(state) = process_state(data_dir) else {
+        return true;
+    };
+    let deadline = Instant::now() + max;
+    loop {
+        let fresh = {
+            let st = lock_state(&state);
+            if st.held.is_none() {
+                return true;
+            }
+            st.held_at.is_some_and(|at| at.elapsed() < FRESH_HOLD)
+        };
+        if !fresh || crate::local_lock::engaged(data_dir) || Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(HOLD_POLL);
+    }
+}
+
+/// Tests: this profile's hold began `age` ago.
+#[cfg(test)]
+pub(crate) fn age_hold(data_dir: &Path, age: Duration) {
+    if let Some(state) = process_state(data_dir) {
+        lock_state(&state).held_at = Instant::now().checked_sub(age);
+    }
 }
 
 /// Whether this process holds the book ([`hold`]): Lock v2 locked it, or
@@ -335,6 +381,7 @@ pub fn enable_process_cache(data_dir: &Path) {
     let state = register(data_dir);
     let mut st = lock_state(&state);
     st.cache = true;
+    st.held_at = None;
     if st.held.take().is_some() {
         st.generation += 1;
     }

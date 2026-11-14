@@ -435,6 +435,45 @@ fn a_held_book_refuses_every_reader_until_released() {
     ));
 }
 
+/// A program that runs raven-node inside its own process waits out the
+/// moment the node holds the book while its key loads at its start. It
+/// waits no longer than asked, and not at all for a hold that stays (a key
+/// load that failed keeps it for minutes).
+#[test]
+fn a_fresh_hold_is_waited_out_and_one_that_stays_is_not() {
+    let dir = profile();
+    let dd = dir.path();
+    fixture(dd);
+    // A book nobody holds is open.
+    assert!(wait_while_fresh_hold(dd, Duration::from_secs(2)));
+    hold(dd, "raven-node is waiting for the at-rest key");
+    let path = dd.to_path_buf();
+    let opener = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        enable_process_cache(&path);
+    });
+    let began = Instant::now();
+    assert!(wait_while_fresh_hold(dd, Duration::from_secs(5)));
+    let waited = began.elapsed();
+    assert!(
+        waited >= Duration::from_millis(100) && waited < Duration::from_secs(3),
+        "{waited:?}"
+    );
+    opener.join().unwrap();
+    assert!(read_rows::<serde_json::Value>(dd).is_ok());
+    // Nobody releases this one: the wait ends when its time is up.
+    hold(dd, "raven-node is waiting for the at-rest key");
+    let began = Instant::now();
+    assert!(!wait_while_fresh_hold(dd, Duration::from_millis(200)));
+    assert!(began.elapsed() >= Duration::from_millis(180));
+    // A hold that has stayed: no wait at all.
+    age_hold(dd, FRESH_HOLD + Duration::from_secs(1));
+    let began = Instant::now();
+    assert!(!wait_while_fresh_hold(dd, Duration::from_secs(5)));
+    assert!(began.elapsed() < Duration::from_millis(500));
+    enable_process_cache(dd);
+}
+
 /// The cache re-reads on every stamp change before it answers: a contact
 /// removed (or added) by another process is seen by the next admission.
 #[test]

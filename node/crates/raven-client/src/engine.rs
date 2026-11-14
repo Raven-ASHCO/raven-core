@@ -22,6 +22,11 @@ use crate::profile::{self, OpenState};
 use crate::safety;
 use crate::settings::{self, Settings};
 
+/// How long an op waits for a friends list that a raven-node inside this
+/// process holds while its at-rest key loads at its start
+/// ([`raven_core::contact_book::wait_while_fresh_hold`]).
+const BOOK_HOLD_WAIT: Duration = Duration::from_secs(3);
+
 /// A mutex that a thread which panicked holding it does not keep locked.
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -302,6 +307,13 @@ impl Inner {
             }
             self.refuse_closed()?;
             return run(self, args);
+        }
+        // A raven-node inside this process (the embedded node of an app)
+        // holds the friends list for the moment its at-rest key loads at
+        // its start. An op that came in that moment was refused as if the
+        // keychain were missing; it waits the moment out instead.
+        if let Ok(dir) = self.data_dir() {
+            raven_core::contact_book::wait_while_fresh_hold(dir, BOOK_HOLD_WAIT);
         }
         // Opened as the CLI opens it before every command, and refused as
         // it refuses (profile.rs).

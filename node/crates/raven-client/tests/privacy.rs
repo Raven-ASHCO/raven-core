@@ -304,3 +304,57 @@ fn delivered_on_sealed_profiles() {
         assert_eq!(ok(client, "privacy.state", json!({}))["encrypted"], true);
     });
 }
+
+/// An app that runs raven-node inside its own process (the iPhone app): the
+/// node holds the friends list for the moment its at-rest key loads at its
+/// start. An operation that comes in that moment waits it out (seen
+/// 2026-11-14: a words check a moment after the node started was refused
+/// with "it needs your keychain"). A hold that stays is still a refusal.
+#[test]
+fn an_op_waits_out_the_moment_a_node_in_this_process_holds_the_friends_list() {
+    let a = profile("Desk A");
+    let (friend, address) = invite(0x51);
+    ok(
+        &a.client,
+        "contacts.add",
+        json!({"text": friend, "name": "Friend F"}),
+    );
+    raven_core::contact_book::hold(&a.path, "raven-node is waiting for the at-rest key");
+    let path = a.path.clone();
+    let opener = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        raven_core::contact_book::enable_process_cache(&path);
+    });
+    let began = std::time::Instant::now();
+    // A change of the friends list: it reads and writes the book.
+    ok(
+        &a.client,
+        "contacts.rename",
+        json!({"address": address, "name": "Friend G"}),
+    );
+    assert!(began.elapsed() >= std::time::Duration::from_millis(250));
+    opener.join().unwrap();
+    assert_eq!(
+        names(&ok(&a.client, "contacts.list", json!({}))),
+        ["Friend G"]
+    );
+
+    // A hold nobody releases: the operation waits its three seconds and
+    // is refused as before.
+    raven_core::contact_book::hold(&a.path, "raven-node is waiting for the at-rest key");
+    let began = std::time::Instant::now();
+    let refused = err(
+        &a.client,
+        "contacts.rename",
+        json!({"address": address, "name": "Friend H"}),
+    );
+    assert!(
+        began.elapsed() >= std::time::Duration::from_secs(2),
+        "{refused}"
+    );
+    raven_core::contact_book::enable_process_cache(&a.path);
+    assert_eq!(
+        names(&ok(&a.client, "contacts.list", json!({}))),
+        ["Friend G"]
+    );
+}

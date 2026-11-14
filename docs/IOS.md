@@ -77,6 +77,17 @@ runs at most one embedded node, for one profile; a second profile is
 refused. That is what an iOS app needs. The tests that need two or three
 friends run each engine in a process of its own (section 9).
 
+**The friends list at the node's start.** One process also means one state
+of the friends list. At its start the node holds the list while its at-rest
+key loads (`contact_book::hold`: its listeners admit nobody meanwhile), and
+in an app that hold is the engine's too: an operation that reads or changes
+the list in that moment was refused as if the keychain were missing ("Raven
+can't open your friends list: it needs your keychain"; seen on an iPhone
+when a words check came a moment after the node started). The engine waits
+that moment out, up to 3 s (`contact_book::wait_while_fresh_hold`). It does
+not wait for a hold that stays (a key load that failed keeps it for minutes,
+and says so) or for a profile that Lock v2 locked.
+
 ### 1.3 How it is built and chosen
 
 | Crate | Feature | What it adds |
