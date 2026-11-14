@@ -1373,6 +1373,8 @@ impl Inner {
         }
         check_text(&text)?;
         send_note(&c.pub_hex, "a send asked");
+        // One send is taken in at a time, up to its keeping row (`send_intake`).
+        let intake = lock(&self.send_intake);
         // The first look at the profile only notes what is there: take it
         // before this send exists, so its receipt is always news.
         let _ = self.refresh(Duration::from_millis(1500));
@@ -1414,6 +1416,7 @@ impl Inner {
         // Taken: on this computer from here on, whenever the app ends (a
         // quit right after Send, a crash, iOS ending the app).
         self.keep_until_sent(&pending.id);
+        drop(intake);
         self.emit(
             "send_started",
             json!({"id": pending.id, "address": pending.address}),
@@ -2704,6 +2707,52 @@ mod tests {
             "nothing more written or taken away"
         );
         assert_eq!(shown(&read()), [("pending-1".to_owned(), State::Waiting)]);
+    }
+
+    /// Many sends asked at once (W5-6: of a hundred at once on an iPhone one
+    /// was refused when the history's file lock gave up after 10 s): each is
+    /// taken in in its turn (`send_intake`), and each has its keeping row,
+    /// once.
+    #[test]
+    fn sends_asked_at_once_are_taken_in_one_at_a_time_and_each_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Inner::new(Ok(dir.path().to_path_buf()));
+        let peer = "ab".repeat(32);
+        let inside = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let most = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asked: Vec<_> = (1..=48)
+            .map(|n| {
+                let (inner, peer) = (Arc::clone(&inner), peer.clone());
+                let (inside, most) = (Arc::clone(&inside), Arc::clone(&most));
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    // As `messages_send` takes one in.
+                    let intake = lock(&inner.send_intake);
+                    most.fetch_max(inside.fetch_add(1, SeqCst) + 1, SeqCst);
+                    let id = format!("pending-{n}");
+                    lock(&inner.book).pendings.push(Pending {
+                        id: id.clone(),
+                        peer,
+                        body: format!("message {n}"),
+                        ..pending(Job::Queued, None)
+                    });
+                    inner.keep_until_sent(&id);
+                    inside.fetch_sub(1, SeqCst);
+                    drop(intake);
+                })
+            })
+            .collect();
+        for thread in asked {
+            thread.join().unwrap();
+        }
+        assert_eq!(most.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rows = rows_of(dir.path());
+        assert_eq!(rows.len(), 48, "{rows:?}");
+        let mut texts: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts.len(), 48, "each message is kept once");
+        assert!(lock(&inner.book).pendings.iter().all(|p| p.kept.is_some()));
     }
 
     #[test]

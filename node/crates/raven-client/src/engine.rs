@@ -128,6 +128,13 @@ pub(crate) struct Inner {
     settings: Mutex<SettingsState>,
     pub(crate) caches: Mutex<Caches>,
     pub(crate) book: Mutex<MessageBook>,
+    /// One send is taken in at a time (messages.rs `messages_send`: its look
+    /// at the history and its keeping row). Many sends at once otherwise wait
+    /// on the history's file lock all together, and that lock gives up after
+    /// 10 s: of a hundred sends at once on an iPhone one was refused, of
+    /// three hundred twenty (W5-6, 2026-11-14). Behind this one they wait
+    /// their turn here, without a limit, and one at a time asks for the file.
+    pub(crate) send_intake: Mutex<()>,
     /// The sends waiting for each friend, each friend's on a worker of its
     /// own (messages.rs `enqueue_send`).
     pub(crate) send_queues: Mutex<SendQueues>,
@@ -171,6 +178,7 @@ impl Inner {
             }),
             caches: Mutex::new(Caches::default()),
             book: Mutex::new(MessageBook::default()),
+            send_intake: Mutex::new(()),
             send_queues: Mutex::new(SendQueues::default()),
             watcher: Mutex::new(WatcherState::default()),
             mismatches: Mutex::new(HashMap::new()),
