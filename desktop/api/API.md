@@ -27,7 +27,11 @@ void  raven_free(char *response);             /* frees a string returned by rave
 - Secrets never cross the boundary. The engine refuses to put fields named like `seed`,
   `private_key`, `secret`, `plaintext` or `recovery` in a response (the same rule as raven-node's IPC).
 - All text returned for display is already sanitised (control characters, bidi overrides and
-  zero-width characters removed), so a friend's name or message cannot draw over the UI.
+  zero-width characters removed), so a friend's name or message cannot draw over the UI. Two
+  zero-width characters stay where writing itself needs them and nowhere else: the non-joiner
+  (U+200C) between two letters of a script that joins its letters (the Persian half-space), and
+  the joiner (U+200D) between two such letters or between two emoji that make one (a family, a
+  flag). An app that cleans text again must keep them there too.
 - `raven_call` is thread-safe and may block (`node.start` can take a few seconds), so apps call it
   off the UI thread and post the result back. `events.poll` never blocks; `events.wait` blocks the
   calling thread up to its `timeout_ms` (25 s at most), never the engine's other calls.

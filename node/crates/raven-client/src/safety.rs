@@ -1,6 +1,7 @@
 //! What every response goes through: display text sanitised (control
-//! characters, bidi controls and zero-width characters removed), and no field
-//! named like a secret.
+//! characters, bidi controls and zero-width characters removed, but for the
+//! two joiners where writing itself needs them: [`joiner_stays`]), and no
+//! field named like a secret.
 
 use serde_json::Value;
 
@@ -65,6 +66,58 @@ fn is_control(c: char) -> bool {
     u < 0x20 || u == 0x7f || (0x80..=0x9f).contains(&u)
 }
 
+/// A letter (or its mark) of a script whose letters join, and that writes a
+/// zero-width non-joiner inside its words: Arabic script (Persian, Urdu,
+/// Kurdish and the rest; never its digits or punctuation) and the scripts of
+/// India from Devanagari to Sinhala.
+fn joins_letters(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0620}'..='\u{065F}'
+            | '\u{066E}'..='\u{06D3}'
+            | '\u{06D5}'..='\u{06DC}'
+            | '\u{06DF}'..='\u{06E8}'
+            | '\u{06EA}'..='\u{06EF}'
+            | '\u{06FA}'..='\u{06FF}'
+            | '\u{0750}'..='\u{077F}'
+            | '\u{08A0}'..='\u{08FF}'
+            | '\u{0900}'..='\u{0DFF}'
+    )
+}
+
+/// A picture character: what a zero-width joiner may stand between to make
+/// one emoji of several (a family, a flag, a profession).
+fn is_picture(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1F000}'..='\u{1FAFF}'
+            | '\u{2190}'..='\u{21FF}'
+            | '\u{2300}'..='\u{23FF}'
+            | '\u{25A0}'..='\u{27BF}'
+            | '\u{2B00}'..='\u{2BFF}'
+    )
+}
+
+/// Whether a zero-width non-joiner (U+200C) or joiner (U+200D) stays: only
+/// where writing itself needs it. The non-joiner between two joining letters
+/// (Persian writes its half-space with it: without it the two halves of a
+/// word run into one wrong shape), the joiner between two joining letters or
+/// between two pictures (after a picture's own selector too), so that one
+/// emoji made of several stays one. `before` is the last character kept,
+/// `after` the next one as written: at the start or the end of a text, next
+/// to a space, a digit or a Latin letter, or beside another invisible
+/// character, both go as every zero-width character does, so that neither
+/// can hide in a name, an address or a code.
+fn joiner_stays(before: Option<char>, joiner: char, after: Option<char>) -> bool {
+    let (Some(before), Some(after)) = (before, after) else {
+        return false;
+    };
+    if joins_letters(before) && joins_letters(after) {
+        return true;
+    }
+    joiner == '\u{200D}' && (is_picture(before) || before == '\u{FE0F}') && is_picture(after)
+}
+
 fn sanitize(input: &str, multi_line: bool) -> String {
     let stripped = raven_core::sanitize::strip_ansi(input);
     let mut out = String::with_capacity(stripped.len());
@@ -80,6 +133,11 @@ fn sanitize(input: &str, multi_line: bool) -> String {
             }
             '\n' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}' => out.push(line_break),
             '\t' => out.push(if multi_line { '\t' } else { ' ' }),
+            '\u{200C}' | '\u{200D}'
+                if joiner_stays(out.chars().next_back(), c, chars.peek().copied()) =>
+            {
+                out.push(c);
+            }
             c if is_control(c) || is_bidi_control(c) || is_invisible(c) => {}
             c => out.push(c),
         }
@@ -197,6 +255,52 @@ mod tests {
         assert_eq!(
             line("Ren\u{00E9} \u{0645}\u{0647}\u{0631}"),
             "Ren\u{00E9} \u{0645}\u{0647}\u{0631}"
+        );
+    }
+
+    /// W5N.6 (2026-11-15): a Persian half-space and an emoji made of several
+    /// were shown without their joiners: wrong words, a family as four
+    /// people. They stay where writing needs them and nowhere else.
+    #[test]
+    fn the_two_joiners_stay_where_writing_needs_them() {
+        // Persian: the half-space inside a word, twice.
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645} \u{062E}\u{0627}\u{0646}\u{0647}\u{200C}\u{0647}\u{0627}";
+        assert_eq!(text(persian), persian);
+        assert_eq!(line(persian), persian);
+        // One family, one flag, one profession.
+        let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466} \u{1F3F3}\u{FE0F}\u{200D}\u{1F308} \u{1F469}\u{200D}\u{1F4BB}";
+        assert_eq!(text(emoji), emoji);
+        // A heart with its selector, joined to a flame.
+        let heart = "\u{2764}\u{FE0F}\u{200D}\u{1F525}";
+        assert_eq!(text(heart), heart);
+        // Devanagari: a joiner after the virama.
+        let hindi = "\u{0915}\u{094D}\u{200D}\u{0937}";
+        assert_eq!(text(hindi), hindi);
+        // Nowhere else: between Latin letters, digits, at an end, beside a
+        // space, in a run, between a letter and a picture.
+        assert_eq!(text("pay\u{200C}pal"), "paypal");
+        assert_eq!(text("12\u{200D}34"), "1234");
+        assert_eq!(
+            text("\u{200C}\u{0633}\u{0644}\u{0627}\u{0645}\u{200C}"),
+            "\u{0633}\u{0644}\u{0627}\u{0645}"
+        );
+        assert_eq!(
+            text("\u{0645}\u{06CC}\u{200C} \u{0631}"),
+            "\u{0645}\u{06CC} \u{0631}"
+        );
+        assert_eq!(
+            text("\u{0645}\u{200C}\u{200C}\u{200B}\u{06CC}"),
+            "\u{0645}\u{06CC}"
+        );
+        assert_eq!(text("a\u{200D}\u{1F600}"), "a\u{1F600}");
+        assert_eq!(text("\u{1F600}\u{200D}a"), "\u{1F600}a");
+        // Arabic digits and punctuation are not joining letters.
+        assert_eq!(text("\u{06F1}\u{200C}\u{06F2}"), "\u{06F1}\u{06F2}");
+        assert_eq!(text("\u{0645}\u{200C}\u{060C}"), "\u{0645}\u{060C}");
+        // The other zero-width characters and the bidi controls go as before.
+        assert_eq!(
+            text("\u{0645}\u{200B}\u{06CC} \u{202E}\u{0645}\u{2060}\u{06CC}\u{FEFF}"),
+            "\u{0645}\u{06CC} \u{0645}\u{06CC}"
         );
     }
 

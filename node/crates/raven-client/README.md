@@ -19,7 +19,8 @@ void  raven_free(char *response);
 - A NULL or non-UTF-8 request is answered with `BAD_REQUEST`; a panic inside with `INTERNAL`.
 - Every response is checked: no field named like `seed`, `private_key`, `secret`, `plaintext` or
   `recovery`, and every string is sanitised (control characters, bidi controls and zero-width
-  characters removed).
+  characters removed; the non-joiner and the joiner stay between two letters of a joining
+  script, as the Persian half-space, and the joiner between two emoji that make one).
 
 ## Building
 
