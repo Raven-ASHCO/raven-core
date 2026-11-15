@@ -267,11 +267,18 @@ pub(super) fn cmd_list(data_dir: &Path) -> Result<(), String> {
     let contacts = super::load_contacts(data_dir).unwrap_or_default();
     for row in &rows {
         let bytes = row.shape().map_or(0, |s| s.len());
-        let (done, total) = if row.outgoing {
-            let total = store::progress(data_dir, row).1;
-            (u64::from(row.friend_has).min(total), total)
+        let total = row.shape().map_or(0, |s| s.chunks());
+        // Mine: what the friend's node said it has. A friend's: the chunks
+        // that are here.
+        let done = if row.outgoing {
+            row.friend_has.min(total)
         } else {
-            store::progress(data_dir, row)
+            match (row.handle_bytes(), row.shape()) {
+                (Some(handle), Some(shape)) => {
+                    store::have(data_dir, &handle, &shape, false).map_or(0, |have| have.count())
+                }
+                _ => 0,
+            }
         };
         println!(
             "{}  {}  {}  {}  {} bytes  {}  chunks {}/{}{}",

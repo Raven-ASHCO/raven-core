@@ -1192,7 +1192,7 @@ fn the_terminal_sends_a_photo_and_a_file_and_the_friend_saves_them() {
     );
     let line = listed(&b, &short).unwrap();
     assert!(
-        line.contains("  from  Friend Sender  photo  200123 bytes  "),
+        line.contains("  from  Friend Sender  photo  200123 bytes  complete  chunks 4/4"),
         "{line}"
     );
     let (ok, text) = said(&b.cli(&["lab", "attachment-save", &short, "--out", &at("got.jpg")]));
@@ -1215,7 +1215,10 @@ fn the_terminal_sends_a_photo_and_a_file_and_the_friend_saves_them() {
     });
     assert!(told, "{:?}", listed(&a, &short));
     let line = listed(&a, &short).unwrap();
-    assert!(line.contains("  to    Friend Receiver  photo  "), "{line}");
+    assert!(
+        line.contains("  to    Friend Receiver  photo  200123 bytes  delivered  chunks 4/4"),
+        "{line}"
+    );
     let (ok, text) = said(&a.cli(&["lab", "attachment-save", &short, "--out", &at("mine.jpg")]));
     assert!(ok && text.contains(&sum), "{text}");
     // The friend's app has the photo's row, with its caption and its size.
@@ -1259,7 +1262,7 @@ fn the_terminal_sends_a_photo_and_a_file_and_the_friend_saves_them() {
     std::thread::sleep(Duration::from_secs(6));
     let line = listed(&b, &short).unwrap();
     assert!(
-        line.contains("  file  150321 bytes  incoming  chunks 0/"),
+        line.contains("  file  150321 bytes  incoming  chunks 0/3"),
         "{line}"
     );
     let (ok, text) = said(&b.cli(&["lab", "attachment-save", &short, "--out", &at("early.txt")]));
