@@ -19,6 +19,7 @@ pub mod offer;
 pub mod peers;
 pub mod shown;
 pub mod store;
+pub mod sweep;
 
 /// Offers for the tests of the code that takes, keeps and shows them.
 #[cfg(test)]

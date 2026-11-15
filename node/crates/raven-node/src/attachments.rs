@@ -21,6 +21,9 @@
 //!   link comes up is tried at once.
 //! - A listener never speaks first; the dialer's `RAX1` frames are answered
 //!   on the link and never dispatched.
+//! - **An attachment goes with its message.** The task removes what the
+//!   history no longer holds (`raven_core::attachment::sweep`) when it
+//!   starts and every hour.
 //!
 //! With the gate shut nothing here runs: no bit 12, no task work, and a
 //! `RAX1` frame is not taken (the link handles it as before: an unknown
@@ -42,6 +45,8 @@ const PASS_WAITING: Duration = Duration::from_secs(1);
 const PASS_IDLE: Duration = Duration::from_secs(4);
 /// ... and this often while attachments are off.
 const PASS_OFF: Duration = Duration::from_secs(60);
+/// Attachments whose message is gone are removed this often.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(3_600);
 /// One dial's deadline: under the shortest life of a listener's link.
 const DIAL_DEADLINE: Duration = Duration::from_secs(100);
 /// The reply budget of a dial (16 chunks and the replies around them): a
@@ -365,8 +370,26 @@ pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
 /// intervals above.
 pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
     let mut adopted = false;
+    let mut next_sweep = tokio::time::Instant::now();
     loop {
         let wait = if live() {
+            if tokio::time::Instant::now() >= next_sweep {
+                // An attachment goes with its message: what the history no
+                // longer holds is removed, at the start and every hour.
+                next_sweep = tokio::time::Instant::now() + SWEEP_INTERVAL;
+                let dd = data_dir.clone();
+                let swept =
+                    blocking(move || raven_core::attachment::sweep::sweep(&dd, crate::now_ms()))
+                        .await;
+                if let Some(Ok(swept)) = swept.filter(|s| s.as_ref().is_ok_and(|s| s.any())) {
+                    // Counts only.
+                    eprintln!(
+                        "raven-node attachments: removed {} with no message, {} unfinished",
+                        swept.attachments,
+                        swept.blobs + swept.staged
+                    );
+                }
+            }
             if !adopted {
                 // Offers a build before this one kept as they came.
                 adopted = true;
