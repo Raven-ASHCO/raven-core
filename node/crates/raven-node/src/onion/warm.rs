@@ -490,7 +490,7 @@ impl WarmPool {
     }
 
     /// How many links are kept.
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn len(&self) -> usize {
         self.lock().links.len()
     }
@@ -1557,7 +1557,7 @@ impl KeepWarm {
     }
 
     /// The friends kept warm now (tests).
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn kept_len(&self) -> usize {
         self.lock()
             .talks

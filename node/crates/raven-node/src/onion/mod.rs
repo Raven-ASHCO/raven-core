@@ -974,7 +974,7 @@ fn restrict_dir(dir: &Path) {
 
 /// [`supervise_on`] with no channel: every helper life on loopback ports
 /// (the tests' fakes).
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 async fn supervise(
     spawner: Arc<dyn Spawn>,
     config: proto::Config,
@@ -2445,10 +2445,13 @@ async fn connect_via_helper(
         })?
 }
 
-#[cfg(test)]
+// Debug builds only: these tests run over the loopback helper
+// ([`loopback`]), which a release build does not hold, so a release test
+// build (scripts/release_inert_tests.sh) is made without them.
+#[cfg(all(test, debug_assertions))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod channel_tests;
 
 #[cfg(test)]

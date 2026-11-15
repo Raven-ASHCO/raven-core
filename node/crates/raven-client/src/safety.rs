@@ -294,6 +294,12 @@ mod tests {
         );
         assert_eq!(text("a\u{200D}\u{1F600}"), "a\u{1F600}");
         assert_eq!(text("\u{1F600}\u{200D}a"), "\u{1F600}a");
+        // A run between two joining letters comes out as one: only the last
+        // of the run has a letter on both sides once the others are gone.
+        assert_eq!(
+            text("\u{0645}\u{06CC}\u{200C}\u{200C}\u{200C}\u{0631}"),
+            "\u{0645}\u{06CC}\u{200C}\u{0631}"
+        );
         // Arabic digits and punctuation are not joining letters.
         assert_eq!(text("\u{06F1}\u{200C}\u{06F2}"), "\u{06F1}\u{06F2}");
         assert_eq!(text("\u{0645}\u{200C}\u{060C}"), "\u{0645}\u{060C}");
