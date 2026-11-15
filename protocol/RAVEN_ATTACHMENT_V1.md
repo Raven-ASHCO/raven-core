@@ -279,6 +279,8 @@ design lists them.
 No shared vectors yet. Unit tests: `attachment::blob`, `attachment::offer`,
 `attachment::link`, `attachment::store`, `attachment::flow`,
 `attachment::exchange` (two profiles exchanging frames by hand),
-`attachment::peers` in raven-core; `lan_direct` in raven-node
-(`a_verified_friends_chunks_are_taken_on_a_lan_link`: a photo over a real
-Noise link, and the refusals).
+`attachment::peers`, `attachment::sweep` in raven-core; in raven-node
+`lan_direct` (`a_verified_friends_chunks_are_taken_on_a_lan_link`: a photo
+over a real Noise link, and the refusals) and `internet_direct`
+(`a_photo_crosses_an_internet_direct_link_in_one_dial`: the real dial, bit
+12 in both hellos, and nothing sent with the gate shut).

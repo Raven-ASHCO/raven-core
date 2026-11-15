@@ -4231,6 +4231,134 @@ mod tests {
         crate::update_exchange::gates_for_test(None);
     }
 
+    /// RAX1 on an Internet direct link (attachments, gated), through the
+    /// real dial: with attachments live at both ends and each a verified
+    /// friend of the other, both hellos carry bit 12 and each end notes
+    /// it; one dial carries every chunk of a photo and HAVE, the listener
+    /// takes the chunks and answers that it is complete. With the gate
+    /// shut no hello carries the bit and the dial sends nothing.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn a_photo_crosses_an_internet_direct_link_in_one_dial() {
+        use raven_core::attachment::exchange::{Exchange, Memory};
+        use raven_core::attachment::store::{self, State};
+        use raven_core::attachment::{flow, offer, peers};
+        use raven_core::attachment_gate::set_lab_attachments_for_this_thread as gate_for_thread;
+        let lab = ["RAVEN_PREKEY_BACKEND", "RAVEN_IDENTITY_BACKEND"]
+            .iter()
+            .all(|k| std::env::var(k).is_ok_and(|v| v == "locked-file"));
+        if !lab {
+            eprintln!("skipped: needs the locked-file backends");
+            return;
+        }
+        const WAITS: ReplyWaits = ReplyWaits {
+            first: Duration::from_secs(10),
+            idle: Duration::from_secs(2),
+        };
+        let mut photo: Vec<u8> = (0..250_000usize).map(|i| (i * 19 % 241) as u8).collect();
+        photo[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        for gate in [true, false] {
+            let (a_dir, b_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let dialer = raven_core::load_or_create_identity(a_dir.path()).unwrap().0;
+            let responder = Arc::new(Identity::from_seed(&[0x5A + u8::from(gate); 32]));
+            write_contacts(b_dir.path(), &[&dialer]);
+            write_contacts(a_dir.path(), &[&responder]);
+            let (alice, bob) = (dialer.public_key_bytes(), responder.public_key_bytes());
+            // The sender's photo, its offer kept by the receiver, and the
+            // offer's delivery written on the sender's side.
+            gate_for_thread(Some(true));
+            let media = flow::Media::Photo {
+                caption: "",
+                width: 800,
+                height: 600,
+                preview: &[1, 2, 3],
+            };
+            let now = crate::now_ms();
+            let made = flow::prepare(a_dir.path(), &bob, &photo, &media, now).unwrap();
+            let Some(offer::Frame::Offer(the_offer)) = offer::parse_frame(made.offer.as_bytes())
+            else {
+                panic!("an offer");
+            };
+            flow::keep_offer(b_dir.path(), &alice, &[7; 16], &the_offer, &made.offer, now).unwrap();
+            flow::history_body(
+                a_dir.path(),
+                "out",
+                &bob,
+                &[7; 16],
+                "delivered",
+                &made.offer,
+                now,
+            )
+            .unwrap();
+            let memory = std::sync::Mutex::new(Memory::default());
+            let sender = Exchange::new(a_dir.path(), &memory);
+            let plan = sender.plans(now, &|_| true).plans.remove(0);
+            gate_for_thread(Some(gate));
+
+            let (client, server_side) = tokio::io::duplex(1 << 18);
+            let (data_dir, resp) = (b_dir.path().to_path_buf(), responder.clone());
+            let server = tokio::spawn(async move {
+                let mut slot = test_slot();
+                serve_inbound(data_dir, resp, server_side, PRODUCTION_LIMITS, &mut slot).await
+            });
+            let mut stream = Some(client);
+            let mut progress = DialProgress::new("INTERNET", WAITS);
+            let started = std::time::Instant::now();
+            let got = tokio::time::timeout(
+                Duration::from_secs(30),
+                dial_session_on(
+                    INTERNET_LINK,
+                    a_dir.path(),
+                    || {
+                        let s = stream.take();
+                        async move { s.ok_or_else(|| "one stream only".to_string()) }
+                    },
+                    &bob,
+                    &plan.frames,
+                    None,
+                    &mut progress,
+                ),
+            )
+            .await
+            .expect("the dial ends");
+            let theirs = store::get(b_dir.path(), &made.handle).unwrap().unwrap();
+            if gate {
+                got.unwrap();
+                let replies = progress.collector.into_replies();
+                assert_eq!(replies.len(), 2, "the RLB1 offer and the LACK");
+                assert!(
+                    !sender.took(&plan, Some(&replies), now),
+                    "complete in one dial"
+                );
+                let mine = store::get(a_dir.path(), &made.handle).unwrap().unwrap();
+                assert_eq!(mine.state, State::Delivered);
+                assert_eq!(theirs.state, State::Complete);
+                assert_eq!(
+                    &store::read_plain(b_dir.path(), &theirs, 0, photo.len()).unwrap()[..],
+                    &photo[..],
+                    "the photo, byte for byte"
+                );
+                // Each end noted the other's bit 12.
+                assert!(peers::speaks(a_dir.path(), &bob));
+                assert!(peers::speaks(b_dir.path(), &alice));
+                eprintln!(
+                    "a 250,000 byte photo over an in-process Internet direct link: {} ms",
+                    started.elapsed().as_millis()
+                );
+            } else {
+                assert_eq!(got.unwrap_err(), crate::attachments::NOT_SPOKEN);
+                assert_eq!(theirs.state, State::Incoming);
+                assert_eq!(store::progress(b_dir.path(), &theirs).0, 0);
+                assert!(!peers::speaks(a_dir.path(), &bob));
+                assert!(!peers::speaks(b_dir.path(), &alice));
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect("the listener ends");
+        }
+        gate_for_thread(None);
+    }
+
     // ── Round trips on a slow link (Tor messaging audit 2026-11) ───────
 
     /// Tor's reply waits (the onion dial's own).
