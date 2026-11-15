@@ -159,6 +159,11 @@ pub(crate) struct Pending {
     /// ([`Inner::own_row_named`]): a history read before the change still
     /// holds a row under it, which is left out of the chats too.
     pub kept_before: Option<String>,
+    /// A photo's send (`attachments.send`): what its attachment's stored
+    /// form says. `body` is that stored form, which has no key: the offer
+    /// that travels is made again from the attachment's row when the
+    /// send's turn comes (attachments.rs).
+    pub attachment: Option<Arc<crate::attachments::Meta>>,
 }
 
 /// What the last observation saw, to tell what changed.
@@ -207,6 +212,9 @@ pub(crate) struct MessageBook {
     /// network (the address, when), by key in lower case: Routes shows the
     /// address in use (E1).
     pub(crate) lan_used: HashMap<String, (String, u64)>,
+    /// What the last look saw of the attachments the rows carry, and what
+    /// the apps were told of them (attachments.rs).
+    pub(crate) att: crate::attachments::AttBook,
 }
 
 /// [`MessageBook::deliveries`]: the records, whether the file could be
@@ -245,6 +253,10 @@ pub(crate) struct View {
     pub history: Option<String>,
     pub outbox: Option<OutboxItem>,
     pub pending: Option<Pending>,
+    /// The photo (later: voice message, file) the message carries: API.md's
+    /// `attachment`. `text` is its caption then, never its stored form
+    /// ([`Inner::attach`], attachments.rs).
+    pub attachment: Option<crate::attachments::AttView>,
 }
 
 impl View {
@@ -283,6 +295,9 @@ impl View {
         }
         if let Some(attempts) = self.attempts {
             m.insert("attempts".into(), attempts.into());
+        }
+        if let Some(attachment) = &self.attachment {
+            m.insert("attachment".into(), attachment.json());
         }
         Value::Object(m)
     }
@@ -619,14 +634,22 @@ fn bind(book: &mut MessageBook, history: &[ChatHistoryEntry]) {
             (e.direction == "out"
                 && e.peer_pub_hex.eq_ignore_ascii_case(&send.peer)
                 && !mid.is_empty()
-                && body.trim_end() == send.body.trim_end()
                 && !send.snapshot.contains(&mid)
-                && !taken.contains(&mid))
+                && !taken.contains(&mid)
+                // The same text; for a photo's send, the row that holds its
+                // attachment (the row keeps the stored form, whatever form
+                // the send holds: attachments.rs).
+                && (body.trim_end() == send.body.trim_end()
+                    || crate::attachments::same_body(body, &send.body)))
             .then_some(mid)
         });
         if let Some(mid) = found {
             taken.insert(mid.clone());
             send.bound_mid = Some(mid.clone());
+            // The attachment's row learns its message's id at the next look.
+            if let Some(meta) = &send.attachment {
+                book.att.message_named(meta.handle, &mid);
+            }
             new_alias.push((mid, send.id.clone()));
         }
     }
@@ -646,8 +669,10 @@ fn kept_rows(book: &MessageBook) -> HashSet<String> {
 }
 
 /// Every message: the history's rows in written order, then this session's
-/// sends that have no row (in this read of the history).
-fn views(
+/// sends that have no row (in this read of the history). A row that holds
+/// an attachment's stored form has no text here: [`Inner::attach`] gives it
+/// its caption and its attachment.
+pub(crate) fn views(
     book: &mut MessageBook,
     history: &[ChatHistoryEntry],
     outbox: &OutboxSnap,
@@ -667,11 +692,12 @@ fn views(
         }
         let peer = e.peer_pub_hex.to_ascii_lowercase();
         let incoming = e.direction != "out";
-        let text = if e.body.is_empty() {
-            e.preview.clone()
+        // Never an attachment's stored form as text (attachments.rs).
+        let text = crate::attachments::row_text(if e.body.is_empty() {
+            &e.preview
         } else {
-            e.body.clone()
-        };
+            &e.body
+        });
         if incoming {
             out.push(View {
                 id: mid.clone(),
@@ -691,6 +717,7 @@ fn views(
                 history: Some(e.delivery.clone()),
                 outbox: None,
                 pending: None,
+                attachment: None,
             });
             continue;
         }
@@ -790,6 +817,7 @@ fn views(
             history: Some(e.delivery.clone()),
             outbox: item,
             pending,
+            attachment: None,
         });
     }
     // A send that still runs shows without its row too: this read of the
@@ -810,7 +838,8 @@ fn views(
             peer: p.peer.clone(),
             address: p.address.clone(),
             incoming: false,
-            text: p.body.clone(),
+            // A photo's send shows its caption and its attachment.
+            text: crate::attachments::pending_text(p),
             at_ms: p.created_ms,
             state,
             until_ms,
@@ -822,6 +851,7 @@ fn views(
             history: None,
             outbox: None,
             pending: Some(p.clone()),
+            attachment: p.attachment.as_ref().map(crate::attachments::AttView::of),
         });
     }
     out
@@ -926,15 +956,21 @@ impl Inner {
     /// changed since the last time. The first time only notes what is there.
     pub(crate) fn refresh(&self, outbox_age: Duration) -> Result<Snapshot, ApiError> {
         let contacts = self.contacts()?;
-        let history = self.history()?;
+        let (history, row_atts) = self.history_shown()?;
         let outbox = self.outbox(outbox_age);
         let marks = self.read_marks();
         let now = now_ms();
         let mut book = lock(&self.book);
         let mut views = views(&mut book, &history, &outbox, &contacts, now);
+        // Each row that carries a photo gets it, with where it stands, before
+        // anything looks at the rows' states: a photo of yours reads
+        // delivered only once the friend has every byte (attachments.rs). A
+        // profile without attachments pays nothing here.
+        self.attach(&mut book.att, &mut views, &row_atts, now);
         self.label_outbox_deliveries(&mut book, &mut views);
         self.apply_deliveries(&mut book, &mut views, now);
         self.observe_messages(&mut book, &views, now);
+        self.observe_attachments(&mut book.att, &views);
         let presence = presence_map(&book, &contacts, &views, now);
         self.observe_presence(&mut book, &contacts, &presence);
         let unread = unread_map(&contacts, &views, &marks);
@@ -1372,6 +1408,43 @@ impl Inner {
             ));
         }
         check_text(&text)?;
+        let pending = self.take_send(&c, text, None)?;
+        let view = View {
+            id: pending.id.clone(),
+            mid: None,
+            peer: pending.peer.clone(),
+            address: pending.address.clone(),
+            incoming: false,
+            text: pending.body.clone(),
+            at_ms: pending.created_ms,
+            state: State::Sending,
+            until_ms: None,
+            path: None,
+            via_name: None,
+            via_friend: false,
+            delivered_at_ms: None,
+            attempts: None,
+            history: None,
+            outbox: None,
+            pending: None,
+            attachment: None,
+        };
+        Ok(json!({"message": view.json()}))
+    }
+
+    /// Takes a send to the friend `c` in: this session's message from here
+    /// on, kept as not sent until it goes, and handed to that friend's
+    /// worker. `body` is the text `messages.send` checked, or, for a photo
+    /// (`attachments.send`), the stored form of the attachment `attachment`:
+    /// engine-made text that `check_text` would refuse, and that never
+    /// travels (the offer is made again from the attachment's row when the
+    /// send's turn comes: [`Self::send_now`]).
+    pub(crate) fn take_send(
+        &self,
+        c: &ContactView,
+        body: String,
+        attachment: Option<Arc<crate::attachments::Meta>>,
+    ) -> Result<Pending, ApiError> {
         send_note(&c.pub_hex, "a send asked");
         // One send is taken in at a time, up to its keeping row (`send_intake`).
         let intake = lock(&self.send_intake);
@@ -1391,7 +1464,7 @@ impl Inner {
                 id: format!("pending-{}", book.next),
                 peer: c.pub_hex.to_ascii_lowercase(),
                 address: c.address.clone(),
-                body: text,
+                body,
                 created_ms: now_ms(),
                 started: Instant::now(),
                 snapshot,
@@ -1404,11 +1477,17 @@ impl Inner {
                 finished: None,
                 kept: None,
                 kept_before: None,
+                attachment,
             };
             if let Some(observed) = book.observed.as_mut() {
                 observed
                     .states
                     .insert(p.id.clone(), (State::Sending, 0, None));
+            }
+            // The app is told `sending` for its photo with the row this
+            // answers: every change from there is an `attachment` event.
+            if p.attachment.is_some() {
+                book.att.sending(&p.id);
             }
             book.pendings.push(p.clone());
             p
@@ -1426,26 +1505,7 @@ impl Inner {
             &pending.peer,
             &format!("{} accepted, {before} before it", pending.id),
         );
-        let view = View {
-            id: pending.id.clone(),
-            mid: None,
-            peer: pending.peer.clone(),
-            address: pending.address.clone(),
-            incoming: false,
-            text: pending.body.clone(),
-            at_ms: pending.created_ms,
-            state: State::Sending,
-            until_ms: None,
-            path: None,
-            via_name: None,
-            via_friend: false,
-            delivered_at_ms: None,
-            attempts: None,
-            history: None,
-            outbox: None,
-            pending: None,
-        };
-        Ok(json!({"message": view.json()}))
+        Ok(pending)
     }
 
     /// Hands a send to `peer`'s worker: after that friend's sends asked for
@@ -1566,14 +1626,19 @@ impl Inner {
             let waited = p.started.elapsed();
             p.job = Job::Running;
             p.started = Instant::now();
-            (p.peer.clone(), p.body.clone(), waited)
+            (
+                p.peer.clone(),
+                p.body.clone(),
+                waited,
+                p.attachment.as_ref().map(|meta| meta.handle),
+            )
         };
         send_note(
             &job.0,
             &format!("{id} started after {} ms", job.2.as_millis()),
         );
         let began = Instant::now();
-        let (outcome, raw) = self.send_now(id, &job.0, &job.1);
+        let (outcome, raw) = self.send_now(id, &job.0, &job.1, job.3.as_ref());
         send_note(
             &job.0,
             &format!(
@@ -1737,7 +1802,13 @@ impl Inner {
             p.kept_before = Some(kept.clone());
             p.bound_mid = Some(mid.clone());
             let peer = p.peer.clone();
+            let attachment = p.attachment.as_ref().map(|meta| meta.handle);
             book.alias.insert(mid.clone(), id.to_owned());
+            // A photo's send: its attachment's row learns the message's id
+            // at the next look (attachments.rs).
+            if let Some(handle) = attachment {
+                book.att.message_named(handle, &mid);
+            }
             (peer, kept)
         };
         let renamed = match self.data_dir() {
@@ -1838,7 +1909,15 @@ impl Inner {
         self.invalidate_history();
     }
 
-    fn send_now(&self, id: &str, peer: &str, body: &str) -> (Outcome, String) {
+    /// One send, now. `attachment`: a photo's send carries the offer of that
+    /// attachment in place of `body` (its stored form).
+    fn send_now(
+        &self,
+        id: &str,
+        peer: &str,
+        body: &str,
+        attachment: Option<&raven_core::attachment::link::Handle>,
+    ) -> (Outcome, String) {
         // The profile as an operation opens it: refused while an erase or a
         // key change is unfinished (profile.rs).
         if let Err(e) = self.open() {
@@ -1874,7 +1953,24 @@ impl Inner {
                 }
             })
         };
-        match bridge::send_to_contact_noting(&dir, &identity, peer, body, own_id) {
+        // A photo's send: the offer is made again from the attachment's row
+        // now (it holds the attachment's key; the send kept only the stored
+        // form), and is let go when the send ends. No row, or a send that
+        // was stopped: nothing goes (attachments.rs).
+        let offer = match attachment {
+            Some(handle) => match self.offer_to_send(handle, peer) {
+                Ok(offer) => Some(offer),
+                Err(why) => return (Outcome::NotSent { meet_first: false }, why),
+            },
+            None => None,
+        };
+        let sent = match &offer {
+            Some(offer) => {
+                bridge::send_offer_to_contact_noting(&dir, &identity, peer, offer, own_id)
+            }
+            None => bridge::send_to_contact_noting(&dir, &identity, peer, body, own_id),
+        };
+        match sent {
             Ok(done) => {
                 {
                     let _guard = lock(&self.contacts_lock);
@@ -1934,9 +2030,17 @@ impl Inner {
     pub(crate) fn messages_retry(&self, args: &Args) -> OpResult {
         let id = args.str("id")?;
         self.identity()?;
-        let (_, view) = self.find_view(id)?;
+        let (_, mut view) = self.find_view(id)?;
         if view.incoming {
             return Ok(json!({"message": view.json(), "changed": false}));
+        }
+        // A photo of yours goes again only while its sealed bytes are still
+        // on this device (it is never sent again as its caption), and one
+        // whose sending was stopped is taken up again (attachments.rs).
+        let attachment = self.attachment_to_retry(&view)?;
+        let resumed = attachment.as_ref().is_some_and(|(_, resumed)| *resumed);
+        if resumed {
+            view = self.find_view(id)?.1;
         }
         // Never written by this session's send: the same message goes again.
         let unbound_unwritten = view.mid.is_none()
@@ -1947,7 +2051,7 @@ impl Inner {
                 .is_some_and(Outcome::never_written);
         match view.state {
             State::Delivered | State::Sending | State::Sent => {
-                Ok(json!({"message": view.json(), "changed": false}))
+                Ok(json!({"message": view.json(), "changed": resumed}))
             }
             _ if unbound_unwritten => {
                 {
@@ -2012,10 +2116,17 @@ impl Inner {
                     .as_ref()
                     .and_then(|p| p.outcome.as_ref())
                     .is_some_and(Outcome::never_written);
-                let mut send_args = Map::new();
-                send_args.insert("address".into(), view.address.clone().into());
-                send_args.insert("text".into(), view.text.clone().into());
-                let mut sent = self.messages_send(&Args(&send_args))?;
+                let mut sent = match &attachment {
+                    // A photo: a new message carries the same attachment,
+                    // its offer made again from its row (attachments.rs).
+                    Some((meta, _)) => self.attachment_sent_again(&view, meta)?,
+                    None => {
+                        let mut send_args = Map::new();
+                        send_args.insert("address".into(), view.address.clone().into());
+                        send_args.insert("text".into(), view.text.clone().into());
+                        self.messages_send(&Args(&send_args))?
+                    }
+                };
                 lock(&self.book).replaced.insert(view.id.clone());
                 // Left out after a restart too, and in the terminal app: one
                 // bubble for the text (E1).
@@ -2092,7 +2203,7 @@ impl Inner {
     pub(crate) fn messages_delete(&self, args: &Args) -> OpResult {
         let id = args.str("id")?;
         self.identity()?;
-        let (_, view) = self.find_view(id)?;
+        let (snap, view) = self.find_view(id)?;
         let ended = matches!(
             view.state,
             State::Failed | State::TimeRanOut | State::NotSentMeetFirst
@@ -2108,6 +2219,15 @@ impl Inner {
                 ),
             ));
         }
+        // Its photo goes with it, at once: the attachment's row first (the
+        // key goes with it), then the sealed bytes (attachments.rs).
+        self.forget_attachment(&view, &snap.views).map_err(|why| {
+            ApiError::new(
+                code::INTERNAL,
+                "Raven could not delete this photo. Try again.",
+                why,
+            )
+        })?;
         // A send of this run that has no history row is forgotten; one
         // with a row keeps its binding (so the row is not taken for another
         // program's message) and is left out as hidden.
@@ -2491,6 +2611,7 @@ mod tests {
             finished: None,
             kept: None,
             kept_before: None,
+            attachment: None,
         }
     }
 
@@ -2513,6 +2634,7 @@ mod tests {
             history: None,
             outbox: None,
             pending: None,
+            attachment: None,
         }
     }
 

@@ -134,8 +134,13 @@ impl Inner {
     }
 
     /// Stops every message to `pub_hex` still waiting to be sent (the
-    /// `include_pending` of a clear): how many were stopped.
-    fn stop_waiting_to(&self, pub_hex: &str) -> Result<usize, ApiError> {
+    /// `include_pending` of a clear): how many were stopped. `only_photos`:
+    /// only those that carry a photo. A clear removes the chat's photos
+    /// from this device, so a photo that still waits could not go any
+    /// more: its message is stopped with the chat, whatever
+    /// `include_pending` says, and the friend never gets a photo whose
+    /// bytes will not come.
+    fn stop_waiting_to(&self, pub_hex: &str, only_photos: bool) -> Result<usize, ApiError> {
         let snap = self.refresh(Duration::ZERO)?;
         let peer = pub_hex.to_ascii_lowercase();
         let ids: Vec<String> = snap
@@ -145,6 +150,7 @@ impl Inner {
                 v.peer == peer
                     && !v.incoming
                     && matches!(v.state, State::Sending | State::Sent | State::Waiting)
+                    && (!only_photos || v.attachment.is_some())
             })
             .map(|v| v.id.clone())
             .collect();
@@ -168,10 +174,22 @@ impl Inner {
             Target::Contact(address) => {
                 let c = self.contact(address)?;
                 if include_pending {
-                    self.stop_waiting_to(&c.pub_hex)?;
+                    self.stop_waiting_to(&c.pub_hex, false)?;
+                } else if crate::attachments::any_on_disk(dir) {
+                    // A profile without photos is cleared as before.
+                    self.stop_waiting_to(&c.pub_hex, true)?;
                 }
                 let (cleared, kept) = bridge::clear_chat(dir, &c.pub_hex).map_err(|why| {
                     ApiError::new(code::INTERNAL, "Raven couldn't clear this chat.", why)
+                })?;
+                // The chat's photos go with it, at once: each one's row (the
+                // key goes with it), then its sealed bytes (attachments.rs).
+                crate::attachments::forget_chat(dir, &c.pub_hex).map_err(|why| {
+                    ApiError::new(
+                        code::INTERNAL,
+                        "Raven cleared this chat but could not remove its photos. Clear it again.",
+                        why,
+                    )
                 })?;
                 (u64::from(cleared), kept as u64)
             }

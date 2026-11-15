@@ -36,6 +36,11 @@ ash = { path = "../ash", features = ["engine"] }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Photos (src/attachments.rs): a preview and a piece of a photo travel
+# through the JSON API as base64, and what was read of a photo to seal it is
+# wiped. Both are raven-core's own dependencies: no new crate.
+base64 = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

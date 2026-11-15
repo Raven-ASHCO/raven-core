@@ -791,6 +791,25 @@ pub fn send_to_contact_noting(
     send_to_contact(data_dir, id, pub_hex, text)
 }
 
+/// [`send_to_contact_noting`] for an attachment's offer: text the engine
+/// made itself (`raven_core::attachment::flow`), which every send refuses
+/// from anybody else, as `RVNATT/` is reserved. Only on this thread, only
+/// for this send, and only an offer of a photo, a voice note or a file in
+/// its one byte form passes (`pair_init_lab::send_text_allowed`): any other
+/// text under a reserved prefix is refused here as everywhere. The history
+/// row the send writes holds the offer's stored form, never its key
+/// (`raven_core::persist_lan_chat_history`).
+pub fn send_offer_to_contact_noting(
+    data_dir: &Path,
+    id: &Identity,
+    pub_hex: &str,
+    offer: &str,
+    own_id: OwnIdNote,
+) -> Result<Delivered, String> {
+    let _offer = super::pair_init_lab::EngineOfferGuard::set();
+    send_to_contact_noting(data_dir, id, pub_hex, offer, own_id)
+}
+
 /// cli.rs's `run_send` with the identity given instead of loaded.
 fn run_send(
     data_dir: &Path,

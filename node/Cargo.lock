@@ -5470,6 +5470,7 @@ name = "raven-client"
 version = "0.1.1"
 dependencies = [
  "ash",
+ "base64 0.22.1",
  "hex",
  "libc",
  "raven-core",
@@ -5477,6 +5478,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]

@@ -49,6 +49,17 @@ pub mod code {
     /// A nearby request raven-node (or the engine) does not take: a friend
     /// who is not verified, an unknown action.
     pub const NEARBY_BAD_REQUEST: &str = "NEARBY_BAD_REQUEST";
+    /// `attachments.send`: more bytes than Raven sends (1 MiB).
+    pub const ATTACHMENT_TOO_BIG: &str = "ATTACHMENT_TOO_BIG";
+    /// `attachments.send`: the friend's Raven does not take attachments.
+    pub const FRIEND_NEEDS_NEWER_RAVEN: &str = "FRIEND_NEEDS_NEWER_RAVEN";
+    /// The attachment store is full, or the disk is.
+    pub const STORAGE_FULL: &str = "STORAGE_FULL";
+    /// The attachment is not on this device (any more).
+    pub const ATTACHMENT_GONE: &str = "ATTACHMENT_GONE";
+    /// A check of the attachment failed, or what was handed over cannot be
+    /// sent as one.
+    pub const ATTACHMENT_BAD: &str = "ATTACHMENT_BAD";
 }
 
 /// The default sentence for each code (desktop/design/strings.en.json words
@@ -100,6 +111,13 @@ pub fn default_message(code: &str) -> &'static str {
         code::NEARBY_BAD_REQUEST => {
             "Raven couldn't do that over Bluetooth nearby. Open Details to see why."
         }
+        code::ATTACHMENT_TOO_BIG => "This photo is too big. Raven sends photos of up to 1 MB.",
+        code::FRIEND_NEEDS_NEWER_RAVEN => "Your friend needs a newer Raven for photos.",
+        code::STORAGE_FULL => {
+            "There is no room left for photos on this device. Free some space, then try again."
+        }
+        code::ATTACHMENT_GONE => "This photo is no longer available.",
+        code::ATTACHMENT_BAD => "This photo could not be shown.",
         code::BAD_REQUEST => {
             "Raven didn't understand what this app asked. Update Raven; if it keeps happening, \
              open Details."
@@ -301,6 +319,11 @@ mod tests {
             code::PASSPHRASE_NEEDED,
             code::UNLOCK_WAIT,
             code::NOT_ON_THIS_SYSTEM,
+            code::ATTACHMENT_TOO_BIG,
+            code::FRIEND_NEEDS_NEWER_RAVEN,
+            code::STORAGE_FULL,
+            code::ATTACHMENT_GONE,
+            code::ATTACHMENT_BAD,
         ] {
             let m = default_message(c);
             assert!(m.ends_with('.') || m.ends_with(')'), "{c}: {m}");

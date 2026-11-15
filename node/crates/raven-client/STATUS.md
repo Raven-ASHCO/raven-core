@@ -6,6 +6,12 @@ says what has not been verified.
 
 ## Where this stands
 
+Photos, 2026-11-15 (lab only: the attachments gate is shut in release builds): the eight
+`attachments.*` ops, a row's `attachment`, the `attachment` event and the new error codes are
+done for a chat with one friend (`src/attachments.rs`; API.md "Photos"). `cargo test -p
+raven-client --test attachments`: two engines with their raven-node on loopback send a photo,
+read it back byte for byte, and delete it. Not done: groups, voice messages, files.
+
 All three priority groups are in: (1) crate, C ABI, envelope, `app.info`, `profile.state`,
 `identity.*`, `card.*`, `contacts.*`, `settings.*`; (2) security words in raven-core and
 `verify.*`; (3) `messages.*`, `node.*`, `events.poll`. Nothing is committed (the lead commits).

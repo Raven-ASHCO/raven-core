@@ -4950,7 +4950,7 @@ fn deliver_routes(
     if text.trim().is_empty() {
         return Err("message is empty".into());
     }
-    if !raven_core::app_channel::chat_text_allowed(text) {
+    if !super::pair_init_lab::send_text_allowed(text) {
         return Err(super::pair_init_lab::RESERVED_PREFIX_REFUSAL.into());
     }
     let Some(first) = routes.first() else {

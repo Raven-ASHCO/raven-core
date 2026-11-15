@@ -283,6 +283,48 @@ fn tell_own_id(mid: &[u8; 16]) {
     }
 }
 
+thread_local! {
+    /// This thread's send carries an attachment's offer the app engine made
+    /// (`engine_bridge::send_offer_to_contact_noting`). Per thread, as a
+    /// send runs on its caller's thread. No terminal command sets it.
+    static ENGINE_OFFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds, for one send of this thread, the app engine's word that the text
+/// is an attachment's offer it made itself ([`send_text_allowed`]).
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+pub(super) struct EngineOfferGuard(());
+
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+impl EngineOfferGuard {
+    pub(super) fn set() -> Self {
+        ENGINE_OFFER.with(|flag| flag.set(true));
+        Self(())
+    }
+}
+
+impl Drop for EngineOfferGuard {
+    fn drop(&mut self) {
+        ENGINE_OFFER.with(|flag| flag.set(false));
+    }
+}
+
+/// May a send carry `text`? Chat text never starts with a reserved prefix
+/// (`chat_text_allowed`: typed or pasted, such text would be a frame on the
+/// friend's side). The one exception is an attachment's offer of a photo, a
+/// voice note or a file, in its one byte form, while the app engine holds
+/// [`EngineOfferGuard`] for this thread's send: only `attachments.send`
+/// makes such text. Any other text under a reserved prefix is refused then
+/// too.
+pub(crate) fn send_text_allowed(text: &str) -> bool {
+    raven_core::app_channel::chat_text_allowed(text)
+        || (ENGINE_OFFER.with(std::cell::Cell::get)
+            && matches!(
+                raven_core::attachment::shown::class(text.as_bytes()),
+                raven_core::attachment::shown::AttClass::Offer(_)
+            ))
+}
+
 /// How long a send waits for raven-node's `ContactReach` (it answers from
 /// memory); an older or busy one: the send probes as before.
 const CONTACT_REACH_WAIT: Duration = Duration::from_millis(700);
@@ -1863,8 +1905,10 @@ pub fn run_pair_init_and_send_routes(
     ctx: &SendCtx,
 ) -> Result<DialRoute, String> {
     // Agent payloads (`RVNAPP/…`) travel only through raven-node's app
-    // channel; chat text never starts with the reserved prefix.
-    if !raven_core::app_channel::chat_text_allowed(text) {
+    // channel; chat text never starts with the reserved prefix. (An
+    // attachment's offer the app engine made is the one exception:
+    // `send_text_allowed`.)
+    if !send_text_allowed(text) {
         return Err(RESERVED_PREFIX_REFUSAL.into());
     }
     if !trace_delivery::live_pair_init_outbound_ready() {
@@ -6345,6 +6389,77 @@ mod revocation_and_offline_tests {
             std::fs::read_dir(dir.path()).unwrap().next().is_none(),
             "nothing was created"
         );
+    }
+
+    /// The one text under a reserved prefix a send may carry: an
+    /// attachment's offer of a photo, a voice note or a file, in its one
+    /// byte form, while the app engine holds its guard for this thread's
+    /// send. Without the guard, after it, on another thread, and for every
+    /// other reserved text even under it: refused as ever.
+    #[test]
+    fn only_the_engines_own_attachment_offer_passes_the_reserved_prefix() {
+        use raven_core::attachment::blob::{Key, Shape};
+        use raven_core::attachment::offer::{gone_text, BlobRef, Offer};
+        let blob = || BlobRef {
+            shape: Shape::of(200_000).unwrap(),
+            key: Key::from_bytes([1u8; 32]),
+            root: [2u8; 32],
+        };
+        let photo = Offer::photo(blob(), "", 800, 600, &[1, 2, 3])
+            .unwrap()
+            .encode()
+            .unwrap();
+        let file = Offer::file(blob(), "application/pdf", "a.pdf", "")
+            .unwrap()
+            .encode()
+            .unwrap();
+        let stored = Offer::photo(blob(), "", 800, 600, &[1, 2, 3])
+            .unwrap()
+            .stored()
+            .encode();
+        let one_chunk = BlobRef {
+            shape: Shape::one_chunk(20_000).unwrap(),
+            key: Key::from_bytes([3u8; 32]),
+            root: [4u8; 32],
+        };
+        let profile = Offer::profile(one_chunk, 1, 0, 384, &[9])
+            .unwrap()
+            .encode()
+            .unwrap();
+        let gone = gone_text(&[5u8; 16]);
+        let mut broken = photo.clone();
+        broken.replace_range(100..101, "!");
+        let never = [
+            profile.as_str(),
+            stored.as_str(),
+            gone.as_str(),
+            broken.as_str(),
+            "RVNATT/",
+            "RVNATT/1 offer\n{}",
+            "RVNGRP/1 msg\n{}",
+            "RVNAPP/1 x",
+        ];
+        // No guard: nothing under a reserved prefix passes.
+        for text in [photo.as_str(), file.as_str()].into_iter().chain(never) {
+            assert!(!send_text_allowed(text), "{}", &text[..text.len().min(20)]);
+        }
+        assert!(send_text_allowed("hello"));
+        {
+            let _guard = EngineOfferGuard::set();
+            assert!(send_text_allowed(&photo));
+            assert!(send_text_allowed(&file));
+            assert!(send_text_allowed("hello"));
+            for text in never {
+                assert!(!send_text_allowed(text), "{}", &text[..text.len().min(20)]);
+            }
+            // Per thread: a send on another thread is not let through.
+            let other = photo.clone();
+            let elsewhere = std::thread::spawn(move || send_text_allowed(&other));
+            assert!(!elsewhere.join().unwrap());
+        }
+        // The guard went with its send.
+        assert!(!send_text_allowed(&photo));
+        assert!(!send_text_allowed(&file));
     }
 
     #[test]

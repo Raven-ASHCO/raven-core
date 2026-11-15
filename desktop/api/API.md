@@ -145,6 +145,14 @@ changes. Fields marked `?` may be missing.
 | `groups.send` | `{group, text}` | `{message: GroupMessage, note?}` (returns at once; raven-node delivers each copy, started first when none runs; `note`: why it could not be asked to now, the copies wait) |
 | `groups.mark_read` | `{group}` | `{group: id, unread: 0}` |
 | `groups.clear` | `{group, include_pending?: bool}` | `{cleared, pending_kept}` (see "Chat controls") |
+| `attachments.can_send` | `{address}` or `{group}` | `{photos: bool, max_bytes, why?}` (see "Photos"; never an error for a known friend) |
+| `attachments.stage` | `{name?}` | `{path}` (a new, empty file in the profile's staging folder; the app writes the photo there) |
+| `attachments.send` | `{address, path, kind: "photo", mime?: "image/jpeg", caption?, preview_b64, width, height}` | `{message: Message}` (at once, with its `attachment`; the staged file is deleted in every outcome) |
+| `attachments.get` | `{id}` | `{attachment: Attachment}` |
+| `attachments.read` | `{id, offset, length}` | `{bytes_b64, eof}` (`length` at most 524,288; only a photo of yours, or a friend's that is `ready`) |
+| `attachments.download` | `{id}` | `{}` (asks for a friend's attachment that is not all here; photos come by themselves) |
+| `attachments.cancel` | `{id}` | `{}` (yours: stops sending it; a friend's: no longer asked for) |
+| `attachments.export` | `{id, to_path}` | `{}` (writes the bytes to a new file outside the profile; never over a file that is there) |
 | `chats.list` | – | `{chats: [Chat]}` (pinned first, then the newest message first; see "Chat controls") |
 | `chats.delete` | `{address}` or `{group}` | `{deleted: true, cleared, pending_kept}` |
 | `chats.pin` | `{address \| group, pinned: bool}` | `{pinned}` |
@@ -289,6 +297,62 @@ or a security notice that holds `feature/groups` or `feature/long-horizon`.
   `raven group forget GROUP`.
 - **Read and unread.** `Group.unread` counts others' messages received after the group was last read
   on this computer (`groups.mark_read`, or `raven group show`). Local only.
+
+### Photos
+
+A photo is one message and sealed bytes that never travel as a message
+(`protocol/RAVEN_ATTACHMENT_V1.md`). The engine makes the message and reads the bytes for the
+app; raven-node moves the bytes by itself. Voice messages and files will use the same operations.
+**Off in release builds** (`ATTACHMENTS_PRODUCTION_ENABLED = false`): `attachments.can_send`
+answers `{photos: false, why}` and every other `attachments.*` op answers `NOT_AVAILABLE_YET`, so
+an app shows no attach button.
+
+- **A row's `attachment`.** A `Message` (in `messages.history`, and in the `incoming`, `outgoing`,
+  `state` and `receipt` events) that carries a photo has one more member, and its `text` is the
+  caption (may be empty):
+
+  ```
+  "attachment": { "id": "32 lower case hex characters", "kind": "photo", "state": "ready",
+                  "bytes": 300123, "bytes_done": 300123, "width": 1600, "height": 1200,
+                  "preview_b64": "...", "caption": "" }
+  ```
+
+  Nothing an app reads holds text that starts with `RVNATT/`. An app that meets a `kind` it does
+  not know shows the row's `text`.
+- **`state`, a friend's photo:** `offered` (the row is here, no byte yet: show the preview
+  blurred), `downloading` (`bytes_done` of `bytes`), `ready` (every byte is here and checked:
+  `attachments.read` works), `gone` (the friend deleted it first), `failed` (a check failed, or
+  this device keeps nothing for it).
+- **`state`, a photo of yours:** `sending`, `sent` (the friend has the message, not yet every
+  byte), `delivered` (the friend's Raven has every byte), `waiting` (the friend is away),
+  `failed` (not sent; `messages.retry` on the row sends it again while its bytes are still on
+  this device). The row's own `state` reads `delivered`, with its receipt, only once the photo
+  is `delivered`: until then a delivered message reads `sent`.
+- **`needs_update`:** this build does not open the attachment (the gate is shut). The row's
+  `text` is a whole sentence ("Max sent a photo. Update Raven to see it.") and the app shows only
+  that, as a plain bubble.
+- **Sending.** The app makes the JPEG that travels (upright, long side at most 1,600 px, at most
+  1,048,576 bytes, no metadata) and a 32 px preview of at most 1,536 bytes, asks for a file with
+  `attachments.stage`, writes the JPEG there, and calls `attachments.send`. The row comes back at
+  once. Photos go only to a friend you verified and did not block whose Raven said it takes
+  them: `attachments.can_send` says so before, with `why` in plain words when not.
+- **Reading.** `attachments.read` gives the photo's own bytes in pieces, decrypted in memory by
+  the engine. The app checks them before it decodes: a JPEG (first bytes FF D8 FF), at most
+  1,048,576 bytes, at most 16,384 px a side as the decoder reports. `width` and `height` of the
+  row are for the layout only.
+- **Deleting.** `messages.delete` removes a row's photo from this device at once (its key first,
+  then its bytes); `messages.clear` and `chats.delete` remove the chat's photos. A photo whose
+  message is gone for any other reason is removed by raven-node within the hour.
+- **`attachment` event:** `{kind: "attachment", id, message_id, address, state, bytes,
+  bytes_done}` when a photo's state or progress changes, at most four a second for one photo.
+  The row is found by `message_id`. A row seen for the first time gets none: its own row, or the
+  event that brings it, says where it stands.
+- **Errors:** `NOT_AVAILABLE_YET`, `ATTACHMENT_TOO_BIG`, `FRIEND_NEEDS_NEWER_RAVEN` (the friend's
+  Raven has not said that it takes photos: an older one, or one not in touch since),
+  `STORAGE_FULL`, `ATTACHMENT_GONE`, `ATTACHMENT_BAD`; a photo that is not all here yet, and a
+  friend who is not verified, are `BAD_REQUEST` with plain words.
+- Not built yet: photos in groups (`attachments.send {group}` is `NOT_AVAILABLE_YET`,
+  `attachments.can_send {group}` says no), voice messages and files.
 
 ### Chat controls
 

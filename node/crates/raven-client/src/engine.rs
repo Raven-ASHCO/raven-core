@@ -13,6 +13,7 @@ use raven_core::identity::Identity;
 use raven_core::ipc::{IpcRequest, IpcResponse, OutboxItem, IPC_VERSION, MAX_OUTBOX_LIST};
 use serde_json::{json, Map, Value};
 
+use crate::attachments::RowAtts;
 use crate::envelope::{self, code, ApiError, Args, OpResult};
 use crate::events::EventHub;
 use crate::explain::{self, IdentityProblem};
@@ -75,10 +76,13 @@ pub(crate) struct OutboxSnap {
 type ContactStamps = (Stamp, Stamp);
 /// The read markers' files' stamps (tui_state.json, tui_private.rms).
 type MarkStamps = [Stamp; 2];
+/// The chat history as the engine shows it, and what its rows carry (a
+/// photo, or an offer a build without attachments kept: attachments.rs).
+pub(crate) type ShownHistory = (Arc<Vec<ChatHistoryEntry>>, Arc<RowAtts>);
 
 #[derive(Default)]
 pub(crate) struct Caches {
-    history: Option<(Stamp, Arc<Vec<ChatHistoryEntry>>)>,
+    history: Option<(Stamp, ShownHistory)>,
     /// Goes up each time the cached history is forgotten: a read that began
     /// before keeps nothing (its rows may be older than the write that
     /// forgot it, under a stamp that write did not change).
@@ -259,6 +263,17 @@ impl Inner {
             "messages.details" => |me, args| me.messages_details(args),
             "messages.mark_read" => |me, args| me.messages_mark_read(args),
             "messages.handoff" => |me, args| me.messages_handoff(args),
+            // Photos (attachments.rs; behind raven-core's attachments gate:
+            // while it is shut every one but `can_send` answers
+            // NOT_AVAILABLE_YET).
+            "attachments.can_send" => |me, args| me.attachments_can_send(args),
+            "attachments.stage" => |me, args| me.attachments_stage(args),
+            "attachments.send" => |me, args| me.attachments_send(args),
+            "attachments.get" => |me, args| me.attachments_get(args),
+            "attachments.read" => |me, args| me.attachments_read(args),
+            "attachments.download" => |me, args| me.attachments_download(args),
+            "attachments.cancel" => |me, args| me.attachments_cancel(args),
+            "attachments.export" => |me, args| me.attachments_export(args),
             "node.status" => |me, _| me.node_status_op(),
             "node.start" => |me, _| me.node_start(),
             "node.stop" => |me, _| me.node_stop(),
@@ -668,29 +683,37 @@ impl Inner {
     /// when its file changed. Needs the identity: reading takes the history's
     /// lock, which creates its file.
     pub(crate) fn history(&self) -> Result<Arc<Vec<ChatHistoryEntry>>, ApiError> {
+        self.history_shown().map(|(entries, _)| entries)
+    }
+
+    /// [`Self::history`], with what its rows carry, both from the same read
+    /// of the file. A row that holds a photo keeps the photo's stored form
+    /// as its body (it has no key, and no reader shows it as text:
+    /// messages.rs `views`, attachments.rs); an offer a build without
+    /// attachments kept as it came reads as its line of plain words.
+    pub(crate) fn history_shown(&self) -> Result<ShownHistory, ApiError> {
         self.identity()?;
         let dir = self.data_dir()?;
         let stamp = Stamp::of(&raven_core::chat_history::history_path(dir));
         let turn = {
             let caches = lock(&self.caches);
-            if let Some((cached, entries)) = &caches.history {
+            if let Some((cached, (entries, atts))) = &caches.history {
                 if *cached == stamp {
-                    return Ok(Arc::clone(entries));
+                    return Ok((Arc::clone(entries), Arc::clone(atts)));
                 }
             }
             caches.history_turn
         };
-        let entries = Arc::new(
-            ChatHistory::load(dir)
-                .map(|h| h.shown().entries)
-                .map_err(|e| history_error(dir, &e.to_string()))?,
-        );
+        let (entries, atts) = ChatHistory::load(dir)
+            .map(crate::attachments::shown_history)
+            .map_err(|e| history_error(dir, &e.to_string()))?;
+        let shown: ShownHistory = (Arc::new(entries), Arc::new(atts));
         self.keep_cached(|c| {
             if c.history_turn == turn {
-                c.history = Some((stamp, Arc::clone(&entries)));
+                c.history = Some((stamp, shown.clone()));
             }
         });
-        Ok(entries)
+        Ok(shown)
     }
 
     /// Forget the cached history: the next read loads it again, and a read

@@ -71,6 +71,11 @@ independent review.
 
 ### For the apps and for people who build Raven
 
+- Lab builds can send a photo between two verified friends (debug builds with
+  `RAVEN_LAB_ATTACHMENTS=1` and `RAVEN_LAB_TEST_A=1`). The engine has the `attachments.*` operations
+  (API.md, "Photos"), and raven-node carries the photo's sealed pieces on the links friends already
+  have, in one dial right behind the photo's message (`protocol/RAVEN_ATTACHMENT_V1.md`). Release
+  builds are unchanged: the gate is shut, so nothing can be sent and nothing new is on the wire.
 - Next to the name of the friend who holds a message of yours, or of the group member who passed a
   message on, the engine now says whether that is a friend you verified and have not blocked
   (`via_friend`), so the apps never show anyone else as a friend.
