@@ -127,6 +127,13 @@ pub struct Row {
     pub reference: String,
     /// Where it is in its life.
     pub state: State,
+    /// A friend's: the user asked for it (a file waits for that tap; a
+    /// photo or a voice note comes by itself).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub asked: bool,
+    /// Mine: how many chunks the friend's node said it has.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub friend_has: u32,
     /// When the row was made.
     pub created_ms: u64,
     /// When it last changed.
@@ -184,6 +191,8 @@ impl Row {
             } else {
                 State::Incoming
             },
+            asked: false,
+            friend_has: 0,
             created_ms: now_ms,
             updated_ms: now_ms,
         })
@@ -214,6 +223,16 @@ impl Row {
         self.stored()?.shape
     }
 
+    /// The friend's key (a chat's attachment).
+    pub fn peer_key(&self) -> Option<[u8; 32]> {
+        self.peer.as_deref().and_then(hex_n)
+    }
+
+    /// The id of the message that carries the offer.
+    pub fn message_id_bytes(&self) -> Option<[u8; 16]> {
+        hex_n(&self.message_id)
+    }
+
     fn well_formed(&self) -> bool {
         self.v == ROW_VERSION
             && self.handle_bytes().is_some()
@@ -235,6 +254,14 @@ impl Row {
                 .zip(self.handle_bytes())
                 .is_some_and(|(key, handle)| key.handle() == handle)
     }
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn hex_n<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -634,6 +661,81 @@ pub fn read_plain(
         at += (upto - from) as u64;
     }
     Ok(out)
+}
+
+/// Does a whole blob that is here open under the row's key, every chunk,
+/// with nothing but zeros after its last byte? A chunk proves its place
+/// under the root when it lands; this proves the root was made over this
+/// attachment and not over other bytes.
+pub fn opens(data_dir: &Path, row: &Row) -> Result<bool, StoreError> {
+    let (handle, shape, _) = parts(row)?;
+    let key = row.key().ok_or(StoreError::Corrupt)?;
+    if !have(data_dir, &handle, &shape, row.outgoing)?.complete() {
+        return Err(StoreError::NotFound);
+    }
+    for index in 0..shape.chunks() {
+        let chunk = read_chunk(data_dir, &handle, &shape, row.outgoing, index)?;
+        let Ok(segment) = blob::open_chunk(&key, &shape, index, &chunk) else {
+            return Ok(false);
+        };
+        // What lies past the attachment's last byte is padding: zeros.
+        let start = u64::from(index) * SEGMENT_LEN as u64;
+        let own = shape.len().saturating_sub(start).min(segment.len() as u64) as usize;
+        if segment[own..].iter().any(|b| *b != 0) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// How many of the attachment's own bytes are here (a friend's), or at the
+/// friend's node as far as it said (mine); and how many there are.
+pub fn progress(data_dir: &Path, row: &Row) -> (u64, u64) {
+    let Some(shape) = row.shape() else {
+        return (0, 0);
+    };
+    let chunks = if row.outgoing {
+        row.friend_has.min(shape.chunks())
+    } else {
+        row.handle_bytes()
+            .and_then(|handle| have(data_dir, &handle, &shape, false).ok())
+            .map_or(0, |have| have.count())
+    };
+    let done = if chunks >= shape.chunks() {
+        shape.len()
+    } else {
+        (u64::from(chunks) * SEGMENT_LEN as u64).min(shape.len())
+    };
+    (done, shape.len())
+}
+
+/// When a chunk of a friend's attachment last landed (the bitmap's time on
+/// disk), in ms; 0 when none did.
+pub fn last_chunk_ms(data_dir: &Path, handle: &[u8; HANDLE_LEN]) -> u64 {
+    std::fs::metadata(have_path(data_dir, handle))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The handles of the rows on disk and when each row's file last changed:
+/// what a watcher compares with its last look, without opening a row.
+pub fn rows_on_disk(data_dir: &Path) -> Vec<([u8; HANDLE_LEN], std::time::SystemTime)> {
+    let Ok(entries) = std::fs::read_dir(data_dir.join(ROWS_DIR)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let handle = name
+                .strip_suffix(&format!(".{ROW_EXT}"))
+                .and_then(hex_n::<HANDLE_LEN>)?;
+            let changed = entry.metadata().and_then(|m| m.modified()).ok()?;
+            Some((handle, changed))
+        })
+        .collect()
 }
 
 /// A new, empty file in the staging folder for an app to write what it

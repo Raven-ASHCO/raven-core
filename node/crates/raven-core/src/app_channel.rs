@@ -465,12 +465,17 @@ pub fn deliver_committed(
             } else {
                 // A later copy is not written again; one with other text
                 // marks the first copy's row (ATSAM_ENDPOINT_TRANSACTION_V1
-                // §3), whose body stays.
+                // §3), whose body stays. An attachment's row holds the
+                // stored form, so a copy of its offer is compared by what a
+                // reader shows, and with the kept offer's digest for the
+                // rest (its key and root; attachments design §8.3).
+                let text = String::from_utf8_lossy(plaintext);
+                let other_offer = crate::attachment::flow::copy_differs(data_dir, &text);
                 crate::chat_history::ChatHistory::note_inbound_copy_persisted(
                     data_dir,
                     &hex::encode(sender_device),
                     &hex::encode(message_id),
-                    Some(&String::from_utf8_lossy(plaintext)),
+                    (!other_offer).then_some(text.as_ref()),
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -1289,10 +1294,26 @@ mod tests {
         assert!(chat_text_allowed("a RVNATT/ later in the text"));
     }
 
+    /// The attachments gate for this test's thread, whatever the
+    /// environment says; back to it when dropped.
+    struct AttGate;
+    impl AttGate {
+        fn set(on: bool) -> AttGate {
+            crate::attachment_gate::set_lab_attachments_for_this_thread(Some(on));
+            AttGate
+        }
+    }
+    impl Drop for AttGate {
+        fn drop(&mut self) {
+            crate::attachment_gate::set_lab_attachments_for_this_thread(None);
+        }
+    }
+
     #[test]
     fn an_offer_is_kept_as_it_came_and_readers_see_its_words() {
         use crate::attachment::testing::photo_offer;
         use crate::chat_history::ChatHistory;
+        let _gate = AttGate::set(false);
         let dir = tempfile::tempdir().unwrap();
         let friend = [7u8; 32];
         book(dir.path(), &[(friend, true)], false);
@@ -1332,6 +1353,166 @@ mod tests {
         assert_eq!(row.preview, row.body);
         assert!(shown.entries.iter().all(|e| !e.body.contains("RVNATT/")));
         assert_eq!(of(&shown, 2).body, "hello");
+    }
+
+    /// Attachments live (phase 1b): the history keeps an offer's stored
+    /// form, never its key, and a verified friend's offer gets its row.
+    #[test]
+    fn with_attachments_live_the_history_keeps_the_stored_form_and_a_friends_row() {
+        use crate::attachment::offer::{parse_frame, parse_ref, Frame};
+        use crate::attachment::store::{self, State};
+        use crate::attachment::testing::photo_offer;
+        use crate::chat_history::ChatHistory;
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (friend, stranger) = ([7u8; 32], [8u8; 32]);
+        book(d, &[(friend, true), (stranger, false)], false);
+        let photo = photo_offer();
+        let Some(Frame::Offer(offer)) = parse_frame(photo.as_bytes()) else {
+            panic!("an offer");
+        };
+        let blob = offer.blob.as_ref().unwrap();
+        let (key, root) = (hex::encode(blob.key.bytes()), hex::encode(blob.root));
+        let write = |direction: &str, peer: &[u8; 32], mid: u8| {
+            crate::lan_dispatch::persist_lan_chat_history(
+                d,
+                direction,
+                peer,
+                &[mid; 16],
+                10,
+                if direction == "in" {
+                    "received"
+                } else {
+                    "queued"
+                },
+                photo.as_bytes(),
+            )
+            .unwrap()
+        };
+        let row_of = |peer: &[u8; 32], direction: &str| {
+            ChatHistory::load(d)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|e| e.peer_pub_hex == hex::encode(peer) && e.direction == direction)
+                .unwrap()
+        };
+
+        // Shut: a friend's offer stays as it came (phase 1a) and has no row.
+        {
+            let _gate = AttGate::set(false);
+            write("in", &friend, 1);
+            assert_eq!(row_of(&friend, "in").body, photo);
+            assert!(store::get(d, &offer.handle).unwrap().is_none());
+        }
+        let _gate = AttGate::set(true);
+        // Live, from someone not verified: the stored form, and no row.
+        write("in", &stranger, 2);
+        let row = row_of(&stranger, "in");
+        assert_eq!(row.body, offer.stored().encode());
+        assert_eq!(row.preview, "Photo");
+        assert!(!row.body.contains(&key) && !row.body.contains(&root));
+        assert!(!row.is_hidden());
+        assert!(store::get(d, &offer.handle).unwrap().is_none());
+
+        // The friend's message written again once attachments are live (its
+        // inbox row archived, say): the first body stays and is no conflict.
+        write("in", &friend, 1);
+        let row = row_of(&friend, "in");
+        assert_eq!(row.body, photo);
+        assert!(!row.id_conflict);
+        // The offers kept as they came take the stored form when the live
+        // build starts, and the verified friend's has its row.
+        assert_eq!(
+            crate::attachment::flow::adopt_kept_offers(d, 20).unwrap(),
+            1
+        );
+        let row = row_of(&friend, "in");
+        assert_eq!(row.body, offer.stored().encode());
+        assert_eq!(row.preview, "Photo");
+        let kept = store::get(d, &offer.handle).unwrap().unwrap();
+        assert_eq!(
+            (kept.state, kept.peer_key()),
+            (State::Incoming, Some(friend))
+        );
+        assert_eq!(
+            crate::attachment::flow::adopt_kept_offers(d, 21).unwrap(),
+            0
+        );
+
+        // Live, from a verified friend: the stored form and the row.
+        let other = tempfile::tempdir().unwrap();
+        let d2 = other.path();
+        book(d2, &[(friend, true)], false);
+        let write2 = |direction: &str, mid: u8, delivery: &str| {
+            crate::lan_dispatch::persist_lan_chat_history(
+                d2,
+                direction,
+                &friend,
+                &[mid; 16],
+                10,
+                delivery,
+                photo.as_bytes(),
+            )
+            .unwrap()
+        };
+        write2("in", 3, "received");
+        let kept = store::get(d2, &offer.handle).unwrap().unwrap();
+        assert_eq!((kept.state, kept.outgoing), (State::Incoming, false));
+        assert_eq!(kept.peer_key(), Some(friend));
+        assert_eq!(kept.message_id_bytes(), Some([3u8; 16]));
+        assert_eq!(hex::encode(kept.key().unwrap().bytes()), key);
+        let history = ChatHistory::load(d2).unwrap();
+        assert_eq!(history.entries[0].body, offer.stored().encode());
+        // A copy that comes again is the same attachment, not a conflict;
+        // another offer under its handle is.
+        write2("in", 3, "received");
+        assert!(!ChatHistory::load(d2).unwrap().entries[0].id_conflict);
+        assert!(!crate::attachment::flow::copy_differs(d2, &photo));
+        let mut other_pad = photo.clone();
+        let at = other_pad.len() - 3;
+        other_pad.replace_range(at..at + 1, " ");
+        assert_ne!(other_pad, photo);
+        // (Not an offer any more: only the encoder's own bytes read.)
+        assert!(!crate::attachment::flow::copy_differs(d2, &other_pad));
+
+        // What readers get: the list words; a reader of attachments, the
+        // stored form.
+        let shown = history.clone().shown();
+        assert_eq!(shown.entries[0].body, "Photo");
+        assert_eq!(shown.entries[0].preview, "Photo");
+        let with = history.shown_with_attachments();
+        assert_eq!(with.entries[0].preview, "Photo");
+        let stored = parse_ref(with.entries[0].body.as_bytes()).unwrap();
+        assert_eq!(stored, offer.stored());
+        assert_eq!(
+            chat_row_text(with.entries[0].body.as_bytes(), "Max"),
+            "Photo"
+        );
+
+        // An offer of mine: the stored form from its first write, also when
+        // its delivery is written with the staged offer again.
+        write2("out", 4, "queued");
+        write2("out", 4, "delivered");
+        let mine = ChatHistory::load(d2)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.direction == "out")
+            .unwrap();
+        assert_eq!(mine.body, offer.stored().encode());
+        assert_eq!(
+            (mine.preview.as_str(), mine.delivery.as_str()),
+            ("Photo", "delivered")
+        );
+        // A stored form that comes from a link is never a message.
+        assert_eq!(
+            classify(offer.stored().encode().as_bytes()),
+            PayloadClass::Att(AttClass::Other)
+        );
     }
 
     #[test]

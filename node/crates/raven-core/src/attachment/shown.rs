@@ -51,6 +51,36 @@ pub fn is_silent(plaintext: &[u8]) -> bool {
     offer::is_att_text(plaintext) && !matches!(class(plaintext), AttClass::Offer(_))
 }
 
+/// Is this stored body one no chat view shows, lists or counts? Unlike
+/// [`is_silent`], which judges a text as it comes from a link, this reads a
+/// body as the history keeps it: the stored form of an attachment is shown.
+pub fn is_hidden_body(body: &str) -> bool {
+    offer::is_att_text(body.as_bytes()) && shown(body, "") == Shown::Hidden
+}
+
+/// The stored form of an attachment text: of an offer, or of a stored form
+/// itself. `None` for anything else.
+fn stored_form(body: &str) -> Option<String> {
+    if !offer::is_att_text(body.as_bytes()) {
+        return None;
+    }
+    if let Some(stored) = offer::parse_ref(body.as_bytes()) {
+        return Some(stored.encode());
+    }
+    match offer::parse_frame(body.as_bytes())? {
+        Frame::Offer(offer) => Some(offer.stored().encode()),
+        Frame::Gone(_) => None,
+    }
+}
+
+/// Do two stored bodies name the same attachment with the same words: an
+/// offer and its stored form, say (a row written before attachments were
+/// live holds the offer; a copy that comes later is stored in its stored
+/// form)?
+pub fn same_attachment(a: &str, b: &str) -> bool {
+    matches!((stored_form(a), stored_form(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// The line a build that cannot open attachments shows for one a friend
 /// sent ("Max sent a photo. Update Raven to see it."). Plain words, no
 /// hyphens, dashes or apostrophes. A profile offer has no line.
@@ -82,6 +112,13 @@ pub enum Shown {
 pub fn shown(body: &str, name: &str) -> Shown {
     if !offer::is_att_text(body.as_bytes()) {
         return Shown::Text;
+    }
+    // The stored form of an attachment this build keeps (a history row
+    // never holds an offer of mine, nor a friend's once attachments are
+    // live): its list words. A reader that can show the attachment itself
+    // reads the row's stored form and the attachment store.
+    if let Some(stored) = offer::parse_ref(body.as_bytes()) {
+        return stored.list_words().map_or(Shown::Hidden, Shown::Words);
     }
     match class(body.as_bytes()) {
         AttClass::Offer(kind) => Shown::Words(update_words(kind, name)),

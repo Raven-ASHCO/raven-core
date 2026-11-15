@@ -22,12 +22,37 @@ pub const ATTACHMENTS_HOLD: &str = "ATTACHMENTS_HOLD: photos, voice messages and
     lab-only (debug RAVEN_LAB_TEST_A=1 RAVEN_LAB_ATTACHMENTS=1); \
     ATTACHMENTS_PRODUCTION_ENABLED=false";
 
+thread_local! {
+    static ATTACHMENTS_LAB: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// Attachments are live: the const (a release build follows it alone), or
-/// in a debug build the lab switch with the Lab Test A unlock; unless a
-/// security notice holds `feature/attachments`.
+/// in a debug build this thread's override, else the lab switch with the
+/// Lab Test A unlock; unless a security notice holds `feature/attachments`.
 pub fn attachments_live() -> bool {
-    crate::pair_init::lab_gate(ATTACHMENTS_PRODUCTION_ENABLED, LAB_ATTACHMENTS)
-        && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_ATTACHMENTS)
+    let over = if cfg!(debug_assertions) {
+        ATTACHMENTS_LAB.with(std::cell::Cell::get)
+    } else {
+        None
+    };
+    over.unwrap_or_else(|| {
+        crate::pair_init::lab_gate(ATTACHMENTS_PRODUCTION_ENABLED, LAB_ATTACHMENTS)
+    }) && crate::suite_policy::hold_allows(crate::suite_registry::FEATURE_ATTACHMENTS)
+}
+
+/// In-process tests switch attachments on or off for the current thread
+/// only; `None` goes back to the const and the environment. Ignored in
+/// release builds.
+#[doc(hidden)]
+pub fn set_lab_attachments_for_this_thread(on: Option<bool>) {
+    ATTACHMENTS_LAB.with(|c| c.set(on));
+}
+
+/// This thread's override ([`set_lab_attachments_for_this_thread`]), for a
+/// test that hands work to another thread.
+#[doc(hidden)]
+pub fn lab_attachments_for_this_thread() -> Option<bool> {
+    ATTACHMENTS_LAB.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

@@ -221,6 +221,12 @@ pub const FILES: &[FileRule] = &[
         Kind::Attachments,
         crate::attachment::store::ATTACHMENTS_LOCK,
     ),
+    // Which friends' nodes take attachments, and when that was last seen.
+    sealed(
+        crate::attachment::peers::PEERS_FILE,
+        Kind::Attachments,
+        crate::attachment::store::ATTACHMENTS_LOCK,
+    ),
     plain(
         "attachments/*/blob",
         "an attachment's sealed chunks as they travel: ciphertext under the attachment's own \

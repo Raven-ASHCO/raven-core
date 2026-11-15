@@ -119,7 +119,7 @@ impl ChatHistoryEntry {
     /// attachment text that is never a message (a friend's profile offer,
     /// kept for a later build; attachments design §8.4).
     pub fn is_hidden(&self) -> bool {
-        self.is_group_copy() || crate::attachment::shown::is_silent(self.body.as_bytes())
+        self.is_group_copy() || crate::attachment::shown::is_hidden_body(&self.body)
     }
 
     /// The `seq` of the friend's profile offer this hidden row keeps.
@@ -529,7 +529,9 @@ impl ChatHistory {
         };
         let differs = body.is_none_or(|b| {
             let b = truncate_chars(b, MAX_BODY_CHARS);
-            !b.is_empty() && b != entry.body
+            !b.is_empty()
+                && b != entry.body
+                && !crate::attachment::shown::same_attachment(&b, &entry.body)
         });
         if !differs || entry.id_conflict {
             return false;
@@ -1024,7 +1026,10 @@ impl ChatHistory {
                 && existing.body != entry.body;
             let mut conflict = entry.id_conflict;
             if inbound && !existing.body.is_empty() && !legacy_preview_body {
-                conflict |= !entry.body.is_empty() && entry.body != existing.body;
+                // An attachment's offer and its stored form are one body.
+                conflict |= !entry.body.is_empty()
+                    && entry.body != existing.body
+                    && !crate::attachment::shown::same_attachment(&entry.body, &existing.body);
             } else if !entry.body.is_empty() {
                 existing.body = entry.body;
                 existing.preview = entry.preview;
@@ -1127,14 +1132,31 @@ impl ChatHistory {
     /// offer), and with an attachment's row saying its line of words in
     /// place of its offer, which is never shown as text (attachments design
     /// §8.4). A copy for reading: it is never saved back.
-    pub fn shown(mut self) -> Self {
+    pub fn shown(self) -> Self {
+        self.shown_as(false)
+    }
+
+    /// [`Self::shown`] for a reader that shows attachments themselves: a
+    /// row that holds an attachment's stored form keeps it as its body
+    /// (the reader takes the caption, the sizes and the preview from it,
+    /// and the rest from the attachment store); its `preview` is the list
+    /// words as for every reader.
+    pub fn shown_with_attachments(self) -> Self {
+        self.shown_as(true)
+    }
+
+    fn shown_as(mut self, keep_stored: bool) -> Self {
         self.entries.retain(|e| !e.is_hidden());
         for entry in &mut self.entries {
             if let crate::attachment::shown::Shown::Words(words) =
                 crate::attachment::shown::shown(&entry.body, &entry.peer_petname)
             {
                 entry.preview = truncate_sanitized(&words, MAX_PREVIEW_CHARS);
-                entry.body = words;
+                let stored = keep_stored
+                    && crate::attachment::offer::parse_ref(entry.body.as_bytes()).is_some();
+                if !stored {
+                    entry.body = words;
+                }
             }
         }
         self
@@ -1172,6 +1194,36 @@ impl ChatHistory {
         history.upsert(entry);
         history.save_unlocked(data_dir, &protector)?;
         Ok(true)
+    }
+
+    /// Rewrites the bodies `rewrite` gives a new form for (its body and its
+    /// list text), under the history's inter-process lock: how a row that
+    /// kept a friend's attachment offer as it came (phase 1a) takes the
+    /// stored form once attachments are live (attachments design §8.2).
+    /// `rewrite` sees every row; `None` leaves a row as it is. The rows
+    /// rewritten; nothing is written when there are none.
+    pub fn rewrite_bodies_persisted(
+        data_dir: &Path,
+        mut rewrite: impl FnMut(&ChatHistoryEntry) -> Option<(String, String)>,
+    ) -> Result<usize, ChatHistoryError> {
+        let protector = PlatformChatHistoryProtector::default();
+        prepare_history(data_dir, &protector, false);
+        let _lock = HistoryLock::acquire(data_dir)?;
+        let mut history = Self::load_unlocked(data_dir, &protector)?;
+        let mut changed = 0;
+        for entry in &mut history.entries {
+            if let Some((body, preview)) = rewrite(entry) {
+                if body != entry.body {
+                    entry.body = body;
+                    entry.preview = truncate_sanitized(&preview, MAX_PREVIEW_CHARS);
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 {
+            history.save_unlocked(data_dir, &protector)?;
+        }
+        Ok(changed)
     }
 
     pub fn for_peer<'a>(&'a self, pub_hex: &str) -> Vec<&'a ChatHistoryEntry> {

@@ -1545,6 +1545,11 @@ async fn handle_inbound_with<S: AsyncRead + AsyncWrite + Unpin>(
             &data_dir,
             remote_ed,
             &extensions,
+        ))
+        .with_att(crate::attachments::AttLink::lan_listener(
+            &data_dir,
+            remote_ed,
+            &extensions,
         ));
     if trusted {
         if let Some(ours) = hints.outgoing().await {
@@ -1553,6 +1558,8 @@ async fn handle_inbound_with<S: AsyncRead + AsyncWrite + Unpin>(
         }
         // What its message 3 showed: its capability floor (P6.29).
         hints.note_features();
+        // ... and whether its node takes attachments (gated).
+        hints.att().seen().await;
     }
     // RUP1 (P6.49): our HAVE, after RRH1, to a pinned contact whose message
     // 3 offered bit 10; one-way, never a reply.
@@ -1588,6 +1595,14 @@ async fn handle_inbound_with<S: AsyncRead + AsyncWrite + Unpin>(
         // RUP1 (P6.49): the dialer's HAVE and requests, answered here and
         // never dispatched.
         if let Some(replies) = hints.update().listener_take(&frame).await {
+            for reply in &replies {
+                write_cipher(&mut stream, &mut transport, reply).await?;
+            }
+            continue;
+        }
+        // RAX1 (attachments, gated): the dialer's chunks and requests,
+        // answered here and never dispatched.
+        if let Some(replies) = hints.att().listener_take(&frame).await {
             for reply in &replies {
                 write_cipher(&mut stream, &mut transport, reply).await?;
             }
@@ -2041,6 +2056,7 @@ async fn dial_session(
         rrh1,
         offers.contains(raven_core::internet::LinkFeatures::PAD1),
         offers.contains(raven_core::internet::LinkFeatures::RUP1),
+        offers.contains(raven_core::internet::LinkFeatures::ATT1),
         reads,
     );
     let asked = raven_core::route_hints::rlx1_caps(&m3_payload) & raven_core::CAP_LINK_RRH1 != 0;
@@ -2142,7 +2158,11 @@ async fn dial_session(
     .with_peer_zone(netutil::link_local_zone(peer_addr))
     .with_update(crate::update_exchange::UpdateLink::lan_dialer(
         data_dir, *expected, rup1_asked,
-    ));
+    ))
+    .with_att(crate::attachments::AttLink::lan_dialer(data_dir, *expected));
+    // A link with a friend whose node takes attachments: what waits for it
+    // is tried (gated; nothing is read while attachments are off).
+    hints.att().seen().await;
     // Whether the listener proved the knock: its capability floor (P6.35).
     hints.knock_seen(knocked);
     // The listener padded its bind: its capability floor keeps that (P6.34).
@@ -7521,7 +7541,7 @@ mod tests {
                 )
                 .await
             });
-            let m3 = crate::hints::lan_m3_payload_with(false, false, bit10, true);
+            let m3 = crate::hints::lan_m3_payload_with(false, false, bit10, false, true);
             let knock = knocks.then(|| {
                 crate::link_knock::for_dial(
                     true,
@@ -7587,5 +7607,173 @@ mod tests {
                 .expect("the listener ends");
         }
         crate::update_exchange::gates_for_test(None);
+    }
+
+    /// RAX1 on a LAN link (attachments, gated): a verified friend whose
+    /// message 3 offered bit 12 fills the attachment it offered, chunk by
+    /// chunk, and is told when it is complete. A dialer that is not
+    /// verified, or whose message 3 did not offer the bit, gets a refusal
+    /// for its request and none of its chunks is taken; with the gate shut
+    /// a RAX1 frame gets no answer at all, as before.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn a_verified_friends_chunks_are_taken_on_a_lan_link() {
+        use raven_core::attachment::exchange::{Exchange, Memory};
+        use raven_core::attachment::link::{self as rax1, Body, ErrorCode};
+        use raven_core::attachment::store::{self, State};
+        use raven_core::attachment::{flow, offer, peers};
+        use raven_core::attachment_gate::set_lab_attachments_for_this_thread as gate_for_thread;
+        if !lab_backend_available() {
+            return;
+        }
+        let mut photo: Vec<u8> = (0..200_000usize).map(|i| (i * 17 % 249) as u8).collect();
+        photo[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        for (gate, bit12, pinned) in [
+            (true, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, true, true),
+        ] {
+            let case = format!("gate {gate}, bit 12 {bit12}, pinned {pinned}");
+            let resp_dir = tempfile::tempdir().unwrap();
+            let init_dir = tempfile::tempdir().unwrap();
+            let responder = Arc::new(Identity::from_seed(&[0x93; 32]));
+            let initiator = Identity::from_seed(&[0x94; 32]);
+            let (alice, bob) = (initiator.public_key_bytes(), responder.public_key_bytes());
+            std::fs::write(
+                resp_dir.path().join("contacts.json"),
+                format!(
+                    r#"[{{"pub_hex":"{}","pinned":{pinned}}}]"#,
+                    hex::encode(alice)
+                ),
+            )
+            .unwrap();
+            // The sender's photo, and its offer kept by the receiver as it
+            // would be when the message came from a verified friend.
+            gate_for_thread(Some(true));
+            let media = flow::Media::Photo {
+                caption: "",
+                width: 800,
+                height: 600,
+                preview: &[1, 2, 3],
+            };
+            let now = crate::now_ms();
+            let made = flow::prepare(init_dir.path(), &bob, &photo, &media, now).unwrap();
+            let Some(offer::Frame::Offer(the_offer)) = offer::parse_frame(made.offer.as_bytes())
+            else {
+                panic!("an offer");
+            };
+            flow::keep_offer(
+                resp_dir.path(),
+                &alice,
+                &[7; 16],
+                &the_offer,
+                &made.offer,
+                now,
+            )
+            .unwrap();
+            gate_for_thread(Some(gate));
+
+            let (mut client, server_side) = tokio::io::duplex(1 << 18);
+            let (data_dir, resp) = (resp_dir.path().to_path_buf(), responder.clone());
+            let server = tokio::spawn(async move {
+                let mut slot = test_slot();
+                handle_inbound(
+                    data_dir,
+                    resp,
+                    server_side,
+                    PRODUCTION_LIMITS,
+                    &mut slot,
+                    LOOPBACK_DIALER,
+                )
+                .await
+            });
+            let m3 = crate::hints::lan_m3_payload_with(false, false, false, bit12, true);
+            let (mut t, _, _) =
+                initiator_session_pinned(&mut client, &initiator, &bob, &m3, None, None, None)
+                    .await
+                    .expect("Noise XX + bind");
+            let ours = encode_local_offer(init_dir.path(), &initiator).unwrap();
+            write_cipher(&mut client, &mut t, &ours).await.unwrap();
+            let theirs = read_cipher(&mut client, &mut t).await.unwrap();
+            assert!(parse_peer_offer(&theirs).is_ok(), "{case}");
+
+            // The sender's exchange says what a dial carries; this test is
+            // the dial.
+            let memory = std::sync::Mutex::new(Memory::default());
+            let sender = Exchange::new(init_dir.path(), &memory);
+            gate_for_thread(Some(true));
+            let plan = sender.plans(now, &|_| true).plans.remove(0);
+            gate_for_thread(Some(gate));
+            assert_eq!(plan.frames.len(), 1, "{case}: HAVE first");
+            write_cipher(&mut client, &mut t, &plan.frames[0])
+                .await
+                .unwrap();
+            let answer = tokio::time::timeout(
+                Duration::from_millis(1_500),
+                read_cipher(&mut client, &mut t),
+            )
+            .await;
+            let theirs_row = |d: &Path| {
+                store::get(d, &made.handle)
+                    .unwrap()
+                    .expect("the receiver's row")
+            };
+            if !gate {
+                // Shut: an unknown frame, and no row state changes.
+                assert!(
+                    !matches!(&answer, Ok(Ok(f)) if rax1::is_rax1(f)),
+                    "{case}: no RAX1 answer"
+                );
+                assert!(!peers::speaks(resp_dir.path(), &alice), "{case}");
+            } else if !(bit12 && pinned) {
+                let reply = answer.expect("an answer").unwrap();
+                assert_eq!(
+                    rax1::decode_for_dialer(&reply).map(|f| f.body),
+                    Ok(Body::Error(ErrorCode::PolicyDenied)),
+                    "{case}"
+                );
+                assert!(!peers::speaks(resp_dir.path(), &alice), "{case}");
+            } else {
+                let reply = answer.expect("a LACK").unwrap();
+                assert!(
+                    sender.took(&plan, Some(&[reply]), now),
+                    "{case}: it wants all of it"
+                );
+                assert!(
+                    peers::speaks(resp_dir.path(), &alice),
+                    "{case}: bit 12 was noted"
+                );
+                let plan = sender.plans(now, &|_| true).plans.remove(0);
+                for frame in &plan.frames {
+                    write_cipher(&mut client, &mut t, frame).await.unwrap();
+                }
+                let reply =
+                    tokio::time::timeout(Duration::from_secs(10), read_cipher(&mut client, &mut t))
+                        .await
+                        .expect("the last LACK")
+                        .unwrap();
+                assert!(!sender.took(&plan, Some(&[reply]), now), "{case}");
+                let mine = store::get(init_dir.path(), &made.handle).unwrap().unwrap();
+                assert_eq!(mine.state, State::Delivered, "{case}");
+                let got = theirs_row(resp_dir.path());
+                assert_eq!(got.state, State::Complete, "{case}");
+                assert_eq!(
+                    &store::read_plain(resp_dir.path(), &got, 0, photo.len()).unwrap()[..],
+                    &photo[..],
+                    "{case}: the photo, byte for byte"
+                );
+            }
+            if !(gate && bit12 && pinned) {
+                let got = theirs_row(resp_dir.path());
+                assert_eq!(got.state, State::Incoming, "{case}");
+                assert_eq!(store::progress(resp_dir.path(), &got).0, 0, "{case}");
+            }
+            drop(client);
+            let _ = tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect("the listener ends");
+        }
+        gate_for_thread(None);
     }
 }

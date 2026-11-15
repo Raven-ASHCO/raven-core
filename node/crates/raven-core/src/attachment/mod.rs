@@ -3,12 +3,20 @@
 //!
 //! An attachment is one sealed message, the offer, and a blob of sealed
 //! chunks that never travel as messages. This module holds what both ends
-//! share and what needs no store and no link: the blob ([`blob`]) and, next,
-//! the offer. The gates, the store and the link frames live elsewhere and
-//! are off in release builds until the owner flips them.
+//! share: the blob ([`blob`]), the offer ([`offer`]), what a build shows for
+//! an offer it cannot open ([`shown`]), the store ([`store`]), making and
+//! keeping offers ([`flow`]), the link frames that carry the chunks
+//! ([`link`]), the exchange of them ([`exchange`]) and which friends take
+//! them ([`peers`]). Everything past phase 1a is
+//! behind [`crate::attachment_gate`], off in release builds until the owner
+//! flips it.
 
 pub mod blob;
+pub mod exchange;
+pub mod flow;
+pub mod link;
 pub mod offer;
+pub mod peers;
 pub mod shown;
 pub mod store;
 

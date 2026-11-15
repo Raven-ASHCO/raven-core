@@ -76,13 +76,16 @@ impl Drop for PaddingForTest {
 /// The link features this side offers on a link of `carrier`: RRH1 while
 /// route hints are live on it ([`crate::hints::live_on`]), PAD1 while link
 /// padding is ([`padding_live`]), RUP1 while the update exchange is active
-/// (Phase 6b P6.49, [`crate::update_exchange::offered`]). A LAN dialer
-/// offers them only on a dial that reads.
+/// (Phase 6b P6.49, [`crate::update_exchange::offered`]), ATT1 while
+/// attachments are live, never on Bluetooth
+/// ([`crate::attachments::offered`]). A LAN dialer offers them only on a
+/// dial that reads.
 pub(crate) fn offers(carrier: OutboxCarrier) -> LinkFeatures {
     LinkFeatures::NONE
         .with(LinkFeatures::RRH1, crate::hints::live_on(carrier))
         .with(LinkFeatures::PAD1, padding_live())
         .with(LinkFeatures::RUP1, crate::update_exchange::offered())
+        .with(LinkFeatures::ATT1, crate::attachments::offered(carrier))
 }
 
 /// Did a link end because the peer broke PAD1 ([`PAD1_REFUSED`])?

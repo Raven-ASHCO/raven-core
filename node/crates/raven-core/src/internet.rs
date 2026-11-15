@@ -83,6 +83,10 @@ pub const CAP_LINK_RUP1: u32 = 1 << 10;
 /// (RAVEN_ROUTE_HINTS_V1 §3.1, §6.1). Set only with [`CAP_LINK_RRH1`]; a
 /// per-link request, never a capability (the capability floor ignores it).
 pub const CAP_LINK_RRH1_ASK: u32 = 1 << 11;
+/// Bit 12: this side takes `RVNATT/1` offers and `RAX1` frames inside
+/// ordinary link limits (attachments design §10.1, [`crate::attachment`]).
+/// No build sets it while the attachments gate is shut.
+pub const CAP_LINK_ATT1: u32 = 1 << 12;
 
 /// The link features one side offers on one link: caps bits 8 up, a set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -99,6 +103,8 @@ impl LinkFeatures {
     pub const RUP1: Self = Self(CAP_LINK_RUP1);
     /// The request for the peer's RRH1 on this link ([`CAP_LINK_RRH1_ASK`]).
     pub const RRH1_ASK: Self = Self(CAP_LINK_RRH1_ASK);
+    /// Attachments' chunks on this link ([`CAP_LINK_ATT1`]).
+    pub const ATT1: Self = Self(CAP_LINK_ATT1);
 
     /// This set, plus `feature` when `on`.
     #[must_use]
@@ -456,6 +462,8 @@ mod tests {
         assert_eq!(bits_to_caps(hello_caps(both)), bits_to_caps(CAP_INTERNET));
         // RUP1 adds bit 10 and nothing else (update/rup1_frames_001.json).
         assert_eq!(hello_caps(LinkFeatures::RUP1), 0x0000_0402);
+        assert_eq!(CAP_LINK_ATT1, 0x0000_1000);
+        assert_eq!(hello_caps(LinkFeatures::ATT1), 0x0000_1002);
         let all = both.with(LinkFeatures::RUP1, true);
         assert_eq!(hello_caps(all), 0x0000_0702);
         assert_eq!(both.with(LinkFeatures::RUP1, false), both);

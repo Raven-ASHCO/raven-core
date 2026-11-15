@@ -278,14 +278,31 @@ pub fn persist_lan_chat_history(
     let peer_pub_hex = hex::encode(peer_pub);
     let (peer_petname, peer_tag) = contact_label_for_pub(data_dir, &peer_pub_hex)?;
     let text = String::from_utf8_lossy(plaintext);
-    let body = text.as_ref().to_string();
-    // The list text: the body's start, or for an attachment's offer its
-    // line of words (the offer itself is never shown as text; attachments
-    // design §8.2, §8.4).
-    let preview: String = match crate::attachment::shown::shown(&body, &peer_petname) {
-        crate::attachment::shown::Shown::Text => body.chars().take(120).collect(),
-        crate::attachment::shown::Shown::Words(words) => words.chars().take(120).collect(),
-        crate::attachment::shown::Shown::Hidden => HIDDEN_ROW_PREVIEW.to_string(),
+    // An attachment's offer is kept in its stored form, never with its key
+    // (attachments design §8.2): always for one of mine, and for a
+    // friend's while attachments are live, when its row is kept too.
+    let stored = crate::attachment::flow::history_body(
+        data_dir,
+        direction,
+        peer_pub,
+        message_id,
+        &text,
+        now_ms(),
+    )?;
+    let (body, words) = match stored {
+        Some((body, words)) => (body, Some(words)),
+        None => (text.as_ref().to_string(), None),
+    };
+    // The list text: the body's start, or for an attachment its words
+    // ("Photo"), or for an offer this build cannot open its line of words
+    // (the offer itself is never shown as text; §8.2, §8.4).
+    let preview: String = match words {
+        Some(words) => words.chars().take(120).collect(),
+        None => match crate::attachment::shown::shown(&body, &peer_petname) {
+            crate::attachment::shown::Shown::Text => body.chars().take(120).collect(),
+            crate::attachment::shown::Shown::Words(words) => words.chars().take(120).collect(),
+            crate::attachment::shown::Shown::Hidden => HIDDEN_ROW_PREVIEW.to_string(),
+        },
     };
     let entry = ChatHistoryEntry {
         message_id_hex: hex::encode(message_id),

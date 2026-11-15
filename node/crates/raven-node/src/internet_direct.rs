@@ -820,6 +820,13 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         remote_ed,
         offers.contains(LinkFeatures::RUP1),
         peer_caps,
+    ))
+    .with_att(crate::attachments::AttLink::inet(
+        &data_dir,
+        link.carrier,
+        true,
+        remote_ed,
+        peer_caps,
     ));
     let our_hints = hints.outgoing().await;
     // RUP1 (P6.49): our HAVE, after RRH1, to a pinned contact whose hello
@@ -924,6 +931,8 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         hints.note_link().await;
         // Its verified hello's link features: its capability floor (P6.29).
         hints.note_features();
+        // ... and whether its node takes attachments (gated).
+        hints.att().seen().await;
     }
 
     let mut frames_seen = 0u32;
@@ -957,6 +966,14 @@ pub(crate) async fn serve_inbound_on<S: AsyncRead + AsyncWrite + Unpin>(
         // RUP1 (P6.49): the dialer's HAVE and requests, answered here and
         // never dispatched.
         if let Some(replies) = hints.update().listener_take(&frame).await {
+            for reply in &replies {
+                write_inet_frame(&mut stream, &mut transport, reply).await?;
+            }
+            continue;
+        }
+        // RAX1 (attachments, gated): the dialer's chunks and requests,
+        // answered here and never dispatched.
+        if let Some(replies) = hints.att().listener_take(&frame).await {
             for reply in &replies {
                 write_inet_frame(&mut stream, &mut transport, reply).await?;
             }
@@ -1308,6 +1325,8 @@ async fn exchange_frames_on<S: AsyncRead + AsyncWrite + Unpin>(
         read_peer_frames(io, transport, hints, progress.collector.idle_wait()).await?;
         crate::update_exchange::check_requests(frames, hints.update())?;
     }
+    // RAX1 (attachments): only to a listener whose hello offered them.
+    crate::attachments::check_frames(frames, hints.att())?;
     for frame in frames {
         io.send(transport, frame).await?;
     }
@@ -1679,7 +1698,7 @@ where
     if !progress.send_check {
         wake_outbox_for(expected);
     }
-    let hints = crate::hints::LinkCtl::inet(
+    let mut hints = crate::hints::LinkCtl::inet(
         data_dir,
         link.carrier,
         crate::hints::Role::Dialer,
@@ -1698,7 +1717,17 @@ where
         remote_ed,
         offers.contains(LinkFeatures::RUP1),
         peer_caps,
+    ))
+    .with_att(crate::attachments::AttLink::inet(
+        data_dir,
+        link.carrier,
+        false,
+        remote_ed,
+        peer_caps,
     ));
+    // Whether the friend's node takes attachments, as its hello says
+    // (gated; nothing is read while attachments are off).
+    hints.att().seen().await;
     Ok(OpenLink {
         stream,
         state: LinkState {

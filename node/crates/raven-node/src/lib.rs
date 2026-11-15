@@ -32,6 +32,7 @@ macro_rules! eprintln {
 mod app_channel;
 mod arrivals;
 mod at_rest_boot;
+mod attachments;
 mod autoreach;
 mod bridge_run;
 mod clock_notes;
@@ -816,6 +817,7 @@ pub(crate) mod netutil {
         if raven_core::session_reset::frame_expects_reply(frame)
             || raven_core::friend_custody::frame_expects_reply(frame)
             || raven_core::update_exchange::frame_expects_reply(frame)
+            || raven_core::attachment::link::frame_expects_reply(frame)
         {
             return true;
         }
@@ -836,6 +838,10 @@ pub(crate) mod netutil {
         if expects_reply(frame) {
             return false;
         }
+        // An attachment's PUSH or DONE (RAX1): pushed, never answered.
+        if raven_core::attachment::link::frame_never_answered(frame) {
+            return true;
+        }
         match classify_packed_envelope(frame) {
             PairInitOobClassify::PairResponse(_) => true,
             PairInitOobClassify::PairInit(_) => false,
@@ -851,6 +857,7 @@ pub(crate) mod netutil {
         if raven_core::session_reset::frame_is_terminal_reply(frame)
             || raven_core::friend_custody::frame_is_terminal_reply(frame)
             || raven_core::update_exchange::frame_is_terminal_reply(frame)
+            || raven_core::attachment::link::reply_is_terminal(frame)
         {
             return true;
         }
@@ -6216,6 +6223,16 @@ pub(crate) async fn run_service(
             update_exchange::run(data_updates.clone())
         }),
     );
+    // Carries the chunks of attachments between verified friends (RAX1,
+    // gated; attachments.rs). Idle while the gate is shut; like the
+    // announcer, the service never ends because of it.
+    let data_attachments = data_dir.clone();
+    let attachments_task = spawn_if(
+        full,
+        supervise_unlocked("attachments", None, move || {
+            attachments::run(data_attachments.clone())
+        }),
+    );
     // Mock BLE stays on ble_listen. Do not fanout the production LAN port.
     // The service owns --timeout-secs; the bridge itself runs until stopped.
     let mut bridge_task = spawn_if(
@@ -6271,6 +6288,7 @@ pub(crate) async fn run_service(
     onion_task.abort();
     hints_task.abort();
     updates_task.abort();
+    attachments_task.abort();
     friend_task.abort();
     reach_task.abort();
     meeting_task.abort();

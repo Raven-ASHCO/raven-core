@@ -198,13 +198,20 @@ impl Drop for LiveForTest {
 /// send. The link code calls [`lan_m3_payload_with`] (the tests this).
 #[cfg(test)]
 pub(crate) fn lan_m3_payload(live: bool, pad: bool, reads: bool) -> Vec<u8> {
-    lan_m3_payload_with(live, pad, false, reads)
+    lan_m3_payload_with(live, pad, false, false, reads)
 }
 
 /// [`lan_m3_payload`] with the update exchange's bit 10 offered on a dial
 /// that reads while it is active (`rup1`, Phase 6b P6.49,
-/// `crate::update_exchange`).
-pub(crate) fn lan_m3_payload_with(live: bool, pad: bool, rup1: bool, reads: bool) -> Vec<u8> {
+/// `crate::update_exchange`), and the attachments' bit 12 while they are
+/// live (`att1`, `crate::attachments`).
+pub(crate) fn lan_m3_payload_with(
+    live: bool,
+    pad: bool,
+    rup1: bool,
+    att1: bool,
+    reads: bool,
+) -> Vec<u8> {
     let mut caps = 0;
     if reads && live {
         caps |= CAP_LINK_RRH1;
@@ -214,6 +221,9 @@ pub(crate) fn lan_m3_payload_with(live: bool, pad: bool, rup1: bool, reads: bool
     }
     if reads && rup1 {
         caps |= raven_core::CAP_LINK_RUP1;
+    }
+    if reads && att1 {
+        caps |= raven_core::CAP_LINK_ATT1;
     }
     route_hints::rlx1_payload(caps)
 }
@@ -293,6 +303,9 @@ pub(crate) struct LinkCtl {
     /// The update exchange on this link (RUP1, Phase 6b P6.49): off unless
     /// the link code gave it one ([`Self::with_update`]).
     update: crate::update_exchange::UpdateLink,
+    /// The attachments' part of this link (RAX1): off unless the link code
+    /// gave it one ([`Self::with_att`]).
+    att: crate::attachments::AttLink,
     /// What our dial carries ([`dial_purpose`]), for the log lines; `None`
     /// on a link the peer opened (its frames come after the route hints).
     purpose: Option<&'static str>,
@@ -335,6 +348,7 @@ impl LinkCtl {
             seen: 0,
             knock: None,
             update: crate::update_exchange::UpdateLink::off(),
+            att: crate::attachments::AttLink::off(),
             purpose: None,
             asked: false,
             ask_sent: false,
@@ -426,6 +440,18 @@ impl LinkCtl {
     /// The update exchange on this link.
     pub(crate) fn update(&mut self) -> &mut crate::update_exchange::UpdateLink {
         &mut self.update
+    }
+
+    /// The attachments' part of this link (RAX1): the link code hands its
+    /// frames to [`Self::att`].
+    pub(crate) fn with_att(mut self, att: crate::attachments::AttLink) -> Self {
+        self.att = att;
+        self
+    }
+
+    /// The attachments' part of this link.
+    pub(crate) fn att(&mut self) -> &mut crate::attachments::AttLink {
+        &mut self.att
     }
 
     /// Internet direct or the p2p link (`carrier`). `rrh1`: our hello set the
