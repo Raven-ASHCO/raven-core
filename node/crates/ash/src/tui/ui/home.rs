@@ -2758,7 +2758,7 @@ mod tests {
             &[
                 "│                    ││   Bring the map.                                       │",
                 "│                    ││ ────────────────────────────────────────────────────── │",
-                "│                    ││ Messages can't start with RVNAPP/ or RVNGRP/.          │",
+                "│                    ││ Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/. │",
                 "│ A  Add a friend    ││ To Bob: RVNAPP/1 hello                                 │",
                 "└────────────────────┘└────────────────────────────────────────────────────────┘",
             ],
@@ -3437,7 +3437,7 @@ mod tests {
             rows[15],
             format!(
                 "│ {:<66} │",
-                "Messages can't start with RVNAPP/ or RVNGRP/."
+                "Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/."
             )
         );
         assert!(!testkit::screen_text(&rows).contains("same network as"));

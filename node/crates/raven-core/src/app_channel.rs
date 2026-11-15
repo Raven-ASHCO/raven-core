@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use crate::app_store::{Admit, AppInboxItem, AppStore, MetadataOnly, PlatformRowSealer};
+use crate::attachment::shown::AttClass;
 use crate::indexed_session_store::{
     InboundPolicy, IndexedSessionRecordKey, IndexedSessionStore, IndexedSessionStoreError,
 };
@@ -91,6 +92,12 @@ pub enum PayloadClass {
     /// A group frame (`protocol/RAVEN_GROUP_V1.md`): the group store's,
     /// never chat history's.
     Group(Box<crate::group::GroupFrame>),
+    /// An attachment text (`RVNATT/`; `docs/design/2026-11-attachments.md`
+    /// §8.4): an offer of a photo, a voice note or a file is kept like chat
+    /// and shown as a line of words, a profile offer is kept silently, and
+    /// anything else under the prefix is taken and dropped. Never chat
+    /// text, and never deferred.
+    Att(crate::attachment::shown::AttClass),
     /// Starts with a reserved prefix (`RVNAPP/`, `RVNGRP/`) but is not a
     /// valid v1 frame: deferred, never committed, never shown.
     ReservedInvalid,
@@ -141,10 +148,35 @@ pub fn classify(plaintext: &[u8]) -> PayloadClass {
             PayloadClass::Group(Box::new(f))
         });
     }
+    if crate::attachment::offer::is_att_text(plaintext) {
+        return PayloadClass::Att(crate::attachment::shown::class(plaintext));
+    }
     if !plaintext.starts_with(APP_RESERVED_PREFIX.as_bytes()) {
         return PayloadClass::Chat;
     }
     parse_frame(plaintext).map_or(PayloadClass::ReservedInvalid, PayloadClass::App)
+}
+
+/// Is this plaintext a row a chat shows: chat text, or an attachment's
+/// offer, which a chat shows as a line of words ([`chat_row_text`])?
+pub fn is_chat_row(plaintext: &[u8]) -> bool {
+    matches!(
+        classify(plaintext),
+        PayloadClass::Chat | PayloadClass::Att(AttClass::Offer(_))
+    )
+}
+
+/// What a chat shows for a chat row's plaintext from `name` (the reader's
+/// name for the friend): the text as it is, or, for an attachment's offer,
+/// its line of words. Never the offer as text.
+pub fn chat_row_text(plaintext: &[u8], name: &str) -> String {
+    let text = String::from_utf8_lossy(plaintext);
+    match crate::attachment::shown::shown(&text, name) {
+        crate::attachment::shown::Shown::Words(words) => words,
+        crate::attachment::shown::Shown::Text | crate::attachment::shown::Shown::Hidden => {
+            text.into_owned()
+        }
+    }
 }
 
 fn parse_frame(plaintext: &[u8]) -> Option<AppFrame> {
@@ -225,9 +257,12 @@ pub fn body_digest(body: &[u8]) -> [u8; 32] {
 }
 
 /// The composer guard: chat text may not start with a reserved prefix
-/// (`RVNAPP/`, or the groups' `RVNGRP/`).
+/// (`RVNAPP/`, the groups' `RVNGRP/`, or the attachments' `RVNATT/`: typed
+/// or pasted, such text would be an offer on the friend's side).
 pub fn chat_text_allowed(text: &str) -> bool {
-    !text.starts_with(APP_RESERVED_PREFIX) && !crate::group::is_group_text(text.as_bytes())
+    !text.starts_with(APP_RESERVED_PREFIX)
+        && !crate::group::is_group_text(text.as_bytes())
+        && !crate::attachment::offer::is_att_text(text.as_bytes())
 }
 
 // ------------------------------------------------------------------ receive
@@ -345,6 +380,9 @@ pub fn inbound_policy(
 ) -> InboundPolicy {
     let frame = match classify(plaintext) {
         PayloadClass::Chat => return InboundPolicy::Accept,
+        // An attachment text is never deferred: kept or dropped after the
+        // commit, and always answered (attachments design §8.4).
+        PayloadClass::Att(_) => return InboundPolicy::Accept,
         PayloadClass::ReservedInvalid => return InboundPolicy::Defer("app_reserved_invalid"),
         // Groups: the gate only; the group store is read after commit.
         PayloadClass::Group(_) if crate::group::group_live_enabled() => {
@@ -411,7 +449,9 @@ pub fn deliver_committed(
     plaintext: &[u8],
 ) -> Result<bool, String> {
     match classify(plaintext) {
-        PayloadClass::Chat => {
+        // An attachment's offer is kept as it came, like chat: a later
+        // build opens it, and readers show its line of words.
+        PayloadClass::Chat | PayloadClass::Att(AttClass::Offer(_)) => {
             if !received_again(sessions, sender_device, message_id, received_at_ms) {
                 crate::lan_dispatch::persist_lan_chat_history(
                     data_dir,
@@ -456,6 +496,20 @@ pub fn deliver_committed(
             &frame,
             received_at_ms,
         ),
+        // A friend's profile offer: kept silently, the newest only.
+        PayloadClass::Att(AttClass::Profile { seq }) => {
+            crate::lan_dispatch::persist_profile_offer(
+                data_dir,
+                sender_device,
+                message_id,
+                created_at_ms,
+                seq,
+                plaintext,
+            )?;
+            Ok(true)
+        }
+        // Any other attachment text: taken (ACKed) and dropped.
+        PayloadClass::Att(AttClass::Other) => Ok(true),
         // Unreachable after the policy; never shown, never ACKed.
         PayloadClass::ReservedInvalid => Ok(false),
     }
@@ -606,7 +660,7 @@ pub fn archive_inbox_row(
     row: &crate::indexed_session_store::EndpointInboxRow,
 ) -> Result<(), String> {
     match classify(&row.plaintext) {
-        PayloadClass::Chat
+        PayloadClass::Chat | PayloadClass::Att(AttClass::Offer(_))
             if received_again(
                 sessions,
                 &row.sender_device,
@@ -616,16 +670,26 @@ pub fn archive_inbox_row(
         {
             Ok(())
         }
-        PayloadClass::Chat => crate::lan_dispatch::persist_lan_chat_history(
+        PayloadClass::Chat | PayloadClass::Att(AttClass::Offer(_)) => {
+            crate::lan_dispatch::persist_lan_chat_history(
+                data_dir,
+                "in",
+                &row.sender_device,
+                &row.message_id,
+                row.created_at_ms,
+                "received",
+                &row.plaintext,
+            )
+        }
+        PayloadClass::Att(AttClass::Profile { seq }) => crate::lan_dispatch::persist_profile_offer(
             data_dir,
-            "in",
             &row.sender_device,
             &row.message_id,
             row.created_at_ms,
-            "received",
+            seq,
             &row.plaintext,
         ),
-        PayloadClass::ReservedInvalid => Ok(()),
+        PayloadClass::Att(AttClass::Other) | PayloadClass::ReservedInvalid => Ok(()),
         // Idempotent: a frame stored already changes nothing.
         PayloadClass::Group(frame) => crate::group::deliver(
             data_dir,
@@ -1173,5 +1237,142 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert_eq!(stored, expected, "{name}");
         }
+    }
+    #[test]
+    fn an_attachment_text_is_never_chat_text_and_never_deferred() {
+        use crate::attachment::offer::Kind;
+        use crate::attachment::testing::{photo_offer, profile_offer};
+        let dir = tempfile::tempdir().unwrap();
+        let friend = [7u8; 32];
+        let mid = [1u8; 16];
+        let photo = photo_offer();
+        assert_eq!(
+            classify(photo.as_bytes()),
+            PayloadClass::Att(AttClass::Offer(Kind::Photo))
+        );
+        assert_eq!(
+            classify(profile_offer(9).as_bytes()),
+            PayloadClass::Att(AttClass::Profile { seq: 9 })
+        );
+        for other in [
+            "RVNATT/",
+            "RVNATT/1 offer\n{}",
+            "RVNATT/2 anything",
+            "RVNATT/1 gone\n{}",
+        ] {
+            assert_eq!(
+                classify(other.as_bytes()),
+                PayloadClass::Att(AttClass::Other),
+                "{other}"
+            );
+        }
+        // Taken whatever it is: kept or dropped after the commit, and always
+        // answered. From a stranger to this profile too, as chat is.
+        for text in [photo.clone(), profile_offer(9), "RVNATT/x".to_string()] {
+            assert_eq!(
+                inbound_policy(dir.path(), &friend, &friend, &mid, text.as_bytes()),
+                InboundPolicy::Accept
+            );
+        }
+        // An offer is a chat row that says words; the others are no rows.
+        assert!(is_chat_row(photo.as_bytes()) && is_chat_row(b"hello"));
+        assert!(!is_chat_row(profile_offer(9).as_bytes()) && !is_chat_row(b"RVNATT/x"));
+        assert_eq!(
+            chat_row_text(photo.as_bytes(), "Max"),
+            "Max sent a photo. Update Raven to see it."
+        );
+        assert_eq!(chat_row_text(b"hello", "Max"), "hello");
+        // Nobody types or pastes one.
+        assert!(!chat_text_allowed(&photo));
+        assert!(!chat_text_allowed("RVNATT/anything"));
+        assert!(chat_text_allowed("rvnatt/ in lower case"));
+        assert!(chat_text_allowed("a RVNATT/ later in the text"));
+    }
+
+    #[test]
+    fn an_offer_is_kept_as_it_came_and_readers_see_its_words() {
+        use crate::attachment::testing::photo_offer;
+        use crate::chat_history::ChatHistory;
+        let dir = tempfile::tempdir().unwrap();
+        let friend = [7u8; 32];
+        book(dir.path(), &[(friend, true)], false);
+        let photo = photo_offer();
+        let keep = |mid: u8, text: &[u8]| {
+            crate::lan_dispatch::persist_lan_chat_history(
+                dir.path(),
+                "in",
+                &friend,
+                &[mid; 16],
+                10,
+                "received",
+                text,
+            )
+            .unwrap()
+        };
+        keep(1, photo.as_bytes());
+        keep(2, b"hello");
+        let raw = ChatHistory::load(dir.path()).unwrap();
+        assert_eq!(raw.entries.len(), 2);
+        let of = |h: &ChatHistory, mid: u8| {
+            h.entries
+                .iter()
+                .find(|e| e.message_id_hex == hex::encode([mid; 16]))
+                .cloned()
+                .unwrap()
+        };
+        let row = of(&raw, 1);
+        assert_eq!(row.body, photo, "kept as it came, for a later build");
+        assert_eq!(row.preview, "Friend sent a photo. Update Raven to see it.");
+        assert!(!row.is_hidden());
+        // What every reader gets: words, never the offer.
+        let shown = raw.shown();
+        assert_eq!(shown.entries.len(), 2);
+        let row = of(&shown, 1);
+        assert_eq!(row.body, "Friend sent a photo. Update Raven to see it.");
+        assert_eq!(row.preview, row.body);
+        assert!(shown.entries.iter().all(|e| !e.body.contains("RVNATT/")));
+        assert_eq!(of(&shown, 2).body, "hello");
+    }
+
+    #[test]
+    fn a_profile_offer_is_kept_silently_and_only_the_newest_of_a_friend() {
+        use crate::attachment::testing::profile_offer;
+        use crate::chat_history::{ChatHistory, ChatHistoryEntry};
+        let dir = tempfile::tempdir().unwrap();
+        let friend = [7u8; 32];
+        let other = [8u8; 32];
+        book(dir.path(), &[(friend, true), (other, true)], false);
+        let keep = |peer: &[u8; 32], mid: u8, seq: u64| {
+            crate::lan_dispatch::persist_profile_offer(
+                dir.path(),
+                peer,
+                &[mid; 16],
+                10,
+                seq,
+                profile_offer(seq).as_bytes(),
+            )
+            .unwrap()
+        };
+        keep(&friend, 1, 50);
+        keep(&friend, 2, 40); // older: dropped
+        keep(&friend, 3, 50); // the same order again: dropped
+        keep(&other, 4, 5);
+        let raw = ChatHistory::load(dir.path()).unwrap();
+        assert_eq!(raw.entries.len(), 2);
+        assert!(raw.entries.iter().all(ChatHistoryEntry::is_hidden));
+        assert!(raw.entries.iter().all(|e| e.preview == "Not shown"));
+        keep(&friend, 5, 60); // newer: in the older one's place
+        let raw = ChatHistory::load(dir.path()).unwrap();
+        assert_eq!(raw.entries.len(), 2);
+        let mine: Vec<_> = raw
+            .entries
+            .iter()
+            .filter(|e| e.peer_pub_hex == hex::encode(friend))
+            .collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].message_id_hex, hex::encode([5u8; 16]));
+        assert_eq!(mine[0].body, profile_offer(60));
+        // No reader shows, lists or counts them.
+        assert!(raw.shown().entries.is_empty());
     }
 }

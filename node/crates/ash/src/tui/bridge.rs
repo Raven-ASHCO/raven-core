@@ -1439,7 +1439,7 @@ pub(super) fn history_path(data_dir: &Path) -> PathBuf {
 /// exists. An unreadable history is an error, never an empty one.
 pub(super) fn load_history(data_dir: &Path) -> Result<Vec<ChatHistoryEntry>, String> {
     ChatHistory::load(data_dir)
-        .map(|history| history.without_group_copies().entries)
+        .map(|history| history.shown().entries)
         .map_err(|e| sanitize_terminal_line(&e.to_string()))
 }
 

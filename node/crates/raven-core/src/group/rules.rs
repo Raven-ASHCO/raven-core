@@ -473,6 +473,18 @@ fn apply_msg(
         }
         return Applied::change(false);
     }
+    // An attachment's offer is a message like any other: its body is kept
+    // as signed, and readers show its line of words. Any other `RVNATT/`
+    // body (a profile offer, a frame of tomorrow, a broken offer) is no
+    // message: taken, never stored or shown (attachments design §8.4). Its
+    // key is kept, so it cannot come back as new.
+    if crate::attachment::shown::is_silent(msg.body.as_bytes()) {
+        let from = hex::encode(msg.from);
+        if g.author_share(&from, now_ms) < g.share() {
+            g.seen.push(&from, &id, msg.sent_ms);
+        }
+        return Applied::change(false);
+    }
     g.messages.push(StoredMsg {
         id: id.clone(),
         from: hex::encode(msg.from),
@@ -1030,7 +1042,9 @@ pub fn send(
     now_ms: u64,
 ) -> Result<SendReport, GroupError> {
     gate()?;
-    if !body_ok(body) {
+    // Text that starts with `RVNATT/` is never a message someone wrote:
+    // typed or pasted, it would be an offer on every member's side.
+    if !body_ok(body) || crate::attachment::offer::is_att_text(body.as_bytes()) {
         return Err(GroupError::BadBody);
     }
     let me = identity.public_key_bytes();

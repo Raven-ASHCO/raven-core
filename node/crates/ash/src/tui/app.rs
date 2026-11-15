@@ -368,7 +368,7 @@ pub(super) const EXT_DELIVERED_FIRST: &str = "before it could be cancelled";
 /// The composer's refusals, shown over it: no send while one holds.
 pub(super) const CONTROL_REFUSED: &str =
     "This message has control characters Raven can't send. Remove them and try again.";
-pub(super) const RESERVED_REFUSED: &str = "Messages can't start with RVNAPP/ or RVNGRP/.";
+pub(super) const RESERVED_REFUSED: &str = "Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/.";
 /// AF-1's share box, when no background program can receive for a reason
 /// of its own (the copy adds '. [S] Show my invite anyway').
 pub(super) const NO_PROGRAM_PATH: &str =

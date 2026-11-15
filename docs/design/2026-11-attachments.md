@@ -11,6 +11,7 @@
 | **Owner constraints** | No Raven server (D1). Everything private and encrypted: nothing a third party can read, no address in anything copied around. No new crate or package without approval. Plain words in the apps. |
 | **Tree read** | raven-core `tor-speed/integration` 9187bbf (main plus the Tor speed work); raven-macos `ui/macos-integration`; raven-ios; raven-core-ios `feature/ios-embedded`; raven-windows; raven-linux. |
 | **Date** | 2026-11-05 |
+| **Amended** | 2026-11-06, for profile pictures (`docs/design/2026-11-profile-pictures.md`): phase 1a also learns the offer kind `profile` (§8.1, §8.4, §21, §22), which §8.3 names as its one exception; the composer guard covers `RVNATT/` (§8.4); a hello without bit 12 clears a friend's record (§10.1); one more write path in §8.2. §25.3 lists them. |
 
 Path shorthand: `core/` = `node/crates/raven-core/src/`, `rn/` =
 `node/crates/raven-node/src/`, `cl/` = `node/crates/raven-client/src/`,
@@ -287,7 +288,7 @@ JSON with unknown fields refused.
 
 | Kind | Carries | Size |
 |---|---|---|
-| `offer` | version, handle, kind (photo, voice, file), chunk count, padded and true length, MIME type, name (files), caption, preview, width and height or length and levels, then key K and root R, and last a `pad` member of zeros | exactly 8,192 B |
+| `offer` | version, handle, kind (photo, voice, file, profile), chunk count, padded and true length, MIME type, name (files), caption, preview, width and height or length and levels, then key K and root R, and last a `pad` member of zeros | exactly 8,192 B |
 | `gone` | handle: the author deleted the attachment before the friend had all of it | small |
 | `ref` | stored only, never sent: the offer without K and R (handle, kind, sizes, MIME type, name, caption, preview, levels) | under 8,192 B |
 
@@ -302,6 +303,12 @@ JSON with unknown fields refused.
   pad and put it back byte for byte (§13).
 - **Why 8,192.** It is the group body limit (`core/group.rs:97`), so the same
   offer is a group message as it is (§13).
+- **Profile pictures.** An offer may also have the kind `profile`: a
+  friend's picture in one chunk, in chats only, never shown as a message. It
+  adds two fields, `seq` and `held`, and an empty form that means No
+  picture. Unlike other offers it is accepted from any current, unblocked
+  contact, verified or not, and kept hidden until the receiver verifies the
+  sender. The design is `docs/design/2026-11-profile-pictures.md`.
 
 ### 8.2 Sending an offer
 The offer is sealed like a chat message, and the outbound stage keeps its
@@ -310,16 +317,21 @@ exact text for re-send (`core/lan_dispatch.rs:381-421`, `core/horizon.rs:903`,
 history write goes through `persist_lan_chat_history`
 (`core/lan_dispatch.rs:232-255`), including the paths that write a staged
 body back: delivery (`core/outbox.rs:498-509, 567-571, 857-891`), failure,
-expiry and cancel (`core/outbox.rs:603-632`), and the start-up reconcile
-(`core/lan_dispatch.rs:498`). So that function turns any `RVNATT/` body into
-its `ref` form and sets the row's `preview`, today the first 120 characters
-of the body (`core/lan_dispatch.rs:245`), to "Photo", "Voice message 0:42"
-or the file name. Rows that a phase 1a build kept as they came are
-converted the same way when the attachment build first opens the history.
+expiry and cancel (`core/outbox.rs:603-632`), the start-up reconcile
+(`core/lan_dispatch.rs:498`), and the session reset's `settle_history`
+(`core/session_reset.rs:993-1011` at 18f98ef). So that function turns any
+`RVNATT/` body into its `ref` form and sets the row's `preview`, today the
+first 120 characters of the body (`core/lan_dispatch.rs:245`), to "Photo",
+"Voice message 0:42" or the file name. Rows that a phase 1a build kept as
+they came are converted the same way when the attachment build first opens
+the history.
 
 ### 8.3 Receiving an offer
 The policy accepts an offer from a verified friend on metadata only, inside
 the session store transaction, as it does chat (`core/app_channel.rs:330-352`).
+A `profile` offer is the one exception: it is accepted from any current,
+unblocked contact and kept hidden until the receiver verifies the sender
+(§8.1).
 After the commit raven-node writes the attachment row (with K and R) and a
 history row whose body is the `ref` form, and only then ACKs
 (`core/lan_dispatch.rs:2529-2547`). The branch is new in five places:
@@ -340,8 +352,23 @@ compared with that: only a different offer under the same id is a conflict.
   so a later build can open it, and shows (also as the chat list preview) as
   "{name} sent a photo. Update
   Raven to see it." (or a voice message, or a file). It is never shown as
-  text and never deferred. Any other `RVNATT/` kind is ACKed and dropped.
-  Without this step, today's builds would show an offer as text.
+  text and never deferred. Any other `RVNATT/` kind, except `profile`
+  (next), is ACKed and dropped. Without this step, today's builds would show
+  an offer as text.
+- **Profile offers in phase 1a.** An offer whose kind is `profile` (§8.1) is
+  ACKed and kept silently, so a later build can open it: one hidden row per
+  friend, a newer `seq` replacing the older. It is never shown as text,
+  never as a placeholder bubble, and never in the chat list, an unread count
+  or a notice; it is never deferred. In a group message body it is invalid:
+  ACKed and dropped. (`docs/design/2026-11-profile-pictures.md` §9.5.)
+- **The composer guard.** From phase 1a, `messages.send` and `groups.send`
+  refuse text that starts with `RVNATT/`, typed or pasted, as they refuse
+  `RVNAPP/` and `RVNGRP/` today; only `attachments.send` builds such text.
+  At 18f98ef the guard reserves only those two
+  (`chat_text_allowed`, `core/app_channel.rs:229`), and `groups.send` checks
+  only `body_ok` (`core/group.rs:722`). Without it, pasted text would become
+  an offer on the friend's side; a pasted profile offer would even put its
+  preview on the friend's screen as the sender's picture.
 - **Then bit 12.** A sender sends offers and chunks only to friends whose
   node announced bit 12 (§10.1).
 - **Groups** cannot rely on bit 12 for every member (§13); there the
@@ -410,7 +437,10 @@ chunks per pull dial). Bigger items need the link changes of phase 2.
 - raven-node remembers, per verified friend, the last time it saw bits 12
   and 13 on an authenticated link. Senders and apps read that record; the
   release capability floor stays as it is. A friend whose node fails a RAX1
-  exchange loses its record until it announces the bit again.
+  exchange loses its record until it announces the bit again. A hello on an
+  authenticated link that carries caps without bit 12 (or 13) clears that
+  bit's record: the friend went back to an older build. A LAN listener sends
+  no caps, so its silence clears nothing.
 - A friend not reached since it updated has no record yet. The app says so
   in plain words and sends once the record exists.
 
@@ -864,7 +894,10 @@ read receipts.
   is not an id conflict; a relayed push stays under 2 MiB; LACK's statuses
   keep a file at Sent; `attachments.sqlite` goes through the key rotation
   pass; an iPhone leaving the screen mid push; a phase 1a build shows the
-  placeholder and never defers.
+  placeholder, keeps a profile offer silently (one per friend, never in a
+  chat view, the chat list, an unread count or a notice) and never defers;
+  the composer guard refuses typed or pasted `RVNATT/` text in chats and
+  groups.
 - **Carrier matrix and fault matrix** rows for each carrier, and a three
   machine field run.
 - **Apps.** UI tests (send a photo, record and play a voice message, save a
@@ -883,7 +916,7 @@ gate.
 | Phase | What | Gate |
 |---|---|---|
 | 0 | Measure Tor and LAN (§21). No product change. | none |
-| 1a | Every build learns `RVNATT/`: offers are kept and shown as a placeholder, never as text, never deferred. Ships alone, first. | none: it only stops a frame from showing as text |
+| 1a | Every build learns `RVNATT/`: offers are kept and shown as a placeholder, never as text, never deferred; a `profile` offer is kept silently and never shown (§8.4); typed `RVNATT/` text is refused. Ships alone, first. | none: it only stops a frame from showing as text |
 | 1b | Offers and live chunks up to 1 MiB: photos and voice notes, chats and groups, bit 12. macOS and iPhone first, Windows and Linux next. Waits until 1a has spread. | `ATTACHMENTS_PRODUCTION_ENABLED` |
 | 1c | Mail friends hold chunks: RFC1 ops 0x09 to 0x0B, chats only, up to 1 MiB. | `ATTACHMENT_CUSTODY_PRODUCTION_ENABLED` |
 | 2 | Transfer links: the link changes of §10.5; files and big photos up to 64 MB (16 MB in groups); two links; moving to LAN mid transfer; bit 13. | `ATTACHMENT_EXCHANGE_PRODUCTION_ENABLED` |
@@ -968,3 +1001,50 @@ fetches a web page, which leaks).
 | 11 | The group body limit is at `core/group.rs:97`, not `:96` | Fixed (§8.1, §13) |
 | 12 | A 512 KiB read cannot cross the node's 256 KiB IPC | The engine serves `attachments.read` itself (§15) |
 | 13 | A 300 KB photo is 5 chunks, not 6; the Tor rate is about 475 KB/s, not 450 | Fixed (§2, §9, §11) |
+
+### 25.3 Third check, 2026-11-06: amendments for profile pictures
+
+Read against raven-core 18f98ef while writing
+`docs/design/2026-11-profile-pictures.md`.
+
+| # | Found | Now |
+|---|---|---|
+| 1 | Phase 1a did not know the `profile` kind: nothing kept such an offer for a later build, and nothing kept it out of chat views and notices | Kept silently, one hidden row per friend, never shown (§8.1, §8.4, §21, §22) |
+| 2 | The composer guard reserves only `RVNAPP/` and `RVNGRP/`, and `groups.send` checks only `body_ok`: pasted `RVNATT/` text would become an offer on a 1a build | Refused in chats and groups from phase 1a (§8.4) |
+| 3 | A friend's bit 12 record was never cleared, so a friend who went back to an older build kept getting offers | A hello with caps but without the bit clears it (§10.1) |
+| 4 | §8.2's list of write paths missed the session reset's `settle_history` | Added; it also goes through `persist_lan_chat_history`, so the rule holds (§8.2) |
+| 5 | §8.3 accepts offers only from verified friends, but verification is one sided, so a friend's picture could never be waiting when the words match | The `profile` kind is the one exception (§8.1, §8.3) |
+
+---
+
+## 26. What is built (2026-11-15)
+
+On the branch `feature/attachments-phase1`, on top of the 3.1 fix line:
+
+- **The blob and the offer** (§7, §8) as code in `core/attachment/`: `blob.rs`
+  (Padmé, sealed chunks, the tree, the handle and the custody ids, a profile
+  picture as one whole chunk) and `offer.rs` (the 8,192-byte offer with its
+  kinds, the `gone` frame, the stored `ref` form). The member names are
+  fixed there: `v`, `handle`, `kind`, `seq`, `held`, `chunks`, `padded_len`,
+  `true_len`, `mime`, `name`, `caption`, `width`, `height`, `duration_ms`,
+  `levels`, `preview`, `key`, `root`, `pad`. An offer is read only in the
+  one byte form the encoder writes. The additional data of a chunk is
+  `"rvnatt/1" || padded_len u64 || chunk_count u32 || index u32`, big
+  endian. `protocol/RAVEN_ATTACHMENT_V1.md` is still to be written from the
+  code.
+- **Phase 1a** (§8.4) in the receive path: `app_channel::classify` knows
+  `RVNATT/` (`PayloadClass::Att`); an offer of a photo, a voice note or a
+  file is accepted, ACKed and kept in its history row as it came, and every
+  reader gets a line of words in its place through `ChatHistory::shown`
+  ("Max sent a photo. Update Raven to see it."); a profile offer is kept in
+  one hidden row per friend, the newest `seq` only
+  (`ChatHistory::keep_newest_profile_offer_persisted`), with no arrival
+  note; any other `RVNATT/` text is ACKed and dropped. In a group the offer
+  is a message body kept as signed and shown as the same words
+  (`group::store::shown_body`); any other `RVNATT/` body is taken and not
+  stored. `chat_text_allowed` and `group::send` refuse text that starts
+  with `RVNATT/`. No gate: this step only stops a frame from showing as
+  text.
+
+Not built yet: the gates, the store, the link frames, the app API, the
+custody ops, and everything in the apps.

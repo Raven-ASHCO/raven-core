@@ -448,13 +448,16 @@ fn accept_message(
                 Err(_) => return RelayedOutcome::Retry(RetryScope::Item, "HISTORY"),
             }
             group = crate::group::is_group_text(plaintext);
-            crate::arrivals::note(crate::arrivals::Arrival {
-                sender: cert.user_ed_pub,
-                message_id: *message_id,
-                via: crate::arrivals::ArrivedVia::Keeper,
-                at_ms: *received_at_ms,
-                group,
-            });
+            // What no chat shows or counts is no arrival either.
+            if !crate::attachment::shown::is_silent(plaintext) {
+                crate::arrivals::note(crate::arrivals::Arrival {
+                    sender: cert.user_ed_pub,
+                    message_id: *message_id,
+                    via: crate::arrivals::ArrivedVia::Keeper,
+                    at_ms: *received_at_ms,
+                    group,
+                });
+            }
             (*session_id, *object_digest, *message_id, false)
         }
         EndpointAcceptance::Duplicate {

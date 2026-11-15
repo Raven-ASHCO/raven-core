@@ -227,6 +227,43 @@ fn contact_label_for_pub(data_dir: &Path, pub_hex: &str) -> Result<(String, Stri
     Ok((String::new(), String::new()))
 }
 
+/// The list text of a history row no reader shows (a friend's profile
+/// offer): fixed words, so nothing of the offer is copied into it.
+const HIDDEN_ROW_PREVIEW: &str = "Not shown";
+
+/// Keeps a friend's profile offer silently, as it came, so a build with
+/// profile pictures can open it: one hidden row per friend, a newer `seq`
+/// replacing the older; an offer that is not newer is dropped (attachments
+/// design §8.4; profile pictures design §9.5). No reader shows the row
+/// ([`ChatHistoryEntry::is_hidden`]).
+pub fn persist_profile_offer(
+    data_dir: &Path,
+    peer_pub: &[u8; 32],
+    message_id: &[u8; 16],
+    created_at_ms: u64,
+    seq: u64,
+    plaintext: &[u8],
+) -> Result<(), String> {
+    let peer_pub_hex = hex::encode(peer_pub);
+    let (peer_petname, peer_tag) = contact_label_for_pub(data_dir, &peer_pub_hex)?;
+    let entry = ChatHistoryEntry {
+        message_id_hex: hex::encode(message_id),
+        direction: "in".into(),
+        peer_petname,
+        peer_tag,
+        peer_pub_hex,
+        created_at_ms,
+        delivery: "received".into(),
+        preview: HIDDEN_ROW_PREVIEW.to_string(),
+        body: String::from_utf8_lossy(plaintext).into_owned(),
+        stored_at_ms: None,
+        id_conflict: false,
+    };
+    ChatHistory::keep_newest_profile_offer_persisted(data_dir, entry, seq)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Persist a LAN message into durable ChatHistory (full body + short preview).
 /// Deduped/upserted by (peer_pub, direction, message_id). Failures must be propagated.
 pub fn persist_lan_chat_history(
@@ -242,7 +279,14 @@ pub fn persist_lan_chat_history(
     let (peer_petname, peer_tag) = contact_label_for_pub(data_dir, &peer_pub_hex)?;
     let text = String::from_utf8_lossy(plaintext);
     let body = text.as_ref().to_string();
-    let preview: String = body.chars().take(120).collect();
+    // The list text: the body's start, or for an attachment's offer its
+    // line of words (the offer itself is never shown as text; attachments
+    // design §8.2, §8.4).
+    let preview: String = match crate::attachment::shown::shown(&body, &peer_petname) {
+        crate::attachment::shown::Shown::Text => body.chars().take(120).collect(),
+        crate::attachment::shown::Shown::Words(words) => words.chars().take(120).collect(),
+        crate::attachment::shown::Shown::Hidden => HIDDEN_ROW_PREVIEW.to_string(),
+    };
     let entry = ChatHistoryEntry {
         message_id_hex: hex::encode(message_id),
         direction: direction.into(),
@@ -2546,7 +2590,9 @@ fn handle_indexed_message(
             })? {
                 return Ok(Vec::new());
             }
-            if let Some(via) = arrived {
+            // What no chat shows or counts is no arrival either (a friend's
+            // profile offer, a dropped attachment text).
+            if let Some(via) = arrived.filter(|_| !crate::attachment::shown::is_silent(plaintext)) {
                 crate::arrivals::note(crate::arrivals::Arrival {
                     sender: peer.cert.user_ed_pub,
                     message_id: *message_id,

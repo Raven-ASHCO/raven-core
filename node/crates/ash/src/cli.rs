@@ -4639,8 +4639,7 @@ fn cmd_messages(data_dir: &Path) {
             Err(e) => eprintln!("queue open error: {e}"),
         }
     }
-    match raven_core::ChatHistory::load(data_dir).map(raven_core::ChatHistory::without_group_copies)
-    {
+    match raven_core::ChatHistory::load(data_dir).map(raven_core::ChatHistory::shown) {
         Ok(hist) if hist.entries.is_empty() => {
             println!("{C_DIM}No messages stored on this computer yet.{C_RESET}");
         }
@@ -15366,10 +15365,13 @@ fn received_history(data_dir: &Path) -> Result<Vec<raven_core::ChatHistoryEntry>
     }
     raven_core::ChatHistory::load(data_dir)
         .map(|history| {
+            // As chat views show it: no hidden rows, and an attachment's
+            // row says its line of words.
             history
+                .shown()
                 .entries
                 .into_iter()
-                .filter(|entry| entry.direction == "in" && !entry.is_group_copy())
+                .filter(|entry| entry.direction == "in")
                 .collect()
         })
         .map_err(|e| e.to_string())
@@ -15444,7 +15446,8 @@ fn inbox_lines(
             InboxLine {
                 sender: row.sender_device,
                 message_id: row.message_id,
-                body: row.plaintext,
+                // An attachment's offer says its line of words, never itself.
+                body: raven_core::app_channel::chat_row_text(&row.plaintext, "").into_bytes(),
                 received_at_ms: row.received_at_ms,
                 copy: if copy == InboxCopy::Again && first_kept {
                     InboxCopy::WithCopies
@@ -15511,17 +15514,14 @@ fn cmd_endpoint_inbox(data_dir: &Path) -> Result<(), String> {
         .rows
         .into_iter()
         .filter(|row| {
+            // Not a group frame, and not an attachment text no chat shows
+            // (a friend's profile offer).
             !matches!(
                 raven_core::app_channel::classify(&row.plaintext),
                 raven_core::app_channel::PayloadClass::Group(_)
-            )
+            ) && !raven_core::attachment::shown::is_silent(&row.plaintext)
         })
-        .partition(|row| {
-            matches!(
-                raven_core::app_channel::classify(&row.plaintext),
-                raven_core::app_channel::PayloadClass::Chat
-            )
-        });
+        .partition(|row| raven_core::app_channel::is_chat_row(&row.plaintext));
     let group_lines = group_cli::inbox_lines(data_dir);
     let agents = agent.len();
     let agent_note = move || {

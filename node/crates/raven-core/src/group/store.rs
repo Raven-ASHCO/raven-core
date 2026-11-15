@@ -1723,8 +1723,35 @@ fn summary(g: &GroupRecord, me: Option<&Key>) -> Option<GroupSummary> {
         members: roster.members.len(),
         unread,
         last_ms: last.map_or(g.updated_ms, |m| m.received_ms),
-        last: last.and_then(|m| Some((hex_key(&m.from)?, m.body.clone()))),
+        last: last.and_then(|m| Some((hex_key(&m.from)?, shown_body(m, Some(&roster))?))),
     })
+}
+
+/// What a chat shows for a stored message's body: the body, or for an
+/// attachment's offer its line of words with the roster's name for its
+/// author; `None` for a body no chat shows (attachments design §8.4). The
+/// stored body stays as signed.
+pub(crate) fn shown_body(m: &StoredMsg, roster: Option<&GroupState>) -> Option<String> {
+    use crate::attachment::shown::{shown, Shown};
+    let name = || {
+        roster
+            .and_then(|r| {
+                r.members
+                    .iter()
+                    .find(|member| hex::encode(member.key) == m.from)
+                    .map(|member| member.label.trim().to_string())
+            })
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "A member".to_string())
+    };
+    match shown(&m.body, "") {
+        Shown::Text => Some(m.body.clone()),
+        Shown::Hidden => None,
+        Shown::Words(_) => match shown(&m.body, &name()) {
+            Shown::Words(words) => Some(words),
+            Shown::Text | Shown::Hidden => None,
+        },
+    }
 }
 
 fn me_of(file: &GroupsFile, data_dir: &Path) -> Option<Key> {
@@ -1783,6 +1810,7 @@ pub fn history(
 ) -> Result<Vec<MessageView>, GroupError> {
     let file = load(data_dir)?;
     let g = file.shown(id).ok_or(GroupError::NotFound)?;
+    let roster = g.roster();
     let rows: Vec<&StoredMsg> = g
         .messages
         .iter()
@@ -1801,7 +1829,7 @@ pub fn history(
                 id: hex_n::<16>(&m.id)?,
                 from: hex_key(&m.from)?,
                 mine: m.mine,
-                body: m.body.clone(),
+                body: shown_body(m, roster.as_ref())?,
                 sent_ms: m.sent_ms,
                 received_ms: m.received_ms,
                 via: hex_key(&m.via),

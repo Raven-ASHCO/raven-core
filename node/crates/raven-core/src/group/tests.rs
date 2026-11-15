@@ -1156,7 +1156,76 @@ fn line_states_follow_history_and_delivered_is_final() {
 // ------------------------------------------------------------------ guards
 
 #[test]
+fn an_attachments_offer_is_a_message_shown_as_words_and_no_other_attachment_text_is_one() {
+    use crate::attachment::testing::{photo_offer, profile_offer};
+    let mut file = joined(2, &roster(1, &[2, 3], 1));
+    let me = key(2);
+    let none = HashSet::new();
+    let offer = photo_offer();
+    assert!(body_ok(&offer), "an offer is a group body as it is");
+    apply(
+        &mut file,
+        &me,
+        &key(3),
+        &GroupFrame::Msg(msg(3, 1, &offer, &[])),
+        &none,
+        NOW,
+    );
+    assert_eq!(group(&file).messages.len(), 1);
+    let stored = &group(&file).messages[0];
+    assert_eq!(stored.body, offer, "kept as signed");
+    let state = group(&file).roster();
+    assert_eq!(
+        store::shown_body(stored, state.as_ref()).as_deref(),
+        Some("member 3 sent a photo. Update Raven to see it.")
+    );
+    assert_eq!(
+        store::shown_body(stored, None).as_deref(),
+        Some("A member sent a photo. Update Raven to see it.")
+    );
+    // A friend's profile offer, a gone frame and a text of tomorrow are no
+    // messages: taken, never stored.
+    let silent = [
+        profile_offer(7),
+        crate::attachment::offer::gone_text(&[1; 16]),
+        "RVNATT/2 x".to_string(),
+    ];
+    for (n, body) in silent.iter().enumerate() {
+        let mut m = msg(3, 1, body, &[]);
+        m.id = [100 + n as u8; 16];
+        m.sign(&id(3));
+        assert!(m.verify(), "{body}");
+        apply(&mut file, &me, &key(3), &GroupFrame::Msg(m), &none, NOW);
+        assert_eq!(group(&file).messages.len(), 1, "{body}");
+    }
+}
+
+#[test]
+fn nobody_sends_an_attachment_text_as_a_group_message() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _lab = Lab::on();
+    let dir = profile(1);
+    let d = dir.path();
+    write_friends(d, &[(2, "Bea")]);
+    let gid = create(d, &id(1), "Team", &[(key(2), "Bea".into())], NOW).unwrap();
+    for body in [
+        crate::attachment::testing::photo_offer(),
+        "RVNATT/anything".to_string(),
+    ] {
+        assert_eq!(
+            send(d, &id(1), &gid, &body, NOW).err(),
+            Some(GroupError::BadBody),
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn chat_composers_refuse_the_reserved_prefix() {
+    assert!(!crate::app_channel::chat_text_allowed("RVNATT/1 offer\n{}"));
+    assert!(!crate::app_channel::chat_text_allowed("RVNATT/anything"));
     assert!(!crate::app_channel::chat_text_allowed("RVNGRP/1 msg\n{}"));
     assert!(!crate::app_channel::chat_text_allowed("RVNGRP/anything"));
     assert!(!crate::app_channel::chat_text_allowed("RVNAPP/1 x"));

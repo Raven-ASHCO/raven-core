@@ -1851,7 +1851,7 @@ fn dial_after_tor_check<T>(
 
 /// Refusal for chat text that starts with the app channel's reserved prefix.
 pub(crate) const RESERVED_PREFIX_REFUSAL: &str =
-    "NOT SENT: messages may not start with the reserved prefix RVNAPP/ or RVNGRP/";
+    "NOT SENT: messages may not start with the reserved prefix RVNAPP/, RVNGRP/ or RVNATT/";
 
 pub fn run_pair_init_and_send_routes(
     data_dir: &Path,

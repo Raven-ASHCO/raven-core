@@ -9,3 +9,37 @@
 
 pub mod blob;
 pub mod offer;
+pub mod shown;
+
+/// Offers for the tests of the code that takes, keeps and shows them.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::blob::{Key, Shape, KEY_LEN};
+    use super::offer::{BlobRef, Offer};
+
+    /// A photo's offer, as it travels.
+    pub(crate) fn photo_offer() -> String {
+        let blob = BlobRef {
+            shape: Shape::of(200_000).unwrap(),
+            key: Key::from_bytes([1u8; KEY_LEN]),
+            root: [2u8; 32],
+        };
+        Offer::photo(blob, "", 800, 600, &[1, 2, 3])
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    /// A profile picture's offer with this `seq`, as it travels.
+    pub(crate) fn profile_offer(seq: u64) -> String {
+        let blob = BlobRef {
+            shape: Shape::one_chunk(20_000).unwrap(),
+            key: Key::from_bytes([3u8; KEY_LEN]),
+            root: [4u8; 32],
+        };
+        Offer::profile(blob, seq, 0, 384, &[9])
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+}

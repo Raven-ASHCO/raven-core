@@ -4355,7 +4355,7 @@ pub(crate) fn talked_before(remembered: bool, history: impl FnOnce() -> bool) ->
 /// unreadable one: no).
 pub(crate) fn history_with(data_dir: &Path, peer_pub_hex: &str) -> bool {
     ChatHistory::load(data_dir)
-        .is_ok_and(|h| h.for_peer(peer_pub_hex).iter().any(|e| !e.is_group_copy()))
+        .is_ok_and(|h| h.for_peer(peer_pub_hex).iter().any(|e| !e.is_hidden()))
 }
 
 impl SendCtx {
@@ -6604,7 +6604,7 @@ pub fn cmd_outbox(data_dir: &Path, cmd: OutboxCmd) -> Result<(), String> {
                 .as_ref()
                 .map(history_previews)
                 .unwrap_or_default();
-            let history = full_history.map(ChatHistory::without_group_copies);
+            let history = full_history.map(ChatHistory::shown);
             if let Some(history) = &history {
                 let ran_out =
                     ran_out_from_history(&history.entries, &items, contact_pub_hex.as_deref(), now);
@@ -7415,14 +7415,13 @@ fn peek_endpoint_inbox_for_contact(
     for row in rows {
         cursor_after = row.position;
         // An agent payload (app channel) belongs to RDAP: step past it,
-        // never print it, never put it in chat history.
-        if !matches!(
-            raven_core::app_channel::classify(&row.plaintext),
-            raven_core::app_channel::PayloadClass::Chat
-        ) {
+        // never print it, never put it in chat history. An attachment's
+        // offer is a chat row that says its line of words; any other
+        // attachment text is no row at all.
+        if !raven_core::app_channel::is_chat_row(&row.plaintext) {
             continue;
         }
-        let preview = String::from_utf8_lossy(&row.plaintext);
+        let preview = raven_core::app_channel::chat_row_text(&row.plaintext, "");
         let again = record_received_chat(data_dir, &store, &peer, &row)?;
         lines.push(InboxLine {
             message_id: row.message_id,
@@ -8022,7 +8021,7 @@ pub fn cmd_chat_session(
     // message that came in while the chat was closed is in the dump *and* still
     // after the saved inbox cursor: without this it was shown twice.
     let mut shown: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
-    match ChatHistory::load(data_dir).map(ChatHistory::without_group_copies) {
+    match ChatHistory::load(data_dir).map(ChatHistory::shown) {
         Ok(history) => {
             let rows = history.for_peer(contact_pub);
             peer_history_nonempty = !rows.is_empty();

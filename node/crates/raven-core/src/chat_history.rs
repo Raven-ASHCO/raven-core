@@ -115,6 +115,24 @@ impl ChatHistoryEntry {
         crate::group::is_group_text(self.body.as_bytes())
     }
 
+    /// A row no chat view shows, lists or counts: a group copy, or an
+    /// attachment text that is never a message (a friend's profile offer,
+    /// kept for a later build; attachments design §8.4).
+    pub fn is_hidden(&self) -> bool {
+        self.is_group_copy() || crate::attachment::shown::is_silent(self.body.as_bytes())
+    }
+
+    /// The `seq` of the friend's profile offer this hidden row keeps.
+    fn profile_offer_seq(&self) -> Option<u64> {
+        if self.direction != "in" || !crate::attachment::offer::is_att_text(self.body.as_bytes()) {
+            return None;
+        }
+        match crate::attachment::shown::class(self.body.as_bytes()) {
+            crate::attachment::shown::AttClass::Profile { seq } => Some(seq),
+            _ => None,
+        }
+    }
+
     /// An outbound row whose message is among `waiting` (still to be sent).
     pub fn is_waiting(&self, waiting: &std::collections::HashSet<[u8; 16]>) -> bool {
         self.direction == "out"
@@ -1104,11 +1122,56 @@ impl ChatHistory {
         });
     }
 
-    /// The history as chat views show it: without group copies
-    /// ([`ChatHistoryEntry::is_group_copy`]).
-    pub fn without_group_copies(mut self) -> Self {
-        self.entries.retain(|e| !e.is_group_copy());
+    /// The history as chat views show it: without the rows no view shows
+    /// ([`ChatHistoryEntry::is_hidden`]: group copies, a friend's profile
+    /// offer), and with an attachment's row saying its line of words in
+    /// place of its offer, which is never shown as text (attachments design
+    /// §8.4). A copy for reading: it is never saved back.
+    pub fn shown(mut self) -> Self {
+        self.entries.retain(|e| !e.is_hidden());
+        for entry in &mut self.entries {
+            if let crate::attachment::shown::Shown::Words(words) =
+                crate::attachment::shown::shown(&entry.body, &entry.peer_petname)
+            {
+                entry.preview = truncate_sanitized(&words, MAX_PREVIEW_CHARS);
+                entry.body = words;
+            }
+        }
         self
+    }
+
+    /// Keeps a friend's profile offer row (`entry`, its offer's order
+    /// `seq`) only when it is newer than the one held from that friend, and
+    /// then in its place: one hidden row per friend. Whether it was kept.
+    /// Under the history's inter-process lock, like every write.
+    pub fn keep_newest_profile_offer_persisted(
+        data_dir: &Path,
+        mut entry: ChatHistoryEntry,
+        seq: u64,
+    ) -> Result<bool, ChatHistoryError> {
+        let protector = PlatformChatHistoryProtector::default();
+        entry.stored_at_ms = (crate::privacy::mode(data_dir) == crate::at_rest::Mode::Sealed)
+            .then(crate::clock::now_ms);
+        prepare_history(data_dir, &protector, true);
+        let _lock = HistoryLock::acquire(data_dir)?;
+        let mut history = Self::load_unlocked(data_dir, &protector)?;
+        let peer = entry.peer_pub_hex.to_lowercase();
+        let held = |e: &ChatHistoryEntry| {
+            e.peer_pub_hex.eq_ignore_ascii_case(&peer) && e.profile_offer_seq().is_some()
+        };
+        let newest = history
+            .entries
+            .iter()
+            .filter(|e| held(e))
+            .filter_map(ChatHistoryEntry::profile_offer_seq)
+            .max();
+        if newest.is_some_and(|have| have >= seq) {
+            return Ok(false);
+        }
+        history.entries.retain(|e| !held(e));
+        history.upsert(entry);
+        history.save_unlocked(data_dir, &protector)?;
+        Ok(true)
     }
 
     pub fn for_peer<'a>(&'a self, pub_hex: &str) -> Vec<&'a ChatHistoryEntry> {

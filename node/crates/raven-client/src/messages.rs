@@ -2267,7 +2267,7 @@ fn check_text(text: &str) -> Result<(), ApiError> {
     if !raven_core::app_channel::chat_text_allowed(text) {
         return Err(ApiError::new(
             code::BAD_REQUEST,
-            "Messages can't start with RVNAPP/ or RVNGRP/. Change how it starts.",
+            "Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/. Change how it starts.",
             "reserved prefix",
         ));
     }

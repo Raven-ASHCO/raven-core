@@ -682,7 +682,7 @@ impl Inner {
         };
         let entries = Arc::new(
             ChatHistory::load(dir)
-                .map(|h| h.without_group_copies().entries)
+                .map(|h| h.shown().entries)
                 .map_err(|e| history_error(dir, &e.to_string()))?,
         );
         self.keep_cached(|c| {

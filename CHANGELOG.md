@@ -60,6 +60,15 @@ independent review.
   be forgotten.
 - A member who is not your friend is marked as such.
 
+### Photos, voice messages and files (first step)
+
+- Raven is getting ready for photos, voice messages and files. In this step every build learns the
+  message that will carry them: it shows a short line ("Max sent a photo. Update Raven to see it.")
+  in place of text nobody can read, and keeps the message so that a later version can open it.
+  Nothing can be sent yet.
+- A message you type or paste cannot start with `RVNATT/`, as it cannot start with `RVNAPP/` or
+  `RVNGRP/`.
+
 ### For the apps and for people who build Raven
 
 - Next to the name of the friend who holds a message of yours, or of the group member who passed a

@@ -548,7 +548,7 @@ fn send_words(text: &str, technical: &str) -> Words {
         }
     } else if l.contains(RESERVED_MARK) {
         (
-            "Messages can't start with RVNAPP/ or RVNGRP/.",
+            "Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/.",
             "Change how it starts.",
         )
     } else if l.starts_with(EARLIER_MARK) {

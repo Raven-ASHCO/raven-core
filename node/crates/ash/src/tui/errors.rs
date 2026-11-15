@@ -158,7 +158,7 @@ enum Why {
 }
 
 const RESERVED: Why = Why::Says(
-    "Messages can't start with RVNAPP/ or RVNGRP/.",
+    "Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/.",
     "Change how it starts.",
     Action::None,
 );
@@ -1804,7 +1804,7 @@ mod tests {
             (
                 bridge::RESERVED_PREFIX_REFUSAL.to_owned(),
                 (
-                    "Messages can't start with RVNAPP/ or RVNGRP/.",
+                    "Messages can't start with RVNAPP/, RVNGRP/ or RVNATT/.",
                     "Change how it starts.",
                     Action::None,
                 ),

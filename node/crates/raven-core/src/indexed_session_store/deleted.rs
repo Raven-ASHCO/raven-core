@@ -320,10 +320,12 @@ impl IndexedSessionStore {
                     }
                     Err(error) => return Err(error),
                 };
-                // An agent payload belongs to RDAP's app inbox, never to chat.
+                // An agent payload belongs to RDAP's app inbox, never to
+                // chat. An attachment text is the chat's: it goes with it.
                 if !matches!(
                     crate::app_channel::classify(&row.plaintext),
                     crate::app_channel::PayloadClass::Chat
+                        | crate::app_channel::PayloadClass::Att(_)
                 ) {
                     continue;
                 }
