@@ -1016,7 +1016,7 @@ async fn chunks_ride(
     };
     progress.stage = "sending an attachment's chunks";
     let started = tokio::time::Instant::now();
-    let deadline = started + budget;
+    let deadline = started + crate::attachments::on_link_wait(plan.bytes(), budget);
     let (written, wrote) = oneshot::channel();
     let (replies_to, mut replies) = mpsc::unbounded_channel();
     let job = Job {

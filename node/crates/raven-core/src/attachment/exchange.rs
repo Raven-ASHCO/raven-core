@@ -183,6 +183,13 @@ enum Landed {
     Last,
 }
 
+impl Plan {
+    /// How many bytes its frames are in all.
+    pub fn bytes(&self) -> usize {
+        self.frames.iter().map(Vec::len).sum()
+    }
+}
+
 /// One dial the exchange wants made.
 #[derive(Debug, Clone)]
 pub struct Plan {
@@ -307,7 +314,7 @@ impl<'a> Exchange<'a> {
                 vec![encode(req, Body::Lack(lacks))]
             }
             Body::Push(chunk) => {
-                self.take(peer, &chunk, now_ms);
+                self.take(peer, &chunk, false, now_ms);
                 Vec::new()
             }
             Body::Want {
@@ -352,7 +359,7 @@ impl<'a> Exchange<'a> {
                 if have.complete() {
                     // Every chunk landed and the last step did not run (a
                     // stop in between): it runs now.
-                    return match self.finish(&row, now_ms) {
+                    return match self.finish(&row, false, now_ms) {
                         State::Complete => Lack::Complete,
                         _ => Lack::Declined,
                     };
@@ -375,7 +382,10 @@ impl<'a> Exchange<'a> {
 
     /// Takes a chunk `source` sent for a friend's attachment: only for an
     /// offer that friend made, checked against its root, then written.
-    fn take(&self, source: &[u8; 32], chunk: &ChunkBody, now_ms: u64) -> Landed {
+    /// `tell`: when it is the last one, the holder is told with DONE (a
+    /// chunk this node asked for; one the holder pushed is followed by its
+    /// HAVE, whose answer tells it).
+    fn take(&self, source: &[u8; 32], chunk: &ChunkBody, tell: bool, now_ms: u64) -> Landed {
         let Some((row, brief)) = self.theirs(source, &chunk.handle) else {
             return Landed::No;
         };
@@ -396,7 +406,7 @@ impl<'a> Exchange<'a> {
         );
         match taken {
             Ok(Taken::Written { complete: true }) => {
-                if self.finish(&row, now_ms) == State::Complete {
+                if self.finish(&row, tell, now_ms) == State::Complete {
                     Landed::Last
                 } else {
                     Landed::Written
@@ -415,8 +425,10 @@ impl<'a> Exchange<'a> {
     }
 
     /// Every chunk of a friend's attachment is here: it is complete when
-    /// the blob opens under the offer's key, failed otherwise.
-    fn finish(&self, row: &Row, now_ms: u64) -> State {
+    /// the blob opens under the offer's key, failed otherwise. `tell`: the
+    /// holder is then told with DONE on a dial of this node's (not when the
+    /// holder is on the link and hears it from its own HAVE's answer).
+    fn finish(&self, row: &Row, tell: bool, now_ms: u64) -> State {
         let Some(handle) = row.handle_bytes() else {
             return State::Failed;
         };
@@ -429,7 +441,7 @@ impl<'a> Exchange<'a> {
         let _ = store::set_state(self.data_dir, &handle, state, now_ms);
         let mut m = locked(self.memory);
         m.rows.remove(&handle);
-        if state == State::Complete {
+        if state == State::Complete && tell {
             if let Some(peer) = row.peer_key() {
                 if !m.done_due.contains(&(peer, handle)) {
                     m.done_due.push((peer, handle));
@@ -1072,7 +1084,7 @@ impl<'a> Exchange<'a> {
         for answer in answers.iter().filter(|f| reqs.contains(&f.req)) {
             match &answer.body {
                 Body::Chunk(chunk) if chunk.handle == handle => {
-                    match self.take(&plan.peer, chunk, now_ms) {
+                    match self.take(&plan.peer, chunk, true, now_ms) {
                         Landed::No => {}
                         Landed::Written => landed += 1,
                         Landed::Last => {

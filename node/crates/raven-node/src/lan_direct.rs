@@ -1939,7 +1939,7 @@ async fn push_on_link<S: AsyncRead + AsyncWrite + Unpin>(
     };
     progress.stage = "sending an attachment's chunks";
     let started = tokio::time::Instant::now();
-    let deadline = started + budget;
+    let deadline = started + crate::attachments::on_link_wait(plan.bytes(), budget);
     let work = async {
         for frame in &plan.frames {
             write_cipher(stream, transport, frame).await?;

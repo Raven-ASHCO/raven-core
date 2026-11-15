@@ -373,6 +373,16 @@ pub(crate) fn on_link_budget(carrier: OutboxCarrier, elapsed: Duration) -> Optio
     (budget >= ON_LINK_MIN).then_some(budget)
 }
 
+/// How long the answer to chunks of `bytes` in all is waited for on a
+/// link, within `budget`: the time a slow link takes to carry them (50
+/// KB/s, a poor Tor circuit) and a few seconds for the listener's answer.
+/// A link that died under the chunks is given up sooner than the whole
+/// budget, so the message's own receipt is not held back by it.
+pub(crate) fn on_link_wait(bytes: usize, budget: Duration) -> Duration {
+    let carry = Duration::from_millis((bytes as u64).saturating_mul(1_000) / 50_000);
+    (carry + Duration::from_secs(5)).min(budget)
+}
+
 /// [`AttLink::plan_on_link`] for a batch on a kept Tor link, which has no
 /// link state at hand: by the friend's record. The link was opened by a
 /// dial of ours to a verified friend, and a listener whose hello did not

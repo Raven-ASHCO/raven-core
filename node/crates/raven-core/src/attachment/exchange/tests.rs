@@ -186,12 +186,9 @@ fn a_photo_goes_over_in_one_dial_once_its_offer_is_delivered() {
         &bytes[..]
     );
 
-    // It says DONE once; the sender has nothing more to say.
+    // Neither has anything more to say: the sender heard "complete" as
+    // the answer to its own HAVE, so the receiver dials nobody to say DONE.
     assert!(a.plans(now).is_empty());
-    let done = b.plans(now).remove(0);
-    assert_eq!((done.peer, ops(&done)), (KA, vec![0x03]));
-    assert!(dial(&a, &KB, &done, now).is_empty());
-    assert!(!b.x().took(&done, Some(&[]), now));
     assert!(b.plans(now).is_empty());
     assert_eq!(a.row(&handle).state, State::Delivered);
 }
