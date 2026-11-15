@@ -1030,8 +1030,7 @@ On the branch `feature/attachments-phase1`, on top of the 3.1 fix line:
   `levels`, `preview`, `key`, `root`, `pad`. An offer is read only in the
   one byte form the encoder writes. The additional data of a chunk is
   `"rvnatt/1" || padded_len u64 || chunk_count u32 || index u32`, big
-  endian. `protocol/RAVEN_ATTACHMENT_V1.md` is still to be written from the
-  code.
+  endian. `protocol/RAVEN_ATTACHMENT_V1.md` is written from the code.
 - **Phase 1a** (§8.4) in the receive path: `app_channel::classify` knows
   `RVNATT/` (`PayloadClass::Att`); an offer of a photo, a voice note or a
   file is accepted, ACKed and kept in its history row as it came, and every
@@ -1046,5 +1045,38 @@ On the branch `feature/attachments-phase1`, on top of the 3.1 fix line:
   with `RVNATT/`. No gate: this step only stops a frame from showing as
   text.
 
-Not built yet: the gates, the store, the link frames, the app API, the
-custody ops, and everything in the apps.
+- **The gate** of phase 1b (§22): `ATTACHMENTS_PRODUCTION_ENABLED`, false,
+  with its lab switch and its feature id `feature/attachments`.
+- **The store** (§14), with one difference from this design: a sealed row
+  of its own per attachment (`attachment_rows/<handle>.row`) in place of
+  one SQLite file, beside the blob folder `attachments/<handle>/` (`blob`,
+  `have`). Every write stays small, no table needs re-sealing, and key
+  rotation, unseal and erase find the rows through the at-rest registry.
+- **Live chunks for chats** (§9, §10.1 to §10.3), behind the gate:
+  the `RAX1` codec (`core/attachment/link.rs`), the exchange
+  (`core/attachment/exchange.rs`), offers of mine and a friend's
+  (`core/attachment/flow.rs`), link caps bit 12 and the record of which
+  friends' nodes showed it (`core/attachment/peers.rs`), and raven-node's
+  part (`rn/attachments.rs`: the listener arms on LAN, Internet direct,
+  p2p and Tor links, and the task that makes the dials). Three differences
+  from §9, chosen to change no dial function:
+  1. **No push on the offer's own link.** The sender's node dials again:
+     it says HAVE, the friend's node answers what it lacks, the next dial
+     pushes that and says HAVE again, until the answer is complete. One
+     small dial more than §9.2 for a new attachment; a cut resumes from
+     exactly what landed, and nothing is pushed to a friend that does not
+     know the offer yet.
+  2. **No Bluetooth.** Bit 12 is never set on a nearby link.
+  3. **The sender does not wait for the offer's ACK** to start: a friend
+     that does not know the offer yet says so and is asked again soon.
+  The receiver pulls with WANT when no chunk landed for 15 s (at once for
+  one the user asked for) and says DONE at the end.
+
+Not built yet: the app API in the engine and the apps (in work), groups
+beyond the offer as a message body, mail friends holding chunks (§12), the
+`gone` frame's sending side, quotas by size, deletion with the chat and
+retention (§14), transfer links (phase 2), profile pictures. Open points
+of the built part: a friend whose node goes back to a build without the
+bit, and then shows no caps at all, keeps its record until a link of its
+own shows caps again; the chunk tree of an attachment is built again for
+every request it serves (cheap up to 1 MiB, not for phase 2).
