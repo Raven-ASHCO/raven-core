@@ -137,7 +137,8 @@ pub fn sweep(data_dir: &Path, now_ms: u64) -> Result<Swept, StoreError> {
         store::remove(data_dir, &handle)?;
         swept.attachments += 1;
     }
-    let now = SystemTime::now();
+    // Against file times the OS stamped: the system's own clock, not a moved test clock.
+    let now = crate::clock::system_now();
     // Blob folders with no row: a write that stopped half way.
     if let Ok(entries) = std::fs::read_dir(&blobs_dir) {
         for entry in entries.flatten() {
