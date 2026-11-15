@@ -10,12 +10,17 @@
 //!   without it clear it, a LAN listener shows none), and a listener takes
 //!   `RAX1` frames only from a verified friend whose caps on this link
 //!   showed the bit; anyone else gets a refusal for a request and nothing
-//!   for the rest.
+//!   for the rest. Whether the peer is a verified friend that is not
+//!   blocked is asked for every frame: one blocked while its link is open
+//!   is refused from its next frame on.
 //! - **The task** ([`run`]). It asks the exchange what is due
 //!   (`Exchange::plans`), makes each dial on the routes the outbox plans
 //!   for a send to that friend (Tor too; never Bluetooth), and hands the
-//!   replies back
-//!   (`Exchange::took`). It looks again at once while there is more to do
+//!   replies back (`Exchange::took`). The dials of one look go to
+//!   different friends and run side by side: a friend that does not
+//!   answer holds no other friend's photo back. A program on the IPC
+//!   cannot make such a dial (`ipc_server`: `ATTACHMENT_IPC_REFUSED`).
+//!   It looks again at once while there is more to do
 //!   and when an offer is delivered in this process, a few times a second
 //!   while something waits (for its time, for a friend, or for a delivery
 //!   another program on this profile writes: found by its row, with no
@@ -63,12 +68,13 @@ const DIAL_REPLY_BUDGET: usize = 2 * 1024 * 1024;
 const NO_WORKER: &str = "no outbox worker: no route plan";
 const NO_ROUTE: &str = "no route to this contact";
 const DEADLINE: &str = "attachment dial deadline";
+const DIAL_ENDED: &str = "the dial did not end";
 
 /// What a failed dial's error says for the log: the task's own words, or
 /// the error's leading code (`ONION_UNREACHABLE`); never the rest of a
 /// dial's error, which may name an address.
 fn failure_words(error: &str) -> &str {
-    if [NO_WORKER, NO_ROUTE, DEADLINE, NOT_SPOKEN].contains(&error) {
+    if [NO_WORKER, NO_ROUTE, DEADLINE, DIAL_ENDED, NOT_SPOKEN].contains(&error) {
         return error;
     }
     let code = error
@@ -155,8 +161,6 @@ pub(crate) struct AttLink {
     /// or no caps at all (`None`: a LAN listener as its dialer sees it, a
     /// LAN dial that does not read).
     peer_speaks: Option<bool>,
-    /// The peer is a verified friend; read once, when first needed.
-    verified: Option<bool>,
 }
 
 impl AttLink {
@@ -168,7 +172,6 @@ impl AttLink {
             peer: [0; 32],
             listener: false,
             peer_speaks: None,
-            verified: None,
         }
     }
 
@@ -235,23 +238,10 @@ impl AttLink {
         })
         .await
         .unwrap_or((false, false));
-        self.verified = Some(known.0);
         if known.1 {
             Exchange::new(&self.data_dir, memory()).peer_seen(&self.peer);
             kick();
         }
-    }
-
-    async fn verified(&mut self) -> bool {
-        if let Some(verified) = self.verified {
-            return verified;
-        }
-        let (data_dir, peer) = (self.data_dir.clone(), self.peer);
-        let verified = blocking(move || pinned(&data_dir, &peer))
-            .await
-            .unwrap_or(false);
-        self.verified = Some(verified);
-        verified
     }
 
     /// May a dial carry `RAX1` frames on this link? Not to a listener whose
@@ -332,11 +322,18 @@ impl AttLink {
         if !self.live || !self.listener || !rax1::is_rax1(frame) {
             return None;
         }
-        if self.peer_speaks != Some(true) || !self.verified().await {
+        if self.peer_speaks != Some(true) {
             return Some(exchange::refuse(frame));
         }
         let (data_dir, peer, bytes) = (self.data_dir.clone(), self.peer, frame.to_vec());
         let replies = blocking(move || {
+            // Asked for every frame, not once a link: a friend the user
+            // blocks while its link is open (a link stays up to five
+            // minutes) is refused from the next frame on, as its chat
+            // frames are.
+            if !pinned(&data_dir, &peer) {
+                return exchange::refuse(&bytes);
+            }
             Exchange::new(&data_dir, memory()).listener_frame(&peer, &bytes, crate::now_ms())
         })
         .await
@@ -550,11 +547,14 @@ pub(crate) struct PassReport {
     pub(crate) waiting: bool,
 }
 
+/// What a dial gave: the replies, or why it failed.
+type Dialled = Result<Vec<Vec<u8>>, String>;
+
 /// One dial: the friend and the frames; the replies.
-pub(crate) type DialFn<'a> = dyn FnMut(&[u8; 32], &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> + 'a;
+pub(crate) type DialFn<'a> = dyn Fn(&[u8; 32], &[Vec<u8>]) -> Dialled + Sync + 'a;
 
 /// One pass: the dials the exchange plans, through `dial`.
-pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
+pub(crate) fn pass(data_dir: &Path, dial: &DialFn<'_>) -> PassReport {
     let exchange = Exchange::new(data_dir, memory());
     // Each friend's record is read once a pass.
     let known: Mutex<HashMap<[u8; 32], bool>> = Mutex::default();
@@ -571,10 +571,43 @@ pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
         waiting: planned.waiting,
         ..PassReport::default()
     };
-    for plan in &planned.plans {
-        report.dials += 1;
+    let one = |plan: &exchange::Plan| {
         let started = std::time::Instant::now();
-        let got = dial(&plan.peer, &plan.frames);
+        (dial(&plan.peer, &plan.frames), started.elapsed())
+    };
+    // The dials of one pass go to different friends: they run side by
+    // side, so that a friend that does not answer (a dial through every
+    // way to it may take minutes) holds no other friend's photo back.
+    let results: Vec<(Dialled, Duration)> = if planned.plans.len() < 2 {
+        planned.plans.iter().map(one).collect()
+    } else {
+        // A lab run's switches of this thread hold on the dials' threads.
+        let gates = security_gate::lab_overrides_for_this_thread();
+        let att = attachment_gate::lab_attachments_for_this_thread();
+        std::thread::scope(|scope| {
+            let running: Vec<_> = planned
+                .plans
+                .iter()
+                .map(|plan| {
+                    let one = &one;
+                    scope.spawn(move || {
+                        security_gate::set_lab_overrides_for_this_thread(gates);
+                        attachment_gate::set_lab_attachments_for_this_thread(att);
+                        one(plan)
+                    })
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|dial| {
+                    dial.join()
+                        .unwrap_or_else(|_| (Err(DIAL_ENDED.into()), Duration::ZERO))
+                })
+                .collect()
+        })
+    };
+    for (plan, (got, took)) in planned.plans.iter().zip(results) {
+        report.dials += 1;
         // One line a dial: the contact's tag, counts and a code, never an
         // address or a handle.
         let outcome = match &got {
@@ -585,7 +618,7 @@ pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
             "raven-node attachments: contact {}, {} frame(s), {outcome} in {} ms",
             crate::netutil::link_tag(&plan.peer),
             plan.frames.len(),
-            started.elapsed().as_millis()
+            took.as_millis()
         );
         report.again |= exchange.took(plan, got.as_deref().ok(), crate::now_ms());
     }
@@ -637,9 +670,9 @@ pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
             let dd = data_dir.clone();
             let handle = tokio::runtime::Handle::current();
             let report = blocking(move || {
-                let mut dial =
+                let dial =
                     |peer: &[u8; 32], frames: &[Vec<u8>]| dial_peer(&handle, &dd, peer, frames);
-                pass(&dd, &mut dial)
+                pass(&dd, &dial)
             })
             .await
             .unwrap_or_default();

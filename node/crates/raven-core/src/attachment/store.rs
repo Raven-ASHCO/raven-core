@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::blob::{self, Key, Sealed, Shape, HANDLE_LEN, KEY_LEN, SEGMENT_LEN};
 use super::offer::{self, Offer, Ref};
@@ -56,6 +56,10 @@ const ROW_EXT: &str = "row";
 const ROW_VERSION: u8 = 1;
 /// The most attachments a profile keeps rows for.
 pub const MAX_ROWS: usize = 4_096;
+/// The most attachments one friend's offers keep rows for: a quarter of
+/// the store. A friend that sends offer after offer fills its own share,
+/// never the room of the others or of what this profile sends.
+pub const MAX_ROWS_PER_FRIEND: usize = MAX_ROWS / 4;
 
 /// Why the store refuses.
 #[derive(Debug, Error)]
@@ -78,7 +82,34 @@ pub enum StoreError {
 }
 
 fn io(e: impl std::fmt::Display) -> StoreError {
-    StoreError::Io(e.to_string())
+    StoreError::Io(without_handles(&e.to_string()))
+}
+
+/// `text` with every run of 32 or more hex digits replaced by a word. An
+/// error of the file layer names its file, and a row's file is named by
+/// the attachment's handle: an error's text may reach a log line or an
+/// app, a handle never does.
+fn without_handles(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.len() >= 2 * HANDLE_LEN {
+            out.push_str("(attachment)");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_hexdigit() {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 /// Where an attachment is in its life.
@@ -144,6 +175,14 @@ pub struct Row {
     pub created_ms: u64,
     /// When it last changed.
     pub updated_ms: u64,
+}
+
+impl Drop for Row {
+    /// The key's hex goes from memory with every copy of the row (a row is
+    /// copied on each change, and read on each look).
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
 }
 
 impl std::fmt::Debug for Row {
@@ -330,8 +369,19 @@ pub fn put(data_dir: &Path, row: &Row) -> Result<(), StoreError> {
         .map_err(io)
 }
 
-fn count(data_dir: &Path) -> usize {
+/// How many rows the store holds (the folder's entries; no row is read).
+pub fn count(data_dir: &Path) -> usize {
     std::fs::read_dir(data_dir.join(ROWS_DIR)).map_or(0, |entries| entries.flatten().count())
+}
+
+/// How many attachments the friend `peer` offered are kept. Every row is
+/// read: ask [`count`] first, which reads none.
+pub fn offered_by(data_dir: &Path, peer: &[u8; 32]) -> Result<usize, StoreError> {
+    let peer = hex::encode(peer);
+    Ok(list(data_dir)?
+        .iter()
+        .filter(|row| !row.outgoing && row.peer.as_deref() == Some(peer.as_str()))
+        .count())
 }
 
 /// The row of `handle`.
@@ -768,6 +818,23 @@ pub fn stage(data_dir: &Path, name: &str) -> Result<PathBuf, StoreError> {
     Ok(path)
 }
 
+/// Removes every file of the staging folder; how many went. For an app's
+/// engine that starts to stage in a new run: whatever is there was left by
+/// a run before it (the app ended between staging and sending), and is a
+/// photo as the app wrote it, not sealed.
+pub fn clear_staging(data_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(data_dir.join(STAGING_DIR)) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && std::fs::remove_file(entry.path()).is_ok()
+        })
+        .count()
+}
+
 /// Is `path` a file of this profile's staging folder (and nothing else,
 /// whatever its name pretends)?
 pub fn is_staged(data_dir: &Path, path: &Path) -> bool {
@@ -781,6 +848,29 @@ pub fn is_staged(data_dir: &Path, path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::attachment::offer::BlobRef;
+
+    /// An error's text never carries a handle: the file layer names the
+    /// row's file, which is the handle in hex.
+    #[test]
+    fn an_errors_text_never_names_a_handle() {
+        let handle = "0123456789abcdef0123456789abcdef";
+        let said = io(format!("{handle}.row: expected value at line 1 column 1"));
+        assert_eq!(
+            said.to_string(),
+            "ATTACHMENT STORE: (attachment).row: expected value at line 1 column 1"
+        );
+        // Words, numbers and short hex stay as they are.
+        assert_eq!(
+            without_handles("No space left on device (os error 28), file deadbeef"),
+            "No space left on device (os error 28), file deadbeef"
+        );
+        assert_eq!(without_handles(""), "");
+        assert_eq!(without_handles(handle), "(attachment)");
+        assert_eq!(
+            without_handles(&format!("/p/attachments/{handle}/blob")),
+            "/p/attachments/(attachment)/blob"
+        );
+    }
 
     fn bytes(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 7 % 253) as u8).collect()

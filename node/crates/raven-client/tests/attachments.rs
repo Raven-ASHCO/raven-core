@@ -721,7 +721,8 @@ fn a_photo_whose_send_did_not_go_before_the_app_ended_goes_again() {
         let stored = store::get(&a.path, &made.handle)
             .unwrap()
             .expect("its row")
-            .reference;
+            .reference
+            .clone();
         assert!(stored.starts_with("RVNATT/1 ref\n"));
         raven_core::persist_lan_chat_history(
             &a.path,

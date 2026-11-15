@@ -29,6 +29,14 @@
 //!   voice notes come by themselves, a file waits until the user asks; at
 //!   most [`MAX_PUSH_PER_DIAL`] chunks pushed and [`MAX_PULL_PER_DIAL`]
 //!   pulled per dial; [`SERVE_BYTES_PER_DAY`] served to one friend a day.
+//! - **What a friend's node cannot make this node do.** Push one
+//!   attachment's chunks more than eight times over in a day, whatever its
+//!   answers ask for; dial for ever (tries that fail grow apart, to four a
+//!   day, and stop by themselves after thirty days; a friend that was not
+//!   reached is not dialled for its other attachments meanwhile); undo an
+//!   attachment that is whole with a late answer; or be served past its
+//!   day's limit at the cost of a read. One friend's offers keep a share
+//!   of the store's rows, never all of them (`flow::keep_offer`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -70,12 +78,33 @@ const MAX_DONE_TRIES: u32 = 6;
 const DAY_MS: u64 = 86_400_000;
 /// The first wait after a dial that failed; doubled each time.
 const RETRY_MS: u64 = 2_000;
-/// The longest wait between tries.
+/// The longest wait between tries, while the tries are few.
 const RETRY_MAX_MS: u64 = 300_000;
+/// Tries in a row that failed before the waits grow past [`RETRY_MAX_MS`]
+/// (about an hour of them), and before they grow to the longest wait
+/// (about a day more). A friend that is gone for good is then asked four
+/// times a day, not every five minutes for ever; a link with the friend
+/// coming up ends any of these waits at once ([`Exchange::peer_seen`]).
+const QUICK_TRIES: u32 = 20;
+const SLOW_TRIES: u32 = 60;
+/// The wait between tries once the quick ones are used up.
+const SLOW_RETRY_MS: u64 = 30 * 60_000;
+/// The longest wait between tries of any kind.
+const LONG_RETRY_MS: u64 = 6 * 3_600_000;
+/// An attachment this old is not dialled for by itself any more: mine
+/// that the friend never took whole, and a friend's that never came. The
+/// friend's own dial still moves it, and one the user asks for is fetched
+/// whatever its age.
+const AUTO_MAX_AGE_MS: u64 = 30 * DAY_MS;
+/// How many times over the chunks of one attachment are pushed in a day at
+/// most. Cuts and resumes push only what the friend's LACK names and stay
+/// far below it; a friend whose answers ask for everything again and again
+/// (a fault, or on purpose) gets this much and no more until the next day.
+const PUSH_ROUNDS_PER_DAY: u32 = 8;
 /// The longest wait between questions about an offer whose delivery this
 /// node did not see: the delivery itself wakes the push, so the question
 /// is only a net under it and need not be asked often.
-const STAGED_RETRY_MAX_MS: u64 = 6 * 3_600_000;
+const STAGED_RETRY_MAX_MS: u64 = LONG_RETRY_MS;
 /// An offer still not delivered this long after its row was made is not
 /// asked about any more: its message's own time to arrive has run out.
 const STAGED_MAX_AGE_MS: u64 = 8 * DAY_MS;
@@ -146,12 +175,33 @@ struct Served {
     bytes: u64,
 }
 
+/// The chunks of one attachment pushed since `day_start_ms`.
+#[derive(Debug, Clone, Copy, Default)]
+struct Pushed {
+    day_start_ms: u64,
+    chunks: u32,
+}
+
+/// A row as last read: the time its file had, the time it was read, and
+/// what the exchange needs of it.
+#[derive(Debug, Clone)]
+struct Seen {
+    changed: SystemTime,
+    read: SystemTime,
+    brief: Option<Brief>,
+}
+
+/// A row read this soon after its file's time may have been written once
+/// more within the same tick of the file system's clock (some count in
+/// milliseconds, some coarser): it is read again at the next look.
+const SAME_TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// What the exchange keeps in memory between frames and passes. Nothing in
 /// it is needed after a restart: a new process asks again.
 #[derive(Debug, Default)]
 pub struct Memory {
     /// Each row as last read, with the time its file had then.
-    rows: HashMap<Handle, (SystemTime, Option<Brief>)>,
+    rows: HashMap<Handle, Seen>,
     /// Mine: the chunks the friend's last LACK still wanted. None: ask first.
     wanted: HashMap<Handle, Vec<u32>>,
     /// Mine: its chunks were pushed whole once since this process started
@@ -170,6 +220,11 @@ pub struct Memory {
     done_due: Vec<([u8; 32], Handle)>,
     /// Bytes served to each friend today.
     served: HashMap<[u8; 32], Served>,
+    /// Chunks of each attachment of mine pushed today.
+    pushed: HashMap<Handle, Pushed>,
+    /// The tree of the attachment served last: the requests of one dial
+    /// ask for runs of the same one, and its tree is the hash of all of it.
+    tree: Option<(Handle, crate::release_bundle::ChunkTree)>,
 }
 
 /// What became of a chunk that came.
@@ -473,7 +528,11 @@ impl<'a> Exchange<'a> {
         if u32::from(first) >= brief.shape.chunks() {
             return error(ErrorCode::NotFound);
         }
-        let Ok(tree) = store::tree(self.data_dir, &row) else {
+        // Nothing is read or hashed for a friend whose day is used up.
+        if !self.may_serve(peer, now_ms) {
+            return error(ErrorCode::RateLimited);
+        }
+        let Some(tree) = self.tree_of(handle, &row) else {
             return error(ErrorCode::NotFound);
         };
         let end = (u32::from(first) + u32::from(count)).min(brief.shape.chunks());
@@ -507,6 +566,27 @@ impl<'a> Exchange<'a> {
         out
     }
 
+    /// The tree of my attachment `handle`: the one built for the request
+    /// before, or built now (the hash of every chunk) and kept.
+    fn tree_of(&self, handle: &Handle, row: &Row) -> Option<crate::release_bundle::ChunkTree> {
+        if let Some((kept, tree)) = &locked(self.memory).tree {
+            if kept == handle {
+                return Some(tree.clone());
+            }
+        }
+        let tree = store::tree(self.data_dir, row).ok()?;
+        locked(self.memory).tree = Some((*handle, tree.clone()));
+        Some(tree)
+    }
+
+    /// Is anything left of what `peer` is served today?
+    fn may_serve(&self, peer: &[u8; 32], now_ms: u64) -> bool {
+        locked(self.memory).served.get(peer).is_none_or(|served| {
+            now_ms.saturating_sub(served.day_start_ms) >= DAY_MS
+                || served.bytes < SERVE_BYTES_PER_DAY
+        })
+    }
+
     fn admit_served(&self, peer: &[u8; 32], bytes: u64, now_ms: u64) -> bool {
         let mut m = locked(self.memory);
         let served = m.served.entry(*peer).or_default();
@@ -528,32 +608,53 @@ impl<'a> Exchange<'a> {
     /// Reads the rows that changed since the last pass.
     fn refresh(&self) {
         let on_disk = store::rows_on_disk(self.data_dir);
+        // Against file times the OS stamped: the system's own clock.
+        let now = crate::clock::system_now();
         let mut m = locked(self.memory);
-        m.rows
-            .retain(|handle, _| on_disk.iter().any(|(h, _)| h == handle));
+        let there: HashSet<Handle> = on_disk.iter().map(|(handle, _)| *handle).collect();
+        m.rows.retain(|handle, _| there.contains(handle));
+        if m.tree
+            .as_ref()
+            .is_some_and(|(handle, _)| !there.contains(handle))
+        {
+            m.tree = None;
+        }
         for (handle, changed) in on_disk {
-            if m.rows.get(&handle).is_some_and(|(at, _)| *at == changed) {
+            // Read before, and long enough after its file's time that no
+            // second write of the same tick can hide behind that time.
+            let settled = m.rows.get(&handle).is_some_and(|seen| {
+                seen.changed == changed
+                    && seen
+                        .read
+                        .duration_since(changed)
+                        .is_ok_and(|after| after >= SAME_TICK)
+            });
+            if settled {
                 continue;
             }
             let brief = self.row(&handle).as_ref().and_then(Brief::of);
+            let old = m.rows.get(&handle).and_then(|seen| seen.brief.as_ref());
             // The user asked for it (again) since the last look: no wait
             // an earlier try set holds it back.
             let asked_now = brief.as_ref().is_some_and(|b| b.asked)
-                && m.rows.get(&handle).is_some_and(|(_, old)| {
-                    old.as_ref().is_some_and(|old| {
-                        old.updated_ms != brief.as_ref().map_or(0, |b| b.updated_ms)
-                    })
+                && old.is_some_and(|old| {
+                    old.updated_ms != brief.as_ref().map_or(0, |b| b.updated_ms)
                 });
             // The offer was delivered since the last look: the wait a
             // question asked too early set is over.
             let delivered_now = brief.as_ref().is_some_and(|b| b.state == State::Offered)
-                && m.rows.get(&handle).is_some_and(|(_, old)| {
-                    old.as_ref().is_some_and(|old| old.state == State::Staged)
-                });
+                && old.is_some_and(|old| old.state == State::Staged);
             if asked_now || delivered_now {
                 m.parked.remove(&handle);
             }
-            m.rows.insert(handle, (changed, brief));
+            m.rows.insert(
+                handle,
+                Seen {
+                    changed,
+                    read: now,
+                    brief,
+                },
+            );
         }
         let Memory {
             rows,
@@ -563,11 +664,12 @@ impl<'a> Exchange<'a> {
             parked,
             bad,
             done_due,
+            pushed,
             ..
         } = &mut *m;
         let live = |handle: &Handle| {
             rows.get(handle)
-                .and_then(|(_, b)| b.as_ref())
+                .and_then(|seen| seen.brief.as_ref())
                 .is_some_and(|b| !matches!(b.state, State::Delivered | State::Gone | State::Failed))
         };
         wanted.retain(|h, _| live(h));
@@ -575,6 +677,7 @@ impl<'a> Exchange<'a> {
         stalls.retain(|h, _| live(h));
         parked.retain(|h, _| live(h));
         bad.retain(|(_, h), _| live(h));
+        pushed.retain(|h, _| live(h));
         done_due.retain(|(_, h)| rows.contains_key(h));
     }
 
@@ -588,20 +691,15 @@ impl<'a> Exchange<'a> {
             let briefs: Vec<(Handle, Brief)> = m
                 .rows
                 .iter()
-                .filter_map(|(h, (_, b))| Some((*h, b.clone()?)))
+                .filter_map(|(h, seen)| Some((*h, seen.brief.clone()?)))
                 .collect();
             (briefs, m.done_due.clone())
         };
-        let mut busy: Vec<[u8; 32]> = Vec::new();
-        let mut add = |out: &mut Planned, plan: Plan| {
-            // One dial per friend in a pass.
-            if out.plans.len() >= MAX_PLANS_PER_PASS || busy.contains(&plan.peer) {
-                out.waiting = true;
-                out.waits.turn += 1;
-                return;
-            }
-            busy.push(plan.peer);
-            out.plans.push(plan);
+        // One dial per friend in a pass, and a few dials in all. Asked
+        // before a plan is made: making one reads the chunks it carries,
+        // and marks them as pushed.
+        let room = |out: &Planned, peer: &[u8; 32]| {
+            out.plans.len() < MAX_PLANS_PER_PASS && !out.plans.iter().any(|p| p.peer == *peer)
         };
         for (peer, handle) in done_due {
             if self.parked(&handle, now_ms) {
@@ -614,15 +712,17 @@ impl<'a> Exchange<'a> {
                 out.waits.friend += 1;
                 continue;
             }
-            add(
-                &mut out,
-                Plan {
-                    peer,
-                    handle,
-                    frames: vec![encode(req(), Body::Done(handle))],
-                    what: What::Done,
-                },
-            );
+            if !room(&out, &peer) {
+                out.waiting = true;
+                out.waits.turn += 1;
+                continue;
+            }
+            out.plans.push(Plan {
+                peer,
+                handle,
+                frames: vec![encode(req(), Body::Done(handle))],
+                what: What::Done,
+            });
         }
         for (handle, brief) in briefs {
             let Some(peer) = brief.peer else {
@@ -635,6 +735,13 @@ impl<'a> Exchange<'a> {
             if !push && !pull {
                 continue;
             }
+            // Old, and still not whole on the other side: no dial of this
+            // node's own any more (the friend's dial still moves it; one
+            // the user asks for is fetched whatever its age).
+            let old = now_ms.saturating_sub(brief.created_ms) >= AUTO_MAX_AGE_MS;
+            if old && !(pull && brief.asked) {
+                continue;
+            }
             if self.parked(&handle, now_ms) {
                 out.waiting = true;
                 out.waits.turn += 1;
@@ -643,6 +750,11 @@ impl<'a> Exchange<'a> {
             if !speaks(&peer) {
                 out.waiting = true;
                 out.waits.friend += 1;
+                continue;
+            }
+            if !room(&out, &peer) {
+                out.waiting = true;
+                out.waits.turn += 1;
                 continue;
             }
             let plan = if push {
@@ -665,7 +777,7 @@ impl<'a> Exchange<'a> {
                         continue;
                     }
                 }
-                self.push_plan(peer, handle, &brief)
+                self.push_plan(peer, handle, &brief, now_ms)
             } else {
                 // One the user asked for is fetched at once; one that
                 // comes by itself only when no chunk landed for a while
@@ -678,10 +790,25 @@ impl<'a> Exchange<'a> {
                     out.waits.push += 1;
                     continue;
                 }
+                // Every chunk is here and the last step did not run (the
+                // process stopped between the last chunk and it): it runs
+                // now, and the holder is told.
+                let whole = store::have(self.data_dir, &handle, &brief.shape, false)
+                    .is_ok_and(|have| have.complete());
+                if whole {
+                    let ended = self.row(&handle).map(|row| self.finish(&row, true, now_ms));
+                    if ended != Some(State::Complete) && ended != Some(State::Failed) {
+                        // The disk did not answer: not at every look.
+                        self.back_off(&handle, now_ms);
+                    }
+                    out.waiting = true;
+                    out.waits.turn += 1;
+                    continue;
+                }
                 self.pull_plan(peer, handle, &brief)
             };
             match plan {
-                Some(plan) => add(&mut out, plan),
+                Some(plan) => out.plans.push(plan),
                 None => {
                     out.waiting = true;
                     out.waits.turn += 1;
@@ -715,7 +842,7 @@ impl<'a> Exchange<'a> {
             let mine: Vec<(Handle, Brief)> = m
                 .rows
                 .iter()
-                .filter_map(|(handle, (_, brief))| Some((*handle, brief.clone()?)))
+                .filter_map(|(handle, seen)| Some((*handle, seen.brief.clone()?)))
                 .filter(|(_, brief)| {
                     brief.outgoing
                         && brief.peer == Some(*peer)
@@ -747,11 +874,15 @@ impl<'a> Exchange<'a> {
                 None => return Err("its chunks were pushed or asked about before"),
             }
         };
+        let room = self.push_room(&handle, brief.shape.chunks(), now_ms);
+        if room == 0 {
+            return Err("its chunks were pushed too often today");
+        }
         locked(self.memory).tried.insert(handle);
         let row = self.row(&handle).ok_or("its row is gone")?;
         let tree = store::tree(self.data_dir, &row).map_err(|_| "its sealed bytes do not read")?;
         let mut frames = Vec::new();
-        for index in (0..brief.shape.chunks()).take(MAX_PUSH_PER_DIAL) {
+        for index in (0..brief.shape.chunks()).take(MAX_PUSH_PER_DIAL.min(room)) {
             let bytes = store::read_chunk(self.data_dir, &handle, &brief.shape, true, index)
                 .map_err(|_| "its sealed bytes do not read")?;
             let path = tree
@@ -768,6 +899,7 @@ impl<'a> Exchange<'a> {
             ));
         }
         let pushed = frames.len();
+        self.note_pushed(&handle, pushed, now_ms);
         let req = req();
         frames.push(encode(
             req,
@@ -791,7 +923,13 @@ impl<'a> Exchange<'a> {
     /// HAVE, after the chunks the friend's last LACK wanted; after every
     /// chunk for an offer just delivered; alone when this node does not
     /// know what the friend has.
-    fn push_plan(&self, peer: [u8; 32], handle: Handle, brief: &Brief) -> Option<Plan> {
+    fn push_plan(
+        &self,
+        peer: [u8; 32],
+        handle: Handle,
+        brief: &Brief,
+        now_ms: u64,
+    ) -> Option<Plan> {
         let (wanted, first_try) = {
             let m = locked(self.memory);
             (m.wanted.get(&handle).cloned(), !m.tried.contains(&handle))
@@ -806,9 +944,25 @@ impl<'a> Exchange<'a> {
         let wanted = wanted.or_else(|| blind.then(|| (0..brief.shape.chunks()).collect()));
         let mut frames = Vec::new();
         if let Some(wanted) = wanted.filter(|w| !w.is_empty()) {
+            // What may still be pushed of it today. Nothing: it waits for
+            // the next day, whatever the friend's node answers meanwhile.
+            let room = self.push_room(&handle, brief.shape.chunks(), now_ms);
+            if room == 0 {
+                let next_day = {
+                    let mut m = locked(self.memory);
+                    // What the friend's node wanted is asked again then.
+                    m.wanted.remove(&handle);
+                    m.pushed
+                        .get(&handle)
+                        .map_or(now_ms, |p| p.day_start_ms)
+                        .saturating_add(DAY_MS)
+                };
+                self.park(&handle, next_day);
+                return None;
+            }
             let row = self.row(&handle)?;
             let tree = store::tree(self.data_dir, &row).ok()?;
-            for index in wanted.into_iter().take(MAX_PUSH_PER_DIAL) {
+            for index in wanted.into_iter().take(MAX_PUSH_PER_DIAL.min(room)) {
                 let bytes =
                     store::read_chunk(self.data_dir, &handle, &brief.shape, true, index).ok()?;
                 let path = tree.chunk_path(index as usize)?;
@@ -827,6 +981,7 @@ impl<'a> Exchange<'a> {
             return None;
         }
         let pushed = frames.len();
+        self.note_pushed(&handle, pushed, now_ms);
         let req = req();
         frames.push(encode(
             req,
@@ -886,29 +1041,69 @@ impl<'a> Exchange<'a> {
         })
     }
 
+    /// How many chunks of my attachment `handle` (of `chunks`) may still be
+    /// pushed today.
+    fn push_room(&self, handle: &Handle, chunks: u32, now_ms: u64) -> usize {
+        let m = locked(self.memory);
+        let used = m.pushed.get(handle).map_or(0, |p| {
+            if now_ms.saturating_sub(p.day_start_ms) >= DAY_MS {
+                0
+            } else {
+                p.chunks
+            }
+        });
+        chunks
+            .saturating_mul(PUSH_ROUNDS_PER_DAY)
+            .saturating_sub(used) as usize
+    }
+
+    fn note_pushed(&self, handle: &Handle, chunks: usize, now_ms: u64) {
+        if chunks == 0 {
+            return;
+        }
+        let mut m = locked(self.memory);
+        let pushed = m.pushed.entry(*handle).or_default();
+        if now_ms.saturating_sub(pushed.day_start_ms) >= DAY_MS {
+            *pushed = Pushed {
+                day_start_ms: now_ms,
+                chunks: 0,
+            };
+        }
+        pushed.chunks = pushed.chunks.saturating_add(chunks as u32);
+    }
+
+    /// A wait the friend's own answer set (later, declined, busy), or the
+    /// day's push limit: no try before it is over. A link with the friend
+    /// coming up does not end it ([`Self::peer_seen`] ends only the waits
+    /// of tries that failed).
     fn park(&self, handle: &Handle, until_ms: u64) {
         let mut m = locked(self.memory);
         let park = m.parked.entry(*handle).or_default();
         park.until_ms = park.until_ms.max(until_ms);
+        park.fails = 0;
     }
 
-    /// A try that failed: wait, longer each time. Up to five minutes for
-    /// an attachment whose offer is at the friend's (a friend seen again
-    /// ends the wait); up to six hours for an offer whose delivery was not
-    /// seen.
+    /// A try that failed: wait, longer each time. Up to five minutes while
+    /// the tries are few, then half an hour, then six hours (a friend seen
+    /// again ends the wait at once); up to six hours from the start for an
+    /// offer whose delivery was not seen.
     fn back_off(&self, handle: &Handle, now_ms: u64) {
         let mut m = locked(self.memory);
         let staged = m
             .rows
             .get(handle)
-            .and_then(|(_, brief)| brief.as_ref())
+            .and_then(|seen| seen.brief.as_ref())
             .is_some_and(|brief| brief.outgoing && brief.state == State::Staged);
+        let park = m.parked.entry(*handle).or_default();
         let longest = if staged {
             STAGED_RETRY_MAX_MS
+        } else if park.fails >= SLOW_TRIES {
+            LONG_RETRY_MS
+        } else if park.fails >= QUICK_TRIES {
+            SLOW_RETRY_MS
         } else {
             RETRY_MAX_MS
         };
-        let park = m.parked.entry(*handle).or_default();
         let wait = RETRY_MS
             .saturating_mul(1 << park.fails.min(16))
             .min(longest);
@@ -927,7 +1122,7 @@ impl<'a> Exchange<'a> {
         let theirs: Vec<Handle> = m
             .rows
             .iter()
-            .filter(|(_, (_, b))| b.as_ref().is_some_and(|b| b.peer == Some(*peer)))
+            .filter(|(_, seen)| seen.brief.as_ref().is_some_and(|b| b.peer == Some(*peer)))
             .map(|(h, _)| *h)
             .collect();
         for handle in theirs {
@@ -947,6 +1142,31 @@ impl<'a> Exchange<'a> {
             let mut m = locked(self.memory);
             m.wanted.remove(&plan.handle);
             let tries = m.parked.get(&plan.handle).map_or(0, |p| p.fails);
+            // The friend was not reached: its other attachments wait as
+            // long, so that a friend with ten of them is dialled once, not
+            // ten times, until it is there again.
+            if let Some(wait) = m.parked.get(&plan.handle).copied() {
+                let same_friend: Vec<Handle> = m
+                    .rows
+                    .iter()
+                    .filter(|(handle, seen)| {
+                        **handle != plan.handle
+                            && seen
+                                .brief
+                                .as_ref()
+                                .is_some_and(|b| b.peer == Some(plan.peer))
+                    })
+                    .map(|(handle, _)| *handle)
+                    .collect();
+                for handle in same_friend {
+                    let park = m.parked.entry(handle).or_default();
+                    // A wait the friend's own answer set stays as it is.
+                    if park.until_ms < wait.until_ms {
+                        park.until_ms = wait.until_ms;
+                        park.fails = park.fails.max(wait.fails);
+                    }
+                }
+            }
             if matches!(plan.what, What::Done) && tries >= MAX_DONE_TRIES {
                 // The holder learns it from its next HAVE instead.
                 m.done_due.retain(|(_, h)| *h != plan.handle);
@@ -1105,8 +1325,14 @@ impl<'a> Exchange<'a> {
             return true;
         }
         if gave_up == Some(ErrorCode::Gone as u8) {
-            // The author deleted it before it was all here.
-            let _ = store::set_state(self.data_dir, &handle, State::Gone, now_ms);
+            // The author deleted it before it was all here. One that is
+            // whole meanwhile (its chunks came over another link while this
+            // answer was on its way, or was held back) stays as it is.
+            let _ = store::update(self.data_dir, &handle, now_ms, |row| {
+                if row.state == State::Incoming {
+                    row.state = State::Gone;
+                }
+            });
             locked(self.memory).rows.remove(&handle);
             return false;
         }

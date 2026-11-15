@@ -1147,7 +1147,24 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// Friend custody frames never ride the local dial ops (design §10): only the
 /// worker and the fetcher speak RFC1, after their own gate and contact
 /// checks. Lab runs may.
+///
+/// Attachment frames (RAX1) never do, lab or not: only raven-node's own
+/// task says them, for rows of its store and after its friend checks
+/// (RAVEN_ATTACHMENT_V1 section 6). A program on the IPC could otherwise
+/// tell a friend's node that a photo is whole (DONE), spend this node's
+/// day of chunks at the friend (WANT), or make the friend's node count bad
+/// chunks against this one (PUSH).
 fn refuse_custody_frames(v: u16, frames: &[Vec<u8>]) -> Option<IpcResponse> {
+    if frames
+        .iter()
+        .any(|f| raven_core::attachment::link::is_rax1(f))
+    {
+        return Some(IpcResponse::Error {
+            v,
+            code: "ATTACHMENT_IPC_REFUSED".into(),
+            message: "attachment frames are not accepted on IPC dials".into(),
+        });
+    }
     let custody = frames
         .iter()
         .any(|f| raven_core::friend_custody::is_rfc1(f));
@@ -2423,6 +2440,25 @@ mod tests {
             );
         }
         assert!(refuse_custody_frames(IPC_VERSION, &[b"plain".to_vec()]).is_none());
+        // An attachment frame is refused on every IPC dial, in a lab run
+        // too: a whole one, and one that only begins as one.
+        use raven_core::attachment::link::{Body, Frame};
+        let done = Frame {
+            req: [1, 2, 3, 4],
+            body: Body::Done([7; 16]),
+        }
+        .encode();
+        for frames in [
+            vec![done.clone()],
+            vec![b"plain".to_vec(), done],
+            vec![b"RAX1\x01\x03".to_vec()],
+        ] {
+            let refused = refuse_custody_frames(IPC_VERSION, &frames);
+            assert!(
+                matches!(refused, Some(IpcResponse::Error { ref code, .. }) if code == "ATTACHMENT_IPC_REFUSED"),
+                "{refused:?}"
+            );
+        }
     }
 
     #[test]

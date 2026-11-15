@@ -1080,6 +1080,50 @@ On the branch `feature/attachments-phase1`, on top of the 3.1 fix line:
   The receiver pulls with WANT when no chunk landed for 15 s (at once for
   one the user asked for) and says DONE at the end.
 
+## 27. The review of the built part (2026-11-15)
+
+An independent read of the exchange as built, against a peer that is no
+friend and against a verified friend whose node misbehaves (on purpose, or
+by a fault such as a full disk). No way was found for a peer that is no
+friend to reach the store, for one friend to reach another's attachments,
+for a key, a name or an address to reach a log line or a peer, or for a
+release build to open the gate. What it did find, and what changed:
+
+| Finding | Change |
+|---|---|
+| A friend's node that answers "not known" and "I lack every chunk" by turns made this node push the same photo without end: no push counted as one that moved nothing | The chunks of one attachment are pushed at most 8 times over in a day; then it waits for the next day and asks first. A wait the friend's own answer set no longer ends when a link with it comes up |
+| One friend could fill every row of the store (4,096) and, with photos that come by themselves, about 4 GiB; other friends' offers then lost their key for good | One friend's offers keep 1,024 rows at most. An offer with no room stays as it came, key and all, and gets its row when a later start finds room |
+| Tries for a friend that never answers went on every 5 minutes for ever, one dial after another on one thread | The waits grow (5 minutes for about an hour, 30 minutes for about a day, then 6 hours), a friend that was not reached is not dialled for its other attachments meanwhile, nothing is dialled for by itself after 30 days, and the dials of one look run side by side |
+| A late answer GONE to a WANT could turn a photo that was whole meanwhile into "no longer available" | GONE counts only while chunks are still missing |
+| A served request hashed the whole blob before the day's limit was asked; plans were built (chunks read, marked as pushed) and then dropped for want of room in the look | The limit is asked first, the tree is kept for the dial's other requests, and room is asked before a plan is made |
+| A friend blocked while its link was open still had its RAX1 frames taken until the link ended | The friend check is made for every frame |
+| RAX1 frames passed through the node's IPC dials | Refused there (`ATTACHMENT_IPC_REFUSED`), in lab runs too |
+| A stop between the last chunk and the last check left a row that nothing finished | The next look finishes it and tells the holder |
+| A row written twice within one tick of a coarse file clock could stay unseen | A row read this soon after its file's time is read again at the next look |
+| Hex copies of the key in a row and in an offer's fields were freed as they were | Wiped when dropped |
+| A staged photo (not sealed) stayed an hour when the app ended before sending | Removed when the engine next stages, and by the sweep after 10 minutes |
+
+Left open, to be decided before the gate opens in a release:
+
+- **Rows in a profile that is not sealed.** There a row is a plain file with
+  `K`, as that profile's other files are plain, while the chat history is
+  protected by the platform's key: the photo can be read from the disk when
+  its message's text cannot. The row should be sealed under the history's
+  key in those modes.
+- **File names.** The row and the blob folder are named by the handle, the
+  same 32 hex characters on the sender's disk and on the receiver's: two
+  directory listings show that these two profiles exchanged this
+  attachment, with its padded size and its times. A name keyed per profile
+  would not.
+- **The day's limit of chunks served** is kept in memory: a restart clears
+  it.
+- **The offer as it came stays in the session store's inbox row** (sealed
+  like every row there) until that row is pruned: `K` outlives the
+  attachment's own row by that long. The blob is gone by then, so nothing
+  on this disk can be opened with it.
+- No limit on messages per friend exists below this: the share of the store
+  bounds what a flood of offers can take, not the flood itself.
+
 Not built yet: the app API in the engine and the apps (in work), groups
 beyond the offer as a message body, mail friends holding chunks (§12), the
 `gone` frame's sending side, quotas by size, deletion with the chat and

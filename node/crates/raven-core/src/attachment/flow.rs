@@ -231,9 +231,13 @@ pub enum Kept {
     New,
     /// The same offer was kept before (a copy sent again).
     Again,
-    /// No row: no blob to fetch, the store is full, or its handle belongs
-    /// to another attachment already.
+    /// No row: no blob to fetch, or its handle belongs to another
+    /// attachment already.
     NotKept,
+    /// No row for now: the store is full, or this friend's share of it is.
+    /// The offer stays as it came, and is taken up when there is room
+    /// ([`adopt_kept_offers`]).
+    NoRoom,
 }
 
 /// Keeps the offer the verified friend `peer` sent as message
@@ -245,6 +249,27 @@ pub fn keep_offer(
     offer: &Offer,
     text: &str,
     now_ms: u64,
+) -> Result<Kept, StoreError> {
+    keep_offer_within(
+        data_dir,
+        peer,
+        message_id,
+        offer,
+        text,
+        now_ms,
+        store::MAX_ROWS_PER_FRIEND,
+    )
+}
+
+/// [`keep_offer`] with the most rows one friend's offers may keep.
+fn keep_offer_within(
+    data_dir: &Path,
+    peer: &[u8; 32],
+    message_id: &[u8; 16],
+    offer: &Offer,
+    text: &str,
+    now_ms: u64,
+    per_friend: usize,
 ) -> Result<Kept, StoreError> {
     if matches!(
         offer.content,
@@ -267,9 +292,15 @@ pub fn keep_offer(
         Err(StoreError::Corrupt) => return Ok(Kept::NotKept),
         Err(e) => return Err(e),
     }
+    // One friend's offers keep a share of the store at most. The rows are
+    // only read once the store holds as many as that share (a look at the
+    // folder; below it no friend can be over).
+    if store::count(data_dir) >= per_friend && store::offered_by(data_dir, peer)? >= per_friend {
+        return Ok(Kept::NoRoom);
+    }
     match store::put(data_dir, &row) {
         Ok(()) => Ok(Kept::New),
-        Err(StoreError::Full) => Ok(Kept::NotKept),
+        Err(StoreError::Full) => Ok(Kept::NoRoom),
         Err(e) => Err(e),
     }
 }
@@ -297,8 +328,10 @@ fn chat_offer(text: &str) -> Option<Offer> {
 /// An offer of mine is always stored so: a history row never holds a key.
 /// A friend's offer is while attachments are live, and then its row is
 /// kept too when the friend is verified; with the gate shut it stays as it
-/// came, for a later build to open (phase 1a). An error means the row
-/// could not be written now: the message is not answered and comes again.
+/// came, for a later build to open (phase 1a), and so does one whose row
+/// has no room now (the store is full, or that friend's share of it). An
+/// error means the row could not be written now: the message is not
+/// answered and comes again.
 pub fn history_body(
     data_dir: &Path,
     direction: &str,
@@ -328,8 +361,15 @@ pub fn history_body(
             return Ok(None);
         }
         if is_friend(data_dir, peer) {
-            keep_offer(data_dir, peer, message_id, &offer, text, now_ms)
+            let kept = keep_offer(data_dir, peer, message_id, &offer, text, now_ms)
                 .map_err(|e| e.to_string())?;
+            // No room for its row now: the offer stays as it came (as a
+            // build without attachments keeps it), key and all, so that it
+            // is not lost: it is taken up when there is room again. The
+            // stored form holds no key, and could never be fetched.
+            if kept == Kept::NoRoom {
+                return Ok(None);
+            }
         }
     }
     let stored = offer.stored();
@@ -356,9 +396,12 @@ pub fn adopt_kept_offers(data_dir: &Path, now_ms: u64) -> Result<usize, String> 
         hex::decode_to_slice(&entry.peer_pub_hex, &mut peer).ok()?;
         hex::decode_to_slice(&entry.message_id_hex, &mut mid).ok()?;
         if is_friend(data_dir, &peer) {
-            // A row that cannot be written now leaves the offer as it is:
-            // the next start tries again.
-            keep_offer(data_dir, &peer, &mid, &offer, &entry.body, now_ms).ok()?;
+            // A row that cannot be written now, or has no room, leaves the
+            // offer as it is: the next start tries again.
+            let kept = keep_offer(data_dir, &peer, &mid, &offer, &entry.body, now_ms).ok()?;
+            if kept == Kept::NoRoom {
+                return None;
+            }
         }
         let stored = offer.stored();
         Some((stored.encode(), stored.list_words().unwrap_or_default()))
@@ -603,5 +646,54 @@ mod tests {
             "no row: nothing to differ from"
         );
         assert_eq!(store::list(d).unwrap().len(), 1);
+    }
+
+    /// One friend's offers keep a share of the store and no more: the next
+    /// one finds no room, while another friend's is kept. Its offer is not
+    /// lost: the history keeps it as it came, key and all (never the
+    /// stored form, which could not be fetched), and it gets its row once
+    /// there is room again.
+    #[test]
+    fn one_friends_offers_keep_their_share_of_the_store_and_no_more() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let _live = Live::on();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let d = b.path();
+        let other: [u8; 32] = [8u8; 32];
+        let offers: Vec<(Handle, String)> = (0..5)
+            .map(|i| {
+                let made = prepare(a.path(), &FRIEND, &jpeg(10_000 + i), &photo(), 1).unwrap();
+                (made.handle, made.offer)
+            })
+            .collect();
+        let keep = |from: &[u8; 32], n: usize, share: usize| {
+            let offer = chat_offer(&offers[n].1).unwrap();
+            keep_offer_within(d, from, &[n as u8; 16], &offer, &offers[n].1, 5, share).unwrap()
+        };
+        for n in 0..3 {
+            assert_eq!(keep(&FRIEND, n, 3), Kept::New);
+        }
+        assert_eq!(store::offered_by(d, &FRIEND).unwrap(), 3);
+        assert_eq!(
+            keep(&FRIEND, 3, 3),
+            Kept::NoRoom,
+            "the friend's share is used up"
+        );
+        assert!(store::get(d, &offers[3].0).unwrap().is_none());
+        // One it sent before is still known as kept; another friend's has room.
+        assert_eq!(keep(&FRIEND, 0, 3), Kept::Again);
+        assert_eq!(keep(&other, 4, 3), Kept::New);
+        assert_eq!(store::offered_by(d, &other).unwrap(), 1);
+        assert_eq!(store::count(d), 4);
+        // Rows of mine to that friend do not count against it.
+        prepare(d, &FRIEND, &jpeg(9_000), &photo(), 6).unwrap();
+        assert_eq!(store::offered_by(d, &FRIEND).unwrap(), 3);
+        // Room again (one of its photos went with its message): kept now.
+        store::remove(d, &offers[1].0).unwrap();
+        assert_eq!(keep(&FRIEND, 3, 3), Kept::New);
+        // The whole store's limit says no room too, never "not kept".
+        assert_eq!(store::MAX_ROWS_PER_FRIEND * 4, store::MAX_ROWS);
     }
 }

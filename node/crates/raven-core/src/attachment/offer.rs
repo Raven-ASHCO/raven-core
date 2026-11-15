@@ -41,6 +41,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::blob::{Key, Shape, HANDLE_LEN, KEY_LEN};
 
@@ -466,7 +467,8 @@ impl Offer {
             self.blob.as_ref().map(|b| &b.shape),
             self.blob.as_ref(),
         );
-        let json = serde_json::to_string(&wire).expect("strings and numbers");
+        // It holds the key: wiped when this returns.
+        let json = Zeroizing::new(serde_json::to_string(&wire).expect("strings and numbers"));
         let fixed = HEAD_OFFER.len() + json.len() - 1 + PAD_OPEN.len() + PAD_CLOSE.len();
         let zeros = OFFER_LEN.checked_sub(fixed).ok_or(OfferError::TooBig)?;
         let mut text = String::with_capacity(OFFER_LEN);
@@ -653,6 +655,15 @@ struct Wire {
     root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pad: Option<String>,
+}
+
+impl Drop for Wire {
+    /// The key's hex goes from memory with the frame's fields.
+    fn drop(&mut self) {
+        if let Some(key) = &mut self.key {
+            key.zeroize();
+        }
+    }
 }
 
 impl Wire {

@@ -76,6 +76,10 @@ independent review.
   (API.md, "Photos"), and raven-node carries the photo's sealed pieces on the links friends already
   have, in one dial right behind the photo's message (`protocol/RAVEN_ATTACHMENT_V1.md`). Release
   builds are unchanged: the gate is shut, so nothing can be sent and nothing new is on the wire.
+- After an independent review of that exchange, a friend's Raven that misbehaves can no longer make
+  this one push a photo again and again, fill the store of photos for everyone else, or keep it
+  dialling for ever; a blocked friend is refused on a link that is already open; and a photo that
+  was whole is not undone by a late answer (`docs/design/2026-11-attachments.md`, section 27).
 - The same lab builds have four terminal commands for tests across computers, before any desktop
   app has photos: `raven lab attach --to FRIEND --file PATH` (a JPEG goes as a photo, anything else
   as a file), `raven lab attachments`, `raven lab attachment-ask HANDLE` and

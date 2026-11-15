@@ -33,7 +33,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use ash_engine::engine::ContactView;
@@ -1239,7 +1239,7 @@ impl Inner {
         let row = store::get(dir, &meta.handle)
             .map_err(store_error)?
             .ok_or_else(|| gone("the photo's sealed bytes are no longer on this device"))?;
-        let pending = self.take_send(&c, row.reference, Some(Arc::clone(meta)))?;
+        let pending = self.take_send(&c, row.reference.clone(), Some(Arc::clone(meta)))?;
         Ok(json!({"message": first_row(&pending, meta).json()}))
     }
 
@@ -1305,7 +1305,19 @@ impl Inner {
         gate()?;
         self.identity()?;
         let name = args.opt_str("name")?.unwrap_or("");
-        let path = store::stage(self.data_dir()?, name).map_err(store_error)?;
+        let dir = self.data_dir()?;
+        // The first file this run stages: what an earlier run left in the
+        // staging folder (the app ended between staging and sending) goes
+        // first. Those are photos as the app wrote them, not sealed.
+        {
+            static CLEARED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+            let mut cleared = CLEARED.lock().unwrap_or_else(|e| e.into_inner());
+            if !cleared.iter().any(|done| done == dir) {
+                cleared.push(dir.to_path_buf());
+                store::clear_staging(dir);
+            }
+        }
+        let path = store::stage(dir, name).map_err(store_error)?;
         // The app must get the path as it is: every string of an answer is
         // cleaned for display on its way out.
         match path.to_str().filter(|p| safety::text(p) == *p) {
@@ -1408,7 +1420,7 @@ impl Inner {
             .map_err(store_error)
             .and_then(|row| row.ok_or_else(|| gone("the photo's row is gone")))
             .and_then(|row| match Meta::parse(&row.reference) {
-                Some(meta) => Ok((row.reference, Arc::new(meta))),
+                Some(meta) => Ok((row.reference.clone(), Arc::new(meta))),
                 None => Err(bad("the photo's row does not read")),
             })
             .and_then(|(stored, meta)| {
@@ -2407,7 +2419,7 @@ mod tests {
         let home = profile(&FRIEND);
         let d = home.path();
         let (handle, offer, _) = photo(d, &FRIEND, 50_000, "hi");
-        let stored = store::get(d, &handle).unwrap().unwrap().reference;
+        let stored = store::get(d, &handle).unwrap().unwrap().reference.clone();
         let meta = Arc::new(Meta::parse(&stored).unwrap());
         assert_eq!(
             (meta.handle, meta.caption.as_str(), meta.words.as_str()),
@@ -2490,7 +2502,7 @@ mod tests {
         let home = profile(&FRIEND);
         let d = home.path();
         let (handle, _, _) = photo(d, &FRIEND, 50_000, "");
-        let stored = store::get(d, &handle).unwrap().unwrap().reference;
+        let stored = store::get(d, &handle).unwrap().unwrap().reference.clone();
         let meta = Arc::new(Meta::parse(&stored).unwrap());
         let inner = Inner::new(Ok(d.to_path_buf()));
         let row = |id: &str, state: State, incoming: bool| {

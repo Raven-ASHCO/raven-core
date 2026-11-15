@@ -734,3 +734,408 @@ fn a_dialer_that_is_no_verified_friend_gets_a_refusal_for_a_request_and_nothing_
         Body::Error(ErrorCode::Malformed)
     );
 }
+
+// ── What a friend's node cannot make this node do (the review of 2026-11-15) ──
+
+/// The request id of a plan's last frame (the HAVE of a push).
+fn last_req(plan: &Plan) -> [u8; 4] {
+    plan.frames.last().unwrap()[6..link::HEADER_LEN]
+        .try_into()
+        .unwrap()
+}
+
+/// Makes every dial `a` plans to `b`, look after look, until `a` plans no
+/// more; the dials made. (Every plan a look gives is dialled, as raven-node
+/// does: a plan that is made counts its chunks as pushed.)
+fn run_all(a: &Side, b: &Side, now: u64) -> usize {
+    let mut dials = 0;
+    loop {
+        let plans = a.plans(now);
+        if plans.is_empty() {
+            return dials;
+        }
+        for plan in &plans {
+            dials += 1;
+            assert!(dials < 40, "the dials do not end");
+            let replies = dial(b, &KA, plan, now);
+            a.x().took(plan, Some(&replies), now);
+        }
+    }
+}
+
+/// The next time from `from` on, in steps of `step`, at which `side` plans
+/// a dial, and that dial; `None` when none comes before `until`.
+fn next_plan(side: &Side, from: u64, step: u64, until: u64) -> Option<(u64, Plan)> {
+    let mut at = from;
+    while at <= until {
+        if let Some(plan) = side.plans(at).into_iter().next() {
+            return Some((at, plan));
+        }
+        at += step;
+    }
+    None
+}
+
+#[test]
+fn a_friend_that_asks_for_everything_again_and_again_gets_a_days_worth_and_no_more() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let handle = offered(&a, &b, &jpeg(300_000), now);
+    let chunks = 5u32;
+    let all: Vec<u32> = (0..chunks).collect();
+    // The friend's node answers a push with "not known" and a question
+    // with "I lack every chunk": no push ever counts as one that moved
+    // nothing, and every question is answered with a call for everything.
+    let answer = |plan: &Plan, at: u64| {
+        let lack = if ops(plan).len() > 1 {
+            Lack::NotKnown
+        } else {
+            Lack::wanting(chunks as u16, &all)
+        };
+        let reply = encode(last_req(plan), Body::Lack(vec![(handle, lack)]));
+        a.x().took(plan, Some(&[reply]), at);
+    };
+    let day_end = now + DAY_MS - 60_000;
+    let (mut at, mut pushed, mut dials) = (now, 0usize, 0usize);
+    while let Some((due, plan)) = next_plan(&a, at, 20_000, day_end) {
+        dials += 1;
+        assert!(dials < 500, "the dials do not end");
+        pushed += ops(&plan).iter().filter(|op| **op == 0x04).count();
+        answer(&plan, due);
+        at = due;
+    }
+    assert_eq!(
+        pushed,
+        (PUSH_ROUNDS_PER_DAY * chunks) as usize,
+        "every chunk eight times in a day, and no more ({dials} dials)"
+    );
+    // Whatever the friend's node says, nothing more goes that day, and a
+    // link with it coming up changes nothing.
+    a.x().peer_seen(&KB);
+    assert!(a.plans(day_end).is_empty());
+    let planned = a.x().plans(day_end, &|_| true);
+    assert!(planned.waiting && planned.waits.turn == 1, "{planned:?}");
+    assert!(a.x().link_push(&KB, day_end).is_none());
+    // The next day it is tried again.
+    let (_, plan) =
+        next_plan(&a, now + DAY_MS + 60_000, 20_000, now + DAY_MS + 3_600_000).expect("a new day");
+    assert_eq!(ops(&plan), [0x01], "a question first");
+    assert_eq!(a.row(&handle).state, State::Offered);
+    // An honest answer then, and it goes over as any other.
+    let replies = dial(&b, &KA, &plan, now + DAY_MS + 3_600_000);
+    assert!(a.x().took(&plan, Some(&replies), now + DAY_MS + 3_600_000));
+    assert_eq!(run_all(&a, &b, now + DAY_MS + 3_600_000), 1);
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    assert_eq!(b.row(&handle).state, State::Complete);
+}
+
+#[test]
+fn a_wait_the_friends_own_answer_set_is_not_ended_by_a_new_link() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let handle = offered(&a, &b, &jpeg(100_000), now);
+    // A dial that did not reach the friend, then one it answers "later".
+    let plan = a.plans(now).remove(0);
+    assert!(!a.x().took(&plan, None, now));
+    let (at, plan) = next_plan(&a, now, 500, now + 10_000).expect("the next try");
+    let later = encode(last_req(&plan), Body::Lack(vec![(handle, Lack::Later)]));
+    assert!(!a.x().took(&plan, Some(&[later]), at));
+    // The friend's link comes up: the wait its answer set stands.
+    a.x().peer_seen(&KB);
+    assert!(a.plans(at + 1_000).is_empty());
+    assert!(a.plans(at + LATER_MS - 1_000).is_empty());
+    assert_eq!(a.plans(at + LATER_MS).len(), 1);
+    // A wait after a dial that failed is ended by the link, as before.
+    let plan = a.plans(at + LATER_MS).remove(0);
+    assert!(!a.x().took(&plan, None, at + LATER_MS));
+    assert!(a.plans(at + LATER_MS + 100).is_empty());
+    a.x().peer_seen(&KB);
+    assert_eq!(a.plans(at + LATER_MS + 100).len(), 1);
+}
+
+#[test]
+fn tries_that_fail_grow_apart_until_a_friend_that_is_gone_is_dialled_a_few_times_a_day() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    offered(&a, &b, &jpeg(100_000), now);
+    // Every dial fails. The times of the dials, over five days.
+    let end = now + 5 * DAY_MS;
+    let (mut at, mut dials) = (now, Vec::new());
+    while let Some((due, plan)) = next_plan(&a, at, 1_000, end) {
+        dials.push(due - now);
+        assert!(!a.x().took(&plan, None, due));
+        // Past the wait just set, in one step where it is long.
+        let wait = a.memory.lock().unwrap().parked[&plan.handle].until_ms;
+        at = wait.max(due + 1_000);
+    }
+    let within = |from: u64, to: u64| dials.iter().filter(|t| **t >= from && **t < to).count();
+    assert!(within(0, 600_000) >= 8, "quick at first: {dials:?}");
+    let first_hour = within(0, 3_600_000);
+    assert!(
+        (15..=25).contains(&first_hour),
+        "{first_hour} in the first hour"
+    );
+    let first_day = within(0, DAY_MS);
+    assert!(
+        (40..=70).contains(&first_day),
+        "{first_day} in the first day"
+    );
+    let fifth_day = within(4 * DAY_MS, 5 * DAY_MS);
+    assert!((3..=5).contains(&fifth_day), "{fifth_day} on the fifth day");
+    // The friend is there again: tried at once, and quick again after it.
+    a.x().peer_seen(&KB);
+    let plan = a.plans(end).remove(0);
+    assert!(!a.x().took(&plan, None, end));
+    assert_eq!(a.plans(end + RETRY_MS).len(), 1);
+}
+
+#[test]
+fn a_friend_that_was_not_reached_is_not_dialled_again_for_its_other_attachments() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let handles = [
+        offered(&a, &b, &jpeg(100_000), now),
+        offered(&a, &b, &jpeg(100_001), now),
+        offered(&a, &b, &jpeg(100_002), now),
+    ];
+    // One dial per friend in a look; it does not reach the friend.
+    let planned = a.x().plans(now, &|_| true);
+    assert_eq!(planned.plans.len(), 1);
+    assert_eq!(planned.waits.turn, 2, "the other two wait their turn");
+    assert_eq!(
+        a.memory.lock().unwrap().tried.len(),
+        1,
+        "only the one in the dial counts as pushed"
+    );
+    assert!(!a.x().took(&planned.plans[0], None, now));
+    // The other two are not tried in its place: all three wait as long.
+    let planned = a.x().plans(now + 100, &|_| true);
+    assert!(planned.plans.is_empty() && planned.waiting, "{planned:?}");
+    assert_eq!(planned.waits.turn, 3);
+    assert_eq!(a.plans(now + RETRY_MS).len(), 1);
+    // A second failure: the wait doubles for all of them, whichever was tried.
+    let plan = a.plans(now + RETRY_MS).remove(0);
+    assert!(!a.x().took(&plan, None, now + RETRY_MS));
+    assert!(a.plans(now + 2 * RETRY_MS + RETRY_MS - 100).is_empty());
+    let third = a.plans(now + 3 * RETRY_MS);
+    assert_eq!(third.len(), 1);
+    assert!(!a.x().took(&third[0], None, now + 3 * RETRY_MS));
+    // The friend is there again: one after the other they go. One that
+    // was pushed into a dial that failed asks first, as after a cut; one
+    // that only waited its turn was never counted as pushed, and is pushed
+    // whole at once. (The three failed dials carried one, two or all
+    // three of them.)
+    let cut = a.memory.lock().unwrap().tried.len();
+    assert!((1..=3).contains(&cut), "{cut}");
+    a.x().peer_seen(&KB);
+    let dials = run_all(&a, &b, now + 10_000);
+    assert_eq!(
+        dials,
+        3 + cut,
+        "ask and then push for a cut one, one dial for the others"
+    );
+    for handle in handles {
+        assert_eq!(a.row(&handle).state, State::Delivered);
+        assert_eq!(b.row(&handle).state, State::Complete);
+    }
+    assert!(a.plans(now + 10_000).is_empty());
+}
+
+#[test]
+fn a_late_answer_that_says_gone_does_not_undo_a_photo_that_is_whole() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let bytes = jpeg(200_000);
+    let handle = offered(&a, &b, &bytes, now);
+    // The receiver asks (nothing landed for a while); the holder keeps its
+    // answer back, pushes every chunk over a dial of its own, and only then
+    // answers the question: "gone".
+    let asked = now + PULL_AFTER_MS;
+    let pull = b.plans(asked).remove(0);
+    assert_eq!(ops(&pull), [0x02]);
+    assert_eq!(push_all(&a, &b, asked), 1);
+    assert_eq!(b.row(&handle).state, State::Complete);
+    let gone = encode(last_req(&pull), Body::Error(ErrorCode::Gone));
+    assert!(!b.x().took(&pull, Some(&[gone]), asked));
+    let theirs = b.row(&handle);
+    assert_eq!(theirs.state, State::Complete, "the photo stays");
+    assert_eq!(
+        &store::read_plain(b.d(), &theirs, 0, bytes.len()).unwrap()[..],
+        &bytes[..]
+    );
+    // One that is still on its way does turn gone on that answer.
+    let (c, d) = (Side::new(), Side::new());
+    let (other, offer) = staged(&c, &bytes, now);
+    keep(&d, &offer, now);
+    let pull = d.plans(asked).remove(0);
+    let gone = encode(last_req(&pull), Body::Error(ErrorCode::Gone));
+    assert!(!d.x().took(&pull, Some(&[gone]), asked));
+    assert_eq!(d.row(&other).state, State::Gone);
+    assert!(d.plans(asked + DAY_MS).is_empty());
+}
+
+#[test]
+fn every_chunk_here_and_the_last_step_not_run_is_finished_at_the_next_look() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let bytes = jpeg(200_000);
+    let (handle, offer) = staged(&a, &bytes, now);
+    keep(&b, &offer, now);
+    // Every chunk lands in the store, and the process stops before the
+    // step that opens the blob and marks the row.
+    let mine = a.row(&handle);
+    let shape = mine.shape().unwrap();
+    let tree = store::tree(a.d(), &mine).unwrap();
+    let root = b.row(&handle).root().unwrap();
+    for index in 0..shape.chunks() {
+        let chunk = store::read_chunk(a.d(), &handle, &shape, true, index).unwrap();
+        let path = tree.chunk_path(index as usize).unwrap();
+        store::take_chunk(b.d(), &handle, &shape, &root, index, &chunk, &path).unwrap();
+    }
+    assert_eq!(b.row(&handle).state, State::Incoming);
+    // The next look, once the time to be pushed is over, runs that step:
+    // nothing is asked of the holder, the photo is there, and the holder is
+    // told with DONE.
+    let later = crate::clock::now_ms() + PULL_AFTER_MS;
+    let planned = b.x().plans(later, &|_| true);
+    assert!(planned.plans.is_empty(), "{planned:?}");
+    let theirs = b.row(&handle);
+    assert_eq!(theirs.state, State::Complete);
+    assert_eq!(
+        &store::read_plain(b.d(), &theirs, 0, bytes.len()).unwrap()[..],
+        &bytes[..]
+    );
+    let done = b.plans(later).remove(0);
+    assert_eq!(ops(&done), [0x03]);
+    dial(&a, &KB, &done, later);
+    assert!(!b.x().took(&done, Some(&[]), later));
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    assert!(b.plans(later).is_empty());
+}
+
+#[test]
+fn a_row_written_again_within_the_same_tick_of_the_file_clock_is_read_again() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(100_000), now);
+    keep(&b, &offer, now);
+    let file = a
+        .d()
+        .join(store::ROWS_DIR)
+        .join(format!("{}.row", hex::encode(handle)));
+    let stamped = std::fs::metadata(&file).unwrap().modified().unwrap();
+    // The exchange reads the row while the offer is on its way.
+    assert!(a.plans(now).is_empty());
+    // Another process writes its delivery, and the file keeps the time it
+    // had (a second write within one tick of a coarse file clock).
+    delivered(&a, &offer, now);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(stamped)
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        stamped
+    );
+    // The next look sees it all the same: every chunk goes.
+    let plan = a
+        .plans(now)
+        .into_iter()
+        .next()
+        .expect("the delivery is seen");
+    assert!(ops(&plan).len() > 1, "{:?}", ops(&plan));
+}
+
+#[test]
+fn a_friend_whose_day_is_used_up_is_refused_before_anything_is_read() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(200_000), now);
+    keep(&b, &offer, now);
+    let want = |first: u16| {
+        encode(
+            req(),
+            Body::Want {
+                handle,
+                first,
+                count: 2,
+            },
+        )
+    };
+    // A request is served, and the tree it needed is kept for the next.
+    let replies = a.x().listener_frame(&KB, &want(0), now);
+    assert_eq!(replies.len(), 3, "two chunks and the end");
+    assert!(a
+        .memory
+        .lock()
+        .unwrap()
+        .tree
+        .as_ref()
+        .is_some_and(|(h, _)| *h == handle));
+    // The friend's day is used up: refused at once, the bytes not read
+    // (they are not even there any more).
+    a.memory.lock().unwrap().served.insert(
+        KB,
+        Served {
+            day_start_ms: now,
+            bytes: SERVE_BYTES_PER_DAY,
+        },
+    );
+    std::fs::remove_dir_all(store::blob_dir(a.d(), &handle)).unwrap();
+    a.memory.lock().unwrap().tree = None;
+    let replies = a.x().listener_frame(&KB, &want(2), now);
+    assert_eq!(replies.len(), 1);
+    let Ok(Frame { body, .. }) = link::decode_for_dialer(&replies[0]) else {
+        panic!("an answer");
+    };
+    assert!(
+        matches!(body, Body::Error(ErrorCode::RateLimited)),
+        "{body:?}"
+    );
+    // The next day it is served again (here: the bytes are gone).
+    let replies = a.x().listener_frame(&KB, &want(2), now + DAY_MS);
+    let Ok(Frame { body, .. }) = link::decode_for_dialer(&replies[0]) else {
+        panic!("an answer");
+    };
+    assert!(matches!(body, Body::Error(ErrorCode::NotFound)), "{body:?}");
+}
+
+#[test]
+fn an_attachment_a_month_old_is_dialled_for_no_more_unless_the_user_asks() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let bytes = jpeg(100_000);
+    // Mine, offered, never taken whole; a friend's, never pushed.
+    let handle = offered(&a, &b, &bytes, now);
+    let month = now + AUTO_MAX_AGE_MS;
+    assert_eq!(a.plans(month - 60_000).len(), 1);
+    let planned = a.x().plans(month, &|_| true);
+    assert!(planned.plans.is_empty() && !planned.waiting, "{planned:?}");
+    assert_eq!(b.plans(month - 60_000).len(), 1);
+    let planned = b.x().plans(month, &|_| true);
+    assert!(planned.plans.is_empty() && !planned.waiting, "{planned:?}");
+    // The friend's own dial still moves it: it is served, and taken.
+    let pull = b.plans(month - 60_000).remove(0);
+    let replies = dial(&a, &KB, &pull, month);
+    assert!(replies.len() > 1);
+    // And one the user asks for is fetched whatever its age.
+    let (c, d) = (Side::new(), Side::new());
+    let (other, offer) = staged(&c, &bytes, now);
+    keep(&d, &offer, now);
+    assert!(d.plans(month).is_empty());
+    store::update(d.d(), &other, month, |row| row.asked = true).unwrap();
+    let plan = d.plans(month).remove(0);
+    assert_eq!(ops(&plan), [0x02]);
+    assert_eq!(handle.len(), other.len());
+}

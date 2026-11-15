@@ -123,6 +123,11 @@ and dropped.
   form. When the sender is a verified friend, the node also keeps a row
   (with `K` and `R`), so the chunks can come. From anyone else no row is
   kept: the attachment can never be fetched.
+- **Room.** One friend's offers keep rows for at most 1,024 attachments, a
+  quarter of the store. An offer that finds no room (that share is used up,
+  or the store is full) is kept as it came, as in §9, and gets its row when
+  a later start finds room: it is never reduced to the stored form, which
+  holds no key and could not be fetched.
 - A copy of the same offer that comes again (a re-send after a lost ACK) is
   compared with the kept row's SHA-256, and by what a reader shows: only
   another offer under the same message id marks the row as a conflict.
@@ -194,7 +199,11 @@ build sets it while the gate is shut; old nodes ignore it.
   hello showed caps without the bit, a dial carries no RAX1 frame.
 - A listener takes RAX1 frames only from a verified friend whose caps on
   this link showed the bit. Anyone else gets ERROR POLICY_DENIED for a HAVE
-  or a WANT, and nothing for a PUSH or a DONE.
+  or a WANT, and nothing for a PUSH or a DONE. Whether the peer is a
+  verified friend that is not blocked is asked for every frame: one blocked
+  while its link is open is refused from its next frame on.
+- RAX1 frames are said only by the node's own task. A program on the
+  node's IPC cannot make a dial carry one (`ATTACHMENT_IPC_REFUSED`).
 - With the gate shut a RAX1 frame is an unknown frame, as in every earlier
   build.
 
@@ -216,9 +225,25 @@ build sets it while the gate is shut; old nodes ignore it.
   see is asked for with HAVE, after 5 s and then ever less often (up to 6
   hours apart, for at most 8 days). A friend that answers "not known" (the
   offer is not there yet) is asked again later.
+- **How much, and how often.** The chunks of one attachment are pushed at
+  most 8 times over in a day, whatever the friend's answers ask for; then
+  the attachment waits for the next day and asks first. A try that failed
+  waits before the next one, longer each time: up to 5 minutes for about
+  the first hour, then 30 minutes for about a day, then 6 hours. A friend
+  that was not reached is not dialled for its other attachments meanwhile.
+  A link with the friend coming up ends these waits at once; it does not
+  end a wait the friend's own answer set (later, declined, busy), or the
+  day's limit. An attachment 30 days old is no longer dialled for by
+  itself, mine or a friend's: the friend's own dial still moves it, and one
+  the user asks for is fetched whatever its age. The dials of one look go
+  to different friends and run side by side.
 - **Pull** (the receiver's node dials). When no chunk landed for 15 s it
   asks the holder with WANT, at most 16 chunks a dial, and says DONE when
-  it has them all. An attachment the user asked for is pulled at once.
+  it has them all. An attachment the user asked for is pulled at once. An
+  answer of GONE turns only an attachment that still lacks chunks into "no
+  longer available"; one that is whole stays. When every chunk is here and
+  the last check did not run (the process stopped in between), the check
+  runs at the next look and the holder is told with DONE.
 - **What a receiver takes.** A chunk only for a row it keeps (§4), from the
   friend who sent that offer, in a state that still lacks chunks, and only
   when the chunk proves its place under `R` with its audit path. Then it is
@@ -229,7 +254,8 @@ build sets it while the gate is shut; old nodes ignore it.
   under the offer's key and everything after the attachment's last byte
   must be zeros. Otherwise the attachment is failed and never shown.
 - **What a holder serves.** Only an attachment it offered to the friend who
-  asks. At most 256 MiB of chunks to one friend a day (RATE_LIMITED).
+  asks. At most 256 MiB of chunks to one friend a day (RATE_LIMITED); once
+  the day is used up a request is refused before anything is read.
 - **What comes by itself.** Photos and voice notes up to 1 MiB. A file
   waits until the user asks (LACK later). Phase 1 sends nothing bigger
   than 1 MiB.
@@ -244,9 +270,19 @@ build sets it while the gate is shut; old nodes ignore it.
   under `K`), and `have`: one bit per chunk that is here.
 - `attachment_peers.json`: which friends' nodes showed bit 12, sealed.
 - `attachments_staging/`: a file an app wrote to be sent; sealed into a
-  blob and deleted at once.
+  blob and deleted at once. It is the attachment as the app wrote it, not
+  sealed: one that was never sent (the app ended in between) is removed
+  when the engine next stages a file, and by the node's sweep after 10
+  minutes.
 - Removing an attachment removes its row first: without `K`, what a disk
   keeps of the blob cannot be read.
+- In memory, the hex copies of `K` in a row and in an offer's fields are
+  wiped when they are dropped.
+- **Open before the gate opens** (design §27): in a profile that is not
+  sealed a row is a plain file, as that profile's other files are, while
+  its chat history is protected by the platform's key; and the row and the
+  blob folder are named by the handle, the same on the sender's disk and on
+  the receiver's.
 
 ## 8. Limits
 
@@ -255,6 +291,9 @@ build sets it while the gate is shut; old nodes ignore it.
 | One attachment | 64,000,000 bytes (1,059 chunks); 1,048,576 in phase 1 |
 | Offer | exactly 8,192 bytes |
 | Rows a profile keeps | 4,096 |
+| Rows one friend's offers keep | 1,024 |
+| One attachment's chunks pushed | 8 times over a day |
+| Dialled for by itself | for 30 days |
 | Chunks pushed per dial | 40 |
 | Chunks asked per dial | 16, in at most 4 WANT requests |
 | Entries in a HAVE or a LACK | 8 |
@@ -284,7 +323,8 @@ design lists them.
 
 No shared vectors yet. Unit tests: `attachment::blob`, `attachment::offer`,
 `attachment::link`, `attachment::store`, `attachment::flow`,
-`attachment::exchange` (two profiles exchanging frames by hand),
+`attachment::exchange` (two profiles exchanging frames by hand, and what a
+friend's node cannot make this node do),
 `attachment::peers`, `attachment::sweep` in raven-core; in raven-node
 `lan_direct` (`a_verified_friends_chunks_are_taken_on_a_lan_link`: a photo
 over a real Noise link, and the refusals) and `internet_direct`

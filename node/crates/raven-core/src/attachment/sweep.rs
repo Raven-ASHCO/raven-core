@@ -30,9 +30,13 @@ use crate::chat_history::ChatHistory;
 
 /// A row is never removed sooner than this after it was written.
 pub const ROW_GRACE_MS: u64 = 60_000;
-/// An attachment of mine whose message was never made, a blob folder with
-/// no row, and a staged file nobody sent are removed after this.
+/// An attachment of mine whose message was never made, and a blob folder
+/// with no row, are removed after this.
 pub const UNSENT_GRACE_MS: u64 = 3_600_000;
+/// A staged file nobody sent is removed after this. It is the photo as the
+/// app wrote it, not sealed: an app writes it and sends it within moments,
+/// so one this old was left behind (the app ended in between).
+pub const STAGED_GRACE_MS: u64 = 600_000;
 
 /// What a sweep removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -163,7 +167,7 @@ pub fn sweep(data_dir: &Path, now_ms: u64) -> Result<Swept, StoreError> {
             let old = entry
                 .metadata()
                 .and_then(|m| m.modified())
-                .is_ok_and(|at| older_than(at, UNSENT_GRACE_MS, now));
+                .is_ok_and(|at| older_than(at, STAGED_GRACE_MS, now));
             if old && std::fs::remove_file(entry.path()).is_ok() {
                 swept.staged += 1;
             }
@@ -338,5 +342,25 @@ mod tests {
         let swept = sweep(d, now).unwrap();
         assert_eq!((swept.staged, swept.blobs), (1, 1));
         assert!(!staged.exists() && !orphan.exists());
+        // A staged file goes sooner than the rest: it is not sealed.
+        let staged = store::stage(d, "photo.jpg").unwrap();
+        let recent = SystemTime::now() - Duration::from_millis(STAGED_GRACE_MS - 60_000);
+        std::fs::File::open(&staged)
+            .and_then(|f| f.set_modified(recent))
+            .unwrap();
+        assert_eq!(sweep(d, now).unwrap().staged, 0);
+        let left = SystemTime::now() - Duration::from_millis(STAGED_GRACE_MS + 60_000);
+        std::fs::File::open(&staged)
+            .and_then(|f| f.set_modified(left))
+            .unwrap();
+        assert_eq!(sweep(d, now).unwrap().staged, 1);
+        // And all of them go when an app starts to stage anew.
+        let (one, two) = (
+            store::stage(d, "a.jpg").unwrap(),
+            store::stage(d, "b.jpg").unwrap(),
+        );
+        assert_eq!(store::clear_staging(d), 2);
+        assert!(!one.exists() && !two.exists());
+        assert_eq!(store::clear_staging(d), 0);
     }
 }
