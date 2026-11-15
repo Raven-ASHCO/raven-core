@@ -10,6 +10,7 @@
 pub mod blob;
 pub mod offer;
 pub mod shown;
+pub mod store;
 
 /// Offers for the tests of the code that takes, keeps and shows them.
 #[cfg(test)]

@@ -211,6 +211,29 @@ pub const FILES: &[FileRule] = &[
         Kind::Groups,
         crate::group::store::GROUPS_LOCK,
     ),
+    // Attachments (docs/design/2026-11-attachments.md §14): one row per
+    // attachment, with its key and its root, RMS1 in a sealed profile,
+    // under the store's lock. The blob beside it is the sealed chunks as
+    // they travel, the bitmap says which of them are here, and a staged
+    // file is what an app wrote to be sent.
+    sealed(
+        "attachment_rows/*.row",
+        Kind::Attachments,
+        crate::attachment::store::ATTACHMENTS_LOCK,
+    ),
+    plain(
+        "attachments/*/blob",
+        "an attachment's sealed chunks as they travel: ciphertext under the attachment's own \
+         key, which is in its sealed row",
+    ),
+    plain(
+        "attachments/*/have",
+        "which chunks of an attachment's blob are here: one bit each, no content",
+    ),
+    plain(
+        "attachments_staging/*",
+        "a file an app wrote for Raven to send: sealed into a blob and deleted at once",
+    ),
     sealed(
         "route_memory.json",
         Kind::RouteMemory,

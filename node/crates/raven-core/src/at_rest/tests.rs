@@ -633,6 +633,83 @@ fn store_json_seals_in_sealed_mode() {
 
 /// Plain and unsealed-by-user profiles get exactly the bytes of today's
 /// writers (the files older builds read).
+/// An attachment's row (`docs/design/2026-11-attachments.md` §14) is one of
+/// the profile's sealed files: RMS1 in a sealed profile, with its key, its
+/// root and its caption nowhere in clear; read back through the store; and
+/// today's bytes in a profile that is not sealed. Every file of the store
+/// has its rule.
+#[test]
+fn an_attachments_row_is_sealed_with_the_profile() {
+    use crate::attachment::blob::{self, Key, KEY_LEN};
+    use crate::attachment::offer::{BlobRef, Offer};
+    use crate::attachment::store::{self, Chat, Row};
+    let source = TestKeySource::new(7);
+    let (dir, keys) = sealed_profile(&source);
+    let d = dir.path();
+    let key = Key::from_bytes([0x5a; KEY_LEN]);
+    let sealed = blob::seal(&key, &[7u8; 5_000]).unwrap();
+    let blob = BlobRef {
+        shape: sealed.shape,
+        key,
+        root: sealed.root(),
+    };
+    let offer = Offer::photo(blob, "a secret caption", 10, 10, &[1]).unwrap();
+    let text = offer.encode().unwrap();
+    let row = Row::of_offer(&offer, &text, Chat::Friend(&[9; 32]), &[1; 16], true, 5).unwrap();
+    store::put(d, &row).unwrap();
+    store::write_blob(d, &offer.handle, &sealed).unwrap();
+    let name = format!("{}.row", hex::encode(offer.handle));
+    let bytes = std::fs::read(d.join(store::ROWS_DIR).join(&name)).unwrap();
+    assert!(is_sealed(&bytes));
+    assert_eq!(bytes[5], Kind::Attachments.code());
+    let key_hex = hex::encode([0x5a; KEY_LEN]);
+    let root_hex = hex::encode(sealed.root());
+    for clear in [
+        key_hex.as_bytes(),
+        root_hex.as_bytes(),
+        &b"a secret caption"[..],
+    ] {
+        assert!(!contains(&bytes, clear));
+    }
+    assert!(open(&keys, Kind::Attachments, &bytes).is_ok());
+    assert_eq!(store::get(d, &offer.handle).unwrap(), Some(row.clone()));
+    assert_eq!(
+        &store::read_plain(d, &row, 0, 10_000).unwrap()[..],
+        &[7u8; 5_000][..]
+    );
+    // The blob is the sealed chunks, no more: none of the attachment's own bytes.
+    let blob_bytes =
+        std::fs::read(store::blob_dir(d, &offer.handle).join(store::BLOB_FILE)).unwrap();
+    assert_eq!(blob_bytes, sealed.blob);
+    assert!(!contains(&blob_bytes, &[7u8; 64]));
+    // Every file of the store has its rule, the rows as a sealed kind.
+    let handle = hex::encode(offer.handle);
+    assert_eq!(
+        registry::rule_for(&format!("attachment_rows/{handle}.row")).map(|r| r.rule),
+        Some(Rule::Sealed(Kind::Attachments))
+    );
+    for file in [
+        format!("attachments/{handle}/blob"),
+        format!("attachments/{handle}/have"),
+        "attachments_staging/00aa11bb22cc33dd.jpg".to_string(),
+    ] {
+        assert!(
+            matches!(
+                registry::rule_for(&file).map(|r| r.rule),
+                Some(Rule::Plain(_))
+            ),
+            "{file}"
+        );
+    }
+    // A profile that is not sealed: the row as JSON.
+    let plain = profile();
+    store::put(plain.path(), &row).unwrap();
+    let bytes = std::fs::read(plain.path().join(store::ROWS_DIR).join(&name)).unwrap();
+    assert!(!is_sealed(&bytes));
+    assert!(serde_json::from_slice::<serde_json::Value>(&bytes).is_ok());
+    assert_eq!(store::get(plain.path(), &offer.handle).unwrap(), Some(row));
+}
+
 #[test]
 fn store_json_in_plain_mode_is_byte_identical_to_todays_writer() {
     let today = tempfile::tempdir().unwrap();

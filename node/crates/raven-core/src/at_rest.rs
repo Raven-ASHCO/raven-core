@@ -210,11 +210,15 @@ pub enum Kind {
     /// intents ([`crate::group::store`]). Groups count up from 144, a lane of
     /// their own.
     Groups = 144,
+    /// `attachment_rows/<handle>.row`: one attachment's row, with its key
+    /// and the root of its blob ([`crate::attachment::store`]). Attachments
+    /// count up from 160, a lane of their own.
+    Attachments = 160,
 }
 
 impl Kind {
     /// Every kind, in code order.
-    pub const ALL: [Kind; 44] = [
+    pub const ALL: [Kind; 45] = [
         Kind::Contacts,
         Kind::LanSeen,
         Kind::LearnedRoutes,
@@ -259,6 +263,7 @@ impl Kind {
         Kind::DesktopPrivate,
         Kind::ChatPrefs,
         Kind::Groups,
+        Kind::Attachments,
     ];
 
     /// The kind byte of RMS1.
@@ -318,6 +323,7 @@ impl Kind {
             Kind::DesktopPrivate => "desktop_private",
             Kind::ChatPrefs => "chat_prefs",
             Kind::Groups => "groups",
+            Kind::Attachments => "attachments",
         }
     }
 
