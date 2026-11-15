@@ -278,6 +278,41 @@ fn a_friend_that_does_not_know_the_offer_yet_is_asked_again_later() {
 }
 
 #[test]
+fn an_offer_never_delivered_is_asked_about_ever_less_often_and_then_no_more() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, _offer) = staged(&a, &jpeg(50_000), now);
+    // The friend never gets the offer. Each question is answered "not
+    // known", and the wait doubles past the five minutes of other tries.
+    let mut at = now + STAGED_PROBE_AFTER_MS;
+    let mut waits = Vec::new();
+    for _ in 0..16 {
+        let plan = a.plans(at).remove(0);
+        assert_eq!(ops(&plan), [0x01]);
+        assert!(!a.x().took(&plan, Some(&dial(&b, &KA, &plan, at)), at));
+        // The next question is not asked a moment before its time.
+        let mut wait = 1_000u64;
+        while a.plans(at + wait).is_empty() {
+            wait *= 2;
+            assert!(wait < 2 * DAY_MS, "it is asked again within a day");
+        }
+        waits.push(wait);
+        at += wait;
+    }
+    assert!(waits[0] <= 2_000 && waits[5] >= 60_000, "{waits:?}");
+    assert!(*waits.last().unwrap() > RETRY_MAX_MS, "{waits:?}");
+    assert!(
+        *waits.last().unwrap() <= 2 * STAGED_RETRY_MAX_MS,
+        "{waits:?}"
+    );
+    assert_eq!(a.row(&handle).state, State::Staged);
+    // Past its message's time to arrive, nothing is asked any more.
+    let planned = a.x().plans(now + STAGED_MAX_AGE_MS, &|_| true);
+    assert!(planned.plans.is_empty() && !planned.waiting);
+}
+
+#[test]
 fn a_delivery_that_comes_after_an_early_question_is_not_held_back_by_its_wait() {
     let Some(_live) = Live::on() else { return };
     let (a, b) = (Side::new(), Side::new());

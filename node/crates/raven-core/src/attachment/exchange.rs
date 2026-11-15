@@ -69,6 +69,13 @@ const DAY_MS: u64 = 86_400_000;
 const RETRY_MS: u64 = 2_000;
 /// The longest wait between tries.
 const RETRY_MAX_MS: u64 = 300_000;
+/// The longest wait between questions about an offer whose delivery this
+/// node did not see: the delivery itself wakes the push, so the question
+/// is only a net under it and need not be asked often.
+const STAGED_RETRY_MAX_MS: u64 = 6 * 3_600_000;
+/// An offer still not delivered this long after its row was made is not
+/// asked about any more: its message's own time to arrive has run out.
+const STAGED_MAX_AGE_MS: u64 = 8 * DAY_MS;
 /// The friend answered "later" (its store is full, a file waits for a tap).
 const LATER_MS: u64 = 300_000;
 /// The friend declined, or does not take the request at all.
@@ -92,6 +99,7 @@ struct Brief {
     kind: Kind,
     asked: bool,
     friend_has: u32,
+    created_ms: u64,
     updated_ms: u64,
 }
 
@@ -106,6 +114,7 @@ impl Brief {
             kind: stored.kind(),
             asked: row.asked,
             friend_has: row.friend_has,
+            created_ms: row.created_ms,
             updated_ms: row.updated_ms,
         })
     }
@@ -592,11 +601,14 @@ impl<'a> Exchange<'a> {
                 // An offer still on its way: its delivery is waited for (the
                 // row then says so, and everything is pushed at once). Only
                 // one whose delivery was not seen for a while is asked for.
-                if brief.state == State::Staged
-                    && now_ms.saturating_sub(brief.updated_ms) < STAGED_PROBE_AFTER_MS
-                {
-                    out.waiting = true;
-                    continue;
+                if brief.state == State::Staged {
+                    if now_ms.saturating_sub(brief.created_ms) >= STAGED_MAX_AGE_MS {
+                        continue;
+                    }
+                    if now_ms.saturating_sub(brief.updated_ms) < STAGED_PROBE_AFTER_MS {
+                        out.waiting = true;
+                        continue;
+                    }
                 }
                 self.push_plan(peer, handle, &brief)
             } else {
@@ -729,13 +741,26 @@ impl<'a> Exchange<'a> {
         park.until_ms = park.until_ms.max(until_ms);
     }
 
-    /// A try that failed: wait, longer each time.
+    /// A try that failed: wait, longer each time. Up to five minutes for
+    /// an attachment whose offer is at the friend's (a friend seen again
+    /// ends the wait); up to six hours for an offer whose delivery was not
+    /// seen.
     fn back_off(&self, handle: &Handle, now_ms: u64) {
         let mut m = locked(self.memory);
+        let staged = m
+            .rows
+            .get(handle)
+            .and_then(|(_, brief)| brief.as_ref())
+            .is_some_and(|brief| brief.outgoing && brief.state == State::Staged);
+        let longest = if staged {
+            STAGED_RETRY_MAX_MS
+        } else {
+            RETRY_MAX_MS
+        };
         let park = m.parked.entry(*handle).or_default();
         let wait = RETRY_MS
             .saturating_mul(1 << park.fails.min(16))
-            .min(RETRY_MAX_MS);
+            .min(longest);
         park.fails = park.fails.saturating_add(1);
         park.until_ms = now_ms.saturating_add(wait);
     }
