@@ -13,7 +13,8 @@
 //!   for the rest.
 //! - **The task** ([`run`]). It asks the exchange what is due
 //!   (`Exchange::plans`), makes each dial on the routes the outbox plans
-//!   for that friend (never Bluetooth), and hands the replies back
+//!   for a send to that friend (Tor too; never Bluetooth), and hands the
+//!   replies back
 //!   (`Exchange::took`). It looks again at once while there is more to do
 //!   and when an offer is delivered in this process, a few times a second
 //!   while something waits (for its time, for a friend, or for a delivery
@@ -56,6 +57,30 @@ const DIAL_DEADLINE: Duration = Duration::from_secs(100);
 /// The reply budget of a dial (16 chunks and the replies around them): a
 /// node-internal dial, never an IPC response.
 const DIAL_REPLY_BUDGET: usize = 2 * 1024 * 1024;
+
+/// Why a dial of the task was not made or did not end, in its own words
+/// (they hold no address and no key, so the log line says them whole).
+const NO_WORKER: &str = "no outbox worker: no route plan";
+const NO_ROUTE: &str = "no route to this contact";
+const DEADLINE: &str = "attachment dial deadline";
+
+/// What a failed dial's error says for the log: the task's own words, or
+/// the error's leading code (`ONION_UNREACHABLE`); never the rest of a
+/// dial's error, which may name an address.
+fn failure_words(error: &str) -> &str {
+    if [NO_WORKER, NO_ROUTE, DEADLINE, NOT_SPOKEN].contains(&error) {
+        return error;
+    }
+    let code = error
+        .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        .next()
+        .unwrap_or("");
+    if code.len() >= 4 {
+        code
+    } else {
+        "no code"
+    }
+}
 
 /// A dial carried `RAX1` frames to a listener whose hello did not offer
 /// them: nothing was sent.
@@ -274,18 +299,21 @@ pub(crate) fn check_frames(frames: &[Vec<u8>], link: &AttLink) -> Result<(), Str
 // ── The task ────────────────────────────────────────────────────────────────
 
 /// One dial to `peer` from the blocking pool: its routes as the outbox
-/// worker plans them, tried in order, never Bluetooth, each with the
-/// internal reply budget and [`DIAL_DEADLINE`].
+/// worker plans a send's (`crate::hints::send_routes`: Tor too, last),
+/// tried in order, never Bluetooth, each with the internal reply budget
+/// and [`DIAL_DEADLINE`].
 fn dial_peer(
     handle: &tokio::runtime::Handle,
     data_dir: &Path,
     peer: &[u8; 32],
     frames: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, String> {
-    let ctx = crate::outbox::attempt_ctx().ok_or("no outbox worker: no route plan")?;
-    let routes = crate::hints::announce_routes(&ctx, peer, raven_core::clock::now_ms());
+    let ctx = crate::outbox::attempt_ctx().ok_or(NO_WORKER)?;
+    // The routes a send to this friend takes, Tor last: two phones often
+    // reach each other over Tor alone.
+    let routes = crate::hints::send_routes(&ctx, peer, raven_core::clock::now_ms());
     let pub_hex = hex::encode(peer);
-    let mut last = Err("no route to this contact".to_string());
+    let mut last = Err(NO_ROUTE.to_string());
     for (_, route) in routes {
         if route.carrier == OutboxCarrier::Nearby {
             continue;
@@ -321,7 +349,7 @@ fn dial_peer(
             async {
                 tokio::time::timeout(DIAL_DEADLINE, work)
                     .await
-                    .unwrap_or_else(|_| Err("attachment dial deadline".into()))
+                    .unwrap_or_else(|_| Err(DEADLINE.into()))
             },
         ));
         match got {
@@ -330,6 +358,24 @@ fn dial_peer(
         }
     }
     last
+}
+
+/// One log line when what waits changes (counts only): a photo that does
+/// not go says here what it waits for.
+fn note_waits(waits: exchange::Waits) {
+    static LAST: Mutex<Option<exchange::Waits>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if *last == Some(waits) {
+        return;
+    }
+    *last = Some(waits);
+    if waits != exchange::Waits::default() {
+        eprintln!(
+            "raven-node attachments: waiting: {} for their message to arrive, {} for the next \
+             try, {} for a friend's Raven that takes them, {} for their sender",
+            waits.offer, waits.turn, waits.friend, waits.push
+        );
+    }
 }
 
 /// What one pass did.
@@ -358,13 +404,27 @@ pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
             .or_insert_with(|| pinned(data_dir, peer) && peers::speaks(data_dir, peer))
     };
     let planned = exchange.plans(crate::now_ms(), &speaks);
+    note_waits(planned.waits);
     let mut report = PassReport {
         waiting: planned.waiting,
         ..PassReport::default()
     };
     for plan in &planned.plans {
         report.dials += 1;
+        let started = std::time::Instant::now();
         let got = dial(&plan.peer, &plan.frames);
+        // One line a dial: the contact's tag, counts and a code, never an
+        // address or a handle.
+        let outcome = match &got {
+            Ok(replies) => format!("answered ({} replies)", replies.len()),
+            Err(e) => format!("failed ({})", failure_words(e)),
+        };
+        eprintln!(
+            "raven-node attachments: contact {}, {} frame(s), {outcome} in {} ms",
+            crate::netutil::link_tag(&plan.peer),
+            plan.frames.len(),
+            started.elapsed().as_millis()
+        );
         report.again |= exchange.took(plan, got.as_deref().ok(), crate::now_ms());
     }
     report
@@ -376,6 +436,9 @@ pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
 pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
     // An offer delivered by this process: its chunks go at once.
     raven_core::attachment::flow::set_delivered_hook(kick);
+    if live() {
+        eprintln!("raven-node attachments: on (lab)");
+    }
     let mut adopted = false;
     let mut next_sweep = tokio::time::Instant::now();
     loop {

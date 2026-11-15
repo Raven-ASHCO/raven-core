@@ -206,6 +206,23 @@ pub struct Planned {
     pub plans: Vec<Plan>,
     /// Something waits for its time or for a friend: look again soon.
     pub waiting: bool,
+    /// How many attachments wait, and for what (counts for a log line).
+    pub waits: Waits,
+}
+
+/// What the attachments that are not dialled now wait for.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Waits {
+    /// Mine: its offer's delivery.
+    pub offer: usize,
+    /// The time of its next try (after a failure, or an answer that said
+    /// later), or a turn behind another dial to the same friend.
+    pub turn: usize,
+    /// A friend whose Raven has not said that it takes attachments.
+    pub friend: usize,
+    /// A friend's: the time its sender has to push it before it is asked
+    /// for.
+    pub push: usize,
 }
 
 /// One profile's side of the exchange.
@@ -562,14 +579,21 @@ impl<'a> Exchange<'a> {
             // One dial per friend in a pass.
             if out.plans.len() >= MAX_PLANS_PER_PASS || busy.contains(&plan.peer) {
                 out.waiting = true;
+                out.waits.turn += 1;
                 return;
             }
             busy.push(plan.peer);
             out.plans.push(plan);
         };
         for (peer, handle) in done_due {
-            if self.parked(&handle, now_ms) || !speaks(&peer) {
+            if self.parked(&handle, now_ms) {
                 out.waiting = true;
+                out.waits.turn += 1;
+                continue;
+            }
+            if !speaks(&peer) {
+                out.waiting = true;
+                out.waits.friend += 1;
                 continue;
             }
             add(
@@ -593,8 +617,14 @@ impl<'a> Exchange<'a> {
             if !push && !pull {
                 continue;
             }
-            if self.parked(&handle, now_ms) || !speaks(&peer) {
+            if self.parked(&handle, now_ms) {
                 out.waiting = true;
+                out.waits.turn += 1;
+                continue;
+            }
+            if !speaks(&peer) {
+                out.waiting = true;
+                out.waits.friend += 1;
                 continue;
             }
             let plan = if push {
@@ -607,6 +637,7 @@ impl<'a> Exchange<'a> {
                     }
                     if now_ms.saturating_sub(brief.updated_ms) < STAGED_PROBE_AFTER_MS {
                         out.waiting = true;
+                        out.waits.offer += 1;
                         continue;
                     }
                 }
@@ -620,13 +651,17 @@ impl<'a> Exchange<'a> {
                     .max(store::last_chunk_ms(self.data_dir, &handle));
                 if !brief.asked && now_ms.saturating_sub(last) < PULL_AFTER_MS {
                     out.waiting = true;
+                    out.waits.push += 1;
                     continue;
                 }
                 self.pull_plan(peer, handle, &brief)
             };
             match plan {
                 Some(plan) => add(&mut out, plan),
-                None => out.waiting = true,
+                None => {
+                    out.waiting = true;
+                    out.waits.turn += 1;
+                }
             }
         }
         out

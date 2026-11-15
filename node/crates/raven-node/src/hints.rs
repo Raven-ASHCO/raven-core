@@ -2937,6 +2937,27 @@ pub(crate) fn announce_routes(
     )
 }
 
+/// Blocking: where a dial that carries something for `peer` goes, in dial
+/// order, as (planned, dialled): [`announce_routes`] with the contact's Tor
+/// route planned last, as a worker attempt and `AppSubmit` plan it
+/// ([`crate::outbox::send_plan`]). An announce link never goes over Tor; a
+/// friend reachable only over Tor still gets what is sent to it (an
+/// attachment's chunks, `crate::attachments`).
+pub(crate) fn send_routes(
+    ctx: &AttemptCtx,
+    peer: &[u8; 32],
+    now: u64,
+) -> Vec<(OutboxRoute, OutboxRoute)> {
+    let ContactAdmission::Allowed(contact) = contact_admission(&ctx.data_dir, peer) else {
+        return Vec::new();
+    };
+    crate::outbox::send_plan(ctx, peer, contact, now).auto_dial(
+        peer,
+        ctx.connected,
+        &mut |r, pinned| localize_lan_route(r, pinned, LOCALIZE_RESOLVE_TIMEOUT),
+    )
+}
+
 // ── Status ──────────────────────────────────────────────────────────────────
 
 /// IPC `Status` `route_hints` (counts only): `None` while route hints are
