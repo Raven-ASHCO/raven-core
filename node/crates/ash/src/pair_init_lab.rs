@@ -3723,6 +3723,22 @@ fn send_indexed_text(
                 staged_for_retry.set(true);
                 // Never hold BEGIN EXCLUSIVE across carrier dial (up to ~45s).
                 let _ = stage_guard.borrow_mut().take();
+                if compose.is_some() {
+                    // The new message's route record, with its row and before
+                    // its dial. Until 2026-11-15 only the end of the send
+                    // wrote it, so a program that ended during the dial (iOS
+                    // ending the app, a quit or a crash in the middle of a
+                    // send) left a queued row without a record, and such a
+                    // row is tried on the same network only: with a friend
+                    // elsewhere it waited until its time ran out, although
+                    // raven-node's outbox could have sent it over Tor, and a
+                    // message the friend already had stayed "waiting" (seen
+                    // on an iPhone on mobile data, the app ended 28 s into a
+                    // burst). Routes only: friend custody is marked when the
+                    // send ends as queued (`record_own`), and a delivered
+                    // message's record is cleared below.
+                    handoff.record(&env.message_id, env.expires_at);
+                }
             }
         }
         if collect_only.get() {
@@ -4332,6 +4348,8 @@ fn send_indexed_text(
                             &digest,
                             &mid,
                         )?;
+                        // Nothing is queued: no record of it either.
+                        let _ = clear_object_routes(data_dir, &[mid]);
                     }
                     return Err(detail);
                 }
@@ -4436,6 +4454,8 @@ fn send_indexed_text(
         }
         if acked {
             // Only a verified ACK gets here: "delivered" means the receiver confirmed.
+            // Its route record (written with its row, before the dial) has done its work.
+            let _ = clear_object_routes(data_dir, &[outbound.message_id]);
             ctx.say_delivered(carrier.label(), dial_path.get(), &outbound.message_id);
             trace_delivery::trace_event(
                 "ash/pair_init_lab.rs:send_indexed_text",
@@ -6615,6 +6635,9 @@ mod send_path_tests {
         /// For each dial that carried a message: was the sender's per-peer
         /// send lock free while it ran?
         lock_free: std::sync::Mutex<Vec<bool>>,
+        /// For each dial that carried a message: how many route records the
+        /// sender held while it ran.
+        recorded: std::sync::Mutex<Vec<usize>>,
         /// Frame-less dials (a send's check) the peer saw.
         probes: AtomicUsize,
         /// PairInits the peer takes whose PairResponse never comes back.
@@ -6912,6 +6935,9 @@ mod send_path_tests {
                 let free =
                     PeerSendLock::acquire_within(peer.a_dir, peer.bob_pub, Duration::ZERO).is_ok();
                 faults.lock_free.lock().unwrap().push(free);
+                let records = raven_core::outbox::object_route_records(peer.a_dir, now_ms())
+                    .map_or(0, |r| r.len());
+                faults.recorded.lock().unwrap().push(records);
             }
             let mode = mode.load(Ordering::SeqCst);
             let shed = !frames.is_empty() && fire(&faults.shed_frame_dials);
@@ -7786,6 +7812,32 @@ mod send_path_tests {
         raven_core::outbox::object_route_records(rig.a.path(), now_ms())
             .unwrap()
             .remove(mid)
+    }
+
+    /// A new message's route record is written with its row, before its
+    /// dial. A program that ends during the dial (iOS ending the app, a quit
+    /// in the middle of a send) then leaves a row raven-node's outbox can
+    /// send over every carrier the send allowed; a row without a record is
+    /// tried on the same network only (2026-11-15: an iPhone on mobile data,
+    /// the app ended during a burst, the message in flight waited for good).
+    /// A message the send itself delivers leaves no record behind (the file
+    /// holds 256 at most), and one that ends queued keeps its record.
+    #[test]
+    fn a_new_message_has_its_route_record_before_its_dial_and_none_once_delivered() {
+        let rig = Rig::new(0xa7);
+        rig.send("hello").unwrap();
+        let during = rig.faults.recorded.lock().unwrap().clone();
+        assert_eq!(during.last(), Some(&1), "while its dial ran: {during:?}");
+        let records = || raven_core::outbox::object_route_records(rig.a.path(), now_ms()).unwrap();
+        assert!(records().is_empty(), "delivered: {:?}", records().len());
+        // The friend takes the next one and its receipt is lost: queued, and
+        // its record stays for the outbox.
+        rig.faults.drop_acks.store(1, Ordering::SeqCst);
+        let _ = rig.send("no receipt").unwrap_err();
+        let waiting = rig.alice_waiting();
+        assert_eq!(waiting.len(), 1);
+        assert!(alice_record(&rig, &waiting[0].message_id).is_some());
+        assert_eq!(rig.faults.recorded.lock().unwrap().last(), Some(&1));
     }
 
     /// B-offline-lan-1 (any-network plan P2.R1), `raven send`'s side: a
