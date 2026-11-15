@@ -1072,3 +1072,221 @@ fn what_cannot_be_sent_is_refused_and_nothing_stays() {
     let details = a.ok("messages.details", json!({"id": rows[0]["id"]}));
     assert!(!common::all_text(&details).contains("RVNATT/"), "{details}");
 }
+
+/// A file that reads as a JPEG to the terminal's size reader: a frame header
+/// of 640 by 480 behind the first markers, then arbitrary bytes.
+fn lab_jpeg(len: usize, salt: usize) -> Vec<u8> {
+    let mut bytes = jpeg(len, salt);
+    let head: [u8; 39] = [
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0,
+        0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0xE0, 0x02, 0x80, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11,
+        0x01, 0x03, 0x11, 0x01,
+    ];
+    bytes[..head.len()].copy_from_slice(&head);
+    bytes
+}
+
+/// What a `raven lab` command printed, and whether it ended well.
+fn said(out: &std::process::Output) -> (bool, String) {
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// The line of `raven lab attachments` for the handle that begins `short`.
+fn listed(p: &Peer, short: &str) -> Option<String> {
+    let (_, text) = said(&p.cli(&["lab", "attachments"]));
+    text.lines()
+        .find(|l| l.starts_with(short))
+        .map(str::to_owned)
+}
+
+/// The handle's start and the SHA-256 that `raven lab attach` printed.
+fn attached(text: &str) -> (String, String) {
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("attachment "))
+        .unwrap_or_else(|| panic!("no attachment line: {text}"));
+    let short = line["attachment ".len()..]
+        .split(':')
+        .next()
+        .unwrap()
+        .to_owned();
+    let sum = line.rsplit("sha256 ").next().unwrap().trim().to_owned();
+    assert_eq!(short.len(), 8, "{line}");
+    assert_eq!(sum.len(), 64, "{line}");
+    (short, sum)
+}
+
+/// The terminal's lab commands, as the tests across computers use them
+/// (`raven lab attach`, `attachments`, `attachment-ask`, `attachment-save`).
+/// A photo sent from a terminal comes by itself, and the friend saves it
+/// with the SHA-256 the sender printed; the friend's app has its row, with
+/// the caption. A file waits on the friend's side until it is asked for,
+/// then comes and saves the same way. A file that exists is never written
+/// over, and nothing is sent to a contact that is not there.
+#[test]
+fn the_terminal_sends_a_photo_and_a_file_and_the_friend_saves_them() {
+    if !lab() {
+        return;
+    }
+    let a = Peer::new("Sender");
+    let b = Peer::new("Receiver");
+    a.befriend(&b, None);
+    b.befriend(&a, None);
+    let (la, lb) = (a.start(), b.start());
+    a.set_lan(&b, &lb);
+    b.set_lan(&a, &la);
+    let limit = Duration::from_secs(120);
+    a.send_until(&b, "hello from the sender", &["delivered"], limit);
+    assert!(b.wait_incoming(&a, "hello from the sender", limit));
+    b.send_until(&a, "hello from the receiver", &["delivered"], limit);
+    assert!(a.wait_incoming(&b, "hello from the receiver", limit));
+    let can = |p: &Peer, friend: &Peer| {
+        p.ok("attachments.can_send", json!({"address": friend.address()}))["photos"] == true
+    };
+    assert!(wait_until(Duration::from_secs(60), &mut [], || can(&a, &b)));
+
+    let files = common::short_dir();
+    let at = |name: &str| files.path().join(name).to_string_lossy().into_owned();
+
+    // Nothing there yet, and nothing goes to a contact that is not saved.
+    // (A friend whose Raven has not said that it takes attachments is
+    // refused the same way, before anything is made: the engine's rule.)
+    let (ok, text) = said(&a.cli(&["lab", "attachments"]));
+    assert!(ok && text.contains("no attachments"), "{text}");
+    let photo = lab_jpeg(200_123, 3);
+    std::fs::write(at("lake.jpg"), &photo).unwrap();
+    let (ok, text) = said(&a.cli(&["lab", "attach", "--to", "Nobody", "--file", &at("lake.jpg")]));
+    assert!(!ok, "{text}");
+    assert!(store::list(&a.path).unwrap().is_empty(), "nothing was made");
+
+    // A photo: it comes by itself.
+    let sent_at = Instant::now();
+    let (ok, text) = said(&a.cli(&[
+        "lab",
+        "attach",
+        "--to",
+        "Friend Receiver",
+        "--file",
+        &at("lake.jpg"),
+        "--caption",
+        "from a terminal",
+    ]));
+    assert!(ok, "{text}");
+    assert!(text.contains(": photo (200123 bytes)"), "{text}");
+    assert!(text.contains("its message is delivered over Lan"), "{text}");
+    assert!(
+        !text.contains("RVNATT/"),
+        "the offer is never printed: {text}"
+    );
+    let (short, sum) = attached(&text);
+    let here = wait_until(Duration::from_secs(60), &mut [], || {
+        listed(&b, &short).is_some_and(|l| l.contains("  complete  "))
+    });
+    assert!(here, "{:?}", listed(&b, &short));
+    eprintln!(
+        "a photo from a terminal: whole on the friend's side {:?} after the command began",
+        sent_at.elapsed()
+    );
+    let line = listed(&b, &short).unwrap();
+    assert!(
+        line.contains("  from  Friend Sender  photo  200123 bytes  "),
+        "{line}"
+    );
+    let (ok, text) = said(&b.cli(&["lab", "attachment-save", &short, "--out", &at("got.jpg")]));
+    assert!(ok && text.contains(&sum), "{text}");
+    assert_eq!(std::fs::read(at("got.jpg")).unwrap(), photo);
+    let (ok, text) = said(&b.cli(&["lab", "attachment-save", &short, "--out", &at("got.jpg")]));
+    assert!(!ok && text.contains("could not make"), "{text}");
+    assert_eq!(
+        std::fs::read(at("got.jpg")).unwrap(),
+        photo,
+        "never written over"
+    );
+    let inside = b.path.join("got.jpg").to_string_lossy().into_owned();
+    let (ok, text) = said(&b.cli(&["lab", "attachment-save", &short, "--out", &inside]));
+    assert!(!ok && text.contains("outside the profile"), "{text}");
+    assert!(!Path::new(&inside).exists());
+    // The sender is told that every byte is with the friend, and can save its own copy.
+    let told = wait_until(Duration::from_secs(60), &mut [], || {
+        listed(&a, &short).is_some_and(|l| l.contains("  delivered  "))
+    });
+    assert!(told, "{:?}", listed(&a, &short));
+    let line = listed(&a, &short).unwrap();
+    assert!(line.contains("  to    Friend Receiver  photo  "), "{line}");
+    let (ok, text) = said(&a.cli(&["lab", "attachment-save", &short, "--out", &at("mine.jpg")]));
+    assert!(ok && text.contains(&sum), "{text}");
+    // The friend's app has the photo's row, with its caption and its size.
+    let row = history(&b, &a)
+        .into_iter()
+        .find(|m| m["attachment"]["kind"] == "photo")
+        .expect("the photo's row");
+    assert_eq!(row["text"], "from a terminal", "{row}");
+    assert_eq!(row["attachment"]["state"], "ready", "{row}");
+    assert_eq!(
+        (
+            row["attachment"]["width"].as_u64(),
+            row["attachment"]["height"].as_u64()
+        ),
+        (Some(640), Some(480)),
+        "{row}"
+    );
+    assert_eq!(
+        read_all(&b, row["attachment"]["id"].as_str().unwrap(), 400_000),
+        photo
+    );
+
+    // A file: it waits until it is asked for.
+    let notes: Vec<u8> = (0..150_321usize).map(|i| (i * 7 % 253) as u8).collect();
+    std::fs::write(at("notes.txt"), &notes).unwrap();
+    let (ok, text) = said(&a.cli(&[
+        "lab",
+        "attach",
+        "--to",
+        "Friend Receiver",
+        "--file",
+        &at("notes.txt"),
+    ]));
+    assert!(ok, "{text}");
+    assert!(text.contains(": file (150321 bytes)"), "{text}");
+    let (short, sum) = attached(&text);
+    let offered = wait_until(Duration::from_secs(60), &mut [], || {
+        listed(&b, &short).is_some()
+    });
+    assert!(offered);
+    std::thread::sleep(Duration::from_secs(6));
+    let line = listed(&b, &short).unwrap();
+    assert!(
+        line.contains("  file  150321 bytes  incoming  chunks 0/"),
+        "{line}"
+    );
+    let (ok, text) = said(&b.cli(&["lab", "attachment-save", &short, "--out", &at("early.txt")]));
+    assert!(!ok && text.contains("it is not here yet"), "{text}");
+    assert!(!Path::new(&at("early.txt")).exists());
+    let (ok, text) = said(&b.cli(&["lab", "attachment-ask", &short]));
+    assert!(ok && text.contains("asked for"), "{text}");
+    let here = wait_until(Duration::from_secs(90), &mut [], || {
+        listed(&b, &short).is_some_and(|l| l.contains("  complete  "))
+    });
+    assert!(here, "{:?}", listed(&b, &short));
+    let (ok, text) = said(&b.cli(&[
+        "lab",
+        "attachment-save",
+        &short,
+        "--out",
+        &at("notes-got.txt"),
+    ]));
+    assert!(ok && text.contains(&sum), "{text}");
+    assert_eq!(std::fs::read(at("notes-got.txt")).unwrap(), notes);
+    let (ok, text) = said(&b.cli(&["lab", "attachment-ask", &short]));
+    assert!(ok && text.contains("it is here already"), "{text}");
+    // A start that names no attachment, or too little of one.
+    let (ok, text) = said(&b.cli(&["lab", "attachment-ask", "zz"]));
+    assert!(!ok && text.contains("four hex digits"), "{text}");
+    let (ok, text) = said(&b.cli(&["lab", "attachment-ask", "00000000"]));
+    assert!(
+        !ok && text.contains("no attachment begins with that"),
+        "{text}"
+    );
+}

@@ -76,6 +76,11 @@ independent review.
   (API.md, "Photos"), and raven-node carries the photo's sealed pieces on the links friends already
   have, in one dial right behind the photo's message (`protocol/RAVEN_ATTACHMENT_V1.md`). Release
   builds are unchanged: the gate is shut, so nothing can be sent and nothing new is on the wire.
+- The same lab builds have four terminal commands for tests across computers, before any desktop
+  app has photos: `raven lab attach --to FRIEND --file PATH` (a JPEG goes as a photo, anything else
+  as a file), `raven lab attachments`, `raven lab attachment-ask HANDLE` and
+  `raven lab attachment-save HANDLE --out PATH` (it prints the SHA-256 to compare with the
+  sender's).
 - Next to the name of the friend who holds a message of yours, or of the group member who passed a
   message on, the engine now says whether that is a friend you verified and have not blocked
   (`via_friend`), so the apps never show anyone else as a friend.

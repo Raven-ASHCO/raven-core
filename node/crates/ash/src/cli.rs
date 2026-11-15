@@ -59,6 +59,7 @@ fn file_send_example(contact: &str) -> String {
     }
 }
 
+mod attach_lab;
 mod custody_cli;
 // The desktop engine's way in (node/crates/raven-client, through ash's
 // library target): compiled with the `engine` feature, which raven-client
@@ -1338,6 +1339,42 @@ enum LabCommands {
         consumer: String,
         #[arg(long)]
         takeover: bool,
+    },
+    /// Attachments (lab): send a small file to a verified friend. A JPEG
+    /// goes as a photo, which the friend's Raven takes by itself; anything
+    /// else as a file, which the friend's side fetches once it is asked for
+    /// (`raven lab attachment-ask`). Debug builds with `RAVEN_LAB_TEST_A=1`
+    /// and `RAVEN_LAB_ATTACHMENTS=1` only.
+    Attach {
+        /// The friend: @tag or petname.
+        #[arg(long)]
+        to: String,
+        /// The file: 1 MiB at most.
+        #[arg(long)]
+        file: PathBuf,
+        /// Words that go with it.
+        #[arg(long, default_value = "", hide_default_value = true)]
+        caption: String,
+        /// Send a JPEG as a file, not as a photo.
+        #[arg(long)]
+        as_file: bool,
+    },
+    /// Attachments (lab): this profile's attachments, one line each.
+    Attachments,
+    /// Attachments (lab): ask for a friend's file that waits to be asked
+    /// for, by the start of its handle.
+    AttachmentAsk {
+        /// The start of the handle (`raven lab attachments`).
+        handle: String,
+    },
+    /// Attachments (lab): write an attachment that is whole to a new file
+    /// and print its SHA-256.
+    AttachmentSave {
+        /// The start of the handle (`raven lab attachments`).
+        handle: String,
+        /// The file to make; one that exists is never written over.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -17227,6 +17264,21 @@ pub fn run() {
             LabCommands::AppConsumer { consumer, takeover } => exit_on_err(cmd_lab_app_inbox(
                 &data_dir, &consumer, None, 0, takeover, 0,
             )),
+            LabCommands::Attach {
+                to,
+                file,
+                caption,
+                as_file,
+            } => exit_on_err(attach_lab::cmd_attach(
+                &data_dir, &to, &file, &caption, as_file,
+            )),
+            LabCommands::Attachments => exit_on_err(attach_lab::cmd_list(&data_dir)),
+            LabCommands::AttachmentAsk { handle } => {
+                exit_on_err(attach_lab::cmd_ask(&data_dir, &handle))
+            }
+            LabCommands::AttachmentSave { handle, out } => {
+                exit_on_err(attach_lab::cmd_save(&data_dir, &handle, &out))
+            }
         },
         Some(Commands::Contact { cmd }) => match cmd {
             ContactCommands::Add {
