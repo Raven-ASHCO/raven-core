@@ -830,6 +830,15 @@ pub(crate) mod netutil {
         }
     }
 
+    /// Is this frame a chat message's envelope (the one frame an
+    /// attachment's offer travels in)?
+    pub(crate) fn is_message_frame(frame: &[u8]) -> bool {
+        matches!(
+            classify_packed_envelope(frame),
+            PairInitOobClassify::NotPairInitOob
+        ) && Envelope::unpack(frame).is_some_and(|e| e.env_type == EnvType::Message as u8)
+    }
+
     /// Is this a frame the responder never answers, whatever its build: a
     /// sealed ACK or a PairResponse? Unlike `!expects_reply`, which is also
     /// true for a frame whose answer it cannot tell (such a dial keeps the
@@ -1093,6 +1102,11 @@ pub(crate) mod netutil {
     }
 
     impl DialProgress {
+        /// How long ago the dial began.
+        pub(crate) fn elapsed(&self) -> Duration {
+            self.started.elapsed()
+        }
+
         /// A dial with today's connect wait per address
         /// ([`CONNECT_TIMEOUT`]) and the reply `waits`.
         pub(crate) fn new(carrier: &'static str, waits: ReplyWaits) -> Self {

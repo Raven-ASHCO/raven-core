@@ -197,6 +197,121 @@ fn a_photo_goes_over_in_one_dial_once_its_offer_is_delivered() {
 }
 
 #[test]
+fn the_link_that_carried_the_offer_takes_the_chunks_along() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let bytes = jpeg(300_000);
+    let (handle, offer) = staged(&a, &bytes, now);
+    // No send of the offer set out: a link with that friend carries no chunks.
+    assert!(a.x().link_push(&KB, now).is_none());
+    // The send sets out; the offer arrives and is answered on a link.
+    flow::offer_going(a.d(), &handle, now);
+    assert!(a.x().link_push(&KX, now).is_none(), "another friend's link");
+    keep(&b, &offer, now);
+    let plan = a
+        .x()
+        .link_push(&KB, now + 500)
+        .expect("the chunks ride the link");
+    assert_eq!(ops(&plan), [0x04, 0x04, 0x04, 0x04, 0x04, 0x01]);
+    // Once only: a second link, or the task, does not push it whole again.
+    assert!(a.x().link_push(&KB, now + 600).is_none());
+    let replies = dial(&b, &KA, &plan, now + 500);
+    assert!(!a.x().took(&plan, Some(&replies), now + 500));
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    assert_eq!(b.row(&handle).state, State::Complete);
+    assert_eq!(
+        &store::read_plain(b.d(), &b.row(&handle), 0, bytes.len()).unwrap()[..],
+        &bytes[..]
+    );
+    // The offer's delivery is written a moment later: nothing more to do.
+    delivered(&a, &offer, now + 700);
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    assert!(a.plans(now + 700).is_empty());
+}
+
+#[test]
+fn nothing_is_asked_beside_a_send_of_the_offer_that_is_under_way() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(300_000), now);
+    // The send set out and takes its time (over Tor a quarter of a minute
+    // is usual): the task asks nothing meanwhile.
+    flow::offer_going(a.d(), &handle, now);
+    for later in [1_000, STAGED_PROBE_AFTER_MS, 30_000, GOING_FRESH_MS - 1] {
+        let planned = a.x().plans(now + later, &|_| true);
+        assert!(planned.plans.is_empty() && planned.waiting, "{later} ms in");
+        assert_eq!(planned.waits.offer, 1);
+    }
+    // So the link that at last carries the offer still takes the chunks.
+    keep(&b, &offer, now);
+    let plan = a
+        .x()
+        .link_push(&KB, now + 15_000)
+        .expect("the chunks ride the link");
+    let replies = dial(&b, &KA, &plan, now + 15_000);
+    assert!(!a.x().took(&plan, Some(&replies), now + 15_000));
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    // A send that set out and was never heard of again: asked after a while.
+    let (lost, _) = staged(&a, &jpeg(50_000), now);
+    flow::offer_going(a.d(), &lost, now);
+    let plan = a.plans(now + GOING_FRESH_MS).remove(0);
+    assert_eq!((plan.handle, ops(&plan)), (lost, vec![0x01]));
+}
+
+#[test]
+fn a_question_asked_before_the_offer_arrived_does_not_stop_the_chunks_riding_its_link() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(300_000), now);
+    // No send under way that the task knows of: it asks, and the friend
+    // does not know the offer yet.
+    let asked = now + STAGED_PROBE_AFTER_MS;
+    let plan = a.plans(asked).remove(0);
+    assert_eq!(ops(&plan), [0x01]);
+    assert!(!a.x().took(&plan, Some(&dial(&b, &KA, &plan, asked)), asked));
+    // Then the send goes, the offer arrives, and its link takes the chunks:
+    // a question pushed nothing, so nothing was tried yet.
+    flow::offer_going(a.d(), &handle, asked + 100);
+    keep(&b, &offer, asked + 100);
+    let plan = a
+        .x()
+        .link_push(&KB, asked + 200)
+        .expect("the chunks ride the link");
+    assert_eq!(plan.frames.len(), 6);
+    let replies = dial(&b, &KA, &plan, asked + 200);
+    assert!(!a.x().took(&plan, Some(&replies), asked + 200));
+    assert_eq!(a.row(&handle).state, State::Delivered);
+}
+
+#[test]
+fn chunks_that_rode_a_link_too_early_or_were_cut_are_taken_up_by_the_task() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(300_000), now);
+    flow::offer_going(a.d(), &handle, now);
+    // The answer on the link was to another message: the friend's node
+    // does not know the offer yet.
+    let plan = a.x().link_push(&KB, now).unwrap();
+    let replies = dial(&b, &KA, &plan, now);
+    assert!(!a.x().took(&plan, Some(&replies), now));
+    assert_eq!(a.row(&handle).state, State::Staged);
+    // The offer arrives and its delivery is written: the task asks first
+    // (something was tried), then pushes what is wanted.
+    keep(&b, &offer, now);
+    delivered(&a, &offer, now + 1_000);
+    assert_eq!(push_all(&a, &b, now + 1_000), 2);
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    // A send that set out long ago is not taken along any more.
+    let (old, _) = staged(&a, &jpeg(50_000), now);
+    flow::offer_going(a.d(), &old, now);
+    assert!(a.x().link_push(&KB, now + GOING_FRESH_MS).is_none());
+}
+
+#[test]
 fn a_delivery_written_without_the_body_starts_the_push_too() {
     let Some(_live) = Live::on() else { return };
     let (a, b) = (Side::new(), Side::new());
@@ -328,12 +443,7 @@ fn a_delivery_that_comes_after_an_early_question_is_not_held_back_by_its_wait() 
     // The offer lands and its ACK comes back a moment later.
     keep(&b, &offer, asked);
     delivered(&a, &offer, asked + 100);
-    let plan = a.plans(asked + 100).remove(0);
-    // Something was tried before: the friend is asked first, not pushed at.
-    assert_eq!(ops(&plan), [0x01]);
-    assert!(a
-        .x()
-        .took(&plan, Some(&dial(&b, &KA, &plan, asked)), asked + 100));
+    // The question pushed nothing, so every chunk goes at once now.
     assert_eq!(push_all(&a, &b, asked + 100), 1);
     assert_eq!(a.row(&handle).state, State::Delivered);
 }

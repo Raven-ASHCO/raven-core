@@ -454,6 +454,11 @@ impl LinkCtl {
         &mut self.att
     }
 
+    /// The carrier of this link.
+    pub(crate) fn carrier(&self) -> OutboxCarrier {
+        self.carrier
+    }
+
     /// Internet direct or the p2p link (`carrier`). `rrh1`: our hello set the
     /// RRH1 bit; `peer_caps`: the peer's verified hello caps.
     pub(crate) fn inet(

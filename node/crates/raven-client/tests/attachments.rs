@@ -333,6 +333,14 @@ fn a_photo_travels_between_two_friends_and_goes_with_its_message() {
         delivered_at.unwrap().as_secs_f64()
     );
 
+    // The photo's bytes rode the link that carried its message: no dial of
+    // their own (over Tor that dial is most of a small photo's time).
+    let log = a.service_log();
+    assert!(
+        log.contains("on the message's own link, answered"),
+        "the chunks took a dial of their own; sender's node: {log}"
+    );
+
     // The receiver's row, and the photo's own bytes in pieces.
     let theirs = photo_row(&b, &a, &id).unwrap();
     assert_eq!(theirs["direction"], "in", "{theirs}");

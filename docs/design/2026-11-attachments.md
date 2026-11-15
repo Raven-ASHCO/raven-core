@@ -1060,13 +1060,19 @@ On the branch `feature/attachments-phase1`, on top of the 3.1 fix line:
   part (`rn/attachments.rs`: the listener arms on LAN, Internet direct,
   p2p and Tor links, and the task that makes the dials). Three differences
   from §9, chosen to change no dial function:
-  1. **No push on the offer's own link.** The sender's node dials again,
-     as soon as the offer's ACK is written (in its own process at once;
-     written by an app on the same profile, within a third of a second):
-     one dial with every chunk and HAVE behind them, answered by a LACK
-     that says complete. So a photo costs one dial more than its message,
-     not the same link. After a cut the node says HAVE first and pushes
-     only what the LACK names.
+  1. **The push on the offer's own link, without changing what a dial
+     gives back.** As §9.2 says, the chunks ride the link that carried the
+     offer, right behind its ACK: in the dialer's link code after the
+     dial's own replies are in (`rn/internet_direct.rs push_on_link`,
+     `rn/lan_direct.rs`), and as one more batch on a kept Tor link
+     (`rn/onion/warm.rs chunks_ride`). The engine marks the attachment's
+     row when a send of its offer sets out, and the link finds it by that.
+     Measured on two iPhones over Tor (2026-11-15): a 339 KB photo was
+     complete 3 s after its message arrived; with a dial of its own it
+     took 7 s, of which 4 to 6 s were the dial. When the link cannot take
+     them (no time left, a cut), the task dials: every chunk and HAVE once
+     the offer's delivery is written, and HAVE first after anything was
+     tried.
   2. **No Bluetooth.** Bit 12 is never set on a nearby link.
   3. **An offer whose delivery the node did not see** (it was noted by a
      process that ended) is asked for with HAVE after 5 s; a friend that

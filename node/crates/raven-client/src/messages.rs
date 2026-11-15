@@ -1966,6 +1966,11 @@ impl Inner {
         };
         let sent = match &offer {
             Some(offer) => {
+                // The link that carries the offer takes the photo's bytes
+                // along right behind its answer (raven-node, by the row).
+                if let Some(handle) = attachment {
+                    raven_core::attachment::flow::offer_going(&dir, handle, now_ms());
+                }
                 bridge::send_offer_to_contact_noting(&dir, &identity, peer, offer, own_id)
             }
             None => bridge::send_to_contact_noting(&dir, &identity, peer, body, own_id),

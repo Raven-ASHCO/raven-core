@@ -208,6 +208,17 @@ pub fn offer_text(row: &Row) -> Option<String> {
     (hex::encode(Sha256::digest(text.as_bytes())) == row.offer_sha256).then_some(text)
 }
 
+/// A send of the offer of `handle` sets out now: the link that carries it
+/// may take the chunks along right behind the offer's answer
+/// (`exchange::Exchange::link_push`), which saves a dial of its own.
+pub fn offer_going(data_dir: &Path, handle: &Handle, now_ms: u64) {
+    let _ = store::update(data_dir, handle, now_ms, |row| {
+        if row.outgoing && matches!(row.state, store::State::Staged | store::State::Offered) {
+            row.going_ms = now_ms;
+        }
+    });
+}
+
 /// The message of `handle` could not be made: its row and its blob go.
 pub fn discard(data_dir: &Path, handle: &Handle) {
     let _ = store::remove(data_dir, handle);

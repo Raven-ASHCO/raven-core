@@ -1364,7 +1364,66 @@ async fn exchange_frames_on<S: AsyncRead + AsyncWrite + Unpin>(
             .collector
             .next(read_reply_hints(io, transport, wait, hints).await?)?;
     }
+    push_on_link(io, transport, frames, hints, progress).await;
     Ok(())
+}
+
+/// The chunks of an attachment whose offer this dial just carried ride
+/// the same link, right behind the offer's answer (attachments, gated;
+/// `crate::attachments::AttLink::plan_on_link`): no dial of their own,
+/// which over Tor is most of a small photo's time. Within what the dial's
+/// deadline leaves; whatever happens here, the dial's own replies stand.
+async fn push_on_link<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut DialIo<'_, S>,
+    transport: &mut LinkCipher,
+    frames: &[Vec<u8>],
+    hints: &mut crate::hints::LinkCtl,
+    progress: &mut DialProgress,
+) {
+    if !progress.collector.all_answered() {
+        return;
+    }
+    let Some(budget) = crate::attachments::on_link_budget(hints.carrier(), progress.elapsed())
+    else {
+        return;
+    };
+    let Some(plan) = hints.att().plan_on_link(frames).await else {
+        return;
+    };
+    progress.stage = "sending an attachment's chunks";
+    let started = tokio::time::Instant::now();
+    let deadline = started + budget;
+    let work = async {
+        for frame in &plan.frames {
+            io.send(transport, frame).await?;
+        }
+        // The listener answers the HAVE once it took the chunks.
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match read_reply_hints(io, transport, left, hints).await? {
+                ReplyWait::Frame(frame)
+                    if raven_core::attachment::link::reply_is_terminal(&frame) =>
+                {
+                    return Ok::<_, String>(vec![frame]);
+                }
+                ReplyWait::Frame(_) => {}
+                ReplyWait::Idle | ReplyWait::Closed(_) => return Err("no answer".into()),
+            }
+        }
+    };
+    let replies = tokio::time::timeout_at(deadline, work)
+        .await
+        .ok()
+        .and_then(Result::ok);
+    if replies.is_none() {
+        // Cut in the middle of the chunks: nothing else may ride this link
+        // (a Tor link that is kept for the next send).
+        io.end().await;
+    }
+    hints
+        .att()
+        .took_on_link(plan, replies, started.elapsed())
+        .await;
 }
 
 /// [`read_reply`] that consumes the peer's RRH1 within the same wait (see

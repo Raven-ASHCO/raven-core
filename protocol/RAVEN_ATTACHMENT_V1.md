@@ -200,16 +200,22 @@ build sets it while the gate is shut; old nodes ignore it.
 
 ## 6. The exchange
 
-- **Push** (the sender's node dials). As soon as the offer is delivered
-  (its ACK came back: the friend's node kept its row before it answered),
-  one dial pushes every chunk (at most 40) and says HAVE; the LACK says
-  complete, and the attachment is delivered. After a cut, or whenever the
-  sender does not know what the friend has, it says HAVE first: the LACK
-  names the chunks still wanted, the next dial pushes those and says HAVE
-  again, until the LACK says complete. An offer whose delivery the node did
-  not see is asked for with HAVE after 5 s. A friend that answers "not
-  known" (the offer is still on its way) is asked again, first after 2 s,
-  then twice as long each time, up to 5 minutes.
+- **Push** (the sender's node). The chunks ride the link that carried the
+  offer: right behind the offer's answer (its ACK: the friend's node kept
+  the offer's row before it answered) the dialer writes every chunk (at
+  most 40) and HAVE on that same link, and the listener answers with a
+  LACK that says complete. Then the attachment is delivered. No dial of
+  its own, which over Tor is most of a small photo's time. This holds for
+  a link's own stream and for a Tor link kept from an earlier send, and
+  only within the time the dial has left (at most 20 s); otherwise, and
+  after a cut, the node dials: when the offer's delivery is written it
+  pushes every chunk and says HAVE, and whenever it does not know what the
+  friend has it says HAVE first, pushes what the LACK names and says HAVE
+  again, until the LACK says complete. While a send of the offer is under
+  way nothing is asked beside it. An offer whose delivery the node did not
+  see is asked for with HAVE, after 5 s and then ever less often (up to 6
+  hours apart, for at most 8 days). A friend that answers "not known" (the
+  offer is not there yet) is asked again later.
 - **Pull** (the receiver's node dials). When no chunk landed for 15 s it
   asks the holder with WANT, at most 16 chunks a dial, and says DONE when
   it has them all. An attachment the user asked for is pulled at once.
@@ -283,4 +289,7 @@ No shared vectors yet. Unit tests: `attachment::blob`, `attachment::offer`,
 `lan_direct` (`a_verified_friends_chunks_are_taken_on_a_lan_link`: a photo
 over a real Noise link, and the refusals) and `internet_direct`
 (`a_photo_crosses_an_internet_direct_link_in_one_dial`: the real dial, bit
-12 in both hellos, and nothing sent with the gate shut).
+12 in both hellos, and nothing sent with the gate shut); in raven-client,
+two engines with their raven-node: `tests/attachments.rs` (loopback LAN)
+and `tests/net_tor.rs` (`tor_a_photo_rides_the_link_that_carried_its_message`:
+friends reached over the onion carrier alone).

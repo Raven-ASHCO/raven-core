@@ -55,6 +55,9 @@ pub const MAX_BAD_CHUNKS: u32 = 3;
 pub const SERVE_BYTES_PER_DAY: u64 = 256 * 1024 * 1024;
 /// A friend's attachment is pulled when no chunk landed for this long.
 pub const PULL_AFTER_MS: u64 = 15_000;
+/// A send of an offer counts as under way for this long after it set out:
+/// the link that just carried it takes the chunks along.
+pub const GOING_FRESH_MS: u64 = 120_000;
 /// An offer of mine whose delivery was not seen is asked for with HAVE
 /// this long after its row was last written.
 pub const STAGED_PROBE_AFTER_MS: u64 = 5_000;
@@ -99,6 +102,7 @@ struct Brief {
     kind: Kind,
     asked: bool,
     friend_has: u32,
+    going_ms: u64,
     created_ms: u64,
     updated_ms: u64,
 }
@@ -114,6 +118,7 @@ impl Brief {
             kind: stored.kind(),
             asked: row.asked,
             friend_has: row.friend_has,
+            going_ms: row.going_ms,
             created_ms: row.created_ms,
             updated_ms: row.updated_ms,
         })
@@ -149,9 +154,10 @@ pub struct Memory {
     rows: HashMap<Handle, (SystemTime, Option<Brief>)>,
     /// Mine: the chunks the friend's last LACK still wanted. None: ask first.
     wanted: HashMap<Handle, Vec<u32>>,
-    /// Mine: a dial was planned for it since this process started. One
-    /// that never was, and whose offer is delivered, is pushed whole
-    /// without asking first.
+    /// Mine: its chunks were pushed whole once since this process started
+    /// (in a dial of the task's, or on the link that carried its offer).
+    /// One that never was, and whose offer is delivered, is pushed whole
+    /// without asking first; after that the friend is asked what it lacks.
     tried: HashSet<Handle>,
     /// Pushes in a row that moved nothing.
     stalls: HashMap<Handle, u32>,
@@ -635,7 +641,13 @@ impl<'a> Exchange<'a> {
                     if now_ms.saturating_sub(brief.created_ms) >= STAGED_MAX_AGE_MS {
                         continue;
                     }
-                    if now_ms.saturating_sub(brief.updated_ms) < STAGED_PROBE_AFTER_MS {
+                    // A send of the offer is under way (over Tor it can
+                    // take a quarter of a minute): its link takes the
+                    // chunks along, or its delivery wakes the push. Nothing
+                    // is asked beside it.
+                    let going = brief.going_ms > 0
+                        && now_ms.saturating_sub(brief.going_ms) < GOING_FRESH_MS;
+                    if going || now_ms.saturating_sub(brief.updated_ms) < STAGED_PROBE_AFTER_MS {
                         out.waiting = true;
                         out.waits.offer += 1;
                         continue;
@@ -667,6 +679,96 @@ impl<'a> Exchange<'a> {
         out
     }
 
+    /// A dial to `peer` just carried a message that was answered, and a
+    /// send of an offer to that friend set out a moment ago: every chunk of
+    /// that attachment and HAVE, to ride the same link right behind the
+    /// answer. No dial of its own, which on Tor is most of a small photo's
+    /// time. None: no such attachment, or something was tried for it
+    /// before (the task then asks first, as after a cut).
+    ///
+    /// The answer on the link may be to another message; the friend's
+    /// node then does not know the offer yet and says so, as it would to a
+    /// dial of the task's.
+    pub fn link_push(&self, peer: &[u8; 32], now_ms: u64) -> Option<Plan> {
+        self.link_push_or_why(peer, now_ms).ok()
+    }
+
+    /// [`Self::link_push`], or why nothing rides the link, for a log line
+    /// (a word, no handle): `""` when this friend has no attachment of
+    /// mine that is still to go at all.
+    pub fn link_push_or_why(&self, peer: &[u8; 32], now_ms: u64) -> Result<Plan, &'static str> {
+        self.refresh();
+        let (handle, brief) = {
+            let m = locked(self.memory);
+            let mine: Vec<(Handle, Brief)> = m
+                .rows
+                .iter()
+                .filter_map(|(handle, (_, brief))| Some((*handle, brief.clone()?)))
+                .filter(|(_, brief)| {
+                    brief.outgoing
+                        && brief.peer == Some(*peer)
+                        && matches!(brief.state, State::Staged | State::Offered)
+                })
+                .collect();
+            if mine.is_empty() {
+                return Err("");
+            }
+            let fresh = |brief: &Brief| {
+                brief.going_ms > 0 && now_ms.saturating_sub(brief.going_ms) < GOING_FRESH_MS
+            };
+            let ready: Vec<&(Handle, Brief)> = mine
+                .iter()
+                .filter(|(handle, brief)| {
+                    fresh(brief)
+                        && brief.friend_has == 0
+                        && brief.shape.len() <= LIVE_MAX_LEN
+                        && !m.tried.contains(handle)
+                        && !m.wanted.contains_key(handle)
+                })
+                .collect();
+            // The send that set out last.
+            match ready.into_iter().max_by_key(|(_, brief)| brief.going_ms) {
+                Some(found) => found.clone(),
+                None if !mine.iter().any(|(_, brief)| fresh(brief)) => {
+                    return Err("no send of its offer set out lately")
+                }
+                None => return Err("its chunks were pushed or asked about before"),
+            }
+        };
+        locked(self.memory).tried.insert(handle);
+        let row = self.row(&handle).ok_or("its row is gone")?;
+        let tree = store::tree(self.data_dir, &row).map_err(|_| "its sealed bytes do not read")?;
+        let mut frames = Vec::new();
+        for index in (0..brief.shape.chunks()).take(MAX_PUSH_PER_DIAL) {
+            let bytes = store::read_chunk(self.data_dir, &handle, &brief.shape, true, index)
+                .map_err(|_| "its sealed bytes do not read")?;
+            let path = tree
+                .chunk_path(index as usize)
+                .ok_or("its sealed bytes do not read")?;
+            frames.push(encode(
+                req(),
+                Body::Push(ChunkBody {
+                    handle,
+                    index: index as u16,
+                    bytes,
+                    path,
+                }),
+            ));
+        }
+        let pushed = frames.len();
+        let req = req();
+        frames.push(encode(
+            req,
+            Body::Have(vec![(handle, brief.shape.chunks() as u16)]),
+        ));
+        Ok(Plan {
+            peer: *peer,
+            handle,
+            frames,
+            what: What::Push { req, pushed },
+        })
+    }
+
     fn parked(&self, handle: &Handle, now_ms: u64) -> bool {
         locked(self.memory)
             .parked
@@ -679,15 +781,17 @@ impl<'a> Exchange<'a> {
     /// know what the friend has.
     fn push_plan(&self, peer: [u8; 32], handle: Handle, brief: &Brief) -> Option<Plan> {
         let (wanted, first_try) = {
-            let mut m = locked(self.memory);
-            (m.wanted.get(&handle).cloned(), m.tried.insert(handle))
+            let m = locked(self.memory);
+            (m.wanted.get(&handle).cloned(), !m.tried.contains(&handle))
         };
-        // The offer is delivered and nothing was tried yet: the friend's
+        // The offer is delivered and no chunk was pushed yet: the friend's
         // node kept its row before it answered, and lacks every chunk.
-        let wanted = wanted.or_else(|| {
-            (first_try && brief.state == State::Offered && brief.friend_has == 0)
-                .then(|| (0..brief.shape.chunks()).collect())
-        });
+        let blind =
+            wanted.is_none() && first_try && brief.state == State::Offered && brief.friend_has == 0;
+        if blind {
+            locked(self.memory).tried.insert(handle);
+        }
+        let wanted = wanted.or_else(|| blind.then(|| (0..brief.shape.chunks()).collect()));
         let mut frames = Vec::new();
         if let Some(wanted) = wanted.filter(|w| !w.is_empty()) {
             let row = self.row(&handle)?;

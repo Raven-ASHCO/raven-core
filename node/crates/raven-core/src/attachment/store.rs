@@ -101,9 +101,10 @@ pub enum State {
     Failed,
 }
 
-/// The row of one attachment.
+/// The row of one attachment. A local file, not a frame: a member this
+/// build does not know (a later build wrote the row) is passed over, so a
+/// profile opened by an older build keeps its attachments.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Row {
     v: u8,
     /// The handle, in hex: the row's and the blob folder's name.
@@ -134,6 +135,11 @@ pub struct Row {
     /// Mine: how many chunks the friend's node said it has.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub friend_has: u32,
+    /// Mine: when a send of its offer last set out (0: never). The link
+    /// that carries the offer takes the chunks along right behind its
+    /// answer, while this is fresh.
+    #[serde(default, skip_serializing_if = "is_zero64")]
+    pub going_ms: u64,
     /// When the row was made.
     pub created_ms: u64,
     /// When it last changed.
@@ -193,6 +199,7 @@ impl Row {
             },
             asked: false,
             friend_has: 0,
+            going_ms: 0,
             created_ms: now_ms,
             updated_ms: now_ms,
         })
@@ -261,6 +268,10 @@ fn is_false(b: &bool) -> bool {
 }
 
 fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_zero64(n: &u64) -> bool {
     *n == 0
 }
 
@@ -791,6 +802,23 @@ mod tests {
 
     const FRIEND: [u8; 32] = [9u8; 32];
     const MID: [u8; 16] = [5u8; 16];
+
+    #[test]
+    fn a_row_with_a_member_of_a_later_build_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (sealed, offer, text) = photo(3, 50_000);
+        let row = Row::of_offer(&offer, &text, Chat::Friend(&FRIEND), &MID, true, 10).unwrap();
+        put(d, &row).unwrap();
+        write_blob(d, &offer.handle, &sealed).unwrap();
+        // The row as a later build would write it: one member more.
+        let path = row_path(d, &offer.handle);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["a_member_of_tomorrow"] = serde_json::json!({"n": 1});
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert_eq!(get(d, &offer.handle).unwrap(), Some(row));
+    }
 
     #[test]
     fn a_row_is_written_read_changed_and_removed() {

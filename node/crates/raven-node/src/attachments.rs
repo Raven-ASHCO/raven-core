@@ -261,6 +261,70 @@ impl AttLink {
         self.live && !self.listener && self.peer_speaks != Some(false)
     }
 
+    /// This dial's own frames were answered. When they carried a message
+    /// and a send of an offer to this friend set out a moment ago: the
+    /// chunks of that attachment and HAVE, to write on this link now
+    /// (`Exchange::link_push`); the listener answers with a LACK. None:
+    /// nothing rides this link.
+    pub(crate) async fn plan_on_link(&mut self, frames: &[Vec<u8>]) -> Option<exchange::Plan> {
+        if !self.live || self.listener {
+            return None;
+        }
+        if !frames.iter().any(|f| crate::netutil::is_message_frame(f)) {
+            return None;
+        }
+        let (data_dir, peer, shown) = (self.data_dir.clone(), self.peer, self.peer_speaks);
+        let planned = blocking(move || {
+            if !pinned(&data_dir, &peer) {
+                return Err("");
+            }
+            // A LAN listener shows no caps: this node goes by the record.
+            // A friend whose Raven did not say that it takes attachments
+            // gets none on any link (the task says what waits for it).
+            if !shown.unwrap_or_else(|| peers::speaks(&data_dir, &peer)) {
+                return Err("");
+            }
+            Exchange::new(&data_dir, memory()).link_push_or_why(&peer, crate::now_ms())
+        })
+        .await
+        .unwrap_or(Err("the look at the store did not end"));
+        match planned {
+            Ok(plan) => Some(plan),
+            Err(why) => {
+                // A photo that waits and does not ride this link says why
+                // (a word; nothing for a link that has none to carry).
+                if !why.is_empty() {
+                    eprintln!(
+                        "raven-node attachments: contact {}, nothing rides the message's link: {why}",
+                        crate::netutil::link_tag(&self.peer)
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// The chunks of `plan` were written on this link: with the listener's
+    /// answer (`replies`), or without one (the time ran out, the link was
+    /// cut): the task then takes it up, asking first.
+    pub(crate) async fn took_on_link(
+        &self,
+        plan: exchange::Plan,
+        replies: Option<Vec<Vec<u8>>>,
+        took: Duration,
+    ) {
+        note_on_link(&plan, replies.is_some(), took);
+        let data_dir = self.data_dir.clone();
+        let more = blocking(move || {
+            Exchange::new(&data_dir, memory()).took(&plan, replies.as_deref(), crate::now_ms())
+        })
+        .await
+        .unwrap_or(false);
+        if more {
+            kick();
+        }
+    }
+
     /// A listener's frame: `None` when it is not a `RAX1` frame or
     /// attachments are off here (dispatch it as before); the replies to
     /// write otherwise.
@@ -284,6 +348,94 @@ impl AttLink {
         }
         Some(replies)
     }
+}
+
+/// The longest the chunks of an offer may ride the link that carried it.
+const ON_LINK_MAX: Duration = Duration::from_secs(20);
+/// What is left of a dial for those chunks must leave this much for the
+/// dial's own end (its replies go back to the program that sent).
+const ON_LINK_MARGIN: Duration = Duration::from_secs(8);
+/// ... and is not worth starting below this.
+const ON_LINK_MIN: Duration = Duration::from_secs(3);
+
+/// How long the chunks of an offer may ride this dial's link, `elapsed`
+/// into the dial: what the dial's own deadline leaves (a program's dial
+/// has 45 s, over Tor 75 s), [`ON_LINK_MAX`] at most. None: not enough is
+/// left; the task sends them in a dial of its own.
+pub(crate) fn on_link_budget(carrier: OutboxCarrier, elapsed: Duration) -> Option<Duration> {
+    let limit = if carrier == OutboxCarrier::Onion {
+        raven_core::onion::ONION_DIAL_DEADLINE
+    } else {
+        Duration::from_secs(45)
+    };
+    let left = limit.checked_sub(elapsed + ON_LINK_MARGIN)?;
+    let budget = left.min(ON_LINK_MAX);
+    (budget >= ON_LINK_MIN).then_some(budget)
+}
+
+/// [`AttLink::plan_on_link`] for a batch on a kept Tor link, which has no
+/// link state at hand: by the friend's record. The link was opened by a
+/// dial of ours to a verified friend, and a listener whose hello did not
+/// offer attachments answers the HAVE with a refusal and takes no chunk.
+pub(crate) async fn plan_for_kept_link(
+    data_dir: &Path,
+    peer: &[u8; 32],
+    frames: &[Vec<u8>],
+) -> Option<exchange::Plan> {
+    if !live() || !frames.iter().any(|f| crate::netutil::is_message_frame(f)) {
+        return None;
+    }
+    let (dd, friend) = (data_dir.to_path_buf(), *peer);
+    let planned = blocking(move || {
+        if !pinned(&dd, &friend) || !peers::speaks(&dd, &friend) {
+            return Err("");
+        }
+        Exchange::new(&dd, memory()).link_push_or_why(&friend, crate::now_ms())
+    })
+    .await
+    .unwrap_or(Err("the look at the store did not end"));
+    match planned {
+        Ok(plan) => Some(plan),
+        Err(why) => {
+            if !why.is_empty() {
+                eprintln!(
+                    "raven-node attachments: contact {}, nothing rides the message's link: {why}",
+                    crate::netutil::link_tag(peer)
+                );
+            }
+            None
+        }
+    }
+}
+
+/// [`AttLink::took_on_link`] for a batch on a kept Tor link.
+pub(crate) async fn took_on_kept_link(
+    data_dir: &Path,
+    plan: exchange::Plan,
+    replies: Option<Vec<Vec<u8>>>,
+    took: Duration,
+) {
+    note_on_link(&plan, replies.is_some(), took);
+    let dd = data_dir.to_path_buf();
+    let more = blocking(move || {
+        Exchange::new(&dd, memory()).took(&plan, replies.as_deref(), crate::now_ms())
+    })
+    .await
+    .unwrap_or(false);
+    if more {
+        kick();
+    }
+}
+
+/// One log line for chunks that rode a message's link (counts only).
+fn note_on_link(plan: &exchange::Plan, answered: bool, took: Duration) {
+    eprintln!(
+        "raven-node attachments: contact {}, {} frame(s) on the message's own link, {} in {} ms",
+        crate::netutil::link_tag(&plan.peer),
+        plan.frames.len(),
+        if answered { "answered" } else { "no answer" },
+        took.as_millis()
+    );
 }
 
 /// A dial may carry `frames` on this link: `RAX1` frames only to a

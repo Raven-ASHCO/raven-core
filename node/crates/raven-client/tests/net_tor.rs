@@ -876,3 +876,154 @@ fn tor_the_message_after_one_whose_streams_dropped_is_delivered() {
     assert!(b.wait_incoming(a, "its streams drop", Duration::from_secs(60)));
     assert!(b.wait_incoming(a, "the next one", Duration::from_secs(30)));
 }
+
+/// The attachments gate for this test's raven-nodes and engines (they read
+/// it at their start), shut again when the test ends, however it ends: the
+/// other tests of this file run with it shut, as a release build does.
+struct PhotosOn;
+
+impl PhotosOn {
+    fn set() -> PhotosOn {
+        // Its first call clears every lab switch; later calls change none.
+        common::lab_env();
+        // The gate's lab switch opens only with the Lab Test A unlock.
+        std::env::set_var("RAVEN_LAB_TEST_A", "1");
+        std::env::set_var("RAVEN_LAB_ATTACHMENTS", "1");
+        PhotosOn
+    }
+}
+
+impl Drop for PhotosOn {
+    fn drop(&mut self) {
+        std::env::remove_var("RAVEN_LAB_ATTACHMENTS");
+        std::env::remove_var("RAVEN_LAB_TEST_A");
+    }
+}
+
+/// A photo between two friends who reach each other over Tor alone (two
+/// phones, usually): its bytes ride the Tor link that is kept from its
+/// message, right behind the message's answer, with no dial of their own;
+/// they arrive whole, and the sender's photo and message read delivered.
+#[test]
+fn tor_a_photo_rides_the_link_that_carried_its_message() {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let _photos = PhotosOn::set();
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    // A link each way: each Raven hears that the other takes photos.
+    first_message(a, b, "hello B over tor");
+    first_message(b, a, "hello A over tor");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let can = a.ok("attachments.can_send", json!({"address": b.address()}));
+        if can["photos"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{can}\n{}", a.service_log());
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    // A warm link, as when a chat is open: one more message first.
+    one_alone(a, b, "before the photo");
+
+    let mut bytes: Vec<u8> = (0..300_123usize).map(|i| (i * 29 % 251) as u8).collect();
+    bytes[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+    let path = a.ok("attachments.stage", json!({"name": "photo.jpg"}))["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::write(&path, &bytes).unwrap();
+    let began = Instant::now();
+    let sent = a.ok(
+        "attachments.send",
+        json!({
+            "address": b.address(), "path": path, "kind": "photo", "mime": "image/jpeg",
+            "caption": "over tor", "preview_b64": BASE64.encode([0xFF, 0xD8, 0xFF, 0xE0, 1, 2]),
+            "width": 1600, "height": 1200,
+        }),
+    );
+    let id = sent["message"]["attachment"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let row_id = sent["message"]["id"].as_str().unwrap().to_owned();
+    let theirs = |p: &Peer, friend: &Peer| -> Option<Value> {
+        p.ok(
+            "messages.history",
+            json!({"address": friend.address(), "limit": 50}),
+        )["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["attachment"]["id"] == id.as_str())
+            .cloned()
+    };
+    let (mut offered_at, mut ready_at, mut delivered_at) = (None, None, None);
+    let limit = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < limit && (ready_at.is_none() || delivered_at.is_none()) {
+        let there = theirs(b, a);
+        if offered_at.is_none() && there.is_some() {
+            offered_at = Some(began.elapsed());
+        }
+        if ready_at.is_none() && there.is_some_and(|m| m["attachment"]["state"] == "ready") {
+            ready_at = Some(began.elapsed());
+        }
+        if delivered_at.is_none()
+            && message(a, b, &row_id).is_some_and(|m| {
+                m["state"] == "delivered" && m["attachment"]["state"] == "delivered"
+            })
+        {
+            delivered_at = Some(began.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        ready_at.is_some() && delivered_at.is_some(),
+        "receiver {:?}, sender {:?}\nsender's node: {}\nreceiver's node: {}",
+        theirs(b, a),
+        message(a, b, &row_id),
+        a.service_log(),
+        b.service_log()
+    );
+    eprintln!(
+        "a photo of {} bytes over Tor (loopback helper, {RENDEZVOUS_MS} ms a connect): its \
+         message at the receiver after {:.1} s, the photo ready after {:.1} s, delivered at the \
+         sender after {:.1} s",
+        bytes.len(),
+        offered_at.unwrap().as_secs_f64(),
+        ready_at.unwrap().as_secs_f64(),
+        delivered_at.unwrap().as_secs_f64()
+    );
+    // The same bytes, read as an app reads them.
+    let mut got = Vec::new();
+    loop {
+        let r = b.ok(
+            "attachments.read",
+            json!({"id": id, "offset": got.len(), "length": 262_144}),
+        );
+        got.extend_from_slice(&BASE64.decode(r["bytes_b64"].as_str().unwrap()).unwrap());
+        if r["eof"] == true {
+            break;
+        }
+    }
+    assert_eq!(got, bytes);
+    // No dial of their own: the bytes rode the message's link.
+    let log = a.service_log();
+    assert!(
+        log.contains("on the message's own link, answered"),
+        "the photo's bytes took a dial of their own; sender's node: {log}"
+    );
+    // So the photo is there soon after its message: well within the time
+    // of one more Tor connect and its handshake.
+    let behind = ready_at.unwrap().saturating_sub(offered_at.unwrap());
+    assert!(
+        behind < Duration::from_millis(3_000),
+        "the photo came {behind:?} after its message"
+    );
+}

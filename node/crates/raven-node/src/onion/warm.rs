@@ -976,14 +976,84 @@ pub(crate) async fn ride(
             Err(e) => return Err(failed(progress, e)),
         };
     }
-    lease.end(if clean && progress.collector.all_answered() {
-        Ended::Clean {
-            trip: sent.elapsed(),
-        }
+    let trip = sent.elapsed();
+    let mut clean = clean && progress.collector.all_answered();
+    if clean {
+        // An attachment's offer was just answered on this link: its chunks
+        // ride it as one more batch (attachments, gated). A batch that got
+        // no answer leaves the link unfit for another.
+        clean = chunks_ride(&lease, expected, frames, progress).await;
+    }
+    lease.end(if clean {
+        Ended::Clean { trip }
     } else {
         Ended::Broken
     });
     Ok(())
+}
+
+/// The chunks of an attachment whose offer `frames` just carried to
+/// `expected` go on the kept link as one more batch, right behind the
+/// offer's answer (`crate::attachments::plan_for_kept_link`; see
+/// `internet_direct::push_on_link`, which does the same on a link's own
+/// stream). `false`: the batch was written and got no answer in time, so
+/// the link carries nothing more. Whatever happens here, the batch's own
+/// replies stand.
+async fn chunks_ride(
+    lease: &Lease,
+    expected: &[u8; 32],
+    frames: &[Vec<u8>],
+    progress: &mut DialProgress,
+) -> bool {
+    let Some(budget) = crate::attachments::on_link_budget(OutboxCarrier::Onion, progress.elapsed())
+    else {
+        return true;
+    };
+    let Some(plan) =
+        crate::attachments::plan_for_kept_link(&lease.data_dir, expected, frames).await
+    else {
+        return true;
+    };
+    progress.stage = "sending an attachment's chunks";
+    let started = tokio::time::Instant::now();
+    let deadline = started + budget;
+    let (written, wrote) = oneshot::channel();
+    let (replies_to, mut replies) = mpsc::unbounded_channel();
+    let job = Job {
+        frames: plan.frames.clone(),
+        // The HAVE behind the chunks is answered; a chunk is not.
+        expected: plan
+            .frames
+            .iter()
+            .filter(|f| crate::netutil::expects_reply(f))
+            .count(),
+        written,
+        replies: replies_to,
+    };
+    let answer = async {
+        if lease.jobs.send(job).is_err() || !matches!(wrote.await, Ok(Ok(()))) {
+            return None;
+        }
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match next_reply(&mut replies, left).await {
+                ReplyWait::Frame(frame)
+                    if raven_core::attachment::link::reply_is_terminal(&frame) =>
+                {
+                    return Some(vec![frame]);
+                }
+                ReplyWait::Frame(_) => {}
+                ReplyWait::Idle | ReplyWait::Closed(_) => return None,
+            }
+        }
+    };
+    let replies = tokio::time::timeout_at(deadline, answer)
+        .await
+        .ok()
+        .flatten();
+    let answered = replies.is_some();
+    crate::attachments::took_on_kept_link(&lease.data_dir, plan, replies, started.elapsed()).await;
+    answered
 }
 
 /// A batch on a kept link failed with `e`, as one on a link's own stream
