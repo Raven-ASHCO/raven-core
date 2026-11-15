@@ -7610,8 +7610,8 @@ mod tests {
     }
 
     /// RAX1 on a LAN link (attachments, gated): a verified friend whose
-    /// message 3 offered bit 12 fills the attachment it offered, chunk by
-    /// chunk, and is told when it is complete. A dialer that is not
+    /// message 3 offered bit 12 fills the attachment it offered in one
+    /// dial, chunk by chunk, and is told that it is complete. A dialer that is not
     /// verified, or whose message 3 did not offer the bit, gets a refusal
     /// for its request and none of its chunks is taken; with the gate shut
     /// a RAX1 frame gets no answer at all, as before.
@@ -7698,19 +7698,35 @@ mod tests {
             let theirs = read_cipher(&mut client, &mut t).await.unwrap();
             assert!(parse_peer_offer(&theirs).is_ok(), "{case}");
 
-            // The sender's exchange says what a dial carries; this test is
-            // the dial.
+            // The offer's ACK came back to the sender: its exchange plans
+            // one dial with every chunk and HAVE behind them. This test is
+            // that dial.
             let memory = std::sync::Mutex::new(Memory::default());
             let sender = Exchange::new(init_dir.path(), &memory);
             gate_for_thread(Some(true));
+            flow::history_body(
+                init_dir.path(),
+                "out",
+                &bob,
+                &[7; 16],
+                "delivered",
+                &made.offer,
+                now,
+            )
+            .unwrap();
             let plan = sender.plans(now, &|_| true).plans.remove(0);
             gate_for_thread(Some(gate));
-            assert_eq!(plan.frames.len(), 1, "{case}: HAVE first");
-            write_cipher(&mut client, &mut t, &plan.frames[0])
-                .await
-                .unwrap();
+            assert!(plan.frames.len() > 1, "{case}: the chunks, then HAVE");
+            for frame in &plan.frames {
+                // A listener that does not take RAX1 ends the link at the
+                // first frame: the rest cannot be written.
+                if write_cipher(&mut client, &mut t, frame).await.is_err() {
+                    break;
+                }
+            }
+            let wait = if gate { 10_000 } else { 1_500 };
             let answer = tokio::time::timeout(
-                Duration::from_millis(1_500),
+                Duration::from_millis(wait),
                 read_cipher(&mut client, &mut t),
             )
             .await;
@@ -7727,6 +7743,8 @@ mod tests {
                 );
                 assert!(!peers::speaks(resp_dir.path(), &alice), "{case}");
             } else if !(bit12 && pinned) {
+                // The chunks are not answered and not taken; the HAVE is
+                // refused.
                 let reply = answer.expect("an answer").unwrap();
                 assert_eq!(
                     rax1::decode_for_dialer(&reply).map(|f| f.body),
@@ -7735,25 +7753,15 @@ mod tests {
                 );
                 assert!(!peers::speaks(resp_dir.path(), &alice), "{case}");
             } else {
-                let reply = answer.expect("a LACK").unwrap();
+                let reply = answer.expect("the LACK").unwrap();
                 assert!(
-                    sender.took(&plan, Some(&[reply]), now),
-                    "{case}: it wants all of it"
+                    !sender.took(&plan, Some(&[reply]), now),
+                    "{case}: complete in one dial"
                 );
                 assert!(
                     peers::speaks(resp_dir.path(), &alice),
                     "{case}: bit 12 was noted"
                 );
-                let plan = sender.plans(now, &|_| true).plans.remove(0);
-                for frame in &plan.frames {
-                    write_cipher(&mut client, &mut t, frame).await.unwrap();
-                }
-                let reply =
-                    tokio::time::timeout(Duration::from_secs(10), read_cipher(&mut client, &mut t))
-                        .await
-                        .expect("the last LACK")
-                        .unwrap();
-                assert!(!sender.took(&plan, Some(&[reply]), now), "{case}");
                 let mine = store::get(init_dir.path(), &made.handle).unwrap().unwrap();
                 assert_eq!(mine.state, State::Delivered, "{case}");
                 let got = theirs_row(resp_dir.path());

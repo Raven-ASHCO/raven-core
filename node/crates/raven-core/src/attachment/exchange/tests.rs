@@ -79,13 +79,29 @@ impl Side {
     }
 }
 
-/// `a` sends `bytes` to `b` as a photo: a's row and blob, and the offer
-/// kept by `b` as it would be when the message came.
+/// `a` sends `bytes` to `b` as a photo and the offer is delivered: a's row
+/// and blob, the offer kept by `b` as it would be when the message came,
+/// and its delivery written on `a` as it is when the ACK comes back.
 fn offered(a: &Side, b: &Side, bytes: &[u8], now: u64) -> Handle {
+    let (handle, offer) = staged(a, bytes, now);
+    keep(b, &offer, now);
+    delivered(a, &offer, now);
+    handle
+}
+
+/// `a` sealed `bytes` for `b` and its offer is on its way: nothing says
+/// yet that it arrived.
+fn staged(a: &Side, bytes: &[u8], now: u64) -> (Handle, String) {
     let made = flow::prepare(a.d(), &KB, bytes, &photo(), now).unwrap();
     flow::sent(a.d(), &made.handle, &MID, now).unwrap();
-    keep(b, &made.offer, now);
-    made.handle
+    (made.handle, made.offer)
+}
+
+/// The offer's ACK came back to `a`: what the history write does then.
+fn delivered(a: &Side, offer: &str, now: u64) {
+    flow::history_body(a.d(), "out", &KB, &MID, "delivered", offer, now)
+        .unwrap()
+        .unwrap();
 }
 
 fn keep(b: &Side, text: &str, now: u64) {
@@ -129,30 +145,26 @@ fn ops(plan: &Plan) -> Vec<u8> {
 }
 
 #[test]
-fn a_photo_goes_over_in_two_dials_and_is_delivered() {
+fn a_photo_goes_over_in_one_dial_once_its_offer_is_delivered() {
     let Some(_live) = Live::on() else { return };
     let (a, b) = (Side::new(), Side::new());
     let now = crate::clock::now_ms();
     let bytes = jpeg(300_000);
-    let handle = offered(&a, &b, &bytes, now);
+    let (handle, offer) = staged(&a, &bytes, now);
     let chunks = a.row(&handle).shape().unwrap().chunks();
     assert_eq!(chunks, 5, "300,000 bytes, padded, in chunks of 61,424");
 
-    // First the friend is asked what it lacks: one small frame.
+    // While the offer is on its way nothing is said: no dial, no question.
+    let planned = a.x().plans(now, &|_| true);
+    assert!(planned.plans.is_empty() && planned.waiting);
+
+    // The offer arrives and its ACK comes back: every chunk goes at once,
+    // with HAVE behind them. No question first.
+    keep(&b, &offer, now);
+    delivered(&a, &offer, now);
+    assert_eq!(a.row(&handle).state, State::Offered);
     let plan = a.plans(now).remove(0);
     assert_eq!((plan.peer, plan.handle), (KB, handle));
-    assert_eq!(ops(&plan), [0x01], "HAVE alone");
-    let replies = dial(&b, &KA, &plan, now);
-    assert_eq!(replies.len(), 1);
-    assert!(
-        a.x().took(&plan, Some(&replies), now),
-        "the friend wants all of it"
-    );
-    assert_eq!(a.row(&handle).state, State::Offered);
-    assert_eq!(a.row(&handle).friend_has, 0);
-
-    // Then every chunk, and HAVE again.
-    let plan = a.plans(now).remove(0);
     assert_eq!(ops(&plan), [0x04, 0x04, 0x04, 0x04, 0x04, 0x01]);
     let replies = dial(&b, &KA, &plan, now);
     assert_eq!(
@@ -185,28 +197,110 @@ fn a_photo_goes_over_in_two_dials_and_is_delivered() {
 }
 
 #[test]
+fn a_delivery_written_without_the_body_starts_the_push_too() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(100_000), now);
+    keep(&b, &offer, now);
+    // The message is written as queued with its body (the offer), and its
+    // delivery later by its id alone.
+    flow::history_body(a.d(), "out", &KB, &MID, "queued", &offer, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.row(&handle).state, State::Staged);
+    flow::message_delivered(a.d(), &[0x77; 16], now);
+    assert_eq!(
+        a.row(&handle).state,
+        State::Staged,
+        "another message's delivery"
+    );
+    flow::message_delivered(a.d(), &MID, now);
+    assert_eq!(a.row(&handle).state, State::Offered);
+    assert_eq!(push_all(&a, &b, now), 1);
+    assert_eq!(a.row(&handle).state, State::Delivered);
+}
+
+#[test]
+fn an_offer_whose_delivery_was_not_seen_is_asked_for_after_a_while() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let bytes = jpeg(300_000);
+    let (handle, offer) = staged(&a, &bytes, now);
+    keep(&b, &offer, now);
+    // The delivery was noted by a process that ended: the row still says
+    // staged. After a few seconds the friend is asked: one small frame.
+    assert!(a.plans(now + STAGED_PROBE_AFTER_MS - 1).is_empty());
+    let later = now + STAGED_PROBE_AFTER_MS;
+    let plan = a.plans(later).remove(0);
+    assert_eq!(ops(&plan), [0x01], "HAVE alone");
+    let replies = dial(&b, &KA, &plan, later);
+    assert!(
+        a.x().took(&plan, Some(&replies), later),
+        "the friend wants all of it"
+    );
+    assert_eq!(a.row(&handle).state, State::Offered);
+    assert_eq!(a.row(&handle).friend_has, 0);
+    // Then every chunk, and HAVE again.
+    let plan = a.plans(later).remove(0);
+    assert_eq!(ops(&plan), [0x04, 0x04, 0x04, 0x04, 0x04, 0x01]);
+    assert!(!a.x().took(&plan, Some(&dial(&b, &KA, &plan, later)), later));
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    assert_eq!(b.row(&handle).state, State::Complete);
+}
+
+#[test]
 fn a_friend_that_does_not_know_the_offer_yet_is_asked_again_later() {
     let Some(_live) = Live::on() else { return };
     let (a, b) = (Side::new(), Side::new());
     let now = crate::clock::now_ms();
-    let made = flow::prepare(a.d(), &KB, &jpeg(100_000), &photo(), now).unwrap();
-    let plan = a.plans(now).remove(0);
-    let replies = dial(&b, &KA, &plan, now);
-    assert!(!a.x().took(&plan, Some(&replies), now));
+    let (handle, offer) = staged(&a, &jpeg(100_000), now);
+    // Asked after a while (the delivery was not seen): not known there.
+    let asked = now + STAGED_PROBE_AFTER_MS;
+    let plan = a.plans(asked).remove(0);
+    let replies = dial(&b, &KA, &plan, asked);
+    assert!(!a.x().took(&plan, Some(&replies), asked));
     assert_eq!(
-        a.row(&made.handle).state,
+        a.row(&handle).state,
         State::Staged,
         "the offer is not there"
     );
     // Not at once, and not for ever.
-    let planned = a.x().plans(now + 1_000, &|_| true);
+    let planned = a.x().plans(asked + 1_000, &|_| true);
     assert!(planned.plans.is_empty() && planned.waiting);
-    assert_eq!(a.plans(now + 2_000).len(), 1);
+    assert_eq!(a.plans(asked + 2_000).len(), 1);
     // The offer arrives: the same question gets the other answer.
-    keep(&b, &made.offer, now);
-    assert_eq!(push_all(&a, &b, now + 2_000), 2);
-    assert_eq!(a.row(&made.handle).state, State::Delivered);
-    assert_eq!(b.row(&made.handle).state, State::Complete);
+    keep(&b, &offer, now);
+    assert_eq!(push_all(&a, &b, asked + 2_000), 2);
+    assert_eq!(a.row(&handle).state, State::Delivered);
+    assert_eq!(b.row(&handle).state, State::Complete);
+}
+
+#[test]
+fn a_delivery_that_comes_after_an_early_question_is_not_held_back_by_its_wait() {
+    let Some(_live) = Live::on() else { return };
+    let (a, b) = (Side::new(), Side::new());
+    let now = crate::clock::now_ms();
+    let (handle, offer) = staged(&a, &jpeg(100_000), now);
+    let asked = now + STAGED_PROBE_AFTER_MS;
+    let plan = a.plans(asked).remove(0);
+    assert!(!a.x().took(&plan, Some(&dial(&b, &KA, &plan, asked)), asked));
+    assert!(
+        a.plans(asked + 100).is_empty(),
+        "waiting after the early question"
+    );
+    // The offer lands and its ACK comes back a moment later.
+    keep(&b, &offer, asked);
+    delivered(&a, &offer, asked + 100);
+    let plan = a.plans(asked + 100).remove(0);
+    // Something was tried before: the friend is asked first, not pushed at.
+    assert_eq!(ops(&plan), [0x01]);
+    assert!(a
+        .x()
+        .took(&plan, Some(&dial(&b, &KA, &plan, asked)), asked + 100));
+    assert_eq!(push_all(&a, &b, asked + 100), 1);
+    assert_eq!(a.row(&handle).state, State::Delivered);
 }
 
 #[test]
@@ -229,10 +323,9 @@ fn a_cut_resumes_from_what_landed() {
     let bytes = jpeg(400_000);
     let handle = offered(&a, &b, &bytes, now);
     let chunks = a.row(&handle).shape().unwrap().chunks();
-    let plan = a.plans(now).remove(0);
-    assert!(a.x().took(&plan, Some(&dial(&b, &KA, &plan, now)), now));
     // The link is cut after two chunks: no answer comes back.
     let plan = a.plans(now).remove(0);
+    assert_eq!(plan.frames.len() as u32, chunks + 1, "every chunk and HAVE");
     for frame in &plan.frames[..2] {
         assert!(b.x().listener_frame(&KA, frame, now).is_empty());
     }
@@ -291,8 +384,6 @@ fn a_bad_chunk_is_dropped_and_three_end_that_source() {
     let now = crate::clock::now_ms();
     let handle = offered(&a, &b, &jpeg(300_000), now);
     let plan = a.plans(now).remove(0);
-    assert!(a.x().took(&plan, Some(&dial(&b, &KA, &plan, now)), now));
-    let plan = a.plans(now).remove(0);
     // Each chunk with one byte changed: none proves its place.
     for frame in &plan.frames[..3] {
         let mut bad = frame.clone();
@@ -320,8 +411,6 @@ fn only_the_friend_who_offered_it_can_fill_it_and_only_the_one_offered_is_served
     let (a, b) = (Side::new(), Side::new());
     let now = crate::clock::now_ms();
     let handle = offered(&a, &b, &jpeg(100_000), now);
-    let plan = a.plans(now).remove(0);
-    assert!(a.x().took(&plan, Some(&dial(&b, &KA, &plan, now)), now));
     let plan = a.plans(now).remove(0);
     // The right chunks from another friend: not taken, and not known.
     let replies = dial(&b, &KX, &plan, now);
@@ -364,7 +453,10 @@ fn a_pull_fetches_what_is_missing_and_says_done() {
     let (a, b) = (Side::new(), Side::new());
     let now = crate::clock::now_ms();
     let bytes = jpeg(LIVE_MAX_LEN as usize);
-    let handle = offered(&a, &b, &bytes, now);
+    // The sender's node is not dialing (it cannot reach the receiver, and
+    // the offer's delivery was not seen by it).
+    let (handle, offer) = staged(&a, &bytes, now);
+    keep(&b, &offer, now);
     let chunks = b.row(&handle).shape().unwrap().chunks();
     assert_eq!(chunks, 18);
     // Not while the sender may still be pushing.
@@ -417,8 +509,11 @@ fn a_file_waits_until_the_user_asks_for_it() {
     };
     let made = flow::prepare(a.d(), &KB, &jpeg(100_000), &file, now).unwrap();
     keep(&b, &made.offer, now);
+    delivered(&a, &made.offer, now);
+    // Pushed like a photo; the friend's node does not take a file unasked.
     let plan = a.plans(now).remove(0);
     assert!(!a.x().took(&plan, Some(&dial(&b, &KA, &plan, now)), now));
+    assert_eq!(store::progress(b.d(), &b.row(&made.handle)).0, 0);
     assert_eq!(
         a.row(&made.handle).state,
         State::Offered,
@@ -463,6 +558,7 @@ fn a_blob_that_does_not_open_under_the_offers_key_fails() {
     store::write_blob(a.d(), &offer.handle, &sealed).unwrap();
     store::put(a.d(), &row).unwrap();
     keep(&b, &text, now);
+    delivered(&a, &text, now);
     push_all(&a, &b, now);
     assert_eq!(b.row(&offer.handle).state, State::Failed);
     assert_eq!(

@@ -14,10 +14,11 @@
 //! - **The task** ([`run`]). It asks the exchange what is due
 //!   (`Exchange::plans`), makes each dial on the routes the outbox plans
 //!   for that friend (never Bluetooth), and hands the replies back
-//!   (`Exchange::took`). It looks again at once while there is more to do,
-//!   every second while something waits for its time or for a friend, and
-//!   every few seconds otherwise: an attachment an app on this profile just
-//!   made is found by its row, with no call from the app. A friend whose
+//!   (`Exchange::took`). It looks again at once while there is more to do
+//!   and when an offer is delivered in this process, a few times a second
+//!   while something waits (for its time, for a friend, or for a delivery
+//!   another program on this profile writes: found by its row, with no
+//!   call from the app), and every few seconds otherwise. A friend whose
 //!   link comes up is tried at once.
 //! - A listener never speaks first; the dialer's `RAX1` frames are answered
 //!   on the link and never dispatched.
@@ -39,8 +40,11 @@ use raven_core::attachment::{link as rax1, peers};
 use raven_core::{attachment_gate, security_gate, OutboxCarrier, CAP_LINK_ATT1};
 use tokio::sync::Notify;
 
-/// The task looks again this soon while something waits for its time.
-const PASS_WAITING: Duration = Duration::from_secs(1);
+/// The task looks again this soon while something waits: for its time,
+/// for a friend, or for its offer's delivery, which another program on
+/// this profile may write (this node then finds it by its row, so this is
+/// the longest a photo waits between its message and its chunks).
+const PASS_WAITING: Duration = Duration::from_millis(300);
 /// ... and this often with nothing to do.
 const PASS_IDLE: Duration = Duration::from_secs(4);
 /// ... and this often while attachments are off.
@@ -369,6 +373,8 @@ pub(crate) fn pass(data_dir: &Path, dial: &mut DialFn<'_>) -> PassReport {
 /// attachments are off; otherwise a pass after every kick and at the
 /// intervals above.
 pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
+    // An offer delivered by this process: its chunks go at once.
+    raven_core::attachment::flow::set_delivered_hook(kick);
     let mut adopted = false;
     let mut next_sweep = tokio::time::Instant::now();
     loop {

@@ -16,6 +16,7 @@
 //! offer stays as it came (phase 1a).
 
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -282,6 +283,7 @@ pub fn history_body(
     direction: &str,
     peer: &[u8; 32],
     message_id: &[u8; 16],
+    delivery: &str,
     text: &str,
     now_ms: u64,
 ) -> Result<Option<(String, String)>, String> {
@@ -291,6 +293,15 @@ pub fn history_body(
     let Some(offer) = chat_offer(text) else {
         return Ok(None);
     };
+    if direction == "out" {
+        // An offer of mine: delivered now, or on its way (its delivery may
+        // be written later without its body: [`message_delivered`]).
+        if delivery == "delivered" {
+            offer_delivered(data_dir, &offer.handle, now_ms);
+        } else {
+            remember_offer(message_id, &offer.handle);
+        }
+    }
     if direction == "in" {
         if !attachment_gate::attachments_live() {
             return Ok(None);
@@ -333,6 +344,66 @@ pub fn adopt_kept_offers(data_dir: &Path, now_ms: u64) -> Result<usize, String> 
         Some((stored.encode(), stored.list_words().unwrap_or_default()))
     })
     .map_err(|e| e.to_string())
+}
+
+/// Offers of mine on their way, by message id: the newest of this process.
+/// A delivery that is written without the message's body finds its
+/// attachment here ([`message_delivered`]); one it does not find is asked
+/// for by the exchange a few seconds later.
+static ON_THEIR_WAY: Mutex<Vec<([u8; 16], Handle)>> = Mutex::new(Vec::new());
+/// Offers remembered at most.
+const MAX_ON_THEIR_WAY: usize = 64;
+static DELIVERED_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// What raven-node does when an offer of mine was delivered in its own
+/// process: wake the task that moves the chunks (set once; later calls are
+/// ignored). Another process's delivery is found by its row.
+pub fn set_delivered_hook(hook: fn()) {
+    let _ = DELIVERED_HOOK.set(hook);
+}
+
+fn remember_offer(message_id: &[u8; 16], handle: &Handle) {
+    let mut list = ON_THEIR_WAY.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|(mid, _)| mid != message_id);
+    if list.len() >= MAX_ON_THEIR_WAY {
+        list.remove(0);
+    }
+    list.push((*message_id, *handle));
+}
+
+/// The message `message_id` of mine was delivered: when it carried an
+/// offer this process remembers, its attachment's chunks may go now. No
+/// file is read for any other message.
+pub fn message_delivered(data_dir: &Path, message_id: &[u8; 16], now_ms: u64) {
+    let handle = {
+        let mut list = ON_THEIR_WAY.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(at) = list.iter().position(|(mid, _)| mid == message_id) else {
+            return;
+        };
+        list.remove(at).1
+    };
+    offer_delivered(data_dir, &handle, now_ms);
+}
+
+/// The offer of the attachment `handle` of mine reached the friend's node:
+/// its row says so (the exchange pushes every chunk at once, without
+/// asking first), and raven-node's task is woken when this is its process.
+fn offer_delivered(data_dir: &Path, handle: &Handle, now_ms: u64) {
+    if !attachment_gate::attachments_live() {
+        return;
+    }
+    ON_THEIR_WAY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(_, h)| h != handle);
+    let _ = store::update(data_dir, handle, now_ms, |row| {
+        if row.outgoing && row.state == store::State::Staged {
+            row.state = store::State::Offered;
+        }
+    });
+    if let Some(hook) = DELIVERED_HOOK.get() {
+        hook();
+    }
 }
 
 /// Is a copy of a friend's offer that came again under the same message id
@@ -421,7 +492,7 @@ mod tests {
         assert_eq!(&back[..], &bytes[..]);
         assert!(store::opens(d, &row).unwrap());
         // The history keeps the stored form: no key, no root.
-        let (body, words) = history_body(d, "out", &FRIEND, &[9u8; 16], &made.offer, 12)
+        let (body, words) = history_body(d, "out", &FRIEND, &[9u8; 16], "queued", &made.offer, 12)
             .unwrap()
             .unwrap();
         assert_eq!(words, "Photo");

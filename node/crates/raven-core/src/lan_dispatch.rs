@@ -286,6 +286,7 @@ pub fn persist_lan_chat_history(
         direction,
         peer_pub,
         message_id,
+        delivery,
         &text,
         now_ms(),
     )?;
@@ -339,6 +340,11 @@ pub fn mark_lan_chat_history_delivery(
         delivery,
     )
     .map_err(|e| e.to_string())?;
+    if updated && direction == "out" && delivery == "delivered" {
+        // An attachment's offer was delivered: its chunks may go now. A
+        // look in memory only; no file is read for any other message.
+        crate::attachment::flow::message_delivered(data_dir, message_id, now_ms());
+    }
     if !updated {
         // No chat row: an app channel object keeps its state in the app
         // outbox instead (stage, then history, then app record; §8.5).

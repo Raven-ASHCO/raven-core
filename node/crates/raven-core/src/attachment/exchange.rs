@@ -5,12 +5,16 @@
 //! here: raven-node hands it the frames of a link and makes the dials it
 //! plans.
 //!
-//! - **Push** (the sender's node dials). It says HAVE; the friend's node
-//!   answers with a LACK that names the chunks it still wants; the next
-//!   dial pushes those and says HAVE again, until the LACK says complete.
-//!   Then the attachment is delivered. A friend that does not know the
-//!   offer yet (it is still on its way) answers "not known" and is asked
-//!   again soon.
+//! - **Push** (the sender's node dials). As soon as the offer is delivered
+//!   (its ACK came: the friend's node has kept its row), one dial pushes
+//!   every chunk and says HAVE; the friend's node answers with a LACK:
+//!   complete, and the attachment is delivered. After a cut, or whenever
+//!   this node does not know what the friend has, it says HAVE first; the
+//!   LACK names the chunks still wanted, the next dial pushes those and
+//!   says HAVE again, until the LACK says complete. An offer whose delivery
+//!   this node did not see (it was noted by a process that ended) is asked
+//!   for with HAVE after a few seconds; a friend that does not know the
+//!   offer yet answers "not known" and is asked again soon.
 //! - **Pull** (the receiver's node dials). When no chunk landed for a
 //!   while it asks the holder with WANT, takes the chunks, and says DONE
 //!   once it has them all. This is how a cut resumes when the sender's node
@@ -26,7 +30,7 @@
 //!   most [`MAX_PUSH_PER_DIAL`] chunks pushed and [`MAX_PULL_PER_DIAL`]
 //!   pulled per dial; [`SERVE_BYTES_PER_DAY`] served to one friend a day.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -51,6 +55,9 @@ pub const MAX_BAD_CHUNKS: u32 = 3;
 pub const SERVE_BYTES_PER_DAY: u64 = 256 * 1024 * 1024;
 /// A friend's attachment is pulled when no chunk landed for this long.
 pub const PULL_AFTER_MS: u64 = 15_000;
+/// An offer of mine whose delivery was not seen is asked for with HAVE
+/// this long after its row was last written.
+pub const STAGED_PROBE_AFTER_MS: u64 = 5_000;
 /// Dials planned in one pass at most.
 const MAX_PLANS_PER_PASS: usize = 4;
 /// Pushes that moved nothing before the attachment waits a long time.
@@ -84,6 +91,7 @@ struct Brief {
     shape: Shape,
     kind: Kind,
     asked: bool,
+    friend_has: u32,
     updated_ms: u64,
 }
 
@@ -97,6 +105,7 @@ impl Brief {
             shape: stored.shape?,
             kind: stored.kind(),
             asked: row.asked,
+            friend_has: row.friend_has,
             updated_ms: row.updated_ms,
         })
     }
@@ -131,6 +140,10 @@ pub struct Memory {
     rows: HashMap<Handle, (SystemTime, Option<Brief>)>,
     /// Mine: the chunks the friend's last LACK still wanted. None: ask first.
     wanted: HashMap<Handle, Vec<u32>>,
+    /// Mine: a dial was planned for it since this process started. One
+    /// that never was, and whose offer is delivered, is pushed whole
+    /// without asking first.
+    tried: HashSet<Handle>,
     /// Pushes in a row that moved nothing.
     stalls: HashMap<Handle, u32>,
     /// Not tried before this.
@@ -487,7 +500,13 @@ impl<'a> Exchange<'a> {
                         old.updated_ms != brief.as_ref().map_or(0, |b| b.updated_ms)
                     })
                 });
-            if asked_now {
+            // The offer was delivered since the last look: the wait a
+            // question asked too early set is over.
+            let delivered_now = brief.as_ref().is_some_and(|b| b.state == State::Offered)
+                && m.rows.get(&handle).is_some_and(|(_, old)| {
+                    old.as_ref().is_some_and(|old| old.state == State::Staged)
+                });
+            if asked_now || delivered_now {
                 m.parked.remove(&handle);
             }
             m.rows.insert(handle, (changed, brief));
@@ -495,6 +514,7 @@ impl<'a> Exchange<'a> {
         let Memory {
             rows,
             wanted,
+            tried,
             stalls,
             parked,
             bad,
@@ -507,6 +527,7 @@ impl<'a> Exchange<'a> {
                 .is_some_and(|b| !matches!(b.state, State::Delivered | State::Gone | State::Failed))
         };
         wanted.retain(|h, _| live(h));
+        tried.retain(|h| live(h));
         stalls.retain(|h, _| live(h));
         parked.retain(|h, _| live(h));
         bad.retain(|(_, h), _| live(h));
@@ -568,6 +589,15 @@ impl<'a> Exchange<'a> {
                 continue;
             }
             let plan = if push {
+                // An offer still on its way: its delivery is waited for (the
+                // row then says so, and everything is pushed at once). Only
+                // one whose delivery was not seen for a while is asked for.
+                if brief.state == State::Staged
+                    && now_ms.saturating_sub(brief.updated_ms) < STAGED_PROBE_AFTER_MS
+                {
+                    out.waiting = true;
+                    continue;
+                }
                 self.push_plan(peer, handle, &brief)
             } else {
                 // One the user asked for is fetched at once; one that
@@ -597,10 +627,20 @@ impl<'a> Exchange<'a> {
             .is_some_and(|p| p.until_ms > now_ms)
     }
 
-    /// HAVE, after the chunks the friend's last LACK wanted (none before
-    /// its first LACK: the friend is asked first).
+    /// HAVE, after the chunks the friend's last LACK wanted; after every
+    /// chunk for an offer just delivered; alone when this node does not
+    /// know what the friend has.
     fn push_plan(&self, peer: [u8; 32], handle: Handle, brief: &Brief) -> Option<Plan> {
-        let wanted = locked(self.memory).wanted.get(&handle).cloned();
+        let (wanted, first_try) = {
+            let mut m = locked(self.memory);
+            (m.wanted.get(&handle).cloned(), m.tried.insert(handle))
+        };
+        // The offer is delivered and nothing was tried yet: the friend's
+        // node kept its row before it answered, and lacks every chunk.
+        let wanted = wanted.or_else(|| {
+            (first_try && brief.state == State::Offered && brief.friend_has == 0)
+                .then(|| (0..brief.shape.chunks()).collect())
+        });
         let mut frames = Vec::new();
         if let Some(wanted) = wanted.filter(|w| !w.is_empty()) {
             let row = self.row(&handle)?;

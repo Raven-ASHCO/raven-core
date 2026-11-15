@@ -200,12 +200,16 @@ build sets it while the gate is shut; old nodes ignore it.
 
 ## 6. The exchange
 
-- **Push** (the sender's node dials). It says HAVE for the attachment. The
-  friend's node answers what it lacks. The next dial pushes those chunks
-  (at most 40) and says HAVE again, until the LACK says complete: then the
-  attachment is delivered. A friend that answers "not known" (the offer is
-  still on its way) is asked again, first after 2 s, then twice as long
-  each time, up to 5 minutes. After a cut the sender asks first again.
+- **Push** (the sender's node dials). As soon as the offer is delivered
+  (its ACK came back: the friend's node kept its row before it answered),
+  one dial pushes every chunk (at most 40) and says HAVE; the LACK says
+  complete, and the attachment is delivered. After a cut, or whenever the
+  sender does not know what the friend has, it says HAVE first: the LACK
+  names the chunks still wanted, the next dial pushes those and says HAVE
+  again, until the LACK says complete. An offer whose delivery the node did
+  not see is asked for with HAVE after 5 s. A friend that answers "not
+  known" (the offer is still on its way) is asked again, first after 2 s,
+  then twice as long each time, up to 5 minutes.
 - **Pull** (the receiver's node dials). When no chunk landed for 15 s it
   asks the holder with WANT, at most 16 chunks a dial, and says DONE when
   it has them all. An attachment the user asked for is pulled at once.

@@ -1060,15 +1060,17 @@ On the branch `feature/attachments-phase1`, on top of the 3.1 fix line:
   part (`rn/attachments.rs`: the listener arms on LAN, Internet direct,
   p2p and Tor links, and the task that makes the dials). Three differences
   from §9, chosen to change no dial function:
-  1. **No push on the offer's own link.** The sender's node dials again:
-     it says HAVE, the friend's node answers what it lacks, the next dial
-     pushes that and says HAVE again, until the answer is complete. One
-     small dial more than §9.2 for a new attachment; a cut resumes from
-     exactly what landed, and nothing is pushed to a friend that does not
-     know the offer yet.
+  1. **No push on the offer's own link.** The sender's node dials again,
+     as soon as the offer's ACK is written (in its own process at once;
+     written by an app on the same profile, within a third of a second):
+     one dial with every chunk and HAVE behind them, answered by a LACK
+     that says complete. So a photo costs one dial more than its message,
+     not the same link. After a cut the node says HAVE first and pushes
+     only what the LACK names.
   2. **No Bluetooth.** Bit 12 is never set on a nearby link.
-  3. **The sender does not wait for the offer's ACK** to start: a friend
-     that does not know the offer yet says so and is asked again soon.
+  3. **An offer whose delivery the node did not see** (it was noted by a
+     process that ended) is asked for with HAVE after 5 s; a friend that
+     does not know the offer yet says so and is asked again soon.
   The receiver pulls with WANT when no chunk landed for 15 s (at once for
   one the user asked for) and says DONE at the end.
 
