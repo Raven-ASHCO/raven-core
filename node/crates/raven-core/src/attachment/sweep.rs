@@ -14,8 +14,10 @@
 //! kept for an hour, and any row for a minute after it was written (a
 //! friend's offer gets its row a moment before its history row).
 //!
-//! raven-node sweeps when it starts and every hour; an app sweeps right
-//! after it deleted messages, so their attachments are gone at once.
+//! raven-node sweeps when it starts and every hour. An app that deletes a
+//! message removes its attachment itself ([`store::remove`]), and one that
+//! clears or deletes a chat removes that friend's ([`forget_peer`]), so
+//! they are gone at once.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -68,6 +70,24 @@ fn handle_of(body: &str) -> Option<[u8; HANDLE_LEN]> {
 fn older_than(at: SystemTime, age_ms: u64, now: SystemTime) -> bool {
     now.duration_since(at)
         .is_ok_and(|d| d >= Duration::from_millis(age_ms))
+}
+
+/// Removes every attachment of the chat with the friend `peer`, at once:
+/// what clearing or deleting that chat calls, so nothing waits for the
+/// next sweep. The attachments removed.
+pub fn forget_peer(data_dir: &Path, peer: &[u8; 32]) -> Result<usize, StoreError> {
+    let mut removed = 0;
+    for (handle, _) in store::rows_on_disk(data_dir) {
+        let theirs = matches!(
+            store::get(data_dir, &handle),
+            Ok(Some(row)) if row.peer_key() == Some(*peer)
+        );
+        if theirs {
+            store::remove(data_dir, &handle)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Removes every attachment whose message the history no longer holds,
@@ -265,6 +285,22 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!store::blob_dir(d, &first.handle_bytes().unwrap()).exists());
+    }
+
+    #[test]
+    fn clearing_a_chat_removes_that_friends_attachments_at_once() {
+        let Some(_live) = Live::on() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let now = crate::clock::now_ms();
+        let mine = flow::prepare(d, &FRIEND, &jpeg(10_000), &photo(), now).unwrap();
+        let other = flow::prepare(d, &[8u8; 32], &jpeg(10_000), &photo(), now).unwrap();
+        // However new the rows are.
+        assert_eq!(forget_peer(d, &FRIEND).unwrap(), 1);
+        assert!(store::get(d, &mine.handle).unwrap().is_none());
+        assert!(!store::blob_dir(d, &mine.handle).exists());
+        assert!(store::get(d, &other.handle).unwrap().is_some());
+        assert_eq!(forget_peer(d, &FRIEND).unwrap(), 0);
     }
 
     #[test]
