@@ -243,6 +243,7 @@ check **after** its own gate, so it can only close.
 | `feature/advisory` | `security_gate::ADVISORY_PRODUCTION_ENABLED` (not holdable, §4.3) |
 | `feature/app-channel` | `app_channel::APP_CHANNEL_PRODUCTION_ENABLED` |
 | `feature/async-letter` | `horizon::ASYNC_LETTER_PRODUCTION_ENABLED` |
+| `feature/attachments` | `attachment_gate::ATTACHMENTS_PRODUCTION_ENABLED` (attachments phase 1b, held) |
 | `feature/custody-handoff` | `custody_gate::CUSTODY_HANDOFF_PRODUCTION_ENABLED` |
 | `feature/friend-custody` | `custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED` |
 | `feature/friend-relay` | `p2p_gate::FRIEND_RELAY_PRODUCTION_ENABLED` |

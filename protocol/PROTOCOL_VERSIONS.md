@@ -667,6 +667,18 @@ changed, and the listener is unchanged. Security and speed report 2026-11-05
   a lock, a network change, the end of a Tor helper's life or the embedded
   node's pause closes kept links.
 
+## Freeze record changes (2026-11-15, the attachments gate)
+
+One new gate, false, and its feature id; no frame layout, entry type, caps
+bit, card field or vector changed. Design
+`docs/design/2026-11-attachments.md` §22 (phase 1b).
+
+- **Security Advisory V1 (draft).** [`RAVEN_SECURITY_ADVISORY_V1.md`](RAVEN_SECURITY_ADVISORY_V1.md)
+  §4.2: feature id `feature/attachments`
+  (`attachment_gate::ATTACHMENTS_PRODUCTION_ENABLED`, false; lab switch
+  `RAVEN_LAB_ATTACHMENTS` with `RAVEN_LAB_TEST_A=1`, debug builds only). A
+  notice can hold it.
+
 ## Freeze record changes (2026-11-06, Tor speed Stage A gates)
 
 Five new gates, every one false, and their feature ids; no frame layout, entry

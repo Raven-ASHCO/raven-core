@@ -182,6 +182,11 @@ lab_switches() {
   sw RAVEN_LAB_TOR_EARLY '1'
   sw RAVEN_LAB_TOR_OPTIMISTIC '1'
   sw RAVEN_LAB_TOR_WARM_LINK '1'
+  # Attachments, phase 1b (docs/design/2026-11-attachments.md §22): the
+  # gate stays shut with its switch set (raven-core
+  # `attachment_gate::tests::attachments_is_inert_in_release_builds` and
+  # `attachments_production_flag_is_off`).
+  sw RAVEN_LAB_ATTACHMENTS '1'
   sw RAVEN_LAB_NET_AUDIT '/tmp/raven-lab-net-audit'
   # Phase 4 (P4.1): its six gates stay at their consts and its
   # harness values are never read.
@@ -276,7 +281,7 @@ core_inert=(
   update_exchange::tests::the_exchange_is_inert_without_debug_assertions
   update_downloads::tests::auto_approve_is_inert_without_debug_assertions
   group::tests::the_lab_switch_is_inert_without_debug_assertions
-  onion_gate:: internet_gate::
+  onion_gate:: internet_gate:: attachment_gate::
   custody_gate::tests::custody_flags_are_on_and_handoff_stays_off
   custody_gate::tests::gates_follow_the_consts_and_the_debug_close_switches
   custody_gate::tests::hold_text_names_the_flag_and_the_close_switch

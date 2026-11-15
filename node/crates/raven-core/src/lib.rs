@@ -45,6 +45,7 @@ pub mod atsam_kdf;
 pub mod atsam_mlkem;
 pub mod atsam_root;
 pub mod attachment;
+pub mod attachment_gate;
 pub mod bech32m;
 pub mod ble_adapter;
 pub mod bootstrap;

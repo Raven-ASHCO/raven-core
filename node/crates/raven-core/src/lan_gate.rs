@@ -408,6 +408,9 @@ mod tests {
             assert!(!crate::onion_gate::ONION_EARLY_PRODUCTION_ENABLED);
             assert!(!crate::onion_gate::ONION_OPTIMISTIC_PRODUCTION_ENABLED);
             assert!(!crate::onion_gate::ONION_WARM_LINK_PRODUCTION_ENABLED);
+            // Attachments, phase 1b (photos, voice notes and files): before
+            // its field test and review.
+            assert!(!crate::attachment_gate::ATTACHMENTS_PRODUCTION_ENABLED);
         }
     }
 
@@ -465,6 +468,7 @@ mod tests {
         assert!(!crate::onion_gate::onion_early_live());
         assert!(!crate::onion_gate::onion_optimistic_live());
         assert!(!crate::onion_gate::onion_warm_link_live());
+        assert!(!crate::attachment_gate::attachments_live());
     }
 
     /// Phase 5 P5.3. Runs in both builds: the release test job sets

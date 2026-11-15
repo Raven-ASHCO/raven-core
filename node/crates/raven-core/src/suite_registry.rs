@@ -199,6 +199,8 @@ features! {
     FEATURE_ADVISORY = "feature/advisory" => security_gate::ADVISORY_PRODUCTION_ENABLED,
     FEATURE_APP_CHANNEL = "feature/app-channel" => app_channel::APP_CHANNEL_PRODUCTION_ENABLED,
     FEATURE_ASYNC_LETTER = "feature/async-letter" => horizon::ASYNC_LETTER_PRODUCTION_ENABLED,
+    FEATURE_ATTACHMENTS =
+        "feature/attachments" => attachment_gate::ATTACHMENTS_PRODUCTION_ENABLED,
     FEATURE_CUSTODY_HANDOFF =
         "feature/custody-handoff" => custody_gate::CUSTODY_HANDOFF_PRODUCTION_ENABLED,
     FEATURE_FRIEND_CUSTODY =

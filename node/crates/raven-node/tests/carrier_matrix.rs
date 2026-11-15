@@ -1031,6 +1031,8 @@ impl Profile {
             "RAVEN_LAB_TOR_EARLY",
             "RAVEN_LAB_TOR_OPTIMISTIC",
             "RAVEN_LAB_TOR_WARM_LINK",
+            // Attachments' lab unlock (phase 1b); no case sets it.
+            "RAVEN_LAB_ATTACHMENTS",
             // Groups' lab unlock; no case sets it.
             "RAVEN_LAB_GROUPS",
             // The engine's Tor tests' lab names (raven-client

@@ -145,6 +145,10 @@ fn gate_checks() -> Vec<Check> {
             crate::horizon::letter_live_enabled,
         ),
         (
+            reg::FEATURE_ATTACHMENTS,
+            crate::attachment_gate::attachments_live,
+        ),
+        (
             reg::FEATURE_CUSTODY_HANDOFF,
             crate::custody_gate::handoff_live,
         ),
