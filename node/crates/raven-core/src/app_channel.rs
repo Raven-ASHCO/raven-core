@@ -1479,6 +1479,28 @@ mod tests {
         // (Not an offer any more: only the encoder's own bytes read.)
         assert!(!crate::attachment::flow::copy_differs(d2, &other_pad));
 
+        // A verified friend who is blocked: the stored form, and no row.
+        let blocked_dir = tempfile::tempdir().unwrap();
+        book(blocked_dir.path(), &[(friend, true)], true);
+        crate::lan_dispatch::persist_lan_chat_history(
+            blocked_dir.path(),
+            "in",
+            &friend,
+            &[5; 16],
+            10,
+            "received",
+            photo.as_bytes(),
+        )
+        .unwrap();
+        assert!(store::get(blocked_dir.path(), &offer.handle)
+            .unwrap()
+            .is_none());
+        assert!(!crate::attachment::flow::is_friend(
+            blocked_dir.path(),
+            &friend
+        ));
+        assert!(crate::attachment::flow::is_friend(d2, &friend));
+
         // What readers get: the list words; a reader of attachments, the
         // stored form.
         let shown = history.clone().shown();

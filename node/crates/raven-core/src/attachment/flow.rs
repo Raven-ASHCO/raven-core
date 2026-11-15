@@ -9,8 +9,8 @@
 //! - **A friend's.** [`history_body`] is what the history write calls for
 //!   every body: an offer of a photo, a voice note or a file becomes its
 //!   stored form there (never the key), and, while attachments are live and
-//!   the sender is a verified friend, its row is kept so the chunks can
-//!   come ([`keep_offer`]).
+//!   the sender is a verified friend who is not blocked ([`is_friend`]),
+//!   its row is kept so the chunks can come ([`keep_offer`]).
 //!
 //! With the gate shut nothing here sends or keeps anything: a friend's
 //! offer stays as it came (phase 1a).
@@ -27,6 +27,16 @@ use super::link::Handle;
 use super::offer::{self, BlobRef, Content, Frame, Offer, OfferError, LEVELS};
 use super::store::{self, Chat, Row, StoreError};
 use crate::attachment_gate;
+
+/// Is `peer` someone attachments are exchanged with: a contact that is
+/// verified and not blocked? Fail closed: a contact book or a block list
+/// that cannot be read says no.
+pub fn is_friend(data_dir: &Path, peer: &[u8; 32]) -> bool {
+    matches!(
+        crate::outbox::contact_admission(data_dir, peer),
+        crate::outbox::ContactAdmission::Allowed(contact) if contact.pinned
+    )
+}
 
 /// What an app hands over with the bytes.
 #[derive(Debug, Clone)]
@@ -306,8 +316,7 @@ pub fn history_body(
         if !attachment_gate::attachments_live() {
             return Ok(None);
         }
-        // Fail closed: an unreadable contact book verifies nobody.
-        if crate::contact_is_pinned(data_dir, peer).unwrap_or(false) {
+        if is_friend(data_dir, peer) {
             keep_offer(data_dir, peer, message_id, &offer, text, now_ms)
                 .map_err(|e| e.to_string())?;
         }
@@ -335,7 +344,7 @@ pub fn adopt_kept_offers(data_dir: &Path, now_ms: u64) -> Result<usize, String> 
         let mut mid = [0u8; 16];
         hex::decode_to_slice(&entry.peer_pub_hex, &mut peer).ok()?;
         hex::decode_to_slice(&entry.message_id_hex, &mut mid).ok()?;
-        if crate::contact_is_pinned(data_dir, &peer).unwrap_or(false) {
+        if is_friend(data_dir, &peer) {
             // A row that cannot be written now leaves the offer as it is:
             // the next start tries again.
             keep_offer(data_dir, &peer, &mid, &offer, &entry.body, now_ms).ok()?;

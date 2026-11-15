@@ -110,8 +110,9 @@ where
     .ok()
 }
 
+/// A verified contact that is not blocked (fail closed).
 fn pinned(data_dir: &Path, peer: &[u8; 32]) -> bool {
-    raven_core::contact_is_pinned(data_dir, peer).unwrap_or(false)
+    raven_core::attachment::flow::is_friend(data_dir, peer)
 }
 
 // ── One link ────────────────────────────────────────────────────────────────
