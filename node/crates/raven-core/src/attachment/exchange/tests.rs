@@ -428,10 +428,13 @@ fn a_file_waits_until_the_user_asks_for_it() {
         b.plans(now + PULL_AFTER_MS).is_empty(),
         "a file is not fetched unasked"
     );
-    // The tap.
-    store::update(b.d(), &made.handle, now, |row| row.asked = true).unwrap();
-    let plan = b.plans(crate::clock::now_ms() + PULL_AFTER_MS).remove(0);
+    // The tap: asked for, it is fetched at once.
+    store::update(b.d(), &made.handle, now + 1, |row| row.asked = true).unwrap();
+    let plan = b.plans(now + 2).remove(0);
     assert_eq!(ops(&plan), [0x02]);
+    let replies = dial(&a, &KB, &plan, now + 2);
+    assert!(b.x().took(&plan, Some(&replies), now + 2));
+    assert_eq!(b.row(&made.handle).state, State::Complete);
 }
 
 #[test]

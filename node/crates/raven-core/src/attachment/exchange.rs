@@ -479,6 +479,17 @@ impl<'a> Exchange<'a> {
                 continue;
             }
             let brief = self.row(&handle).as_ref().and_then(Brief::of);
+            // The user asked for it (again) since the last look: no wait
+            // an earlier try set holds it back.
+            let asked_now = brief.as_ref().is_some_and(|b| b.asked)
+                && m.rows.get(&handle).is_some_and(|(_, old)| {
+                    old.as_ref().is_some_and(|old| {
+                        old.updated_ms != brief.as_ref().map_or(0, |b| b.updated_ms)
+                    })
+                });
+            if asked_now {
+                m.parked.remove(&handle);
+            }
             m.rows.insert(handle, (changed, brief));
         }
         let Memory {
@@ -559,10 +570,13 @@ impl<'a> Exchange<'a> {
             let plan = if push {
                 self.push_plan(peer, handle, &brief)
             } else {
+                // One the user asked for is fetched at once; one that
+                // comes by itself only when no chunk landed for a while
+                // (its sender may be pushing it).
                 let last = brief
                     .updated_ms
                     .max(store::last_chunk_ms(self.data_dir, &handle));
-                if now_ms.saturating_sub(last) < PULL_AFTER_MS {
+                if !brief.asked && now_ms.saturating_sub(last) < PULL_AFTER_MS {
                     out.waiting = true;
                     continue;
                 }

@@ -175,6 +175,28 @@ pub fn sent(
     .map(|_| ())
 }
 
+/// The offer of an attachment of mine as it travels, made again from its
+/// row: byte for byte the text [`prepare`] gave (an offer has one form).
+/// For a send that is taken up again after the app ended: the history
+/// keeps only the stored form.
+pub fn offer_text(row: &Row) -> Option<String> {
+    if !row.outgoing {
+        return None;
+    }
+    let stored = row.stored()?;
+    let offer = Offer {
+        handle: stored.handle,
+        content: stored.content,
+        blob: Some(BlobRef {
+            shape: stored.shape?,
+            key: row.key()?,
+            root: row.root()?,
+        }),
+    };
+    let text = offer.encode().ok()?;
+    (hex::encode(Sha256::digest(text.as_bytes())) == row.offer_sha256).then_some(text)
+}
+
 /// The message of `handle` could not be made: its row and its blob go.
 pub fn discard(data_dir: &Path, handle: &Handle) {
     let _ = store::remove(data_dir, handle);
@@ -392,6 +414,8 @@ mod tests {
         sent(d, &made.handle, &[9u8; 16], 11).unwrap();
         let row = store::get(d, &made.handle).unwrap().unwrap();
         assert_eq!(row.message_id_bytes(), Some([9u8; 16]));
+        // The offer can be made again from the row, byte for byte.
+        assert_eq!(offer_text(&row).as_deref(), Some(made.offer.as_str()));
         // What was written opens to what was handed over.
         let back = store::read_plain(d, &row, 0, bytes.len()).unwrap();
         assert_eq!(&back[..], &bytes[..]);
