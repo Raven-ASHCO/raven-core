@@ -102,6 +102,27 @@ fn mime_of(name: &str) -> &'static str {
     }
 }
 
+/// Attachments go to a verified friend whose Raven said that it takes
+/// them.
+fn may_attach(data_dir: &Path, peer: &[u8; 32]) -> Result<(), String> {
+    if !flow::is_friend(data_dir, peer) {
+        return Err(
+            "attachments go to verified friends only: verify this contact first (raven verify)"
+                .into(),
+        );
+    }
+    // As an app's engine: an offer goes only to a Raven that said it takes
+    // attachments (an older one would show the offer as a message's text).
+    if !peers::speaks(data_dir, peer) {
+        return Err(
+            "this friend's Raven has not said yet that it takes attachments: nothing was sent \
+             (a message each way first lets the two say so)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// `raven lab attach --to @friend --file PATH`: seal the file, send its
 /// offer as a message, and leave the bytes to raven-node. A JPEG goes as a
 /// photo, which the friend's Raven takes by itself; anything else, or a JPEG
@@ -115,6 +136,17 @@ pub(super) fn cmd_attach(
     as_file: bool,
 ) -> Result<(), String> {
     live()?;
+    // Who it is for is asked before a way to them is looked for. A contact
+    // that is not verified may have no way yet (over Tor one opens only once
+    // the words are checked), and "save a LAN address" would be the wrong
+    // advice for it.
+    let contacts = super::load_contacts(data_dir)?;
+    if let [one] = super::resolve_contact_arg(&contacts, to).as_slice() {
+        let mut key = [0u8; 32];
+        if hex::decode_to_slice(one.pub_hex.trim(), &mut key).is_ok() {
+            may_attach(data_dir, &key)?;
+        }
+    }
     let target = super::resolve_send_target(
         data_dir,
         to,
@@ -126,21 +158,8 @@ pub(super) fn cmd_attach(
     let mut peer = [0u8; 32];
     hex::decode_to_slice(target.pub_hex.trim(), &mut peer)
         .map_err(|_| "that contact's key does not read".to_string())?;
-    if !flow::is_friend(data_dir, &peer) {
-        return Err(
-            "attachments go to verified friends only: verify this contact first (raven verify)"
-                .into(),
-        );
-    }
-    // As an app's engine: an offer goes only to a Raven that said it takes
-    // attachments (an older one would show the offer as a message's text).
-    if !peers::speaks(data_dir, &peer) {
-        return Err(
-            "this friend's Raven has not said yet that it takes attachments: nothing was sent \
-             (a message each way first lets the two say so)"
-                .into(),
-        );
-    }
+    // The key the send will use, whatever named it.
+    may_attach(data_dir, &peer)?;
     let bytes = std::fs::read(file)
         .map_err(|e| format!("could not read {}: {}", file.display(), e.kind()))?;
     let name = file
@@ -501,6 +520,35 @@ mod tests {
         let refusal = not_a_picture(&row_of(true)).unwrap_err();
         assert!(refusal.contains("picture-save"), "{refusal}");
         assert_eq!(not_a_picture(&row_of(false)), Ok(()));
+    }
+
+    /// A contact that is not verified is told so before a way to it is
+    /// looked for: one added from a card with only its onion address has no
+    /// way yet, and is not to be told to save a LAN address.
+    #[test]
+    fn a_contact_that_is_not_verified_is_told_so_before_a_way_is_looked_for() {
+        if !cfg!(debug_assertions) {
+            // A release build follows its const alone: the gate is shut.
+            return;
+        }
+        raven_core::attachment_gate::set_lab_attachments_for_this_thread(Some(true));
+        let dir = tempfile::tempdir().unwrap();
+        let book = |pinned: bool| {
+            let row = format!(
+                r#"[{{"petname":"Max","pub_hex":"{}","address":"","pinned":{pinned}}}]"#,
+                hex::encode([7u8; 32])
+            );
+            std::fs::write(dir.path().join("contacts.json"), row).unwrap();
+        };
+        let attach = || cmd_attach(dir.path(), "Max", Path::new("no-such.jpg"), "", false);
+        book(false);
+        let said = attach().unwrap_err();
+        assert!(said.contains("verified friends only"), "{said}");
+        // Verified, and its Raven has not said that it takes attachments.
+        book(true);
+        let said = attach().unwrap_err();
+        raven_core::attachment_gate::set_lab_attachments_for_this_thread(None);
+        assert!(said.contains("has not said yet"), "{said}");
     }
 
     #[test]
