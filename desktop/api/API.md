@@ -384,8 +384,10 @@ builds, and it needs the photo gate): a person sets **one** picture, and the fri
 - **`Mine`:** `{set, seq, changed_ms, changes_left, friends, have_it, waiting, need_newer}`.
   `seq` names your newest choice and changes with every change. `changes_left`: how many more
   times a picture can be set today (3 a day); removing is always possible and uses up none.
-  `friends` are your verified friends; before you ever chose a picture the three counts are 0,
-  after that they add up to `friends`.
+  `friends` are your verified friends. `need_newer` is counted from the start, so an app can say
+  how many friends will see a picture before the first one is set (`friends` less `need_newer`);
+  `have_it` and `waiting` are 0 until you chose a picture, and from then on the three add up to
+  `friends`.
 - **`picture.set`.** The app hands over a square baseline JPEG of at most 60,000 bytes and 512
   px a side (apps make 384 px, quality 0.7 and lower until it fits) and its preview (32 px, at
   most 1,536 bytes, 64 px a side at most). The engine checks both and writes them again without

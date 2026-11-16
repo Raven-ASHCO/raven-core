@@ -365,11 +365,12 @@ pub struct MineView {
     pub changes_left: u8,
     /// My verified friends who are not blocked.
     pub friends: usize,
-    /// Those whose Raven has my newest choice.
+    /// Those whose Raven has my newest choice. None before a first choice.
     pub have_it: usize,
-    /// Those it has not reached yet.
+    /// Those it has not reached yet. None before a first choice.
     pub waiting: usize,
-    /// Those whose Raven is too old for pictures.
+    /// Those whose Raven is too old for pictures: counted from the start,
+    /// also before a first choice.
     pub need_newer: usize,
 }
 
@@ -396,30 +397,35 @@ fn reach_of(data_dir: &Path, mine: &Mine, sent: &SentBook, speaks: bool, peer: &
     if !speaks {
         return Reach::NeedsNewer;
     }
-    match sent.friends.get(&key_of(peer)) {
-        Some(s)
-            if s.choice == mine.choice
-                && (s.reached == Reached::Has || whole_at_friend(data_dir, s)) =>
-        {
-            Reach::Has
-        }
+    let key = key_of(peer);
+    let Some(sent) = sent.friends.get(&key).filter(|s| s.choice == mine.choice) else {
+        return Reach::Waiting;
+    };
+    if sent.reached == Reached::Has {
+        return Reach::Has;
+    }
+    let Some(handle) = sent.handle.as_deref().and_then(handle_of) else {
+        return Reach::Waiting;
+    };
+    match store::get(data_dir, &handle) {
+        // The friend's node has the chunk of this offer, though no [`pass`]
+        // has noted it yet: raven-node wrote so in the offer's row.
+        Ok(Some(row)) if row.outgoing && row.state == State::Delivered => Reach::Has,
+        // The row is gone: a [`pass`] noted what became of the offer after
+        // this book was read (it writes the book first, then removes the
+        // row). What the book says now is the answer, so that a friend who
+        // has my picture never reads as waiting for a moment.
+        Ok(None) => match load::<SentBook>(data_dir, SENT_FILE).friends.get(&key) {
+            Some(now) if now.choice == mine.choice && now.reached == Reached::Has => Reach::Has,
+            _ => Reach::Waiting,
+        },
         _ => Reach::Waiting,
     }
 }
 
-/// The friend's node has the chunk of this offer, though no [`pass`] has
-/// noted it yet: raven-node wrote so in the offer's row.
-fn whole_at_friend(data_dir: &Path, sent: &Sent) -> bool {
-    sent.handle
-        .as_deref()
-        .and_then(handle_of)
-        .is_some_and(|handle| {
-            matches!(
-                store::get(data_dir, &handle),
-                Ok(Some(row)) if row.outgoing && row.state == State::Delivered
-            )
-        })
-}
+/// An entry of the friends' pictures names a row that is not in the
+/// attachment store.
+struct RowGone;
 
 /// The picture files, the friends and whose node takes attachments, as
 /// they are at one moment: read once, and asked for every friend of a list.
@@ -477,13 +483,20 @@ impl Views {
             friends: self.friends.len(),
             ..MineView::default()
         };
-        if self.mine.choice != 0 {
-            for peer in &self.friends {
-                match self.reach_of(peer) {
-                    Reach::Has => view.have_it += 1,
-                    Reach::Waiting => view.waiting += 1,
-                    Reach::NeedsNewer => view.need_newer += 1,
+        for peer in &self.friends {
+            if self.mine.choice == 0 {
+                // Before a first choice nothing is on its way to anybody. Who
+                // could not take a picture is known all the same, so an app
+                // can say how many friends will see the one being chosen.
+                if !self.speakers.contains(&key_of(peer)) {
+                    view.need_newer += 1;
                 }
+                continue;
+            }
+            match self.reach_of(peer) {
+                Reach::Has => view.have_it += 1,
+                Reach::Waiting => view.waiting += 1,
+                Reach::NeedsNewer => view.need_newer += 1,
             }
         }
         Some(view)
@@ -512,19 +525,46 @@ impl Views {
         if !self.is_friend(peer) {
             return None;
         }
-        let theirs = self.theirs.friends.get(&key_of(peer))?;
-        let handle = theirs.handle.as_deref().and_then(handle_of)?;
-        if not_today(theirs, self.now_ms) {
-            return None;
+        let key = key_of(peer);
+        match self.their_view(self.theirs.friends.get(&key)?) {
+            Ok(view) => view,
+            // The picture's row is gone: a newer offer took its place (or
+            // took the picture away) after this book was read. What the
+            // book says now is the answer, so that the picture held until
+            // then never reads as announced only for a moment.
+            Err(RowGone) => {
+                let now: TheirsBook = load(&self.data_dir, THEIRS_FILE);
+                let theirs = now.friends.get(&key)?;
+                self.their_view(theirs).unwrap_or(Some(TheirView {
+                    seq: theirs.seq,
+                    ready: false,
+                }))
+            }
         }
-        let ready = matches!(
-            store::get(&self.data_dir, &handle),
-            Ok(Some(row)) if !row.outgoing && row.state == State::Complete
-        );
-        Some(TheirView {
-            seq: theirs.seq,
-            ready,
-        })
+    }
+
+    /// What one entry of the friends' pictures shows: nothing (no picture,
+    /// or too many bad ones today), or the picture and whether its bytes
+    /// are here. [`RowGone`]: the entry names a row that is not in the
+    /// attachment store.
+    fn their_view(&self, theirs: &Theirs) -> Result<Option<TheirView>, RowGone> {
+        let Some(handle) = theirs.handle.as_deref().and_then(handle_of) else {
+            return Ok(None);
+        };
+        if not_today(theirs, self.now_ms) {
+            return Ok(None);
+        }
+        match store::get(&self.data_dir, &handle) {
+            Ok(Some(row)) => Ok(Some(TheirView {
+                seq: theirs.seq,
+                ready: !row.outgoing && row.state == State::Complete,
+            })),
+            Ok(None) => Err(RowGone),
+            Err(_) => Ok(Some(TheirView {
+                seq: theirs.seq,
+                ready: false,
+            })),
+        }
     }
 }
 
@@ -734,6 +774,9 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
     let mut made = Vec::new();
     let mut failure = None;
     let mut first_look = false;
+    // The rows of offers that are at their friends: removed once the book
+    // says so.
+    let mut there: Vec<Handle> = Vec::new();
     edit(data_dir, SENT_FILE, |book: &mut SentBook| {
         // 1. Friends who are no longer friends.
         book.friends.retain(|key, sent| {
@@ -745,7 +788,7 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
         });
         // 2. What was sent.
         for sent in book.friends.values_mut() {
-            follow(data_dir, sent, &fates, now_ms);
+            follow(data_dir, sent, &fates, now_ms, &mut there);
         }
         // 3. Who is due. The first look of a store (a new one, or one made
         // again after the old was lost) only notes the friends who are
@@ -822,6 +865,9 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
             }
         }
     })?;
+    for handle in there {
+        let _ = store::remove(data_dir, &handle);
+    }
     let last = made.iter().map(|to_send| to_send.seq).max();
     if last.is_some() || first_look {
         edit(data_dir, MINE_FILE, |kept: &mut Mine| {
@@ -837,7 +883,13 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
 
 /// Follows one offer of mine: what its row in the attachment store, or its
 /// message, says by now.
-fn follow(data_dir: &Path, sent: &mut Sent, fates: &BTreeMap<String, Fate>, now_ms: u64) {
+fn follow(
+    data_dir: &Path,
+    sent: &mut Sent,
+    fates: &BTreeMap<String, Fate>,
+    now_ms: u64,
+    there: &mut Vec<Handle>,
+) {
     if sent.reached == Reached::Has {
         return;
     }
@@ -855,7 +907,10 @@ fn follow(data_dir: &Path, sent: &mut Sent, fates: &BTreeMap<String, Fate>, now_
         Some(Some(handle)) => match store::get(data_dir, &handle) {
             Ok(Some(row)) if row.outgoing => match row.state {
                 State::Delivered => {
-                    let _ = store::remove(data_dir, &handle);
+                    // Its row goes once the book is written (the caller):
+                    // whoever reads in between finds the row or the book's
+                    // word, never neither.
+                    there.push(handle);
                     sent.handle = None;
                     sent.reached = Reached::Has;
                 }
@@ -1035,7 +1090,8 @@ pub fn take_offer(
     }
     let sha256 = hex::encode(Sha256::digest(text.as_bytes()));
     let today = day_of(now_ms);
-    edit(data_dir, THEIRS_FILE, |book: &mut TheirsBook| {
+    let mut old_row: Option<String> = None;
+    let taken = edit(data_dir, THEIRS_FILE, |book: &mut TheirsBook| {
         let key = key_of(peer);
         let old = book.friends.get(&key);
         if old.is_some_and(|t| t.sha256 == sha256) {
@@ -1080,11 +1136,18 @@ pub fn take_offer(
             next.side = u16::try_from(side).unwrap_or(0);
             next.preview = Some(BASE64.encode(preview));
         }
-        // The picture held until now goes, with its row and its key.
-        remove_row(data_dir, old.and_then(|t| t.handle.as_deref()));
+        // The picture held until now goes, with its row and its key: once
+        // the book names the new one (below).
+        old_row = old.and_then(|t| t.handle.clone());
         book.friends.insert(key, next);
         Ok(Taken::New)
-    })?
+    })?;
+    // Whoever reads between the two writes finds the old picture whole or
+    // the new one announced, never the old one without its bytes.
+    if matches!(taken, Ok(Taken::New)) {
+        remove_row(data_dir, old_row.as_deref());
+    }
+    taken
 }
 
 /// Takes up the profile offers the history kept as they came, from friends
@@ -1445,6 +1508,19 @@ mod tests {
         // nothing.
         assert!(pass(d, T0).unwrap().is_empty());
         assert!(pass(d, T0).unwrap().is_empty());
+        // Who could not take a picture is counted all the same: an app says
+        // how many friends will see the picture being chosen.
+        let before = mine(d, T0).unwrap();
+        assert_eq!(
+            (
+                before.friends,
+                before.have_it,
+                before.waiting,
+                before.need_newer
+            ),
+            (2, 0, 0, 1)
+        );
+        assert_eq!(reach(d, &old), None, "nothing to say of one friend yet");
         set_mine(d, &face(64), &small(), T0).unwrap();
         let made = pass(d, T0 + 1).unwrap();
         assert_eq!(made.len(), 1, "{made:?}");
@@ -1696,6 +1772,63 @@ mod tests {
             Err(PictureError::NoPicture)
         ));
         assert_eq!(store::count(b), 0);
+    }
+
+    /// What a row is built from may be a moment old (an app's engine reads
+    /// the files once for a list of friends): a picture replaced or removed
+    /// since then reads as it is now, never as the old one without its bytes.
+    #[test]
+    fn a_look_from_before_a_newer_offer_reads_the_picture_as_it_is_now() {
+        let Some(_live) = Live::on() else { return };
+        let (theirs_home, my_home) = (profile(&[(ME, true)]), profile(&[(FRIEND, true)]));
+        let (a, b) = (theirs_home.path(), my_home.path());
+        speaks(a, &ME);
+        set_mine(a, &face(64), &small(), T0).unwrap();
+        let first = pass(a, T0).unwrap();
+        assert_eq!(carry(a, b, &FRIEND, &first[0], 1, T0), Taken::New);
+        let seen = |views: &Views| views.theirs(&FRIEND).map(|v| (v.seq, v.ready));
+        // A look taken now, asked after the friend's newer picture came.
+        let before = Views::load(b, T0 + 1);
+        assert_eq!(seen(&before), Some((first[0].seq, true)));
+        set_mine(a, &face(128), &small(), T0 + 10).unwrap();
+        let second = pass(a, T0 + 10).unwrap();
+        assert_eq!(
+            take_offer(b, &FRIEND, &[2u8; 16], &second[0].offer, T0 + 11).unwrap(),
+            Taken::New
+        );
+        // The newer one, announced: not the older one announced once more.
+        assert_eq!(seen(&before), Some((second[0].seq, false)));
+        // A look from before the friend removed its picture: no picture.
+        let handle = second[0].handle.unwrap();
+        land(b, &handle, &chunk_at(a, &handle), T0 + 11);
+        let before = Views::load(b, T0 + 12);
+        assert_eq!(seen(&before), Some((second[0].seq, true)));
+        clear_mine(a, T0 + 20).unwrap();
+        let third = pass(a, T0 + 20).unwrap();
+        assert_eq!(carry(a, b, &FRIEND, &third[0], 3, T0 + 21), Taken::New);
+        assert_eq!(seen(&before), None);
+    }
+
+    /// The same for my own picture: a look from before the pass that noted
+    /// the friend has it, and let the offer's row go, still says so.
+    #[test]
+    fn a_look_from_before_the_pass_that_noted_it_says_the_friend_has_my_picture() {
+        let Some(_live) = Live::on() else { return };
+        let home = profile(&[(FRIEND, true)]);
+        let d = home.path();
+        speaks(d, &FRIEND);
+        set_mine(d, &face(64), &small(), T0).unwrap();
+        let made = pass(d, T0).unwrap();
+        let handle = made[0].handle.unwrap();
+        offer_sent(d, &FRIEND, made[0].seq, &[1u8; 16], T0).unwrap();
+        delivered(d, &handle);
+        let before = Views::load(d, T0 + 1);
+        assert_eq!(before.reach(&FRIEND), Some(Reach::Has));
+        // The pass writes what it found, then lets the row go.
+        assert!(pass(d, T0 + 2).unwrap().is_empty());
+        assert!(store::get(d, &handle).unwrap().is_none());
+        assert_eq!(before.reach(&FRIEND), Some(Reach::Has));
+        assert_eq!(before.mine().unwrap().have_it, 1);
     }
 
     #[test]
