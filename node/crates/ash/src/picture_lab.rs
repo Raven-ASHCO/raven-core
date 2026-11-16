@@ -59,14 +59,19 @@ fn send_name(contact: &super::Contact) -> String {
     }
 }
 
-/// `raven lab picture-set --file PICTURE --preview SMALL`: check both JPEGs,
-/// keep the picture as it travels, and send it to every verified friend who
-/// is due it. The terminal has no picture library: the picture (square, 64
-/// to 512 pixels, at most 60,000 bytes) and its preview (square, 16 to 64
-/// pixels, at most 1,536 bytes) are made beforehand, as an app makes them.
-pub(super) fn cmd_set(data_dir: &Path, file: &Path, preview: &Path) -> Result<(), String> {
+/// `raven lab picture-set --file PICTURE [--preview SMALL]`: check both
+/// JPEGs, keep the picture as it travels, and send it to every verified
+/// friend who is due it. The terminal has no picture library: the picture
+/// (square, 64 to 512 pixels, at most 60,000 bytes) and its preview
+/// (square, 16 to 64 pixels, at most 1,536 bytes) are made beforehand, as an
+/// app makes them. Without a preview a plain grey square goes in its place.
+pub(super) fn cmd_set(data_dir: &Path, file: &Path, preview: Option<&Path>) -> Result<(), String> {
     live()?;
-    let (picture_bytes, preview_bytes) = (read(file)?, read(preview)?);
+    let picture_bytes = read(file)?;
+    let preview_bytes = match preview {
+        Some(preview) => read(preview)?,
+        None => raven_core::attachment::jpeg::flat(32, false),
+    };
     picture::set_mine(data_dir, &picture_bytes, &preview_bytes, now_ms())
         .map_err(|e| e.to_string())?;
     let kept = picture::read_mine(data_dir, false).map_err(|e| e.to_string())?;

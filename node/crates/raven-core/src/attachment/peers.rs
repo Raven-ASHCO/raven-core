@@ -57,6 +57,12 @@ pub fn speaks(data_dir: &Path, peer: &[u8; 32]) -> bool {
     load(data_dir).peers.contains_key(&hex::encode(peer))
 }
 
+/// The keys (lowercase hex) of every friend whose node takes attachments,
+/// as far as this node saw: one read for a whole list of friends.
+pub fn speakers(data_dir: &Path) -> std::collections::HashSet<String> {
+    load(data_dir).peers.into_keys().collect()
+}
+
 /// An authenticated link with the verified friend `peer` showed link caps
 /// with the bit (`speaks`) or without it. `Ok(true)`: the record changed.
 pub fn note(

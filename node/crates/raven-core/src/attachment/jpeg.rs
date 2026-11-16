@@ -656,6 +656,46 @@ fn read_scan_header(body: &[u8], components: &mut [Component]) -> Result<(), Jpe
     Ok(())
 }
 
+/// A flat square of `side` pixels, grey or in colour (4:2:0): every block
+/// the same, each two codes of one bit. It is a picture [`check`] takes for
+/// a side inside the limits, and a real decoder opens it. For a preview
+/// where no picture library can make one (the terminal's lab commands), and
+/// for tests.
+pub fn flat(side: u16, colour: bool) -> Vec<u8> {
+    let components: u8 = if colour { 3 } else { 1 };
+    let mut out = vec![0xFF, SOI];
+    out.extend_from_slice(&JFIF_APP0);
+    out.extend_from_slice(&[0xFF, DQT, 0x00, 0x43, 0x00]);
+    out.extend_from_slice(&[1u8; 64]);
+    out.extend_from_slice(&[0xFF, SOF0, 0x00, 8 + 3 * components, 8]);
+    out.extend_from_slice(&side.to_be_bytes());
+    out.extend_from_slice(&side.to_be_bytes());
+    out.push(components);
+    for index in 0..components {
+        let sampling = if colour && index == 0 { 0x22 } else { 0x11 };
+        out.extend_from_slice(&[index + 1, sampling, 0]);
+    }
+    for class in [0u8, 1] {
+        // One code of one bit: a size of 0, and the end of the block.
+        out.extend_from_slice(&[0xFF, DHT, 0x00, 20, class << 4, 1]);
+        out.extend_from_slice(&[0u8; 16]);
+    }
+    out.extend_from_slice(&[0xFF, SOS, 0x00, 6 + 2 * components, components]);
+    for index in 0..components {
+        out.extend_from_slice(&[index + 1, 0x00]);
+    }
+    out.extend_from_slice(&[0x00, 0x3F, 0x00]);
+    let px = usize::from(side);
+    let (units, blocks) = if colour {
+        (px.div_ceil(16) * px.div_ceil(16), 6)
+    } else {
+        (px.div_ceil(8) * px.div_ceil(8), 1)
+    };
+    out.extend(std::iter::repeat_n(0u8, (units * blocks * 2).div_ceil(8)));
+    out.extend_from_slice(&[0xFF, EOI]);
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     //! JPEGs made by hand for tests: a grey or a colour square whose every
@@ -825,6 +865,29 @@ mod tests {
                 components: 3
             })
         );
+    }
+
+    #[test]
+    fn a_flat_square_is_a_picture_and_the_one_the_tests_make_by_hand() {
+        for (side, colour) in [(32u16, true), (64, false), (384, true), (512, true)] {
+            let components = if colour { 3 } else { 1 };
+            assert_eq!(flat(side, colour), parts(side, components, 0).bytes());
+        }
+        assert_eq!(
+            check(&flat(32, true), &PREVIEW),
+            Ok(Checked {
+                side: 32,
+                components: 3
+            })
+        );
+        assert_eq!(
+            check(&flat(384, true), &PICTURE),
+            Ok(Checked {
+                side: 384,
+                components: 3
+            })
+        );
+        assert!(flat(32, true).len() <= PREVIEW.max_len);
     }
 
     #[test]

@@ -402,8 +402,9 @@ A sender looks at its contact book and its own records, not at events:
 - **Repair.** A friend whose profile offer came after the sender's was made,
   and carries a `held` lower than the `seq` it took, has lost the sender's
   picture: it is offered again, at most once a day.
-- At most 4 offers for one friend in a day, and 3 changes of the picture in
-  a day.
+- A picture can be set 3 times in a day. Removing it is never refused and
+  uses up none of them. At most 7 offers for one friend in a day, every
+  reason counted.
 - An offer whose message never left, or ended without arriving, is made
   again, with a new key and `seq`.
 - When the friend's node has the chunk, the sender removes the offer's row:

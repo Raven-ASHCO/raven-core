@@ -6,6 +6,15 @@ says what has not been verified.
 
 ## Where this stands
 
+Your picture, 2026-11-16 (lab only: the profile pictures gate is shut in release builds, and it
+needs the photo gate): `picture.mine`, `picture.set`, `picture.clear`, `picture.read`, the
+`picture` and `my_picture` members of a friend's row, the `picture` and `picture_mine` events
+and five error codes (`src/pictures.rs`; API.md "Your picture"). The engine sends while an app
+listens. `cargo test -p raven-client --test pictures`: two engines with their raven-node on
+loopback set a picture, the verified friend reads it back byte for byte, a newer one replaces
+it, and a friend that is no longer verified has none. Not done: the apps' screens on the real
+engine, more than one picture.
+
 Photos, 2026-11-15 (lab only: the attachments gate is shut in release builds): the eight
 `attachments.*` ops, a row's `attachment`, the `attachment` event and the new error codes are
 done for a chat with one friend (`src/attachments.rs`; API.md "Photos"). `cargo test -p

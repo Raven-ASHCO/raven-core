@@ -29,6 +29,7 @@ mod messages;
 mod nearby;
 mod network;
 mod node;
+mod pictures;
 mod profile;
 mod safety;
 mod settings;

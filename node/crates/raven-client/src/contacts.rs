@@ -355,6 +355,9 @@ impl Inner {
         }
         map.insert("blocked".into(), c.blocked.into());
         map.insert("unread".into(), unread.unwrap_or(0).into());
+        // `picture` and `my_picture`, for a verified friend only (none
+        // while profile pictures are off).
+        self.picture_members(c, &mut map);
         Value::Object(map)
     }
 

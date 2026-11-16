@@ -60,6 +60,17 @@ pub mod code {
     /// A check of the attachment failed, or what was handed over cannot be
     /// sent as one.
     pub const ATTACHMENT_BAD: &str = "ATTACHMENT_BAD";
+    /// `picture.set`: more bytes or pixels than a profile picture has.
+    pub const PICTURE_TOO_BIG: &str = "PICTURE_TOO_BIG";
+    /// `picture.set` and `picture.read`: not a picture Raven takes (a plain
+    /// baseline JPEG, square), or a friend's that failed its check.
+    pub const PICTURE_BAD: &str = "PICTURE_BAD";
+    /// `picture.set`: a picture was set three times today already.
+    pub const CHANGE_LIMIT: &str = "CHANGE_LIMIT";
+    /// `picture.read`: only a verified friend's picture is read.
+    pub const NOT_VERIFIED: &str = "NOT_VERIFIED";
+    /// `picture.read`: there is no picture.
+    pub const NO_PICTURE: &str = "NO_PICTURE";
 }
 
 /// The default sentence for each code (desktop/design/strings.en.json words
@@ -118,6 +129,11 @@ pub fn default_message(code: &str) -> &'static str {
         }
         code::ATTACHMENT_GONE => "This photo is no longer available.",
         code::ATTACHMENT_BAD => "This photo could not be shown.",
+        code::PICTURE_TOO_BIG => "This picture is too big.",
+        code::PICTURE_BAD => "Raven could not use this picture.",
+        code::CHANGE_LIMIT => "You can set a picture 3 times a day. Try again tomorrow.",
+        code::NOT_VERIFIED => "Compare security words with this friend to share pictures.",
+        code::NO_PICTURE => "There is no picture here.",
         code::BAD_REQUEST => {
             "Raven didn't understand what this app asked. Update Raven; if it keeps happening, \
              open Details."

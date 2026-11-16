@@ -153,6 +153,10 @@ changes. Fields marked `?` may be missing.
 | `attachments.download` | `{id}` | `{}` (asks for a friend's attachment that is not all here; photos come by themselves) |
 | `attachments.cancel` | `{id}` | `{}` (yours: stops sending it; a friend's: no longer asked for) |
 | `attachments.export` | `{id, to_path}` | `{}` (writes the bytes to a new file outside the profile; never over a file that is there) |
+| `picture.mine` | – | `{mine: Mine}` (see "Your picture") |
+| `picture.set` | `{jpeg_b64, preview_b64}` | `{mine: Mine}` (the picture is checked and kept as it travels, then goes to each verified friend) |
+| `picture.clear` | – | `{mine: Mine}` (your picture goes; the friends who have it are told; never refused for the day's count) |
+| `picture.read` | `{address?, preview?: bool}` | `{jpeg_b64}` (without `address` your own; a friend's only while they are verified, and checked first) |
 | `chats.list` | – | `{chats: [Chat]}` (pinned first, then the newest message first; see "Chat controls") |
 | `chats.delete` | `{address}` or `{group}` | `{deleted: true, cleared, pending_kept}` |
 | `chats.pin` | `{address \| group, pinned: bool}` | `{pinned}` |
@@ -356,6 +360,56 @@ an app shows no attach button.
   friend who is not verified, are `BAD_REQUEST` with plain words.
 - Not built yet: photos in groups (`attachments.send {group}` is `NOT_AVAILABLE_YET`,
   `attachments.can_send {group}` says no), voice messages and files.
+
+### Your picture
+
+Version 1 of profile pictures (lab only: raven-core's profile pictures gate is shut in release
+builds, and it needs the photo gate): a person sets **one** picture, and the friends they
+**verified** see it. `protocol/RAVEN_ATTACHMENT_V1.md` section 10 says what travels.
+
+- **Only verified friends.** Your picture goes only to a friend who is verified and not blocked,
+  to each under a key of its own. A friend's picture is read and shown only while you have them
+  verified; whether it shows is worked out at each call, never stored. A picture is never in a
+  card, a notice or a Live Activity.
+- **A friend's row** has two more members, there only for a friend who is verified and not
+  blocked:
+  - `picture: {seq, state}` when they sent a picture. `state` is `preview` (their picture is
+    announced, its bytes are not here yet: `picture.read {address, preview: true}` gives the
+    small preview to show blurred) or `ready` (`picture.read {address}` gives the bytes). `seq`
+    names the picture: it changes when the friend changes theirs, not from `preview` to `ready`.
+    Without the member the app shows the letter.
+  - `my_picture: "has" | "waiting" | "needs_newer"` once you chose a picture (or removed one):
+    their Raven has your newest choice, it has not reached them yet, or their Raven is too old
+    for pictures.
+- **`Mine`:** `{set, seq, changed_ms, changes_left, friends, have_it, waiting, need_newer}`.
+  `seq` names your newest choice and changes with every change. `changes_left`: how many more
+  times a picture can be set today (3 a day); removing is always possible and uses up none.
+  `friends` are your verified friends; before you ever chose a picture the three counts are 0,
+  after that they add up to `friends`.
+- **`picture.set`.** The app hands over a square baseline JPEG of at most 60,000 bytes and 512
+  px a side (apps make 384 px, quality 0.7 and lower until it fits) and its preview (32 px, at
+  most 1,536 bytes, 64 px a side at most). The engine checks both and writes them again without
+  anything an encoder adds (Exif, colour profile, comments): what it keeps is what travels, and
+  `picture.read {}` gives exactly that back.
+- **`picture.read`** of a friend's picture gives bytes the engine has checked as a plain
+  baseline JPEG, square, of the side the friend announced. The app still decodes them only with
+  the system's decoder pinned to JPEG, at the size shown, and keeps the pixels in memory only. A
+  picture that fails the check goes, and the call is `PICTURE_BAD`; after three in a day none of
+  that friend's is read until the next day.
+- **Sending** needs no call: the engine sends while an app listens for events, at once after
+  `picture.set` or `picture.clear`, and it looks once a minute for friends who became due
+  (verified since, or their Raven learned pictures). The offers are messages no chat shows, lists
+  or counts.
+- **Events.** `picture {address, picture: {seq, state} | null, my_picture: "…" | null}` when one
+  of a friend's two members changed, with both as they are now (`null`: absent from the row);
+  `picture_mine {mine}` when your picture or its counts changed. Told at the watcher's beat,
+  about a second after the change; the first look only notes, so an app reads `contacts.list`
+  first.
+- **Errors:** `NOT_AVAILABLE_YET` (pictures are off: the app shows no picture controls and only
+  letters), `PICTURE_TOO_BIG`, `PICTURE_BAD`, `CHANGE_LIMIT` (a picture was set 3 times today),
+  `NOT_VERIFIED` (`picture.read` for a friend who is not verified, or is blocked), `NO_PICTURE`.
+- Not built yet: more than one picture, a setting that hides pictures, pictures in the desktop
+  apps.
 
 ### Chat controls
 
@@ -675,7 +729,9 @@ codes: `NEARBY_NOT_RUNNING` (nearby is off, or has no radio), `NEARBY_BAD_REQUES
 Contact   { address, name, short_address, verified: bool, blocked: bool, pinned: bool, hidden: bool,
             presence: "in_touch" | "waiting" | "none" | "no_address",
             last_contact_ms?, waiting: {count, until_ms}?, avatar_index: 0..4, lan?: "ip:port",
-            unread }
+            unread, picture?: {seq, state: "preview" | "ready"},
+            my_picture?: "has" | "waiting" | "needs_newer" }
+            picture, my_picture: see "Your picture"; only for a verified friend who is not blocked.
             waiting.until_ms is 0 when not known (raven-node not running).
             last_contact_ms: the newest message from the friend or of yours they confirmed (the
             history counts, also from before the app started); in_touch while that, or a message or
@@ -924,6 +980,10 @@ Event     { seq, kind, at_ms, ... } kinds:
                                        (also a group that appeared, and one forgotten: groups.get is
                                        then GROUP_NOT_FOUND, drop it)             -> reload it (groups.get,
                                        and groups.history when it is open)
+            "picture"       {address, picture: {seq, state} | null, my_picture: "…" | null}  a
+                                       friend's picture members changed (see "Your picture")
+                                                                                  -> the avatar follows
+            "picture_mine"  {mine: Mine}  your picture or how far it is changed  -> the counts follow
 ```
 
 A `receipt` comes only after Raven verified the friend's signed receipt, and always before the
@@ -951,6 +1011,9 @@ copies still wait; try again once some are delivered; or you sent your share of 
 within 7 days, see Receipts) and `GROUP_NO_ROUTE` (none of the other members
 is your friend); a member who is not a friend is `NOT_A_CONTACT`, a message over 8,192 bytes
 `MESSAGE_TOO_LONG`.
+
+Your picture adds `PICTURE_TOO_BIG`, `PICTURE_BAD`, `CHANGE_LIMIT`, `NOT_VERIFIED` and `NO_PICTURE`
+(see "Your picture").
 
 - "Not sent, meet first" and "time ran out" are message states (`not_sent_meet_first`,
   `time_ran_out`), not errors: no operation returns them as error codes.

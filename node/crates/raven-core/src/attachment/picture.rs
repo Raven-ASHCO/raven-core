@@ -72,10 +72,13 @@ pub const PICTURES_LOCK: &str = ".pictures.lock.sqlite";
 
 const VERSION: u8 = 1;
 const DAY_MS: u64 = 86_400_000;
-/// How often my picture can be changed or removed in a day.
+/// How often a picture can be set in a day. Removing it is never refused
+/// and uses up none of them: taking a picture away must always work.
 pub const CHANGES_A_DAY: u8 = 3;
-/// Offers made for one friend in a day, every reason counted.
-pub const OFFERS_A_DAY: u8 = 4;
+/// Offers made for one friend in a day, every reason counted: three
+/// pictures, each taken away again, and one more for a friend verified anew
+/// or one that lost mine. Below what a receiver takes ([`TAKEN_A_DAY`]).
+pub const OFFERS_A_DAY: u8 = 7;
 /// Offers taken from one friend in a day; more are dropped.
 pub const TAKEN_A_DAY: u8 = 8;
 /// Bad pictures from one friend in a day before none of theirs is opened
@@ -97,8 +100,8 @@ pub enum PictureError {
     /// Not a picture this build takes.
     #[error("PICTURE_BAD: {0}")]
     Bad(JpegError),
-    /// Changed too often today.
-    #[error("CHANGE_LIMIT: a picture can be changed {CHANGES_A_DAY} times a day")]
+    /// Set too often today.
+    #[error("CHANGE_LIMIT: a picture can be set {CHANGES_A_DAY} times a day")]
     ChangeLimit,
     /// Not a friend whose picture is shown: not verified, or blocked.
     #[error("NOT_VERIFIED: only a verified friend's picture is shown")]
@@ -358,7 +361,7 @@ pub struct MineView {
     pub choice: u64,
     /// When it was last changed.
     pub changed_ms: u64,
-    /// How many more changes today.
+    /// How many more times a picture can be set today.
     pub changes_left: u8,
     /// My verified friends who are not blocked.
     pub friends: usize,
@@ -418,58 +421,124 @@ fn whole_at_friend(data_dir: &Path, sent: &Sent) -> bool {
         })
 }
 
+/// The picture files, the friends and whose node takes attachments, as
+/// they are at one moment: read once, and asked for every friend of a list.
+/// With the gate shut nothing is read and every answer is none.
+pub struct Views {
+    data_dir: PathBuf,
+    now_ms: u64,
+    live: bool,
+    friends: Vec<[u8; 32]>,
+    speakers: HashSet<String>,
+    mine: Mine,
+    sent: SentBook,
+    theirs: TheirsBook,
+}
+
+impl Views {
+    /// Reads everything once.
+    pub fn load(data_dir: &Path, now_ms: u64) -> Views {
+        let live = attachment_gate::pictures_live();
+        let read = |on: bool| on.then_some(());
+        Views {
+            data_dir: data_dir.to_path_buf(),
+            now_ms,
+            live,
+            friends: read(live).map(|()| friends(data_dir)).unwrap_or_default(),
+            speakers: read(live)
+                .map(|()| peers::speakers(data_dir))
+                .unwrap_or_default(),
+            mine: read(live)
+                .map(|()| load(data_dir, MINE_FILE))
+                .unwrap_or_default(),
+            sent: read(live)
+                .map(|()| load(data_dir, SENT_FILE))
+                .unwrap_or_default(),
+            theirs: read(live)
+                .map(|()| load(data_dir, THEIRS_FILE))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn is_friend(&self, peer: &[u8; 32]) -> bool {
+        self.live && self.friends.contains(peer)
+    }
+
+    /// My picture and how far it is. `None`: the gate is shut.
+    pub fn mine(&self) -> Option<MineView> {
+        if !self.live {
+            return None;
+        }
+        let mut view = MineView {
+            set: self.mine.jpeg.is_some(),
+            choice: self.mine.choice,
+            changed_ms: self.mine.changed_ms,
+            changes_left: changes_left(&self.mine, self.now_ms),
+            friends: self.friends.len(),
+            ..MineView::default()
+        };
+        if self.mine.choice != 0 {
+            for peer in &self.friends {
+                match self.reach_of(peer) {
+                    Reach::Has => view.have_it += 1,
+                    Reach::Waiting => view.waiting += 1,
+                    Reach::NeedsNewer => view.need_newer += 1,
+                }
+            }
+        }
+        Some(view)
+    }
+
+    fn reach_of(&self, peer: &[u8; 32]) -> Reach {
+        reach_of(
+            &self.data_dir,
+            &self.mine,
+            &self.sent,
+            self.speakers.contains(&key_of(peer)),
+            peer,
+        )
+    }
+
+    /// How far my picture is with the friend `peer`. `None`: not a verified
+    /// friend, or I never chose a picture.
+    pub fn reach(&self, peer: &[u8; 32]) -> Option<Reach> {
+        (self.is_friend(peer) && self.mine.choice != 0).then(|| self.reach_of(peer))
+    }
+
+    /// The picture the verified friend `peer` sent, if there is one to
+    /// show. Whether it shows is worked out here each time, never stored:
+    /// no path leaves a picture showing for a contact that is not verified.
+    pub fn theirs(&self, peer: &[u8; 32]) -> Option<TheirView> {
+        if !self.is_friend(peer) {
+            return None;
+        }
+        let theirs = self.theirs.friends.get(&key_of(peer))?;
+        let handle = theirs.handle.as_deref().and_then(handle_of)?;
+        if not_today(theirs, self.now_ms) {
+            return None;
+        }
+        let ready = matches!(
+            store::get(&self.data_dir, &handle),
+            Ok(Some(row)) if !row.outgoing && row.state == State::Complete
+        );
+        Some(TheirView {
+            seq: theirs.seq,
+            ready,
+        })
+    }
+}
+
 /// My picture and how far it is, for an app.
 pub fn mine(data_dir: &Path, now_ms: u64) -> Result<MineView, PictureError> {
-    if !attachment_gate::pictures_live() {
-        return Err(PictureError::Hold);
-    }
-    let mine: Mine = load(data_dir, MINE_FILE);
-    let sent: SentBook = load(data_dir, SENT_FILE);
-    let mut view = MineView {
-        set: mine.jpeg.is_some(),
-        choice: mine.choice,
-        changed_ms: mine.changed_ms,
-        changes_left: changes_left(&mine, now_ms),
-        ..MineView::default()
-    };
-    for peer in friends(data_dir) {
-        view.friends += 1;
-        if mine.choice == 0 {
-            continue;
-        }
-        match reach_of(
-            data_dir,
-            &mine,
-            &sent,
-            peers::speaks(data_dir, &peer),
-            &peer,
-        ) {
-            Reach::Has => view.have_it += 1,
-            Reach::Waiting => view.waiting += 1,
-            Reach::NeedsNewer => view.need_newer += 1,
-        }
-    }
-    Ok(view)
+    Views::load(data_dir, now_ms)
+        .mine()
+        .ok_or(PictureError::Hold)
 }
 
 /// How far my picture is with the friend `peer`. `None`: not a verified
 /// friend, or I never chose a picture.
 pub fn reach(data_dir: &Path, peer: &[u8; 32]) -> Option<Reach> {
-    if !attachment_gate::pictures_live() || !flow::is_friend(data_dir, peer) {
-        return None;
-    }
-    let mine: Mine = load(data_dir, MINE_FILE);
-    if mine.choice == 0 {
-        return None;
-    }
-    let sent: SentBook = load(data_dir, SENT_FILE);
-    Some(reach_of(
-        data_dir,
-        &mine,
-        &sent,
-        peers::speaks(data_dir, peer),
-        peer,
-    ))
+    Views::load(data_dir, 0).reach(peer)
 }
 
 fn next_choice(mine: &mut Mine, now_ms: u64) -> Result<(), PictureError> {
@@ -513,21 +582,23 @@ pub fn set_mine(
 }
 
 /// Removes my picture. The next [`pass`] tells every friend who has it.
-/// With no picture set nothing changes.
+/// With no picture set nothing changes. Never refused for the day's count,
+/// and it uses up none of it.
 pub fn clear_mine(data_dir: &Path, now_ms: u64) -> Result<(), PictureError> {
     if !attachment_gate::pictures_live() {
         return Err(PictureError::Hold);
     }
     edit(data_dir, MINE_FILE, |mine: &mut Mine| {
         if mine.jpeg.is_none() {
-            return Ok(());
+            return;
         }
-        next_choice(mine, now_ms)?;
+        mine.choice = now_ms.max(mine.choice.saturating_add(1)).min(MAX_SEQ);
+        mine.changed_ms = now_ms;
         mine.jpeg = None;
         mine.preview = None;
         mine.side = 0;
-        Ok(())
-    })?
+    })?;
+    Ok(())
 }
 
 /// My picture's bytes, or its preview's.
@@ -1063,23 +1134,7 @@ fn not_today(theirs: &Theirs, now_ms: u64) -> bool {
 /// Whether it shows is worked out here each time, never stored: no path
 /// leaves a picture showing for a contact that is not verified.
 pub fn theirs(data_dir: &Path, peer: &[u8; 32], now_ms: u64) -> Option<TheirView> {
-    if !attachment_gate::pictures_live() || !flow::is_friend(data_dir, peer) {
-        return None;
-    }
-    let book: TheirsBook = load(data_dir, THEIRS_FILE);
-    let theirs = book.friends.get(&key_of(peer))?;
-    let handle = theirs.handle.as_deref().and_then(handle_of)?;
-    if not_today(theirs, now_ms) {
-        return None;
-    }
-    let ready = matches!(
-        store::get(data_dir, &handle),
-        Ok(Some(row)) if !row.outgoing && row.state == State::Complete
-    );
-    Some(TheirView {
-        seq: theirs.seq,
-        ready,
-    })
+    Views::load(data_dir, now_ms).theirs(peer)
 }
 
 /// The bytes of the picture the verified friend `peer` sent, or of its
@@ -1351,19 +1406,27 @@ mod tests {
         // The same instant again: the number still rises.
         set_mine(d, &face(64), &small(), T0).unwrap();
         assert_eq!(mine(d, T0).unwrap().choice, T0 + 1);
+        // Taking it away is a new choice, and uses up none of the day's.
         clear_mine(d, T0 + 5).unwrap();
         let view = mine(d, T0 + 5).unwrap();
         assert!(!view.set);
-        assert_eq!((view.choice, view.changes_left), (T0 + 5, 0));
+        assert_eq!((view.choice, view.changes_left), (T0 + 5, 1));
         assert!(matches!(read_mine(d, false), Err(PictureError::NoPicture)));
-        // Clearing what is not set changes nothing and costs nothing.
+        // Clearing what is not set changes nothing.
         clear_mine(d, T0 + 6).unwrap();
         assert_eq!(mine(d, T0 + 6).unwrap().choice, T0 + 5);
-        // The fourth change of the day is refused; the next day takes it.
+        // The third picture of the day is the last; the fourth is refused,
+        // and taking the third away still works.
+        set_mine(d, &face(64), &small(), T0 + 7).unwrap();
+        assert_eq!(mine(d, T0 + 7).unwrap().changes_left, 0);
         assert!(matches!(
-            set_mine(d, &face(64), &small(), T0 + 7),
+            set_mine(d, &face(64), &small(), T0 + 8),
             Err(PictureError::ChangeLimit)
         ));
+        assert_eq!(mine(d, T0 + 8).unwrap().choice, T0 + 7);
+        clear_mine(d, T0 + 9).unwrap();
+        assert!(!mine(d, T0 + 9).unwrap().set);
+        // The next day takes a picture again.
         set_mine(d, &face(64), &small(), T0 + DAY).unwrap();
         assert_eq!(mine(d, T0 + DAY).unwrap().changes_left, 2);
     }
@@ -1527,18 +1590,23 @@ mod tests {
         };
         assert!(matches!(offer.content, Content::NoProfile { .. }));
         assert_eq!(store::count(d), 0);
-        // The fourth offer of the day for one friend is the last.
-        set_mine(d, &face(64), &small(), T0 + DAY - 2_000).unwrap_err();
-        let mut book: SentBook = load(d, SENT_FILE);
-        assert_eq!(book.friends[&key_of(&FRIEND)].offers, 3);
-        book.friends.get_mut(&key_of(&FRIEND)).unwrap().choice = 0;
-        edit(d, SENT_FILE, |b: &mut SentBook| *b = book.clone()).unwrap();
-        assert_eq!(pass(d, T0 + 30).unwrap().len(), 1, "the fourth");
-        edit(d, SENT_FILE, |b: &mut SentBook| {
-            b.friends.get_mut(&key_of(&FRIEND)).unwrap().choice = 0;
-        })
-        .unwrap();
-        assert!(pass(d, T0 + 31).unwrap().is_empty(), "no fifth today");
+        // One friend is offered so many in a day and no more.
+        assert_eq!(
+            load::<SentBook>(d, SENT_FILE).friends[&key_of(&FRIEND)].offers,
+            3
+        );
+        let due_again = || {
+            edit(d, SENT_FILE, |b: &mut SentBook| {
+                b.friends.get_mut(&key_of(&FRIEND)).unwrap().choice = 0;
+            })
+            .unwrap();
+        };
+        for offer in 4..=u64::from(OFFERS_A_DAY) {
+            due_again();
+            assert_eq!(pass(d, T0 + 30 + offer).unwrap().len(), 1, "offer {offer}");
+        }
+        due_again();
+        assert!(pass(d, T0 + 50).unwrap().is_empty(), "no more today");
         assert_eq!(pass(d, T0 + DAY).unwrap().len(), 1, "the next day");
     }
 

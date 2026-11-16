@@ -154,6 +154,9 @@ pub(crate) struct Inner {
     /// key (hex), until when (`None`: until asked to stop): what
     /// `nearby.status` lists as `advertising_for` (nearby.rs).
     pub(crate) nearby_on: Mutex<HashMap<String, Option<u64>>>,
+    /// What the apps were last told about profile pictures, and when the
+    /// engine last looked for friends who are due mine (pictures.rs).
+    pub(crate) pictures: Mutex<crate::pictures::PictureWatch>,
 }
 
 impl Inner {
@@ -189,6 +192,7 @@ impl Inner {
             marks_unsaved: Mutex::new(ReadMarks::new()),
             groups: Mutex::new(crate::groups::GroupWatch::default()),
             nearby_on: Mutex::new(HashMap::new()),
+            pictures: Mutex::new(crate::pictures::PictureWatch::default()),
         })
     }
 
@@ -274,6 +278,13 @@ impl Inner {
             "attachments.download" => |me, args| me.attachments_download(args),
             "attachments.cancel" => |me, args| me.attachments_cancel(args),
             "attachments.export" => |me, args| me.attachments_export(args),
+            // Your picture (pictures.rs; behind raven-core's profile
+            // pictures gate: while it is shut each answers
+            // NOT_AVAILABLE_YET).
+            "picture.mine" => |me, _| me.picture_mine(),
+            "picture.set" => |me, args| me.picture_set(args),
+            "picture.clear" => |me, _| me.picture_clear(),
+            "picture.read" => |me, args| me.picture_read(args),
             "node.status" => |me, _| me.node_status_op(),
             "node.start" => |me, _| me.node_start(),
             "node.stop" => |me, _| me.node_stop(),
@@ -756,6 +767,9 @@ impl Inner {
 
     pub(crate) fn invalidate_contacts(&self) {
         lock(&self.caches).contacts = None;
+        // A friend verified, unverified, blocked or removed: who gets my
+        // picture, and whose I show, is looked at again (pictures.rs).
+        self.kick_pictures();
     }
 
     /// raven-node's outbox, asked again when the last answer is older than

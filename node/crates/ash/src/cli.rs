@@ -1386,8 +1386,9 @@ enum LabCommands {
         #[arg(long)]
         file: PathBuf,
         /// Its preview: square, 16 to 64 pixels, 1,536 bytes at most.
+        /// Without it a plain grey square goes as the preview.
         #[arg(long)]
-        preview: PathBuf,
+        preview: Option<PathBuf>,
     },
     /// Profile pictures (lab): remove your picture, and tell every verified
     /// friend who has it.
@@ -17317,7 +17318,7 @@ pub fn run() {
                     exit_on_err(attach_lab::cmd_save(&data_dir, &handle, &out))
                 }
                 LabCommands::PictureSet { file, preview } => {
-                    exit_on_err(picture_lab::cmd_set(&data_dir, &file, &preview))
+                    exit_on_err(picture_lab::cmd_set(&data_dir, &file, preview.as_deref()))
                 }
                 LabCommands::PictureClear => exit_on_err(picture_lab::cmd_clear(&data_dir)),
                 LabCommands::PictureSend => exit_on_err(picture_lab::cmd_send(&data_dir)),

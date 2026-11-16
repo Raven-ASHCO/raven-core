@@ -756,6 +756,7 @@ impl Inner {
         if self.cached_identity().is_some() && self.open().is_ok() {
             let _ = self.refresh(Duration::from_millis(900));
             self.refresh_groups();
+            self.refresh_pictures();
         }
     }
 }

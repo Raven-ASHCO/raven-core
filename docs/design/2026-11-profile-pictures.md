@@ -1245,10 +1245,11 @@ The owner's wish of 2026-11-15: simple, as on the messengers people know. A
 person picks one photo from their own gallery for their profile, and the
 friends they verified see it. So version 1 is this design with one face and
 without the two extras of §24.1. Built on 2026-11-16 in raven-core
-(`attachment::jpeg`, `attachment::picture`) and as lab commands of the
-terminal app (`raven lab picture-set`, `picture-clear`, `picture-send`,
-`pictures`, `picture-save`), behind `PROFILE_PICTURES_PRODUCTION_ENABLED`
-(false). The wire text is `protocol/RAVEN_ATTACHMENT_V1.md` §10.
+(`attachment::jpeg`, `attachment::picture`), in the engine the apps call
+(raven-client `src/pictures.rs`) and as lab commands of the terminal app
+(`raven lab picture-set`, `picture-clear`, `picture-send`, `pictures`,
+`picture-save`), behind `PROFILE_PICTURES_PRODUCTION_ENABLED` (false). The
+wire text is `protocol/RAVEN_ATTACHMENT_V1.md` §10.
 
 | This design | Version 1 |
 |---|---|
@@ -1269,7 +1270,8 @@ terminal app (`raven lab picture-set`, `picture-clear`, `picture-send`,
 | A picture is not an attachment of a chat (§15.2) | As written: a cleared or deleted chat and the sweep leave a picture's row alone while a picture file names it |
 | A bad picture, 3 a day (§14) | As written |
 | Show pictures (§17) | Not built |
-| The app API `faces.*`, `pictures.*` (§17) | For the apps: `picture.mine`, `picture.set`, `picture.clear`, `picture.read` and two members of a contact row. Not in the engine yet |
+| The app API `faces.*`, `pictures.*` (§17) | `picture.mine`, `picture.set`, `picture.clear`, `picture.read`, the members `picture` and `my_picture` of a friend's row and the events `picture` and `picture_mine` (`desktop/api/API.md`, "Your picture"; raven-client `src/pictures.rs`) |
+| Changing a face 3 times a day, 4 offers a friend a day (§21) | A picture can be set 3 times a day. Removing it is never refused and uses up none: taking a picture away must always work (the builder of the iPhone screens pointed at this). So a friend may be offered 7 in a day |
 | Group authors (§13) | Follows from the contact row: an app shows a verified friend's picture beside their group message |
 
 Tried between two nodes on one computer (throwaway profiles, the same

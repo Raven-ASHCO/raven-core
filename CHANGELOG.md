@@ -76,8 +76,9 @@ independent review.
   each verified friend under a key of its own, and readable only for a verified friend. Before a
   picture is kept or handed to an app, Raven checks that it is a plain baseline JPEG with nothing
   in it but its tables, its frame and one scan (`protocol/RAVEN_ATTACHMENT_V1.md`, section 10).
-  Five terminal commands for tests across computers: `raven lab picture-set`, `picture-clear`,
-  `picture-send`, `pictures` and `picture-save`. No app has the screens yet. Release builds are
+  The engine has the `picture.*` operations (API.md, "Your picture"), and five terminal commands
+  serve tests across computers: `raven lab picture-set`, `picture-clear`, `picture-send`,
+  `pictures` and `picture-save`. No released app has the screens yet. Release builds are
   unchanged: the gate is shut.
 - Lab builds can send a photo between two verified friends (debug builds with
   `RAVEN_LAB_ATTACHMENTS=1` and `RAVEN_LAB_TEST_A=1`). The engine has the `attachments.*` operations
