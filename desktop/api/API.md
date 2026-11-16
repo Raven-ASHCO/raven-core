@@ -324,10 +324,13 @@ an app shows no attach button.
   `attachments.read` works), `gone` (the friend deleted it first), `failed` (a check failed, or
   this device keeps nothing for it).
 - **`state`, a photo of yours:** `sending`, `sent` (the friend has the message, not yet every
-  byte), `delivered` (the friend's Raven has every byte), `waiting` (the friend is away),
-  `failed` (not sent; `messages.retry` on the row sends it again while its bytes are still on
-  this device). The row's own `state` reads `delivered`, with its receipt, only once the photo
-  is `delivered`: until then a delivered message reads `sent`.
+  byte), `delivered` (the friend's Raven has every byte, and the signed receipt of its message
+  is here), `waiting` (the friend is away), `failed` (not sent; `messages.retry` on the row
+  sends it again while its bytes are still on this device). The row and its photo read
+  `delivered` together: until the photo is there whole a delivered message reads `sent`, and
+  until the receipt is here a photo that is there whole reads `sending` with every byte done.
+  The `receipt` event comes first, then the row's `state`, then the photo's `attachment`
+  event.
 - **`needs_update`:** this build does not open the attachment (the gate is shut). The row's
   `text` is a whole sentence ("Max sent a photo. Update Raven to see it.") and the app shows only
   that, as a plain bubble.

@@ -562,18 +562,29 @@ fn state_in(row: Option<&Brief>, done: u64) -> AttState {
 
 /// Where an attachment of yours stands, from its row (none: no row of
 /// yours for it here) and its message's own state.
+///
+/// It reads delivered only when both say so: the friend's Raven has every
+/// byte (the row, written by raven-node), and the signed receipt of its
+/// message is here (the message, written by whoever sent it). The two are
+/// written by different hands and in either order, so neither alone is
+/// enough, and the `receipt` event always comes before an attachment's
+/// `delivered`.
 fn state_out(row: Option<&Brief>, message: State) -> AttState {
     let Some(row) = row else {
         return AttState::Failed;
     };
+    let whole = row.state == store::State::Delivered;
     match row.state {
-        store::State::Delivered => AttState::Delivered,
-        store::State::Staged | store::State::Offered => {
+        store::State::Staged | store::State::Offered | store::State::Delivered => {
             // The friend has the offer: its message was delivered, or the
             // friend's node said so.
-            let offered = message == State::Delivered || row.state == store::State::Offered;
+            let offered = message == State::Delivered || row.state != store::State::Staged;
             match message {
                 State::Failed | State::TimeRanOut | State::NotSentMeetFirst => AttState::Failed,
+                State::Delivered if whole => AttState::Delivered,
+                // Every byte is with the friend, and the receipt of its
+                // message is still to come.
+                _ if whole => AttState::Sending,
                 State::Waiting => AttState::Waiting,
                 State::Sending => AttState::Sending,
                 State::Sent | State::Delivered if offered && row.friend_has == 0 => AttState::Sent,
@@ -1067,10 +1078,10 @@ impl Inner {
                 };
             } else {
                 att.state = state_out(row, v.state);
-                att.bytes_done = match att.state {
-                    AttState::Delivered => meta.bytes,
-                    _ => done,
-                };
+                // Every byte is with the friend once the row says so, with
+                // or without the receipt of its message.
+                let whole = row.is_some_and(|row| row.state == store::State::Delivered);
+                att.bytes_done = if whole { meta.bytes } else { done };
                 // Two ticks mean the friend has every byte.
                 if v.state == State::Delivered && att.state != AttState::Delivered {
                     v.state = State::Sent;
@@ -1464,8 +1475,10 @@ impl Inner {
         let brief = Brief::of(&row);
         let done = store::progress(dir, &row).0;
         let state = if brief.outgoing {
+            // No message row to ask: the friend's node took the offer, so
+            // its message arrived.
             let message = match brief.state {
-                store::State::Offered => State::Delivered,
+                store::State::Offered | store::State::Delivered => State::Delivered,
                 _ => State::Sending,
             };
             state_out(Some(&brief), message)
@@ -1832,12 +1845,18 @@ mod tests {
         let offered = brief(true, Stored::Offered, 0);
         let going = brief(true, Stored::Offered, 2);
         for message in every {
-            // No row: it cannot go. The friend has every byte: delivered,
-            // whatever the message's own row says by now. Stopped or
-            // deleted: failed.
+            // No row: it cannot go. The friend has every byte: delivered
+            // once the receipt of its message is here too, and never before
+            // it (the row and the receipt are written by different hands, in
+            // either order). Stopped or deleted: failed.
             assert_eq!(state_out(None, message), AttState::Failed);
             let at = |state| state_out(Some(&brief(true, state, 0)), message);
-            assert_eq!(at(Stored::Delivered), AttState::Delivered, "{message:?}");
+            let whole = match message {
+                M::Delivered => AttState::Delivered,
+                M::Failed | M::TimeRanOut | M::NotSentMeetFirst => AttState::Failed,
+                M::Sending | M::Sent | M::Waiting => AttState::Sending,
+            };
+            assert_eq!(at(Stored::Delivered), whole, "{message:?}");
             assert_eq!(at(Stored::Failed), AttState::Failed, "{message:?}");
             assert_eq!(at(Stored::Gone), AttState::Failed, "{message:?}");
             // Not a row of mine.
@@ -2258,6 +2277,48 @@ mod tests {
             readable(b, &handle).unwrap_err().code,
             code::ATTACHMENT_GONE
         );
+    }
+
+    /// raven-node writes that the friend has every byte; whoever sent the
+    /// message writes its receipt. Either can be first. A photo whose bytes
+    /// are there first reads sending with every byte, and delivered only in
+    /// the look that also sees the receipt.
+    #[test]
+    fn a_photo_whose_bytes_are_there_before_its_receipt_is_not_delivered_before_it() {
+        let Some(_gate) = Gate::open() else { return };
+        let home = profile(&FRIEND);
+        let d = home.path();
+        let (handle, offer, _) = photo(d, &FRIEND, 200_000, "");
+        // Its message is on its way: no receipt yet.
+        history_row(d, "out", &FRIEND, 6, "queued", &offer);
+        let chunks = store::get(d, &handle)
+            .unwrap()
+            .unwrap()
+            .shape()
+            .unwrap()
+            .chunks();
+        store::update(d, &handle, 30, |row| {
+            row.state = Stored::Delivered;
+            row.friend_has = chunks;
+        })
+        .unwrap();
+        let inner = Inner::new(Ok(d.to_path_buf()));
+        let mut book = MessageBook::default();
+        let mut after = 0;
+        let row = look(&inner, &mut book, d)[0].json();
+        assert_ne!(row["state"], "delivered", "{row}");
+        assert_eq!(row["attachment"]["state"], "sending", "{row}");
+        assert_eq!(row["attachment"]["bytes_done"], 200_000);
+        assert!(events(&inner, &mut after).is_empty());
+        // The receipt: the message and its photo read delivered together.
+        history_row(d, "out", &FRIEND, 6, "delivered", &offer);
+        let row = look(&inner, &mut book, d)[0].json();
+        assert_eq!(row["state"], "delivered", "{row}");
+        assert_eq!(row["attachment"]["state"], "delivered");
+        assert_eq!(row["attachment"]["bytes_done"], 200_000);
+        let told = events(&inner, &mut after);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0]["state"], "delivered");
     }
 
     #[test]
