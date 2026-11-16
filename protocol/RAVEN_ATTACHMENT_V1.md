@@ -409,8 +409,14 @@ A sender looks at its contact book and its own records, not at events:
   again, with a new key and `seq`.
 - When the friend's node has the chunk, the sender removes the offer's row:
   the key goes with it, and a later request for that handle finds nothing.
-- A contact that is no longer a verified friend is forgotten at the next
-  look: what was sent to it, what it sent, and the rows of both.
+- A contact that is no longer a verified friend (its verification taken
+  back, blocked, removed) is forgotten: what was sent to it, what it sent,
+  and the rows of both. Its picture stops showing with the change itself.
+  raven-node forgets on a beat of its own, every few seconds, so the bytes
+  and the keys leave the disk whichever program made the change, and with
+  no app open; the sender's own look forgets too.
+  While the contact book cannot be read nothing is shown, and nothing is
+  forgotten or offered.
 
 ### 10.4 What a receiver keeps
 

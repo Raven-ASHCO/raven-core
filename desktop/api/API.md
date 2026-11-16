@@ -401,6 +401,12 @@ builds, and it needs the photo gate): a person sets **one** picture, and the fri
 - **A picture is no attachment to `attachments.*`.** No row and no event gives an app an `id`
   for a picture, and an operation asked with one answers `ATTACHMENT_GONE`. `picture.read` is
   the one way to a picture's bytes, and it asks first whether the friend is verified.
+- **A friend who is one no longer.** After `contacts.unverify`, `contacts.block` or the
+  contact's removal their picture is absent from the row at the next look, and `picture.read`
+  says `NOT_VERIFIED`. raven-node takes its bytes and its key off the device within seconds,
+  also with no app open, and what was kept of yours for them goes too. Verified again, they get
+  your picture at the engine's next look, and theirs comes back once their Raven has heard that
+  yours holds none (it sends a picture again for that reason at most once a day).
 - **Sending** needs no call: the engine sends while an app listens for events, at once after
   `picture.set` or `picture.clear`, and it looks once a minute for friends who became due
   (verified since, or their Raven learned pictures). For two minutes after your own picture
@@ -431,7 +437,8 @@ this device: the other person is never told, and nothing about it is sent. Every
   it. The CLI: `raven contact block NAME`, `raven contact unblock NAME`.
 - **Remove verification** (`contacts.unverify`): `verified: false`; the contact, the chat and the
   routes stay. What needs both of you verified (friend mailboxes, the LAN address shared over Tor)
-  stops until `verify.check_words` matches again. `raven contact unverify NAME`.
+  stops until `verify.check_words` matches again. Their profile picture stops showing at once
+  and leaves the device within seconds ("Your picture"). `raven contact unverify NAME`.
 - **Clear history** (`messages.clear`, `groups.clear`): this device's messages of that chat go for
   good (received copies leave a tombstone, so neither the archive nor a copy that comes again
   brings them back; the privacy pack's delete-chat). Messages of yours still waiting to be sent stay

@@ -78,8 +78,10 @@ independent review.
   in it but its tables, its frame and one scan (`protocol/RAVEN_ATTACHMENT_V1.md`, section 10).
   The engine has the `picture.*` operations (API.md, "Your picture"), and five terminal commands
   serve tests across computers: `raven lab picture-set`, `picture-clear`, `picture-send`,
-  `pictures` and `picture-save`. No released app has the screens yet. Release builds are
-  unchanged: the gate is shut.
+  `pictures` and `picture-save`. A contact who is no longer a verified friend keeps no picture
+  on the device: it stops showing at once, raven-node removes its bytes within seconds, and
+  only the picture's own operation opens a picture. No released app has the screens yet.
+  Release builds are unchanged: the gate is shut.
 - Lab builds can send a photo between two verified friends (debug builds with
   `RAVEN_LAB_ATTACHMENTS=1` and `RAVEN_LAB_TEST_A=1`). The engine has the `attachments.*` operations
   (API.md, "Photos"), and raven-node carries the photo's sealed pieces on the links friends already

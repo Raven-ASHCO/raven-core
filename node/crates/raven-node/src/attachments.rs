@@ -57,6 +57,10 @@ const PASS_IDLE: Duration = Duration::from_secs(4);
 const PASS_OFF: Duration = Duration::from_secs(60);
 /// Attachments whose message is gone are removed this often.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3_600);
+/// The pictures kept for a contact that is a friend no longer are looked
+/// for this often, on a beat of their own: a pass may wait on a dial for
+/// as long as [`DIAL_DEADLINE`].
+const FORGET_EVERY: Duration = Duration::from_secs(3);
 /// One dial's deadline: under the shortest life of a listener's link.
 const DIAL_DEADLINE: Duration = Duration::from_secs(100);
 /// The reply budget of a dial (16 chunks and the replies around them): a
@@ -128,11 +132,15 @@ where
 {
     let gates = security_gate::lab_overrides_for_this_thread();
     let att = attachment_gate::lab_attachments_for_this_thread();
+    let pictures = attachment_gate::lab_pictures_for_this_thread();
     tokio::task::spawn_blocking(move || {
         let before = security_gate::set_lab_overrides_for_this_thread(gates);
         let att_before = attachment_gate::lab_attachments_for_this_thread();
+        let pictures_before = attachment_gate::lab_pictures_for_this_thread();
         attachment_gate::set_lab_attachments_for_this_thread(att);
+        attachment_gate::set_lab_pictures_for_this_thread(pictures);
         let out = work();
+        attachment_gate::set_lab_pictures_for_this_thread(pictures_before);
         attachment_gate::set_lab_attachments_for_this_thread(att_before);
         security_gate::set_lab_overrides_for_this_thread(before);
         out
@@ -553,6 +561,44 @@ type Dialled = Result<Vec<Vec<u8>>, String>;
 /// One dial: the friend and the frames; the replies.
 pub(crate) type DialFn<'a> = dyn Fn(&[u8; 32], &[Vec<u8>]) -> Dialled + Sync + 'a;
 
+/// A contact who is a verified friend no longer (not verified any more,
+/// blocked, removed) keeps no profile picture on this device, and none of
+/// ours is kept for them: the entries and their rows go within a few
+/// seconds of the change ([`FORGET_EVERY`]), whichever program made it and
+/// with no app open. A friend's picture is hidden from the moment of the
+/// change (the picture files' readers ask each time); this takes its bytes
+/// and its key off the disk. One line with a count, never a name.
+pub(crate) fn forget_pictures(data_dir: &Path) -> usize {
+    let forgotten = raven_core::attachment::picture::forget_strangers(data_dir).unwrap_or(0);
+    if forgotten > 0 {
+        eprintln!(
+            "raven-node attachments: the profile pictures of {forgotten} contact(s) no longer verified are gone"
+        );
+    }
+    forgotten
+}
+
+/// [`forget_pictures`] on its own beat while profile pictures are live,
+/// for as long as the attachments task runs (the task ends it).
+async fn forget_beat(data_dir: PathBuf) {
+    loop {
+        if attachment_gate::pictures_live() {
+            let dd = data_dir.clone();
+            blocking(move || forget_pictures(&dd)).await;
+        }
+        tokio::time::sleep(FORGET_EVERY).await;
+    }
+}
+
+/// Ends the task it holds when dropped.
+struct EndsWith(tokio::task::JoinHandle<()>);
+
+impl Drop for EndsWith {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// One pass: the dials the exchange plans, through `dial`.
 pub(crate) fn pass(data_dir: &Path, dial: &DialFn<'_>) -> PassReport {
     let exchange = Exchange::new(data_dir, memory());
@@ -634,6 +680,8 @@ pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
     if live() {
         eprintln!("raven-node attachments: on (lab)");
     }
+    // Ends when this task does (a supervised restart starts another).
+    let _forgetting = EndsWith(tokio::spawn(forget_beat(data_dir.clone())));
     let mut adopted = false;
     let mut next_sweep = tokio::time::Instant::now();
     loop {
@@ -691,5 +739,48 @@ pub(crate) async fn run(data_dir: PathBuf) -> Result<(), String> {
             _ = kicked().notified() => {}
             _ = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raven_core::attachment::{jpeg, picture, store};
+
+    /// The task's look takes what is kept for a contact whose verification
+    /// was taken back off the disk: here my offer's row with its key. A
+    /// contact who stays a friend loses nothing.
+    #[test]
+    fn the_tasks_look_forgets_the_pictures_of_a_contact_no_longer_verified() {
+        if !cfg!(debug_assertions) {
+            // A release build follows its consts alone: the gate is shut.
+            return;
+        }
+        attachment_gate::set_lab_attachments_for_this_thread(Some(true));
+        attachment_gate::set_lab_pictures_for_this_thread(Some(true));
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let friend = [9u8; 32];
+        let book = |pinned: bool| {
+            let row = format!(
+                r#"[{{"petname":"Friend","pub_hex":"{}","address":"","pinned":{pinned}}}]"#,
+                hex::encode(friend)
+            );
+            std::fs::write(d.join("contacts.json"), row).unwrap();
+        };
+        book(true);
+        peers::note(d, &friend, true, 1).unwrap();
+        let now = crate::now_ms();
+        picture::set_mine(d, &jpeg::flat(64, false), &jpeg::flat(32, false), now).unwrap();
+        assert_eq!(picture::pass(d, now).unwrap().len(), 1);
+        assert_eq!(store::count(d), 1);
+        assert_eq!(forget_pictures(d), 0);
+        assert_eq!(store::count(d), 1);
+        book(false);
+        assert_eq!(forget_pictures(d), 1);
+        assert_eq!(store::count(d), 0);
+        assert_eq!(forget_pictures(d), 0);
+        attachment_gate::set_lab_pictures_for_this_thread(None);
+        attachment_gate::set_lab_attachments_for_this_thread(None);
     }
 }

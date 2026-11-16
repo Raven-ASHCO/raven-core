@@ -345,9 +345,91 @@ fn peer_of(hex_key: &str) -> Option<[u8; 32]> {
 }
 
 /// The friends pictures are exchanged with: verified and not blocked. A
-/// contact book or a block list that cannot be read is nobody.
+/// contact book or a block list that cannot be read is nobody: no picture
+/// is shown on it.
 fn friends(data_dir: &Path) -> Vec<[u8; 32]> {
-    crate::outbox::pinned_unblocked_contacts(data_dir).unwrap_or_default()
+    friends_now(data_dir).unwrap_or_default()
+}
+
+/// The same friends, or `None` while the contact book or the block list
+/// cannot be read. Whoever forgets or offers asks this one: on a book that
+/// does not read just now nothing is shown ([`friends`]), and nothing is
+/// forgotten or sent either, so one bad read never costs every friend's
+/// picture.
+fn friends_now(data_dir: &Path) -> Option<Vec<[u8; 32]>> {
+    crate::outbox::pinned_unblocked_contacts(data_dir).ok()
+}
+
+/// Forgets every friend whose key is not in `current`: what they sent me,
+/// what I sent them, and the rows of both in the attachment store. A book
+/// is written only when it holds somebody to forget, and never made; the
+/// rows go once the books are written. How many were forgotten.
+fn forget_all_but(data_dir: &Path, current: &HashSet<String>) -> Result<usize, PictureError> {
+    let mut gone: HashSet<String> = HashSet::new();
+    let mut rows: Vec<String> = Vec::new();
+    let theirs_names_one = path(data_dir, THEIRS_FILE).exists()
+        && load::<TheirsBook>(data_dir, THEIRS_FILE)
+            .friends
+            .keys()
+            .any(|key| !current.contains(key));
+    if theirs_names_one {
+        edit(data_dir, THEIRS_FILE, |book: &mut TheirsBook| {
+            book.friends.retain(|key, theirs| {
+                let stays = current.contains(key);
+                if !stays {
+                    gone.insert(key.clone());
+                    rows.extend(theirs.handle.take());
+                }
+                stays
+            });
+        })?;
+    }
+    let sent_names_one = path(data_dir, SENT_FILE).exists()
+        && load::<SentBook>(data_dir, SENT_FILE)
+            .friends
+            .keys()
+            .any(|key| !current.contains(key));
+    if sent_names_one {
+        edit(data_dir, SENT_FILE, |book: &mut SentBook| {
+            book.friends.retain(|key, sent| {
+                let stays = current.contains(key);
+                if !stays {
+                    gone.insert(key.clone());
+                    rows.extend(sent.handle.take());
+                }
+                stays
+            });
+        })?;
+    }
+    for handle in &rows {
+        remove_row(data_dir, Some(handle));
+    }
+    Ok(gone.len())
+}
+
+/// A contact who is a verified friend no longer (not verified any more,
+/// blocked, removed) keeps no picture on this device, and none of mine is
+/// kept for them: their entries and the rows of both go now. A picture of
+/// theirs is hidden from the moment they are no friend
+/// ([`Views::theirs`]); this takes its bytes and its key off the disk.
+///
+/// raven-node calls it every few seconds, so it holds whichever program
+/// changed the contact, and with no app open. It costs a profile without
+/// picture files nothing, writes nothing while every entry is a friend's,
+/// and does nothing while the contact book cannot be read. How many
+/// contacts were forgotten.
+pub fn forget_strangers(data_dir: &Path) -> Result<usize, PictureError> {
+    if !attachment_gate::pictures_live() {
+        return Ok(0);
+    }
+    if !path(data_dir, THEIRS_FILE).exists() && !path(data_dir, SENT_FILE).exists() {
+        return Ok(0);
+    }
+    let Some(friends) = friends_now(data_dir) else {
+        return Ok(0);
+    };
+    let current: HashSet<String> = friends.iter().map(key_of).collect();
+    forget_all_but(data_dir, &current)
 }
 
 // ── Mine ────────────────────────────────────────────────────────────────
@@ -717,7 +799,8 @@ fn remove_row(data_dir: &Path, handle: Option<&str>) {
 ///
 /// 1. A friend who is no longer one (not verified any more, blocked,
 ///    removed) is forgotten: what I sent them, what they sent me, and the
-///    rows of both in the attachment store.
+///    rows of both in the attachment store ([`forget_strangers`] does the
+///    same between looks).
 /// 2. What was sent is followed: an offer whose message arrived is taken,
 ///    one whose chunk the friend's node has is there (its row and its key
 ///    go), one whose message ended or was never made is due again.
@@ -739,25 +822,16 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
         return Ok(Vec::new());
     }
     let today = day_of(now_ms);
-    let friends = friends(data_dir);
+    // A contact book that does not read just now: nobody is forgotten and
+    // nobody is offered anything at this look.
+    let Some(friends) = friends_now(data_dir) else {
+        return Ok(Vec::new());
+    };
     let current: HashSet<String> = friends.iter().map(key_of).collect();
     adopt_kept(data_dir, now_ms);
 
-    // What friends who are no longer friends sent me goes.
-    let gone = edit(data_dir, THEIRS_FILE, |book: &mut TheirsBook| {
-        let mut gone = Vec::new();
-        book.friends.retain(|key, theirs| {
-            let stays = current.contains(key);
-            if !stays {
-                gone.push(theirs.handle.take());
-            }
-            stays
-        });
-        gone
-    })?;
-    for handle in gone {
-        remove_row(data_dir, handle.as_deref());
-    }
+    // 1. Friends who are no longer friends.
+    forget_all_but(data_dir, &current)?;
     let theirs: TheirsBook = load(data_dir, THEIRS_FILE);
 
     let waiting: HashSet<String> = load::<SentBook>(data_dir, SENT_FILE)
@@ -778,14 +852,6 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
     // says so.
     let mut there: Vec<Handle> = Vec::new();
     edit(data_dir, SENT_FILE, |book: &mut SentBook| {
-        // 1. Friends who are no longer friends.
-        book.friends.retain(|key, sent| {
-            let stays = current.contains(key);
-            if !stays {
-                remove_row(data_dir, sent.handle.as_deref());
-            }
-            stays
-        });
         // 2. What was sent.
         for sent in book.friends.values_mut() {
             follow(data_dir, sent, &fates, now_ms, &mut there);
@@ -1874,6 +1940,89 @@ mod tests {
         // Verified again: they are due my picture again.
         write_contacts(b, &[(FRIEND, true)]);
         assert_eq!(pass(b, T0 + 4).unwrap().len(), 1);
+    }
+
+    /// Between looks: a friend whose verification is taken back keeps no
+    /// picture here, and none of mine is kept for them, with no look at
+    /// what is due. A friend who stays one is not touched, nothing is
+    /// written for them, and a profile with no picture files gets none.
+    #[test]
+    fn a_friend_who_is_one_no_longer_is_forgotten_between_looks() {
+        let Some(_live) = Live::on() else { return };
+        let (theirs_home, my_home) = (
+            profile(&[(ME, true)]),
+            profile(&[(FRIEND, true), (OTHER, true)]),
+        );
+        let (a, b) = (theirs_home.path(), my_home.path());
+        speaks(a, &ME);
+        speaks(b, &FRIEND);
+        speaks(b, &OTHER);
+        // No picture files yet: nothing is read and none is made.
+        assert_eq!(forget_strangers(b).unwrap(), 0);
+        assert!(!b.join(THEIRS_FILE).exists() && !b.join(SENT_FILE).exists());
+        // The friend's picture is here, and mine is on its way to both.
+        set_mine(a, &face(64), &small(), T0).unwrap();
+        let first = pass(a, T0).unwrap();
+        assert_eq!(carry(a, b, &FRIEND, &first[0], 1, T0 + 1), Taken::New);
+        set_mine(b, &face(64), &small(), T0 + 2).unwrap();
+        assert_eq!(pass(b, T0 + 2).unwrap().len(), 2);
+        assert_eq!(store::count(b), 3, "theirs, and my offer for each friend");
+        // Everybody is a friend: nothing goes, and no file is written.
+        let written = |file: &str| std::fs::metadata(b.join(file)).unwrap().modified().unwrap();
+        let before = (written(THEIRS_FILE), written(SENT_FILE));
+        assert_eq!(forget_strangers(b).unwrap(), 0);
+        assert_eq!((written(THEIRS_FILE), written(SENT_FILE)), before);
+        assert_eq!(store::count(b), 3);
+        // The verification is taken back: both ways go, the other friend's stay.
+        write_contacts(b, &[(FRIEND, false), (OTHER, true)]);
+        assert_eq!(forget_strangers(b).unwrap(), 1);
+        assert_eq!(store::count(b), 1, "my offer for the friend who stays");
+        assert!(load::<TheirsBook>(b, THEIRS_FILE).friends.is_empty());
+        let sent: SentBook = load(b, SENT_FILE);
+        assert_eq!(
+            sent.friends.keys().collect::<Vec<_>>(),
+            vec![&key_of(&OTHER)]
+        );
+        assert!(mine(b, T0 + 3).unwrap().set, "my own picture stays");
+        assert_eq!(forget_strangers(b).unwrap(), 0, "once");
+        // Blocked or removed is the same: no contact is a friend's entry.
+        write_contacts(b, &[]);
+        assert_eq!(forget_strangers(b).unwrap(), 1);
+        assert_eq!(store::count(b), 0);
+    }
+
+    /// A contact book that does not read just now is nobody's friend for
+    /// what is shown, and costs no picture: nothing is forgotten, nothing
+    /// is offered, and all is as before once it reads again.
+    #[test]
+    fn a_contact_book_that_does_not_read_forgets_nobody() {
+        let Some(_live) = Live::on() else { return };
+        let (theirs_home, my_home) = (profile(&[(ME, true)]), profile(&[(FRIEND, true)]));
+        let (a, b) = (theirs_home.path(), my_home.path());
+        speaks(a, &ME);
+        speaks(b, &FRIEND);
+        set_mine(a, &face(64), &small(), T0).unwrap();
+        let first = pass(a, T0).unwrap();
+        assert_eq!(carry(a, b, &FRIEND, &first[0], 1, T0 + 1), Taken::New);
+        set_mine(b, &face(64), &small(), T0 + 2).unwrap();
+        assert_eq!(pass(b, T0 + 2).unwrap().len(), 1);
+        let books = || {
+            (
+                load::<TheirsBook>(b, THEIRS_FILE),
+                load::<SentBook>(b, SENT_FILE),
+                store::count(b),
+            )
+        };
+        let before = books();
+        std::fs::write(b.join("contacts.json"), "[{ not a contact book").unwrap();
+        assert!(theirs(b, &FRIEND, T0 + 3).is_none(), "nothing shows");
+        assert_eq!(forget_strangers(b).unwrap(), 0);
+        assert!(pass(b, T0 + 3).unwrap().is_empty());
+        assert_eq!(books(), before);
+        write_contacts(b, &[(FRIEND, true)]);
+        assert!(theirs(b, &FRIEND, T0 + 4).unwrap().ready);
+        assert!(pass(b, T0 + 4).unwrap().is_empty(), "nobody is due again");
+        assert_eq!(books(), before);
     }
 
     #[test]
