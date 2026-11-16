@@ -4016,12 +4016,12 @@ fn send_indexed_text(
             say_parked_settled(ctx, &previews, &report);
         }
     }
-    // Earlier messages to this peer go first (queued, then sent without an ACK),
-    // in order. When the probe already found the peer unreachable they are not
-    // dialled again (that only adds a timeout), and one whose dial fails at the
-    // transport goes back to the outbox queue: either way they stay queued for
-    // raven-node's outbox and this message is queued behind them, up to
-    // MAX_QUEUED_PER_PEER waiting messages per peer.
+    // Earlier messages to this peer go first, in the order they were written
+    // ([`in_write_order`]). When the probe already found the peer unreachable
+    // they are not dialled again (that only adds a timeout), and one whose
+    // dial fails at the transport goes back to the outbox queue: either way
+    // they stay queued for raven-node's outbox and this message is queued
+    // behind them, up to MAX_QUEUED_PER_PEER waiting messages per peer.
     let mut earlier: Vec<(raven_core::EndpointOutbound, bool)> = store
         .pending_endpoint_outbound_for_recipient(Some(recipient))
         .map_err(|e| e.redacted_display())?
@@ -4035,6 +4035,7 @@ fn send_indexed_text(
             .into_iter()
             .map(|row| (row, true)),
     );
+    in_write_order(&mut earlier);
     // Each queued object's own route record (its `--carrier` choice and
     // routes): read once. Best effort, like the records themselves. Whether
     // it ever left this computer is read past its deadline too.
@@ -4663,6 +4664,30 @@ fn send_indexed_text(
         now,
     });
     outcome
+}
+
+/// A send's earlier rows in the order their messages were written, as
+/// raven-node's outbox orders the objects of a dial: within a session the
+/// ratchet index is that order, and sessions go by their first row's
+/// creation time. The store lists the prepared rows and those written without
+/// an answer apart, and the prepared ones stood first here. While a send
+/// had the friend to itself until its answer that did no harm: a row
+/// written without an answer was at the friend already. Since a friend's
+/// sends go one behind the other over Tor (2026-11-16), a prepared row may
+/// be the newer one: the message on its way, behind one whose link closed
+/// before the friend read it. Taken first, it reached the friend before the
+/// older one (a burst whose link dropped arrived as 1, 3, 2, 4, 5).
+fn in_write_order(rows: &mut [(raven_core::EndpointOutbound, bool)]) {
+    let created = |row: &raven_core::EndpointOutbound| {
+        raven_core::Envelope::unpack(&row.immutable_envelope_bytes).map_or(0, |e| e.created_at)
+    };
+    let mut first: HashMap<[u8; 32], u64> = HashMap::new();
+    for (row, _) in rows.iter() {
+        let at = created(row);
+        let start = first.entry(row.session_id).or_insert(at);
+        *start = (*start).min(at);
+    }
+    rows.sort_by_key(|(row, _)| (first[&row.session_id], row.session_id, row.ratchet_index));
 }
 
 /// Frames on one link of a send's dial (T1 a): raven-node's outbox cap on
@@ -5392,6 +5417,50 @@ mod tests {
         assert_eq!(tor_head_start(true, None, false), head);
         assert_eq!(tor_head_start(false, Some(Some(30)), false), zero);
         assert_eq!(tor_head_start(false, Some(None), true), head);
+    }
+
+    /// A send takes its earlier messages along in the order they were
+    /// written. The store lists the prepared row first; it is the newest
+    /// here, behind two that were written and have no answer yet (a burst
+    /// whose Tor link dropped): taken as listed, it reached the friend
+    /// before them.
+    #[test]
+    fn a_sends_earlier_rows_go_in_the_order_they_were_written() {
+        use raven_core::{EndpointOutboundKind, EndpointOutboxState};
+        let row = |session: u8, index: u32, state| raven_core::EndpointOutbound {
+            kind: EndpointOutboundKind::Message,
+            session_id: [session; 32],
+            object_digest: [index as u8; 32],
+            message_id: [index as u8; 16],
+            recipient_device: [9; 32],
+            ratchet_index: index,
+            state,
+            immutable_envelope_bytes: Vec::new(),
+        };
+        let mut rows = vec![
+            (row(7, 12, EndpointOutboxState::Prepared), false),
+            (row(7, 10, EndpointOutboxState::Queued), true),
+            (row(7, 11, EndpointOutboxState::Queued), true),
+        ];
+        in_write_order(&mut rows);
+        let order: Vec<(u32, bool)> = rows
+            .iter()
+            .map(|(r, again)| (r.ratchet_index, *again))
+            .collect();
+        assert_eq!(order, [(10, true), (11, true), (12, false)]);
+        // Each session's rows stay together, in their own order.
+        let mut two = vec![
+            (row(3, 5, EndpointOutboxState::Prepared), false),
+            (row(7, 2, EndpointOutboxState::Queued), true),
+            (row(3, 4, EndpointOutboxState::Queued), true),
+            (row(7, 1, EndpointOutboxState::Queued), true),
+        ];
+        in_write_order(&mut two);
+        let order: Vec<(u8, u32)> = two
+            .iter()
+            .map(|(r, _)| (r.session_id[0], r.ratchet_index))
+            .collect();
+        assert_eq!(order, [(3, 4), (3, 5), (7, 1), (7, 2)]);
     }
 
     /// E2 r40 (A): a send that can queue waits for Tor's check
