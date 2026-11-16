@@ -44,7 +44,7 @@ use raven_core::attachment::flow::{self, FlowError, Media};
 use raven_core::attachment::link::Handle;
 use raven_core::attachment::offer::{self, Content, Kind};
 use raven_core::attachment::store::{self, Row, StoreError};
-use raven_core::attachment::{peers, shown, sweep};
+use raven_core::attachment::{peers, picture, shown, sweep};
 use raven_core::attachment_gate;
 use raven_core::chat_history::{ChatHistory, ChatHistoryEntry};
 use serde_json::{json, Map, Value};
@@ -881,12 +881,21 @@ fn offer_for(dir: &Path, handle: &Handle, peer: &str) -> Result<Zeroizing<String
         .ok_or_else(|| "ATTACHMENT_BAD: the offer could not be made again from its row".to_owned())
 }
 
+/// The row of the attachment `handle`, for the operations that take an id.
+/// A profile picture's row is not theirs: `picture.read` opens a picture,
+/// and asks first whether the friend is verified. To these operations there
+/// is no such attachment.
+fn row_by_id(dir: &Path, handle: &Handle) -> Result<Row, ApiError> {
+    store::get(dir, handle)
+        .map_err(store_error)?
+        .filter(|row| !picture::is_picture_row(row))
+        .ok_or_else(|| gone("no such attachment on this device"))
+}
+
 /// The row of an attachment whose bytes can be read now: one of yours, or
 /// a friend's that is all here.
 fn readable(dir: &Path, handle: &Handle) -> Result<Row, ApiError> {
-    let row = store::get(dir, handle)
-        .map_err(store_error)?
-        .ok_or_else(|| gone("no such attachment on this device"))?;
+    let row = row_by_id(dir, handle)?;
     if row.outgoing {
         return Ok(row);
     }
@@ -1467,9 +1476,7 @@ impl Inner {
         }
         // No row carries it (any more): what its own row says.
         let dir = self.data_dir()?;
-        let row = store::get(dir, &handle)
-            .map_err(store_error)?
-            .ok_or_else(|| gone("no such attachment on this device"))?;
+        let row = row_by_id(dir, &handle)?;
         let meta =
             Meta::parse(&row.reference).ok_or_else(|| bad("the attachment's row does not read"))?;
         let brief = Brief::of(&row);
@@ -1525,9 +1532,7 @@ impl Inner {
         let handle = id_arg(args)?;
         self.identity()?;
         let dir = self.data_dir()?;
-        let row = store::get(dir, &handle)
-            .map_err(store_error)?
-            .ok_or_else(|| gone("no such attachment on this device"))?;
+        let row = row_by_id(dir, &handle)?;
         if !row.outgoing {
             match row.state {
                 store::State::Incoming => {
@@ -1561,9 +1566,7 @@ impl Inner {
         let handle = id_arg(args)?;
         self.identity()?;
         let dir = self.data_dir()?;
-        let row = store::get(dir, &handle)
-            .map_err(store_error)?
-            .ok_or_else(|| gone("no such attachment on this device"))?;
+        let row = row_by_id(dir, &handle)?;
         let unsent = |row: &Row| {
             row.outgoing && matches!(row.state, store::State::Staged | store::State::Offered)
         };
@@ -2276,6 +2279,58 @@ mod tests {
         assert_eq!(
             readable(b, &handle).unwrap_err().code,
             code::ATTACHMENT_GONE
+        );
+    }
+
+    /// A profile picture's row is opened by `picture.read` alone, which asks
+    /// first whether the friend is verified. To the operations that take an
+    /// attachment's id there is no such attachment: not a friend's picture
+    /// that is all here, and not the row of my own for a friend.
+    #[test]
+    fn a_profile_pictures_row_is_no_attachment_to_the_operations_by_id() {
+        use raven_core::attachment::{blob, jpeg};
+        let Some(_gate) = Gate::open() else { return };
+        let tmp = profile(&FRIEND);
+        let d = tmp.path();
+        let picture_row = |outgoing: bool| {
+            let key = Key::random();
+            let sealed = blob::seal_one_chunk(&key, &jpeg::flat(64, false)).unwrap();
+            let root = sealed.root();
+            let blob = BlobRef {
+                shape: sealed.shape,
+                key,
+                root,
+            };
+            let offer = Offer::profile(blob, 1, 0, 64, &jpeg::flat(32, false)).unwrap();
+            let text = offer.encode().unwrap();
+            let chat = store::Chat::Friend(&FRIEND);
+            let row = Row::of_offer(&offer, &text, chat, &[1u8; 16], outgoing, 10).unwrap();
+            store::write_blob(d, &offer.handle, &sealed).unwrap();
+            store::put(d, &row).unwrap();
+            if !outgoing {
+                store::set_state(d, &offer.handle, Stored::Complete, 20).unwrap();
+            }
+            offer.handle
+        };
+        for outgoing in [false, true] {
+            let handle = picture_row(outgoing);
+            let row = store::get(d, &handle).unwrap().unwrap();
+            assert!(picture::is_picture_row(&row), "the row is in the store");
+            assert_eq!(
+                row_by_id(d, &handle).unwrap_err().code,
+                code::ATTACHMENT_GONE
+            );
+            assert_eq!(
+                readable(d, &handle).unwrap_err().code,
+                code::ATTACHMENT_GONE
+            );
+        }
+        // A photo's row is theirs.
+        let (handle, _, bytes) = photo(d, &FRIEND, 5_000, "");
+        let row = readable(d, &handle).unwrap();
+        assert_eq!(
+            &store::read_plain(d, &row, 0, usize::MAX).unwrap()[..],
+            &bytes[..]
         );
     }
 

@@ -157,8 +157,13 @@ fn send_due(data_dir: &Path) -> Result<(), String> {
             )
         };
         match outcome {
-            Ok(used) => println!(
+            Ok(used) if to_send.handle.is_some() => println!(
                 "{name}: its message is delivered over {:?}; the picture follows (raven lab pictures)",
+                used.carrier
+            ),
+            // The empty form: a removal, or no picture to tell a new friend of.
+            Ok(used) => println!(
+                "{name}: is told over {:?} that you have no picture",
                 used.carrier
             ),
             Err(error) if error.starts_with(super::ext::QUEUED_PREFIX) => println!(
@@ -200,11 +205,14 @@ pub(super) fn cmd_list(data_dir: &Path) -> Result<(), String> {
         let Some(peer) = key_of(contact) else {
             continue;
         };
-        let yours = match picture::reach(data_dir, &peer) {
-            Some(Reach::Has) => "has yours",
-            Some(Reach::Waiting) => "yours is on its way",
-            Some(Reach::NeedsNewer) => "needs a newer Raven for pictures",
-            None => "yours: nothing to tell",
+        // With no picture set, what a friend is told is that there is none.
+        let yours = match (picture::reach(data_dir, &peer), mine.set) {
+            (Some(Reach::Has), true) => "has yours",
+            (Some(Reach::Has), false) => "knows you have none",
+            (Some(Reach::Waiting), true) => "yours is on its way",
+            (Some(Reach::Waiting), false) => "is not told yet that you have none",
+            (Some(Reach::NeedsNewer), _) => "needs a newer Raven for pictures",
+            (None, _) => "yours: nothing to tell",
         };
         let theirs = match picture::theirs(data_dir, &peer, now) {
             Some(view) if view.ready => "theirs is here",

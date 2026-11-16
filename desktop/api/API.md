@@ -398,6 +398,9 @@ builds, and it needs the photo gate): a person sets **one** picture, and the fri
   the system's decoder pinned to JPEG, at the size shown, and keeps the pixels in memory only. A
   picture that fails the check goes, and the call is `PICTURE_BAD`; after three in a day none of
   that friend's is read until the next day.
+- **A picture is no attachment to `attachments.*`.** No row and no event gives an app an `id`
+  for a picture, and an operation asked with one answers `ATTACHMENT_GONE`. `picture.read` is
+  the one way to a picture's bytes, and it asks first whether the friend is verified.
 - **Sending** needs no call: the engine sends while an app listens for events, at once after
   `picture.set` or `picture.clear`, and it looks once a minute for friends who became due
   (verified since, or their Raven learned pictures). For two minutes after your own picture

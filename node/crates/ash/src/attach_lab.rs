@@ -319,11 +319,23 @@ fn row_by_prefix(data_dir: &Path, prefix: &str) -> Result<Row, String> {
     }
 }
 
+/// A profile picture's row is not these commands' to fetch or to open. Its
+/// own commands ask first whether the friend is verified
+/// (`raven lab picture-save`), and raven-node fetches a picture by itself.
+fn not_a_picture(row: &Row) -> Result<(), String> {
+    if raven_core::attachment::picture::is_picture_row(row) {
+        Err("that one is a profile picture: raven lab picture-save".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// `raven lab attachment-ask HANDLE`: ask for a friend's attachment that
 /// waits to be asked for (a file). raven-node fetches it at its next look.
 pub(super) fn cmd_ask(data_dir: &Path, prefix: &str) -> Result<(), String> {
     live()?;
     let row = row_by_prefix(data_dir, prefix)?;
+    not_a_picture(&row)?;
     if row.outgoing {
         return Err("that one is yours: nothing to ask for".into());
     }
@@ -374,6 +386,7 @@ pub(super) fn cmd_save(data_dir: &Path, prefix: &str, out: &Path) -> Result<(), 
     use std::io::Write as _;
     live()?;
     let row = row_by_prefix(data_dir, prefix)?;
+    not_a_picture(&row)?;
     if !row.outgoing && row.state != State::Complete {
         return Err(format!(
             "it is not here yet: it is {} (raven lab attachments)",
@@ -448,6 +461,46 @@ mod tests {
             jpeg_size(&[0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x00, 0x00, 0x00]),
             None
         );
+    }
+
+    /// A profile picture is opened by its own command alone, which asks
+    /// first whether the friend is verified: the general commands leave its
+    /// row alone, while a photo's row is theirs.
+    #[test]
+    fn a_profile_pictures_row_is_not_the_general_commands() {
+        use raven_core::attachment::blob::{self, Key};
+        use raven_core::attachment::jpeg;
+        use raven_core::attachment::offer::{BlobRef, Offer};
+        use raven_core::attachment::store::Chat;
+
+        let friend = [7u8; 32];
+        let row_of = |profile: bool| {
+            let key = Key::random();
+            let picture = jpeg::flat(64, false);
+            // A picture is sealed as one chunk, a photo as any attachment.
+            let sealed = if profile {
+                blob::seal_one_chunk(&key, &picture).unwrap()
+            } else {
+                blob::seal(&key, &picture).unwrap()
+            };
+            let root = sealed.root();
+            let blob = BlobRef {
+                shape: sealed.shape,
+                key,
+                root,
+            };
+            let preview = jpeg::flat(32, false);
+            let offer = if profile {
+                Offer::profile(blob, 1, 0, 64, &preview).unwrap()
+            } else {
+                Offer::photo(blob, "", 64, 64, &preview).unwrap()
+            };
+            let text = offer.encode().unwrap();
+            Row::of_offer(&offer, &text, Chat::Friend(&friend), &[1u8; 16], false, 10).unwrap()
+        };
+        let refusal = not_a_picture(&row_of(true)).unwrap_err();
+        assert!(refusal.contains("picture-save"), "{refusal}");
+        assert_eq!(not_a_picture(&row_of(false)), Ok(()));
     }
 
     #[test]
