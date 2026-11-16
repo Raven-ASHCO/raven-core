@@ -354,7 +354,7 @@ pub(super) fn cmd_ask(data_dir: &Path, prefix: &str) -> Result<(), String> {
 
 /// Is `out` a place inside the profile's folder? Its plain bytes do not
 /// belong beside the sealed ones.
-fn inside_profile(data_dir: &Path, out: &Path) -> bool {
+pub(super) fn inside_profile(data_dir: &Path, out: &Path) -> bool {
     let Ok(profile) = data_dir.canonicalize() else {
         return false;
     };

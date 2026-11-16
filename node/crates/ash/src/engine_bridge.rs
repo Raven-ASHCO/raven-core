@@ -810,6 +810,23 @@ pub fn send_offer_to_contact_noting(
     send_to_contact_noting(data_dir, id, pub_hex, offer, own_id)
 }
 
+/// [`send_to_contact_noting`] for a profile picture's offer that
+/// `raven_core::attachment::picture::pass` made: `offer` is such an offer in
+/// its one byte form, for the verified friend `pub_hex`. Only on this
+/// thread, only for this send, and only a profile offer passes
+/// (`pair_init_lab::send_text_allowed`). The history row the send writes
+/// holds the offer's stored form, never its key, and no reader shows it.
+pub fn send_picture_offer_to_contact_noting(
+    data_dir: &Path,
+    id: &Identity,
+    pub_hex: &str,
+    offer: &str,
+    own_id: OwnIdNote,
+) -> Result<Delivered, String> {
+    let _offer = super::pair_init_lab::PictureOfferGuard::set();
+    send_to_contact_noting(data_dir, id, pub_hex, offer, own_id)
+}
+
 /// cli.rs's `run_send` with the identity given instead of loaded.
 fn run_send(
     data_dir: &Path,

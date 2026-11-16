@@ -309,20 +309,49 @@ impl Drop for EngineOfferGuard {
     }
 }
 
+thread_local! {
+    /// This thread's send carries a profile picture's offer that
+    /// `raven_core::attachment::picture::pass` made. Per thread, as a send
+    /// runs on its caller's thread.
+    static PICTURE_OFFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds, for one send of this thread, the word that the text is a profile
+/// picture's offer the picture pass made ([`send_text_allowed`]).
+pub(super) struct PictureOfferGuard(());
+
+impl PictureOfferGuard {
+    pub(super) fn set() -> Self {
+        PICTURE_OFFER.with(|flag| flag.set(true));
+        Self(())
+    }
+}
+
+impl Drop for PictureOfferGuard {
+    fn drop(&mut self) {
+        PICTURE_OFFER.with(|flag| flag.set(false));
+    }
+}
+
 /// May a send carry `text`? Chat text never starts with a reserved prefix
 /// (`chat_text_allowed`: typed or pasted, such text would be a frame on the
-/// friend's side). The one exception is an attachment's offer of a photo, a
-/// voice note or a file, in its one byte form, while the app engine holds
-/// [`EngineOfferGuard`] for this thread's send: only `attachments.send`
-/// makes such text. Any other text under a reserved prefix is refused then
-/// too.
+/// friend's side). Two exceptions, each only in its one byte form and only
+/// while its guard is held for this thread's send: an attachment's offer of
+/// a photo, a voice note or a file under [`EngineOfferGuard`] (only
+/// `attachments.send` makes such text), and a profile picture's offer under
+/// [`PictureOfferGuard`] (only the picture pass makes it). Neither guard
+/// lets the other kind pass, and any other text under a reserved prefix is
+/// refused always.
 pub(crate) fn send_text_allowed(text: &str) -> bool {
-    raven_core::app_channel::chat_text_allowed(text)
-        || (ENGINE_OFFER.with(std::cell::Cell::get)
-            && matches!(
-                raven_core::attachment::shown::class(text.as_bytes()),
-                raven_core::attachment::shown::AttClass::Offer(_)
-            ))
+    use raven_core::attachment::shown::{class, AttClass};
+    if raven_core::app_channel::chat_text_allowed(text) {
+        return true;
+    }
+    match class(text.as_bytes()) {
+        AttClass::Offer(_) => ENGINE_OFFER.with(std::cell::Cell::get),
+        AttClass::Profile { .. } => PICTURE_OFFER.with(std::cell::Cell::get),
+        AttClass::Other => false,
+    }
 }
 
 /// How long a send waits for raven-node's `ContactReach` (it answers from
@@ -6459,6 +6488,24 @@ mod revocation_and_offline_tests {
         }
         // The guard went with its send.
         assert!(!send_text_allowed(&photo));
+        {
+            // The picture pass's guard lets a profile offer through, and
+            // nothing else under a reserved prefix: not a photo's offer.
+            let _guard = PictureOfferGuard::set();
+            assert!(send_text_allowed(&profile));
+            assert!(send_text_allowed("hello"));
+            let others = [photo.as_str(), file.as_str()]
+                .into_iter()
+                .chain(never)
+                .filter(|text| *text != profile.as_str());
+            for text in others {
+                assert!(!send_text_allowed(text), "{}", &text[..text.len().min(20)]);
+            }
+            let other = profile.clone();
+            let elsewhere = std::thread::spawn(move || send_text_allowed(&other));
+            assert!(!elsewhere.join().unwrap());
+        }
+        assert!(!send_text_allowed(&profile));
         assert!(!send_text_allowed(&file));
     }
 

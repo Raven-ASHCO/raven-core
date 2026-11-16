@@ -61,6 +61,7 @@ fn file_send_example(contact: &str) -> String {
 
 mod attach_lab;
 mod custody_cli;
+mod picture_lab;
 // The desktop engine's way in (node/crates/raven-client, through ash's
 // library target): compiled with the `engine` feature, which raven-client
 // turns on. The ash and raven binaries never call it.
@@ -1372,6 +1373,41 @@ enum LabCommands {
     AttachmentSave {
         /// The start of the handle (`raven lab attachments`).
         handle: String,
+        /// The file to make; one that exists is never written over.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Profile pictures (lab): set your picture and send it to every
+    /// verified friend. Both files are JPEGs made beforehand, as an app
+    /// makes them. Debug builds with `RAVEN_LAB_TEST_A=1`,
+    /// `RAVEN_LAB_ATTACHMENTS=1` and `RAVEN_LAB_PROFILE_PICTURES=1` only.
+    PictureSet {
+        /// The picture: square, 64 to 512 pixels, 60,000 bytes at most.
+        #[arg(long)]
+        file: PathBuf,
+        /// Its preview: square, 16 to 64 pixels, 1,536 bytes at most.
+        #[arg(long)]
+        preview: PathBuf,
+    },
+    /// Profile pictures (lab): remove your picture, and tell every verified
+    /// friend who has it.
+    PictureClear,
+    /// Profile pictures (lab): send your picture to every verified friend
+    /// who is due it now (verified since, or an offer that never left).
+    PictureSend,
+    /// Profile pictures (lab): your picture and how far it is, and one line
+    /// for each verified friend.
+    Pictures,
+    /// Profile pictures (lab): write your picture, or a verified friend's,
+    /// to a new file and print its SHA-256.
+    PictureSave {
+        /// The friend whose picture it is: @tag or petname. Without it,
+        /// your own.
+        #[arg(long)]
+        from: Option<String>,
+        /// The small preview, not the picture.
+        #[arg(long)]
+        preview: bool,
         /// The file to make; one that exists is never written over.
         #[arg(long)]
         out: PathBuf,
@@ -17183,103 +17219,114 @@ pub fn run() {
                 ext::cmd_mailbox_get(&data_dir, &k_route, epoch, slot)
             }
         },
-        Some(Commands::Lab { cmd }) => match cmd {
-            LabCommands::ExportCert => {
-                let id = require_identity(&data_dir);
-                if let Err(e) = pair_init_lab::export_lab_device_cert(&data_dir, &id) {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+        Some(Commands::Lab { cmd }) => {
+            match cmd {
+                LabCommands::ExportCert => {
+                    let id = require_identity(&data_dir);
+                    if let Err(e) = pair_init_lab::export_lab_device_cert(&data_dir, &id) {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
                 }
-            }
-            LabCommands::ImportPeerCert { peer_pub_hex, file } => {
-                if let Err(e) =
-                    pair_init_lab::import_peer_device_cert(&data_dir, &peer_pub_hex, &file)
-                {
-                    eprintln!("{e}");
-                    std::process::exit(1);
+                LabCommands::ImportPeerCert { peer_pub_hex, file } => {
+                    if let Err(e) =
+                        pair_init_lab::import_peer_device_cert(&data_dir, &peer_pub_hex, &file)
+                    {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
                 }
+                LabCommands::ImportPeerPrekey { peer_pub_hex, file } => {
+                    exit_on_err(cmd_prekey_fetch(&data_dir, &peer_pub_hex, Some(&file)))
+                }
+                LabCommands::Status => print_production_gate_matrix(),
+                LabCommands::LanDialSealed {
+                    dial,
+                    expected_pub_hex,
+                    envelope_b64,
+                } => cmd_lab_lan_dial_sealed(&data_dir, &dial, &expected_pub_hex, &envelope_b64),
+                LabCommands::CustodyDeposit {
+                    dial,
+                    custodian_pub_hex,
+                    recipient_pub_hex,
+                    rso1_b64,
+                } => exit_on_err(cmd_lab_custody_deposit(
+                    &data_dir,
+                    &dial,
+                    &custodian_pub_hex,
+                    &recipient_pub_hex,
+                    &rso1_b64,
+                )),
+                LabCommands::AppSubmit {
+                    to,
+                    content_type,
+                    client_ref,
+                    body,
+                    ttl_ms,
+                    resend,
+                } => exit_on_err(cmd_lab_app_submit(
+                    &data_dir,
+                    &to,
+                    &content_type,
+                    &client_ref,
+                    &body,
+                    ttl_ms,
+                    resend,
+                )),
+                LabCommands::AppInbox {
+                    consumer,
+                    content_type,
+                    wait_ms,
+                    takeover,
+                } => exit_on_err(cmd_lab_app_inbox(
+                    &data_dir,
+                    &consumer,
+                    content_type,
+                    wait_ms,
+                    takeover,
+                    8,
+                )),
+                LabCommands::AppAck {
+                    consumer,
+                    sender_device_hex,
+                    message_id_hex,
+                    rejected,
+                } => exit_on_err(cmd_lab_app_ack(
+                    &data_dir,
+                    &consumer,
+                    &sender_device_hex,
+                    &message_id_hex,
+                    rejected,
+                )),
+                LabCommands::AppConsumer { consumer, takeover } => exit_on_err(cmd_lab_app_inbox(
+                    &data_dir, &consumer, None, 0, takeover, 0,
+                )),
+                LabCommands::Attach {
+                    to,
+                    file,
+                    caption,
+                    as_file,
+                } => exit_on_err(attach_lab::cmd_attach(
+                    &data_dir, &to, &file, &caption, as_file,
+                )),
+                LabCommands::Attachments => exit_on_err(attach_lab::cmd_list(&data_dir)),
+                LabCommands::AttachmentAsk { handle } => {
+                    exit_on_err(attach_lab::cmd_ask(&data_dir, &handle))
+                }
+                LabCommands::AttachmentSave { handle, out } => {
+                    exit_on_err(attach_lab::cmd_save(&data_dir, &handle, &out))
+                }
+                LabCommands::PictureSet { file, preview } => {
+                    exit_on_err(picture_lab::cmd_set(&data_dir, &file, &preview))
+                }
+                LabCommands::PictureClear => exit_on_err(picture_lab::cmd_clear(&data_dir)),
+                LabCommands::PictureSend => exit_on_err(picture_lab::cmd_send(&data_dir)),
+                LabCommands::Pictures => exit_on_err(picture_lab::cmd_list(&data_dir)),
+                LabCommands::PictureSave { from, preview, out } => exit_on_err(
+                    picture_lab::cmd_save(&data_dir, from.as_deref(), preview, &out),
+                ),
             }
-            LabCommands::ImportPeerPrekey { peer_pub_hex, file } => {
-                exit_on_err(cmd_prekey_fetch(&data_dir, &peer_pub_hex, Some(&file)))
-            }
-            LabCommands::Status => print_production_gate_matrix(),
-            LabCommands::LanDialSealed {
-                dial,
-                expected_pub_hex,
-                envelope_b64,
-            } => cmd_lab_lan_dial_sealed(&data_dir, &dial, &expected_pub_hex, &envelope_b64),
-            LabCommands::CustodyDeposit {
-                dial,
-                custodian_pub_hex,
-                recipient_pub_hex,
-                rso1_b64,
-            } => exit_on_err(cmd_lab_custody_deposit(
-                &data_dir,
-                &dial,
-                &custodian_pub_hex,
-                &recipient_pub_hex,
-                &rso1_b64,
-            )),
-            LabCommands::AppSubmit {
-                to,
-                content_type,
-                client_ref,
-                body,
-                ttl_ms,
-                resend,
-            } => exit_on_err(cmd_lab_app_submit(
-                &data_dir,
-                &to,
-                &content_type,
-                &client_ref,
-                &body,
-                ttl_ms,
-                resend,
-            )),
-            LabCommands::AppInbox {
-                consumer,
-                content_type,
-                wait_ms,
-                takeover,
-            } => exit_on_err(cmd_lab_app_inbox(
-                &data_dir,
-                &consumer,
-                content_type,
-                wait_ms,
-                takeover,
-                8,
-            )),
-            LabCommands::AppAck {
-                consumer,
-                sender_device_hex,
-                message_id_hex,
-                rejected,
-            } => exit_on_err(cmd_lab_app_ack(
-                &data_dir,
-                &consumer,
-                &sender_device_hex,
-                &message_id_hex,
-                rejected,
-            )),
-            LabCommands::AppConsumer { consumer, takeover } => exit_on_err(cmd_lab_app_inbox(
-                &data_dir, &consumer, None, 0, takeover, 0,
-            )),
-            LabCommands::Attach {
-                to,
-                file,
-                caption,
-                as_file,
-            } => exit_on_err(attach_lab::cmd_attach(
-                &data_dir, &to, &file, &caption, as_file,
-            )),
-            LabCommands::Attachments => exit_on_err(attach_lab::cmd_list(&data_dir)),
-            LabCommands::AttachmentAsk { handle } => {
-                exit_on_err(attach_lab::cmd_ask(&data_dir, &handle))
-            }
-            LabCommands::AttachmentSave { handle, out } => {
-                exit_on_err(attach_lab::cmd_save(&data_dir, &handle, &out))
-            }
-        },
+        }
         Some(Commands::Contact { cmd }) => match cmd {
             ContactCommands::Add {
                 address,
