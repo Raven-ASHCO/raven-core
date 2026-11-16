@@ -344,9 +344,20 @@ pub fn history_body(
     if !offer::is_att_text(text.as_bytes()) {
         return Ok(None);
     }
-    let Some(offer) = chat_offer(text) else {
+    let Some(Frame::Offer(offer)) = offer::parse_frame(text.as_bytes()) else {
         return Ok(None);
     };
+    let offer = *offer;
+    // A profile offer is never a chat message. One of mine is stored like
+    // every offer of mine, without its key, in a row no reader shows; a
+    // friend's does not come this way (`persist_profile_offer`).
+    let profile = matches!(
+        offer.content,
+        Content::Profile { .. } | Content::NoProfile { .. }
+    );
+    if profile && direction != "out" {
+        return Ok(None);
+    }
     if direction == "out" {
         // An offer of mine: delivered now, or on its way (its delivery may
         // be written later without its body: [`message_delivered`]).

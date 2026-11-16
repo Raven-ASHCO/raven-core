@@ -1139,3 +1139,70 @@ fn an_attachment_a_month_old_is_dialled_for_no_more_unless_the_user_asks() {
     assert_eq!(ops(&plan), [0x02]);
     assert_eq!(handle.len(), other.len());
 }
+
+/// A profile's contact book with `friend` in it, verified.
+fn befriend(side: &Side, friend: &[u8; 32]) {
+    std::fs::write(
+        side.d().join("contacts.json"),
+        format!(
+            r#"[{{"petname":"Friend","pub_hex":"{}","address":"","pinned":true}}]"#,
+            hex::encode(friend)
+        ),
+    )
+    .unwrap();
+}
+
+/// A profile picture is one more attachment to the exchange: its offer is
+/// delivered like a message, its one chunk is pushed behind it, and both
+/// ends then know that it is there
+/// (`docs/design/2026-11-profile-pictures.md` §10.3, §11.3).
+#[test]
+fn a_profile_picture_travels_between_two_verified_friends() {
+    use crate::attachment::{jpeg, peers, picture};
+    let Some(_live) = Live::on() else { return };
+    struct Pictures;
+    impl Drop for Pictures {
+        fn drop(&mut self) {
+            attachment_gate::set_lab_pictures_for_this_thread(None);
+        }
+    }
+    attachment_gate::set_lab_pictures_for_this_thread(Some(true));
+    let _pictures = Pictures;
+    const T: u64 = 1_763_000_000_000;
+    let (a, b) = (Side::new(), Side::new());
+    befriend(&a, &KB);
+    befriend(&b, &KA);
+    peers::note(a.d(), &KB, true, 1).unwrap();
+    let face = jpeg::testing::picture(384);
+    let small = jpeg::testing::parts(32, 3, 0).bytes();
+    picture::set_mine(a.d(), &face, &small, T).unwrap();
+    let made = picture::pass(a.d(), T).unwrap();
+    assert_eq!(made.len(), 1);
+    let handle = made[0].handle.unwrap();
+    picture::offer_sent(a.d(), &KB, made[0].seq, &MID, T).unwrap();
+    // Nothing is pushed for an offer whose message has not arrived.
+    assert!(a.plans(T).iter().all(|plan| plan.frames.len() <= 1));
+
+    // The message arrives at b, and its answer comes back to a.
+    assert_eq!(
+        picture::take_offer(b.d(), &KA, &MID, &made[0].offer, T).unwrap(),
+        picture::Taken::New
+    );
+    let seen = picture::theirs(b.d(), &KA, T).unwrap();
+    assert!(!seen.ready, "the preview only");
+    delivered(&a, &made[0].offer, T);
+
+    // a's node pushes the one chunk; b checks it against the root.
+    assert!(push_all(&a, &b, T) >= 1);
+    assert_eq!(b.row(&handle).state, store::State::Complete);
+    assert_eq!(a.row(&handle).state, store::State::Delivered);
+    assert!(picture::theirs(b.d(), &KA, T).unwrap().ready);
+    assert_eq!(picture::read_theirs(b.d(), &KA, false, T).unwrap(), face);
+
+    // a's next look: the friend has it, and the row with its key is gone.
+    assert!(picture::pass(a.d(), T + 1).unwrap().is_empty());
+    assert_eq!(picture::reach(a.d(), &KB), Some(picture::Reach::Has));
+    assert!(store::get(a.d(), &handle).unwrap().is_none());
+    // Asked for once more by b (a second device, say): a no longer has it.
+    assert!(a.plans(T + 2).is_empty());
+}

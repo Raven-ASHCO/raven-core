@@ -876,6 +876,8 @@ LAB_SWITCHES = (
     'RAVEN_LAB_TOR_OPTIMISTIC', 'RAVEN_LAB_TOR_WARM_LINK',
     # Attachments' lab unlock (phase 1b), never a caller's value.
     'RAVEN_LAB_ATTACHMENTS',
+    # Profile pictures' lab unlock, never a caller's value.
+    'RAVEN_LAB_PROFILE_PICTURES',
     # The engine's Tor tests' lab names (raven-client tests/net_tor.rs sets
     # them in its own process: an ACK lost after the write, and the loopback
     # helper's connect counts, latency, one circuit per service, bootstrap

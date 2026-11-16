@@ -244,6 +244,18 @@ pub fn persist_profile_offer(
     seq: u64,
     plaintext: &[u8],
 ) -> Result<(), String> {
+    // With profile pictures live and the sender a verified friend, the
+    // picture files take it (the newest of a friend, its chunk to come).
+    // Anything else stays here as it came, for the day the words match.
+    if let Ok(text) = std::str::from_utf8(plaintext) {
+        use crate::attachment::picture::{self, Taken};
+        match picture::take_offer(data_dir, peer_pub, message_id, text, crate::clock::now_ms()) {
+            Ok(Taken::Kept) => {}
+            Ok(Taken::New | Taken::Again | Taken::Dropped) => return Ok(()),
+            // Not written now: no answer goes, and the offer comes again.
+            Err(e) => return Err(e.to_string()),
+        }
+    }
     let peer_pub_hex = hex::encode(peer_pub);
     let (peer_petname, peer_tag) = contact_label_for_pub(data_dir, &peer_pub_hex)?;
     let entry = ChatHistoryEntry {

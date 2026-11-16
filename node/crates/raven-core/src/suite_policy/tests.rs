@@ -226,6 +226,10 @@ fn gate_checks() -> Vec<Check> {
             reg::FEATURE_PREKEY_LIFECYCLE,
             crate::prekey_lifecycle::live_enabled,
         ),
+        (
+            reg::FEATURE_PROFILE_PICTURES,
+            crate::attachment_gate::pictures_live,
+        ),
         (reg::FEATURE_RELEASE_BUNDLE, || live(G::ReleaseBundle)),
         (
             reg::FEATURE_ROUTE_HINTS,

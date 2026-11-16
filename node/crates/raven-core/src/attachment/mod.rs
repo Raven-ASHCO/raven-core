@@ -7,16 +7,20 @@
 //! an offer it cannot open ([`shown`]), the store ([`store`]), making and
 //! keeping offers ([`flow`]), the link frames that carry the chunks
 //! ([`link`]), the exchange of them ([`exchange`]) and which friends take
-//! them ([`peers`]). Everything past phase 1a is
+//! them ([`peers`]). A profile picture is an attachment of a kind of its
+//! own: the check of its JPEG ([`jpeg`]) and what is kept around it
+//! ([`picture`]). Everything past phase 1a is
 //! behind [`crate::attachment_gate`], off in release builds until the owner
 //! flips it.
 
 pub mod blob;
 pub mod exchange;
 pub mod flow;
+pub mod jpeg;
 pub mod link;
 pub mod offer;
 pub mod peers;
+pub mod picture;
 pub mod shown;
 pub mod store;
 pub mod sweep;

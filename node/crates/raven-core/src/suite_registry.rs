@@ -244,6 +244,8 @@ features! {
     FEATURE_PORT_MAP = "feature/port-map" => portmap_gate::PORT_MAP_PRODUCTION_ENABLED,
     FEATURE_PREKEY_LIFECYCLE =
         "feature/prekey-lifecycle" => prekey_lifecycle::PREKEY_LIFECYCLE_PRODUCTION_ENABLED,
+    FEATURE_PROFILE_PICTURES =
+        "feature/profile-pictures" => attachment_gate::PROFILE_PICTURES_PRODUCTION_ENABLED,
     FEATURE_RELEASE_BUNDLE =
         "feature/release-bundle" => security_gate::RELEASE_BUNDLE_PRODUCTION_ENABLED,
     FEATURE_ROUTE_HINTS = "feature/route-hints" => route_hints::ROUTE_HINTS_PRODUCTION_ENABLED,

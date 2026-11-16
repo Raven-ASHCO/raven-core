@@ -71,6 +71,14 @@ independent review.
 
 ### For the apps and for people who build Raven
 
+- Lab builds have the first version of profile pictures (debug builds with
+  `RAVEN_LAB_PROFILE_PICTURES=1` beside the two photo switches): one picture a person sets, sent to
+  each verified friend under a key of its own, and readable only for a verified friend. Before a
+  picture is kept or handed to an app, Raven checks that it is a plain baseline JPEG with nothing
+  in it but its tables, its frame and one scan (`protocol/RAVEN_ATTACHMENT_V1.md`, section 10).
+  Five terminal commands for tests across computers: `raven lab picture-set`, `picture-clear`,
+  `picture-send`, `pictures` and `picture-save`. No app has the screens yet. Release builds are
+  unchanged: the gate is shut.
 - Lab builds can send a photo between two verified friends (debug builds with
   `RAVEN_LAB_ATTACHMENTS=1` and `RAVEN_LAB_TEST_A=1`). The engine has the `attachments.*` operations
   (API.md, "Photos"), and raven-node carries the photo's sealed pieces on the links friends already

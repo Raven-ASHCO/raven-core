@@ -1196,6 +1196,31 @@ impl ChatHistory {
         Ok(true)
     }
 
+    /// Shows `keep` every hidden row that keeps a friend's profile offer
+    /// ([`Self::keep_newest_profile_offer_persisted`]) and drops the rows it
+    /// says no to: how such an offer leaves the history once the profile
+    /// store took it (`attachment::picture::adopt_kept`). Under the
+    /// history's inter-process lock, so `keep` must not read or write the
+    /// history itself. Nothing is written when no row goes. How many went.
+    pub fn retain_kept_profile_offers_persisted(
+        data_dir: &Path,
+        mut keep: impl FnMut(&ChatHistoryEntry) -> bool,
+    ) -> Result<usize, ChatHistoryError> {
+        let protector = PlatformChatHistoryProtector::default();
+        prepare_history(data_dir, &protector, false);
+        let _lock = HistoryLock::acquire(data_dir)?;
+        let mut history = Self::load_unlocked(data_dir, &protector)?;
+        let before = history.entries.len();
+        history
+            .entries
+            .retain(|e| e.profile_offer_seq().is_none() || keep(e));
+        let gone = before - history.entries.len();
+        if gone > 0 {
+            history.save_unlocked(data_dir, &protector)?;
+        }
+        Ok(gone)
+    }
+
     /// Rewrites the bodies `rewrite` gives a new form for (its body and its
     /// list text), under the history's inter-process lock: how a row that
     /// kept a friend's attachment offer as it came (phase 1a) takes the

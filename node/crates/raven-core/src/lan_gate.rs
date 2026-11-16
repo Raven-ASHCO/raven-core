@@ -411,6 +411,8 @@ mod tests {
             // Attachments, phase 1b (photos, voice notes and files): before
             // its field test and review.
             assert!(!crate::attachment_gate::ATTACHMENTS_PRODUCTION_ENABLED);
+            // Profile pictures: before their field test and review.
+            assert!(!crate::attachment_gate::PROFILE_PICTURES_PRODUCTION_ENABLED);
         }
     }
 
@@ -469,6 +471,7 @@ mod tests {
         assert!(!crate::onion_gate::onion_optimistic_live());
         assert!(!crate::onion_gate::onion_warm_link_live());
         assert!(!crate::attachment_gate::attachments_live());
+        assert!(!crate::attachment_gate::pictures_live());
     }
 
     /// Phase 5 P5.3. Runs in both builds: the release test job sets

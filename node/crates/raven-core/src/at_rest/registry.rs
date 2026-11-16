@@ -227,6 +227,25 @@ pub const FILES: &[FileRule] = &[
         Kind::Attachments,
         crate::attachment::store::ATTACHMENTS_LOCK,
     ),
+    // Profile pictures (docs/design/2026-11-profile-pictures.md): my
+    // picture, which choice of mine went to which friend, and the newest
+    // offer of each friend with its preview. A lock of their own: a writer
+    // holds it while it asks the attachment store.
+    sealed(
+        crate::attachment::picture::MINE_FILE,
+        Kind::Attachments,
+        crate::attachment::picture::PICTURES_LOCK,
+    ),
+    sealed(
+        crate::attachment::picture::SENT_FILE,
+        Kind::Attachments,
+        crate::attachment::picture::PICTURES_LOCK,
+    ),
+    sealed(
+        crate::attachment::picture::THEIRS_FILE,
+        Kind::Attachments,
+        crate::attachment::picture::PICTURES_LOCK,
+    ),
     plain(
         "attachments/*/blob",
         "an attachment's sealed chunks as they travel: ciphertext under the attachment's own \

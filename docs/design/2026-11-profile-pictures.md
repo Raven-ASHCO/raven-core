@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Design, first draft, built on the owner's five decisions of 2026-11-06 (§24.1). Nothing is built yet. Not normative: the wire text belongs in `protocol/RAVEN_ATTACHMENT_V1.md`, which is not written yet. It changes no frozen byte. |
+| **Status** | Design, first draft, built on the owner's five decisions of 2026-11-06 (§24.1). Version 1, one picture, is built in the core and the terminal's lab commands behind its gate (§28, 2026-11-16); the rest is design. Not normative: the wire text belongs in `protocol/RAVEN_ATTACHMENT_V1.md`, which is not written yet. It changes no frozen byte. |
 | **Review** | On 2026-11-06: checked against the code while writing (14 findings), then a skeptical read of the whole draft and of the attachments doc (16 more). §27 lists each finding and its fix. |
 | **Requested** | By the owner, 2026-11-06: profile pictures that only verified friends see, a face for each circle, and a picture taken when friends meet. Design only. |
 | **Gate (new)** | `PROFILE_PICTURES_PRODUCTION_ENABLED = false`. It asserts `ATTACHMENTS_PRODUCTION_ENABLED` at compile time. Lab switch `RAVEN_LAB_PROFILE_PICTURES=1` with `RAVEN_LAB_TEST_A=1`, debug builds only. |
@@ -1238,3 +1238,44 @@ The process is the attachments one (attachments §22):
 | 14 | "The first face made" also covered a new face after all faces were removed, which would send to everyone again | Only when there is no face; the count first, and the user can pick friends instead (§6.1) |
 | 15 | The pass did not say what a verified friend without a `face_of` row gets, so after a lost store every friend would have looked new and got No picture; and a friend verified again whose choice matched the last offer got nothing, so `held` never reached them | New friends get the choice for new friends; a new store gives friends already verified no choice yet, and nothing goes to them; a friend verified again is due an offer (§10.1, §14, §15.1, §17) |
 | 16 | §9.5 said a 1a row removed by retention comes back at the next first sight of bit 12, but a build with bit 12 and the profile gate shut never shows bit 12 for the first time again | It comes back by `held` with my next offer, or when the friend changes it (§9.5) |
+
+## 28. What is built (version 1: one picture)
+
+The owner's wish of 2026-11-15: simple, as on the messengers people know. A
+person picks one photo from their own gallery for their profile, and the
+friends they verified see it. So version 1 is this design with one face and
+without the two extras of §24.1. Built on 2026-11-16 in raven-core
+(`attachment::jpeg`, `attachment::picture`) and as lab commands of the
+terminal app (`raven lab picture-set`, `picture-clear`, `picture-send`,
+`pictures`, `picture-save`), behind `PROFILE_PICTURES_PRODUCTION_ENABLED`
+(false). The wire text is `protocol/RAVEN_ATTACHMENT_V1.md` §10.
+
+| This design | Version 1 |
+|---|---|
+| Up to three faces, one for each circle (§6) | One picture. Every verified friend gets it. The wire has no notion of a face, so circles can come later with no change on it |
+| Met in person (§12) | Not built |
+| Only verified friends (§7) | As written: offered only to verified friends, shown only for verified friends, worked out at each read and never stored |
+| The picture: a square JPEG, 384 px, at most 60,000 bytes, checked and written again by the engine (§8, §16) | `attachment::jpeg` (`check`, `clean`). Stricter than §16.2 in three places: the first of three components may be sampled twice as finely as the others and nothing else is taken; a scan holds at least two bits a block; and it holds exactly the restart markers its interval and its size ask for |
+| The offer, `seq`, `held`, the empty form (§9) | As written (the codec is phase 1a's) |
+| The profile pass in raven-node, on each outbox scan (§10.1) | The same look, `attachment::picture::pass`, taken by whoever sends: an app's engine while it runs, or `raven lab picture-send`. raven-node makes no offer by itself, so a friend verified while no app runs gets the picture when one next runs |
+| A friend already verified when the store is new gets nothing before a choice; one verified later gets an offer, the empty form too (§10.1 step 2) | As written: the store's first look notes who is verified, and a later friend is due an offer that carries `held` |
+| Parked like a group copy, friends who are away at random times within an hour (§10.2) | Sent as a message of the user's is, at once. A change is one burst of messages that a watcher of the network could count; §19.2 leaned on the spread. Open before the gate opens |
+| A newer offer stops the one still waiting (§10.2) | Both may arrive, and the higher `seq` wins. The older one's row is gone, so its chunk is never served |
+| Repair by `held` (§9.4) | As written, and only for an offer of the friend's that came after mine was made: what a friend held before it had my newest asks for nothing. Found in the first run between two nodes, where an older offer made a picture go twice |
+| An offer before the receiver verified the sender: kept hidden with its chunk for 7 days (§11.4) | The offer is kept as phase 1a keeps it (one hidden history row, the newest). It is taken up, and its chunk pulled, once the words match. So nothing but that one message is taken from a contact that is not verified |
+| The policy: 8 offers a day, then Defer (§11.1) | 8 a day, then ACKed and dropped |
+| The chunk served 8 times a day, only for the newest offer (§10.3) | The attachment exchange's limits (attachments §27). Only the newest offer has a row to serve from |
+| New tables in `attachments.sqlite` (§15) | Three sealed files (`pictures_mine.json`, `pictures_sent.json`, `pictures_theirs.json`) and the rows of the attachment store, which is one sealed file a row (attachments §26) |
+| A picture is not an attachment of a chat (§15.2) | As written: a cleared or deleted chat and the sweep leave a picture's row alone while a picture file names it |
+| A bad picture, 3 a day (§14) | As written |
+| Show pictures (§17) | Not built |
+| The app API `faces.*`, `pictures.*` (§17) | For the apps: `picture.mine`, `picture.set`, `picture.clear`, `picture.read` and two members of a contact row. Not in the engine yet |
+| Group authors (§13) | Follows from the contact row: an app shows a verified friend's picture beside their group message |
+
+Tried between two nodes on one computer (throwaway profiles, the same
+network way): a picture an encoder wrote with an Exif block arrived as the
+9,144 bytes the sender kept, with the same SHA-256 on both sides, and the
+system's decoder opens it as a 384 px JPEG; a newer picture replaced it; a
+file of 72,796 bytes and a PNG were refused; removing the verification made
+the friend's picture unreadable at once and removed it at the next look;
+removing the picture told the friend.

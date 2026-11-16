@@ -4,9 +4,9 @@
 |---|---|
 | **Status** | Draft. Production disabled: `ATTACHMENTS_PRODUCTION_ENABLED = false`. Lab switch `RAVEN_LAB_ATTACHMENTS=1` with `RAVEN_LAB_TEST_A=1`, debug builds only. Phase 1a (§9) has no gate. |
 | **Design** | `docs/design/2026-11-attachments.md`; profile pictures: `docs/design/2026-11-profile-pictures.md` |
-| **Code** | `node/crates/raven-core/src/attachment/` (`blob.rs`, `offer.rs`, `shown.rs`, `store.rs`, `flow.rs`, `link.rs`, `exchange.rs`, `peers.rs`), `node/crates/raven-node/src/attachments.rs` |
-| **Feature id** | `feature/attachments` (a security notice can hold it; close only) |
-| **Not frozen** | Not in a release with the gate open. No test vectors yet (§11). |
+| **Code** | `node/crates/raven-core/src/attachment/` (`blob.rs`, `offer.rs`, `shown.rs`, `store.rs`, `flow.rs`, `link.rs`, `exchange.rs`, `peers.rs`; profile pictures: `jpeg.rs`, `picture.rs`), `node/crates/raven-node/src/attachments.rs` |
+| **Feature id** | `feature/attachments`; profile pictures (§10): `feature/profile-pictures`, gate `PROFILE_PICTURES_PRODUCTION_ENABLED = false` (a security notice can hold either; close only) |
+| **Not frozen** | Not in a release with the gate open. No test vectors yet (§12). |
 
 A photo, a voice note or a file is one sealed message, the **offer**, and a
 **blob** of sealed chunks that never travel as messages. This document says
@@ -312,20 +312,168 @@ Every build knows the prefix, in chats and in group message bodies:
 - Any other `RVNATT/` text is ACKed and dropped. None is ever deferred.
 - No composer sends text that starts with `RVNATT/`.
 
-## 10. Not in this version
+## 10. Profile pictures
+
+Version 1: one picture a person sets, sent to each friend they verified, and
+shown by a friend's Raven only while that friend has verified them. Behind
+`PROFILE_PICTURES_PRODUCTION_ENABLED` (false; never open while the
+attachments gate is shut), feature id `feature/profile-pictures`, lab switch
+`RAVEN_LAB_PROFILE_PICTURES` beside the attachments switches. Design:
+`docs/design/2026-11-profile-pictures.md`; its §28 says what of it is built.
+
+### 10.1 The picture
+
+- A baseline JPEG, square, 64 to 512 pixels a side (apps send 384), at most
+  60,000 bytes. Its preview: the same rules, 16 to 64 pixels, at most 1,536
+  bytes.
+- **The file's form** (`attachment::jpeg::check`). In this order and nothing
+  else:
+  1. SOI;
+  2. one JFIF APP0 of 16 bytes: version 1, a known unit, densities that are
+     not 0, no thumbnail;
+  3. the quantization tables (DQT): 8 bit, at most 4, no number twice, no
+     value 0;
+  4. one SOF0: 8 bit samples; 1 or 3 components, none twice; width equal to
+     height; the first of three components sampled 1 or 2 each way and every
+     other component 1; each names a quantization table that is there;
+  5. the Huffman tables (DHT): classes 0 and 1, numbers 0 and 1, none twice;
+     counts that make a prefix code with no code of all ones; DC symbols 0 to
+     11; AC symbols with a size of 1 to 10, or 0x00, or 0xF0; no symbol
+     twice; every table a component names is there;
+  6. at most one DRI, never 0;
+  7. one SOS with every component in the frame's order, Ss 0, Se 63, Ah and
+     Al 0;
+  8. the scan's data, in which 0xFF is followed only by 0x00, by a restart
+     marker, or by EOI. The restart markers RST0 to RST7 come in their order
+     and exactly as many as the interval and the picture's size ask for; a
+     scan shorter than two bits a block is refused;
+  9. EOI, and no byte after it.
+- Refused with everything else: SOF1 to SOF15, DAC, DNL, DHP, EXP, every
+  other APP segment, COM, any other marker, fill bytes between segments, a
+  length that runs past the file.
+- **Made so by the sender** (`attachment::jpeg::clean`). What an encoder
+  wrote is written again in that order under a plain JFIF header: one DQT
+  segment a table, lower numbers first; SOF0; one DHT segment a table, DC
+  before AC; a DRI only when its interval is not 0; the scan as it is.
+  Segments that hold no pixel are left out. A file whose Adobe segment says
+  that its three components are not YCbCr, or whose three components are
+  named R, G and B with no JFIF header, is refused: leaving the segment out
+  would change its colours. So what leaves a device is exactly what every
+  receiver takes.
+- A receiver checks the bytes again before anything decodes them, and the
+  side against the offer's `width`. Neither check decodes anything. A
+  picture that fails goes at once.
+
+### 10.2 The offer and its chunk
+
+- **A key for each friend.** Every offer has a new random `K`, so the copies
+  two friends get share no handle, no key and no byte. The picture is padded
+  with zeros to one segment of 61,424 bytes and sealed as chunk 0 of 1 (§2);
+  `R` is its leaf.
+- The offer is §3.1's `profile` kind. `seq` orders a sender's profile
+  offers: its clock in milliseconds, and at least the last `seq` it used
+  plus one, one count for all friends. `held` is the `seq` of the
+  receiver's newest profile offer that the sender holds; 0 for none.
+- The empty form (`chunks` 0) says that the sender has no picture (any
+  more).
+- The offer travels as a message to that friend, and is never a chat
+  message on either side. The sender's history row holds its stored form
+  (no key, no root, no preview), and no reader shows, lists or counts it.
+- The chunk travels as every attachment's does (§5, §6): pushed on the link
+  that carried the offer, or pulled. A profile picture comes by itself, like
+  a photo.
+
+### 10.3 Who gets one, and when
+
+A sender looks at its contact book and its own records, not at events:
+
+- Only a contact that is verified and not blocked, and whose node showed
+  link caps bit 12, is offered a picture.
+- A friend is due an offer when it has none of the sender's newest choice (a
+  picture, or none): after a change, after being verified, after its node
+  first showed bit 12.
+- **The first look of a store** (a new one, or one made again after the old
+  was lost) only notes the friends verified by then. While the sender has
+  never chosen, those friends are offered nothing, so a lost store never
+  tells them that there is no picture. A friend verified after that look is
+  due an offer like any other: the empty form when there is no picture. It
+  carries `held`, and so lets that friend send its own picture again when
+  the sender holds none of it.
+- **Repair.** A friend whose profile offer came after the sender's was made,
+  and carries a `held` lower than the `seq` it took, has lost the sender's
+  picture: it is offered again, at most once a day.
+- At most 4 offers for one friend in a day, and 3 changes of the picture in
+  a day.
+- An offer whose message never left, or ended without arriving, is made
+  again, with a new key and `seq`.
+- When the friend's node has the chunk, the sender removes the offer's row:
+  the key goes with it, and a later request for that handle finds nothing.
+- A contact that is no longer a verified friend is forgotten at the next
+  look: what was sent to it, what it sent, and the rows of both.
+
+### 10.4 What a receiver keeps
+
+- With the gate shut, or from a contact the receiver has not verified: §9,
+  the hidden row, the newest `seq` only. Once pictures are live and the
+  words match, the kept offer is taken up and its row leaves the history;
+  its chunk is then pulled.
+- From a verified friend the newest `seq` wins. An offer with a higher `seq`
+  replaces what is held at once: row, chunk and preview. The same offer
+  again changes nothing. A lower or equal `seq` is ACKed and dropped. The
+  empty form removes the picture. More than 8 offers from one friend in a
+  day are ACKed and dropped.
+- Nothing is decrypted or decoded when the offer or the chunk arrives. An
+  app asks the engine, which opens the chunk in memory, checks it (§10.1)
+  and hands over the bytes. Whether a picture shows is worked out at that
+  moment from the contact book and is never stored: a contact that is not
+  verified, or is blocked, shows none.
+- Three pictures from one friend that fail the check in a day: none of that
+  friend's is opened until the next day.
+- A picture belongs to the contact, not to a chat. Clearing or deleting the
+  chat, and the sweep of attachments whose message is gone, leave it alone.
+  A picture's row that no record names is the sweep's to remove.
+
+### 10.5 At rest
+
+- `pictures_mine.json`: the picture as it travels, its preview, the number
+  of the newest choice and the last `seq`.
+- `pictures_sent.json`: for each friend, which choice went, its `seq`, the
+  handle of its row and how far it is.
+- `pictures_theirs.json`: for each friend, the newest `seq`, the digest of
+  its offer, the handle of its row, its preview and the `held` it carried.
+
+All three are sealed files of kind `attachments`, under a writer lock of
+their own. A friend's chunk lies in the attachment store under its handle
+(§7), ciphertext under the `K` of its row.
+
+### 10.6 Not in this version of profile pictures
+
+More than one picture (a face for each circle), a picture taken when
+friends meet, the chunk held by mail friends, the chunk of an offer taken
+before the receiver verified the sender (only the offer is kept until
+then), a setting that hides every picture, offers spread over an hour
+after a change (they go at once, as messages do), and raven-node sending
+by itself: an offer is made by an app's engine while it runs, or by the
+terminal's lab command.
+
+## 11. Not in this version
 
 Transfer links for items over 1 MiB (link caps bit 13), chunks held by mail
 friends, attachments in groups beyond the offer itself, the `gone` frame's
 sending side, quotas by size, deletion with the chat and retention. The
 design lists them.
 
-## 11. Vectors and status
+## 12. Vectors and status
 
 No shared vectors yet. Unit tests: `attachment::blob`, `attachment::offer`,
 `attachment::link`, `attachment::store`, `attachment::flow`,
-`attachment::exchange` (two profiles exchanging frames by hand, and what a
-friend's node cannot make this node do),
-`attachment::peers`, `attachment::sweep` in raven-core; in raven-node
+`attachment::exchange` (two profiles exchanging frames by hand, what a
+friend's node cannot make this node do, and a profile picture travelling
+between two verified friends),
+`attachment::peers`, `attachment::sweep`, `attachment::jpeg` (the form of a
+picture's file, every refused marker, every cut of a file, and the rewrite
+of an encoder's file) and `attachment::picture` (who is due an offer, the
+newest `seq`, verified friends only, repair, the limits) in raven-core; in raven-node
 `lan_direct` (`a_verified_friends_chunks_are_taken_on_a_lan_link`: a photo
 over a real Noise link, and the refusals) and `internet_direct`
 (`a_photo_crosses_an_internet_direct_link_in_one_dial`: the real dial, bit

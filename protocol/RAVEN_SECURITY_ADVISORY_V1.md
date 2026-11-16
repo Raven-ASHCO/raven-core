@@ -244,6 +244,7 @@ check **after** its own gate, so it can only close.
 | `feature/app-channel` | `app_channel::APP_CHANNEL_PRODUCTION_ENABLED` |
 | `feature/async-letter` | `horizon::ASYNC_LETTER_PRODUCTION_ENABLED` |
 | `feature/attachments` | `attachment_gate::ATTACHMENTS_PRODUCTION_ENABLED` (attachments phase 1b, held) |
+| `feature/profile-pictures` | `attachment_gate::PROFILE_PICTURES_PRODUCTION_ENABLED` (profile pictures, held; needs `feature/attachments`) |
 | `feature/custody-handoff` | `custody_gate::CUSTODY_HANDOFF_PRODUCTION_ENABLED` |
 | `feature/friend-custody` | `custody_gate::FRIEND_CUSTODY_PRODUCTION_ENABLED` |
 | `feature/friend-relay` | `p2p_gate::FRIEND_RELAY_PRODUCTION_ENABLED` |

@@ -116,9 +116,10 @@ const DECLINED_MS: u64 = DAY_MS;
 const BUSY_MS: u64 = 60_000;
 
 /// Does this attachment come by itself: a photo or a voice note of at most
-/// [`LIVE_MAX_LEN`]? A file waits until the user asks for it.
+/// [`LIVE_MAX_LEN`], or a profile picture? A file waits until the user asks
+/// for it.
 pub fn comes_by_itself(kind: Kind, shape: &Shape) -> bool {
-    matches!(kind, Kind::Photo | Kind::Voice) && shape.len() <= LIVE_MAX_LEN
+    matches!(kind, Kind::Photo | Kind::Voice | Kind::Profile) && shape.len() <= LIVE_MAX_LEN
 }
 
 /// What the exchange needs of a row, kept between passes.

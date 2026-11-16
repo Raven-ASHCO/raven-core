@@ -78,13 +78,14 @@ fn older_than(at: SystemTime, age_ms: u64, now: SystemTime) -> bool {
 
 /// Removes every attachment of the chat with the friend `peer`, at once:
 /// what clearing or deleting that chat calls, so nothing waits for the
-/// next sweep. The attachments removed.
+/// next sweep. The attachments removed. A profile picture is not a chat's:
+/// it belongs to the friend, and stays ([`super::picture`]).
 pub fn forget_peer(data_dir: &Path, peer: &[u8; 32]) -> Result<usize, StoreError> {
     let mut removed = 0;
     for (handle, _) in store::rows_on_disk(data_dir) {
         let theirs = matches!(
             store::get(data_dir, &handle),
-            Ok(Some(row)) if row.peer_key() == Some(*peer)
+            Ok(Some(row)) if row.peer_key() == Some(*peer) && !super::picture::is_picture_row(&row)
         );
         if theirs {
             store::remove(data_dir, &handle)?;
@@ -97,7 +98,8 @@ pub fn forget_peer(data_dir: &Path, peer: &[u8; 32]) -> Result<usize, StoreError
 /// Removes every attachment whose message the history no longer holds,
 /// and what was left half done. Without a readable history nothing is
 /// removed. Rows of group attachments are left alone (their messages live
-/// in the group store).
+/// in the group store), and so is a profile picture's row while the
+/// picture files name it: it follows its friend, not a message.
 pub fn sweep(data_dir: &Path, now_ms: u64) -> Result<Swept, StoreError> {
     let mut swept = Swept::default();
     let rows = store::rows_on_disk(data_dir);
@@ -114,6 +116,8 @@ pub fn sweep(data_dir: &Path, now_ms: u64) -> Result<Swept, StoreError> {
         .filter_map(|e| handle_of(&e.body))
         .collect();
     let mut kept: HashSet<[u8; HANDLE_LEN]> = HashSet::new();
+    // The rows the picture files name: read only when a picture's row is met.
+    let mut pictures: Option<HashSet<[u8; HANDLE_LEN]>> = None;
     for (handle, _) in rows {
         if named.contains(&handle) {
             kept.insert(handle);
@@ -134,7 +138,11 @@ pub fn sweep(data_dir: &Path, now_ms: u64) -> Result<Swept, StoreError> {
         } else {
             ROW_GRACE_MS
         };
-        if row.group.is_some() || age < grace {
+        let pictures_own = super::picture::is_picture_row(&row)
+            && pictures
+                .get_or_insert_with(|| super::picture::handles(data_dir))
+                .contains(&handle);
+        if row.group.is_some() || pictures_own || age < grace {
             kept.insert(handle);
             continue;
         }

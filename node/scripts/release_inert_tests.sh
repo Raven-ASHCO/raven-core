@@ -187,6 +187,11 @@ lab_switches() {
   # `attachment_gate::tests::attachments_is_inert_in_release_builds` and
   # `attachments_production_flag_is_off`).
   sw RAVEN_LAB_ATTACHMENTS '1'
+  # Profile pictures (docs/design/2026-11-profile-pictures.md §23): the
+  # gate stays shut with its switch and the attachments switch set
+  # (raven-core `attachment_gate::tests::profile_pictures_is_inert_in_release_builds`
+  # and `profile_pictures_production_flag_is_off`).
+  sw RAVEN_LAB_PROFILE_PICTURES '1'
   sw RAVEN_LAB_NET_AUDIT '/tmp/raven-lab-net-audit'
   # Phase 4 (P4.1): its six gates stay at their consts and its
   # harness values are never read.
