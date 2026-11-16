@@ -8,9 +8,11 @@
 //!   ever read here.
 //! - **The engine sends while it runs.** raven-core finds who is due an
 //!   offer (`picture::pass`); the engine takes that look after every change,
-//!   and once a minute while an app listens, and sends each offer as a
-//!   message of its own that no chat shows. raven-node carries the
-//!   picture's one chunk as it carries a photo's.
+//!   and once a minute while an app listens (every few seconds for two
+//!   minutes after my own picture changed, while a friend still waits: the
+//!   look also notes who was told), and sends each offer as a message of
+//!   its own that no chat shows. raven-node carries the picture's one chunk
+//!   as it carries a photo's.
 //! - **Checked before it is handed over.** `picture.read` gives a friend's
 //!   bytes only after raven-core checked them as a plain baseline JPEG; the
 //!   app then decodes them with the system's decoder, pinned to JPEG.
@@ -38,6 +40,12 @@ use crate::envelope::{code, ApiError, Args, OpResult};
 /// The look that finds who is due an offer is taken this often while an app
 /// listens, and at once after a change.
 const PASS_EVERY: Duration = Duration::from_secs(60);
+/// After a change of my own picture, and while a friend still waits for it,
+/// the look is taken this often for [`SOON_FOR`]: it is the look that notes
+/// that a friend was told a picture is gone (a removal has no row whose state
+/// says so), and it lets a delivered offer's row and key go sooner.
+const PASS_SOON: Duration = Duration::from_secs(5);
+const SOON_FOR: Duration = Duration::from_secs(120);
 /// What a row was last built from is used again for this long: a list of
 /// friends reads the picture files once, not once a friend.
 const VIEWS_FOR: Duration = Duration::from_millis(400);
@@ -62,6 +70,8 @@ pub(crate) struct PictureWatch {
     last_pass: Option<Instant>,
     passing: bool,
     kick: bool,
+    /// When my own picture was last set or removed here.
+    changed: Option<Instant>,
 }
 
 fn not_yet() -> ApiError {
@@ -202,7 +212,7 @@ impl Inner {
         let jpeg = decode("jpeg_b64", MOST_PICTURE)?;
         let preview = decode("preview_b64", MOST_PREVIEW)?;
         picture::set_mine(self.data_dir()?, &jpeg, &preview, now_ms()).map_err(picture_error)?;
-        self.kick_pictures();
+        self.my_picture_changed();
         self.picture_mine()
     }
 
@@ -212,7 +222,7 @@ impl Inner {
         gate()?;
         self.identity()?;
         picture::clear_mine(self.data_dir()?, now_ms()).map_err(picture_error)?;
-        self.kick_pictures();
+        self.my_picture_changed();
         self.picture_mine()
     }
 
@@ -248,6 +258,13 @@ impl Inner {
         let mut watch = lock(&self.pictures);
         watch.kick = true;
         watch.views = None;
+    }
+
+    /// My own picture was set or removed: the look is taken at once, and
+    /// then often for a while ([`PASS_SOON`]).
+    fn my_picture_changed(&self) {
+        lock(&self.pictures).changed = Some(Instant::now());
+        self.kick_pictures();
     }
 
     /// One beat of the watcher: a `picture` event for each friend whose
@@ -301,7 +318,10 @@ impl Inner {
     fn pictures_pass_if_due(&self) {
         {
             let mut watch = lock(&self.pictures);
-            let due = watch.kick || watch.last_pass.is_none_or(|at| at.elapsed() >= PASS_EVERY);
+            let soon = watch.changed.is_some_and(|at| at.elapsed() < SOON_FOR)
+                && watch.mine.is_some_and(|mine| mine.waiting > 0);
+            let every = if soon { PASS_SOON } else { PASS_EVERY };
+            let due = watch.kick || watch.last_pass.is_none_or(|at| at.elapsed() >= every);
             if watch.passing || !due {
                 return;
             }

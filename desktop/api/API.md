@@ -400,8 +400,10 @@ builds, and it needs the photo gate): a person sets **one** picture, and the fri
   that friend's is read until the next day.
 - **Sending** needs no call: the engine sends while an app listens for events, at once after
   `picture.set` or `picture.clear`, and it looks once a minute for friends who became due
-  (verified since, or their Raven learned pictures). The offers are messages no chat shows, lists
-  or counts.
+  (verified since, or their Raven learned pictures). For two minutes after your own picture
+  changed, and while a friend still waits, it looks every few seconds, so `my_picture` says
+  `has` within seconds of a friend being told that your picture is gone. The offers are messages
+  no chat shows, lists or counts.
 - **Events.** `picture {address, picture: {seq, state} | null, my_picture: "…" | null}` when one
   of a friend's two members changed, with both as they are now (`null`: absent from the row);
   `picture_mine {mine}` when your picture or its counts changed. Told at the watcher's beat,

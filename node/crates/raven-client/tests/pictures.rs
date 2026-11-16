@@ -270,6 +270,14 @@ fn a_picture_is_set_seen_by_the_verified_friend_replaced_and_removed() {
     assert_eq!(cleared["mine"]["set"], false, "{cleared}");
     assert_eq!(cleared["mine"]["changes_left"], 1, "{cleared}");
     assert_eq!(a.err("picture.read", json!({})), "NO_PICTURE");
+    // Bee's Raven is told, and Ay's row says so soon: a removal has no row
+    // whose state says it, so the look that notes it comes every few seconds
+    // after a change, not a minute later.
+    assert_eq!(row(&a, &b)["my_picture"], "waiting");
+    let told = wait_until(Duration::from_secs(30), &mut [&mut wa, &mut wb], || {
+        row(&a, &b)["my_picture"] == "has"
+    });
+    assert!(told, "{} / {:#?}", row(&a, &b), wa.events);
     // The third picture of the day is the last, and can still be removed.
     let third = a.ok(
         "picture.set",
