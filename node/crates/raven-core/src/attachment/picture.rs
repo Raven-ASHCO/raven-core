@@ -212,6 +212,10 @@ struct Sent {
     /// The day an offer was last made because the friend had lost mine.
     #[serde(default)]
     repair_day: u64,
+    /// When a look of mine found that the friend holds it (0: not yet, or
+    /// a book written before this was kept).
+    #[serde(default)]
+    has_ms: u64,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -881,13 +885,19 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
             let from_them = theirs.friends.get(&key);
             // A friend whose newest offer says it holds an older one of
             // mine than it took has lost mine: an offer of theirs that came
-            // after mine was made. One that came before says only what
-            // they held then.
+            // after I found mine to be there. One that came before says
+            // only what they held when they made it: two friends who set a
+            // picture at about the same time each get the other's offer
+            // while their own is still on its way, and neither has lost
+            // anything (until 2026-11-16 "after mine was made" counted, and
+            // such a friend was sent the picture a second time). A book
+            // from before `has_ms` goes by when mine was made, as it did.
             let repair = before.as_ref().is_some_and(|s| {
+                let there_since = if s.has_ms > 0 { s.has_ms } else { s.made_ms };
                 s.choice == mine.choice
                     && s.reached == Reached::Has
                     && s.repair_day != today
-                    && from_them.is_some_and(|t| t.held < s.seq && t.came_ms > s.made_ms)
+                    && from_them.is_some_and(|t| t.held < s.seq && t.came_ms > there_since)
             });
             let due = before.as_ref().is_none_or(|s| s.choice != mine.choice) || repair;
             let offers_today = before
@@ -918,6 +928,7 @@ pub fn pass(data_dir: &Path, now_ms: u64) -> Result<Vec<ToSend>, PictureError> {
                             day: today,
                             offers: offers_today + 1,
                             repair_day,
+                            has_ms: 0,
                         },
                     );
                     made.push(to_send);
@@ -979,6 +990,7 @@ fn follow(
                     there.push(handle);
                     sent.handle = None;
                     sent.reached = Reached::Has;
+                    sent.has_ms = now_ms;
                 }
                 State::Offered => sent.reached = Reached::Taken,
                 State::Staged if unsent_long => again(sent),
@@ -992,7 +1004,10 @@ fn follow(
         Some(None) => again(sent),
         // No picture: its message says whether the friend was told.
         None => match sent.message_id.as_ref().and_then(|mid| fates.get(mid)) {
-            Some(Fate::Arrived) => sent.reached = Reached::Has,
+            Some(Fate::Arrived) => {
+                sent.reached = Reached::Has;
+                sent.has_ms = now_ms;
+            }
             Some(Fate::Ended) => again(sent),
             Some(Fate::OnItsWay) => {}
             None if unsent_long => again(sent),
@@ -2080,6 +2095,42 @@ mod tests {
         // The next day it says so again: mine goes again.
         lost_again(T0 + DAY + 20, 4);
         assert_eq!(pass(b, T0 + DAY + 22).unwrap().len(), 1);
+    }
+
+    /// Two friends set a picture at about the same time, and the offers
+    /// cross: the friend's offer was made before mine was there, so it says
+    /// it holds nothing of mine, and it comes to me after mine was made.
+    /// It says what the friend held then, not that mine was lost: no second
+    /// offer goes (an iPhone sent its picture to a desktop twice within two
+    /// minutes of being verified, 2026-11-16).
+    #[test]
+    fn offers_that_cross_ask_for_nothing() {
+        let Some(_live) = Live::on() else { return };
+        let (theirs_home, my_home) = (profile(&[(ME, true)]), profile(&[(FRIEND, true)]));
+        let (a, b) = (theirs_home.path(), my_home.path());
+        speaks(a, &ME);
+        speaks(b, &FRIEND);
+        // Mine is made; the friend makes theirs a moment later, before mine
+        // is there.
+        set_mine(b, &face(64), &small(), T0).unwrap();
+        let mine_out = pass(b, T0).unwrap();
+        set_mine(a, &face(64), &small(), T0 + 1).unwrap();
+        let theirs_out = pass(a, T0 + 1).unwrap();
+        // Theirs comes, mine arrives there, and my next look finds it so.
+        assert_eq!(carry(a, b, &FRIEND, &theirs_out[0], 1, T0 + 2), Taken::New);
+        delivered(b, &mine_out[0].handle.unwrap());
+        assert!(
+            pass(b, T0 + 3).unwrap().is_empty(),
+            "the friend made its offer before mine was there"
+        );
+        assert!(pass(b, T0 + 4).unwrap().is_empty());
+        // A later offer of the friend's that still holds nothing of mine is
+        // a loss, as before.
+        edit(a, THEIRS_FILE, |book: &mut TheirsBook| book.friends.clear()).unwrap();
+        set_mine(a, &face(128), &small(), T0 + 5).unwrap();
+        let lost = pass(a, T0 + 5).unwrap();
+        assert_eq!(carry(a, b, &FRIEND, &lost[0], 2, T0 + 6), Taken::New);
+        assert_eq!(pass(b, T0 + 7).unwrap().len(), 1, "mine goes again");
     }
 
     #[test]

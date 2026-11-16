@@ -80,7 +80,9 @@ independent review.
   serve tests across computers: `raven lab picture-set`, `picture-clear`, `picture-send`,
   `pictures` and `picture-save`. A contact who is no longer a verified friend keeps no picture
   on the device: it stops showing at once, raven-node removes its bytes within seconds, and
-  only the picture's own operation opens a picture. No released app has the screens yet.
+  only the picture's own operation opens a picture. Two friends who set theirs at about the
+  same time are no longer sent each other's picture twice (each took the other's first offer, made
+  before its own had arrived, for a friend who had lost the picture). No released app has the screens yet.
   Release builds are unchanged: the gate is shut.
 - Lab builds can send a photo between two verified friends (debug builds with
   `RAVEN_LAB_ATTACHMENTS=1` and `RAVEN_LAB_TEST_A=1`). The engine has the `attachments.*` operations
