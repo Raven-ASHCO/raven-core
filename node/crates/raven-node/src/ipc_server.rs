@@ -1024,7 +1024,8 @@ pub(crate) const CLIENT_GONE: &str = "IPC_CLIENT_GONE";
 /// Serve the send dial `req` with `serve`, then write its line (D1). The
 /// dial ends when `hangup` does: the program that asked for it closed its
 /// connection (T3 a, Tor messaging audit 2026-11: a send gives its Tor
-/// check 25 s, then queues the message and hangs up, while the dial ran on
+/// check its own wait (25 s then, 40 s since 2026-11-16: ash's
+/// `ONION_SEND_BUDGET`), then queues the message and hangs up, while the dial ran on
 /// for up to 80 s beside the outbox's own and counted as Tor tried without
 /// an answer for the sends after it).
 async fn logged_send_dial<F>(
@@ -4467,8 +4468,9 @@ mod tests {
         serving.abort();
     }
 
-    /// T3 (a) (Tor messaging audit 2026-11): a send waits at most 25 s for
-    /// its Tor check, then queues its message and hangs up. raven-node went
+    /// T3 (a) (Tor messaging audit 2026-11): a send waits at most its own
+    /// Tor wait (25 s then, 40 s since 2026-11-16) for its Tor check, then
+    /// queues its message and hangs up. raven-node went
     /// on with the dial (up to 80 s on Tor): the outbox's own dial ran
     /// beside it, and as a Tor dial without an answer it made later sends
     /// count Tor as busy. A send dial whose program hung up now ends with

@@ -122,6 +122,11 @@ independent review.
 - On the iPhone, a local network connection the system refuses right after the app starts no longer
   holds a send or a mail check for up to 30 seconds. The wait stays on macOS, where a new program is
   let onto the local network only after a few seconds.
+- A message whose first Tor connection is slow no longer shows Waiting while Tor is still
+  connecting. A send waited 25 seconds for Tor and then put the message in the queue, although the
+  connection often stood a few seconds later (after the iPhone app had just opened, for one). It
+  now waits 40 seconds. A friend who is away is still found out sooner: Tor itself says so after 7
+  to 19 seconds.
 - In the apps, several messages written quickly to one friend over Tor no longer wait for each
   other's answer. Each one goes as soon as the one before it is on its way, on the same connection:
   five short texts over a slow Tor connection were delivered in under 3 seconds where they took 5.

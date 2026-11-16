@@ -591,7 +591,17 @@ fn ipc_dial_wait(carrier: DialCarrier, timeout: Duration, frameless: bool) -> Du
 /// r40: a first Tor connect takes 6-12 s in the field, and a friend that
 /// was offline cost 75 s per message). Past it the message is queued and
 /// raven-node's outbox tries Tor first, with Tor's full wait.
-pub(crate) const ONION_SEND_BUDGET: Duration = Duration::from_secs(25);
+///
+/// 25 s until 2026-11-16. In that day's rounds a first Tor connection
+/// after a start of the iPhone app took 7 s to over 30 s. Of 23 checks
+/// that got no answer on two iPhones, 11 were cut at 25 s: the message
+/// showed Waiting, and for 5 of the 8 that could be followed raven-node's
+/// outbox delivered it within 12 s, on the connection Tor had gone on
+/// building. The other 12 were Tor's own "unreachable", after 7 to 19 s:
+/// a friend who is away is still told long before this wait ends. So the
+/// wait covers a slow first connection, and stays under the 44 s the Tor
+/// helper gives one connect.
+pub(crate) const ONION_SEND_BUDGET: Duration = Duration::from_secs(40);
 
 fn ensure_local_device_cert(
     data_dir: &Path,

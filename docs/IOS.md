@@ -61,7 +61,7 @@ to a socket whose other end is closed raises SIGPIPE, whose default action
 ends the process with no panic and no crash report. A Rust program ignores
 the signal from its start; an app whose `main` is Swift does not. A program
 that gives up waiting hangs up before the node's answer (a send gives its
-Tor check 25 s, then queues the message), and the node's answer to that
+Tor check 40 s, then queues the message; 25 s until 2026-11-16), and the node's answer to that
 closed pair ended the app (two iPhones, 2026-11-14: "App terminated due to
 signal 13"). So both ends of every pair carry `SO_NOSIGPIPE`, and the
 embedded node sets SIGPIPE to "ignore" at its start if the app left the

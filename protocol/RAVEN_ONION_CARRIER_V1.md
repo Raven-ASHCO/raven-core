@@ -331,7 +331,7 @@ RRH1 entry type `0x40 ONION` carries the 104-byte binding (§3);
   the contact's Raven is known stopped (its computer refused the LAN dial at an address on this
   computer's network), or while the node's outbox already carries a message to the contact
   and Tor did not reach it in the last 2 minutes (or still dials it): anywhere else Tor stays in
-  the race. Such a send waits for Tor's probe at most 25 s (a first message, which needs the
+  the race. Such a send waits for Tor's probe at most 40 s (25 s until 2026-11-16; a first message, which needs the
   answer, Tor's full wait); past it the message is queued and the outbox tries Tor first, at
   once, with Tor's full wait.
 - **The message after the probe.** The message goes on a connection of its own, over the route

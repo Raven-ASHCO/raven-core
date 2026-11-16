@@ -681,6 +681,55 @@ fn tor_a_burst_whose_link_drops_keeps_its_order() {
     );
 }
 
+/// A slow first connection (the owner, 2026-11-16: messages turn Waiting
+/// for nothing). A's Tor needs 30 s for a connect, as a first connection
+/// after a start of the iPhone app did that day. The send waited 25 s for
+/// its Tor check, then showed Waiting, and raven-node's outbox delivered the
+/// message a little later. It waits 40 s now: the message is delivered by
+/// its own send, and never shows Waiting.
+#[test]
+fn tor_a_slow_first_connection_is_delivered_by_its_own_send() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers(&["Tor A", "Tor B"]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    // A again, with a Tor whose every connect takes 30 s: its kept link to B
+    // went with the node, so the next send needs a connect.
+    a.stop();
+    std::env::set_var("RAVEN_LAB_TOR_LOOPBACK_DELAY_MS", "30000");
+    a.start();
+    std::env::set_var("RAVEN_LAB_TOR_LOOPBACK_DELAY_MS", RENDEZVOUS_MS);
+    wait_tor_ready(a);
+
+    let began = Instant::now();
+    let m = a.send_until(
+        b,
+        "after a slow connection",
+        &["delivered", "waiting", "failed"],
+        Duration::from_secs(150),
+    );
+    let took = began.elapsed();
+    eprintln!("a first connection of 30 s: {} after {took:?}", m["state"]);
+    assert_eq!(
+        m["state"],
+        "delivered",
+        "{m}\n--- A ---\n{}\n--- B ---\n{}",
+        a.service_log(),
+        b.service_log()
+    );
+    assert!(
+        took > Duration::from_secs(29) && took < Duration::from_secs(39),
+        "took {took:?}\n--- A ---\n{}",
+        a.service_log()
+    );
+    assert!(b.wait_incoming(a, "after a slow connection", Duration::from_secs(30)));
+}
+
 /// Several friends at once, both ways (the owner's four-device test,
 /// 2026-11-01: "it must be seamless, with one friend and with several
 /// friends"): A writes to B and to C while B and C write to A. Every
