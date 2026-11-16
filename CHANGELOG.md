@@ -122,6 +122,11 @@ independent review.
 - On the iPhone, a local network connection the system refuses right after the app starts no longer
   holds a send or a mail check for up to 30 seconds. The wait stays on macOS, where a new program is
   let onto the local network only after a few seconds.
+- In the apps, several messages written quickly to one friend over Tor no longer wait for each
+  other's answer. Each one goes as soon as the one before it is on its way, on the same connection:
+  five short texts over a slow Tor connection were delivered in under 3 seconds where they took 5.
+  A message takes the ones before it that have no answer yet along, so they arrive in the order you
+  wrote them, also when the connection drops in the middle.
 
 ## 0.1.1 (October 2026)
 

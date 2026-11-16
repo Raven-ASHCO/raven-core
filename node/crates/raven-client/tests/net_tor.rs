@@ -521,6 +521,166 @@ fn tor_burst_both_ways_every_message_arrives() {
     );
 }
 
+/// A burst to one friend on a kept Tor link (the owner, 2026-11-16: the
+/// needless lags between several texts). Five texts are written within a
+/// moment, on a Tor whose round trip takes 0.7 s. Each is on its way as soon
+/// as the one before it is sealed and written, not after its answer came
+/// back (raven-node carries three batches on one kept link at once), so the
+/// whole burst is delivered within about two sends alone, not five. They
+/// arrive in the order they were written, and none turns `waiting`.
+#[test]
+fn tor_a_burst_to_one_friend_does_not_wait_for_each_answer() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers_with(&[
+        ("Tor A", RENDEZVOUS_MS, "350"),
+        ("Tor B", RENDEZVOUS_MS, "0"),
+    ]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    first_message(b, a, "hello A over tor");
+    let alone = one_alone(a, b, "A alone");
+
+    let texts: Vec<String> = (1..=5).map(|i| format!("burst {i}")).collect();
+    let plan: Vec<(&Peer, &Peer, &str)> = texts.iter().map(|t| (a, b, t.as_str())).collect();
+    let (seen, _) = sends_at_once(&plan, Duration::from_secs(120));
+    assert!(
+        seen.values()
+            .all(|s| s.ended.is_some() && s.arrived.is_some()),
+        "not every text ended and arrived: {seen:#?}"
+    );
+    let ended: Vec<Duration> = texts.iter().map(|t| seen[t].ended.unwrap()).collect();
+    let came: Vec<Duration> = texts.iter().map(|t| seen[t].arrived.unwrap()).collect();
+    eprintln!("a burst of five to one friend: one send alone {alone:?}; delivered after {ended:?}; in the friend's chat after {came:?}");
+    all_delivered(&seen, alone, &[a, b]);
+    assert!(
+        came.windows(2).all(|w| w[0] <= w[1]),
+        "out of order {came:?}: {seen:#?}"
+    );
+    let order = b.ok(
+        "messages.history",
+        json!({"address": a.address(), "limit": 50}),
+    );
+    let shown: Vec<String> = order["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["text"].as_str())
+        .filter(|t| t.starts_with("burst "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        shown, texts,
+        "the friend's chat shows them in another order"
+    );
+    let last = *ended.iter().max().unwrap();
+    assert!(
+        last < alone * 2 + Duration::from_secs(2),
+        "the burst took {last:?} to be delivered, one send alone {alone:?}: {seen:#?}"
+    );
+    // A text written while the one before it had no answer yet took that one
+    // along, before itself: whichever link reaches the friend brings a
+    // friend's messages in the order they were written.
+    let log = a.service_log();
+    assert!(
+        log.lines().any(|l| l.contains("raven-node send: ")
+            && (l.contains("message (2 frames)") || l.contains("message (3 frames)"))),
+        "no send took the message before it along:\n{log}"
+    );
+}
+
+/// A burst whose Tor link drops in the middle. B's raven-node closes the
+/// link of each of the next two messages it takes before its answer goes
+/// back, while five texts of A are on their way one behind the other. Each
+/// send takes the messages before it that have no answer yet along, before
+/// its own, so a link that reaches B after the drop brings them in the
+/// order they were written: B's chat shows the five in that order, each
+/// once, and every one is delivered in the end.
+#[test]
+fn tor_a_burst_whose_link_drops_keeps_its_order() {
+    let _one = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tor_lab_ready() {
+        return;
+    }
+    let (peers, cards) = tor_peers_with(&[
+        ("Tor A", RENDEZVOUS_MS, "350"),
+        ("Tor B", RENDEZVOUS_MS, "0"),
+    ]);
+    let (a, b) = (&peers[0], &peers[1]);
+    a.befriend(b, Some(&cards[1]));
+    b.befriend(a, Some(&cards[0]));
+    first_message(a, b, "hello B over tor");
+    b.stop();
+    std::env::set_var("RAVEN_LAB_CLOSE_BEFORE_ACK", "2");
+    b.start();
+    std::env::remove_var("RAVEN_LAB_CLOSE_BEFORE_ACK");
+    wait_tor_ready(b);
+
+    let texts: Vec<String> = (1..=5).map(|i| format!("drop burst {i}")).collect();
+    let plan: Vec<(&Peer, &Peer, &str)> = texts.iter().map(|t| (a, b, t.as_str())).collect();
+    let (seen, _) = sends_at_once(&plan, Duration::from_secs(240));
+    let logs = || {
+        format!(
+            "--- A ---\n{}\n--- B ---\n{}",
+            a.service_log(),
+            b.service_log()
+        )
+    };
+    for text in &texts {
+        let s = &seen[text];
+        assert_eq!(
+            s.states.last().map(String::as_str),
+            Some("delivered"),
+            "{text}: {s:?}\nall: {seen:#?}\n{}",
+            logs()
+        );
+        assert!(
+            s.arrived.is_some(),
+            "{text} never showed in the friend's chat: {seen:#?}\n{}",
+            logs()
+        );
+    }
+    let told: Vec<String> = texts
+        .iter()
+        .map(|t| {
+            let s = &seen[t];
+            format!(
+                "{:?} delivered after {:?}, in the friend's chat after {:?}",
+                s.states,
+                s.ended.unwrap(),
+                s.arrived.unwrap()
+            )
+        })
+        .collect();
+    eprintln!(
+        "a burst of five whose link dropped twice:\n  {}",
+        told.join("\n  ")
+    );
+    let history = b.ok(
+        "messages.history",
+        json!({"address": a.address(), "limit": 50}),
+    );
+    let shown: Vec<String> = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["direction"] == "in")
+        .filter_map(|m| m["text"].as_str())
+        .filter(|t| t.starts_with("drop burst "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        shown,
+        texts,
+        "the friend's chat shows them in another order, or one twice\n{}",
+        logs()
+    );
+}
+
 /// Several friends at once, both ways (the owner's four-device test,
 /// 2026-11-01: "it must be seamless, with one friend and with several
 /// friends"): A writes to B and to C while B and C write to A. Every

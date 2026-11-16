@@ -791,6 +791,24 @@ pub fn send_to_contact_noting(
     send_to_contact(data_dir, id, pub_hex, text)
 }
 
+/// What [`note_on_its_way`] tells, once: `true` when the message goes over
+/// Tor.
+pub type OnItsWayNote = Box<dyn FnOnce(bool)>;
+
+/// Holds [`note_on_its_way`]'s note for the sends of this thread; the note
+/// goes with it.
+pub struct OnItsWay(#[allow(dead_code)] super::pair_init_lab::OnItsWayGuard);
+
+/// The next send of this thread tells `note` once, on this thread, when its
+/// own message is sealed and staged and its dial begins with the friend's
+/// send lock let go: from then on another send to the same friend may be
+/// sealed behind it, and over Tor raven-node carries both on one kept link
+/// (pair_init_lab `OnItsWayNote`). A send that never dials its own message
+/// never tells it. Hold what this gives back until the send ended.
+pub fn note_on_its_way(note: OnItsWayNote) -> OnItsWay {
+    OnItsWay(super::pair_init_lab::OnItsWayGuard::set(note))
+}
+
 /// [`send_to_contact_noting`] for an attachment's offer: text the engine
 /// made itself (`raven_core::attachment::flow`), which every send refuses
 /// from anybody else, as `RVNATT/` is reserved. Only on this thread, only

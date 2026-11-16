@@ -1508,14 +1508,24 @@ impl Inner {
         Ok(pending)
     }
 
-    /// Hands a send to `peer`'s worker: after that friend's sends asked for
-    /// before it, beside every other friend's (a worker per friend while it
-    /// has sends; the send lock is per friend too, `PeerSendLock`). One
-    /// worker for everybody held a message to one friend until a Tor send to
-    /// another ended (the owner's four-device test, 2026-11-01).
-    /// `Ok`: how many of the friend's sends wait before it.
+    /// Hands a send to `peer`'s queue: after that friend's sends asked for
+    /// before it, beside every other friend's (the send lock is per friend
+    /// too, `PeerSendLock`). One worker for everybody held a message to one
+    /// friend until a Tor send to another ended (the owner's four-device
+    /// test, 2026-11-01). `Ok`: how many of the friend's sends are before
+    /// it, waiting or on their way.
     fn enqueue_send(&self, id: &str, peer: &str) -> Result<usize, ApiError> {
-        self.enqueue_locked(&mut lock(&self.send_queues), id, peer, false)
+        // A photo's send goes alone: its bytes ride the link right behind
+        // its offer's answer (attachments.rs).
+        let alone = lock(&self.book)
+            .pendings
+            .iter()
+            .any(|p| p.id == id && p.attachment.is_some());
+        let mut queues = lock(&self.send_queues);
+        if alone {
+            queues.alone.insert(id.to_owned());
+        }
+        self.enqueue_locked(&mut queues, id, peer, false)
     }
 
     /// [`Self::enqueue_send`] with the queues held; `first`: before the
@@ -1528,28 +1538,138 @@ impl Inner {
         peer: &str,
         first: bool,
     ) -> Result<usize, ApiError> {
-        if let Some(queue) = queues.by_peer.get_mut(peer) {
-            // Its worker runs: it takes this one after those before it.
-            let before = if first { 0 } else { queue.len() };
-            if first {
-                queue.push_front(id.to_owned());
-            } else {
-                queue.push_back(id.to_owned());
+        let before = Self::queue_locked(queues, id, peer, first);
+        if let Err(e) = self.start_sends_locked(queues, peer) {
+            // Not this one's turn yet: it waits, and goes when a send of
+            // the friend's that runs ends. No send runs: nothing takes it.
+            let waits = queues.flying.get(peer).copied().unwrap_or(0) > 0;
+            if !waits {
+                if let Some(queue) = queues.by_peer.get_mut(peer) {
+                    queue.retain(|q| q != id);
+                    if queue.is_empty() {
+                        queues.by_peer.remove(peer);
+                    }
+                }
+                queues.alone.remove(id);
+                return Err(e);
             }
-            return Ok(before);
         }
-        queues
-            .by_peer
-            .insert(peer.to_owned(), VecDeque::from([id.to_owned()]));
-        let (me, friend) = (self.me.clone(), peer.to_owned());
+        Ok(before)
+    }
+
+    /// Puts a send into its friend's queue and starts nothing. How many of
+    /// the friend's sends are before it, waiting or on their way.
+    fn queue_locked(queues: &mut SendQueues, id: &str, peer: &str, first: bool) -> usize {
+        let flying = queues.flying.get(peer).copied().unwrap_or(0);
+        let queue = queues.by_peer.entry(peer.to_owned()).or_default();
+        if first {
+            queue.push_front(id.to_owned());
+            0
+        } else {
+            queue.push_back(id.to_owned());
+            queue.len() - 1 + flying
+        }
+    }
+
+    /// Starts the friend's next waiting send when its turn has come, each on
+    /// a thread of its own ([`send_job`]).
+    ///
+    /// Its turn has come when the send started before it has sealed its
+    /// message and is on its way over Tor, or has ended; so a friend's
+    /// messages are sealed, and written to the link, in the order they were
+    /// asked for. Until 2026-11-16 the next one started only when the one
+    /// before it had its answer, and a burst of texts cost one Tor round
+    /// trip more for every message before it (five texts on a round trip of
+    /// 0.7 s: the fifth was delivered after 5 s). raven-node carries
+    /// [`SENDS_ON_THEIR_WAY`] batches on one kept Tor link at once and gives
+    /// each its own answers, so each text is now answered about one round
+    /// trip after it was written. A send that starts while one before it
+    /// has no answer yet takes that message along, before its own (ash,
+    /// `send_indexed_text`), so a link that closes under a burst never lets
+    /// a later message reach the friend before an earlier one.
+    ///
+    /// Over any other way a send still waits for the end of the one before
+    /// it (a link on the local network is answered in milliseconds, and
+    /// each dial is a link of its own there). A photo's send goes alone.
+    fn start_sends_locked(&self, queues: &mut SendQueues, peer: &str) -> Result<(), ApiError> {
+        if queues.sealing.contains_key(peer) {
+            return Ok(());
+        }
+        let flying = queues.flying.get(peer).copied().unwrap_or(0);
+        let Some(id) = queues.by_peer.get(peer).and_then(|q| q.front().cloned()) else {
+            if flying == 0 {
+                queues.by_peer.remove(peer);
+            }
+            return Ok(());
+        };
+        let alone = queues.alone.contains(&id);
+        if !turn_has_come(flying, alone, queues.alone_runs.contains(peer)) {
+            return Ok(());
+        }
+        if let Some(queue) = queues.by_peer.get_mut(peer) {
+            queue.pop_front();
+        }
+        *queues.flying.entry(peer.to_owned()).or_insert(0) += 1;
+        queues.sealing.insert(peer.to_owned(), id.clone());
+        if alone {
+            queues.alone_runs.insert(peer.to_owned());
+        }
+        let (me, friend, job) = (self.me.clone(), peer.to_owned(), id.clone());
         let started = std::thread::Builder::new()
             .name("raven-client-send".into())
-            .spawn(move || send_worker(me, friend));
+            .spawn(move || send_job(me, friend, job, alone));
         if let Err(e) = started {
-            queues.by_peer.remove(peer);
+            // As it was: the send waits at the head of the queue.
+            if let Some(queue) = queues.by_peer.get_mut(peer) {
+                queue.push_front(id);
+            }
+            match queues.flying.get_mut(peer) {
+                Some(n) if *n > 1 => *n -= 1,
+                _ => {
+                    queues.flying.remove(peer);
+                }
+            }
+            queues.sealing.remove(peer);
+            if alone {
+                queues.alone_runs.remove(peer);
+            }
             return Err(ApiError::internal(format!("send worker: {e}")));
         }
-        Ok(0)
+        Ok(())
+    }
+
+    /// The send `id` to `peer` is sealed and on its way over Tor
+    /// (`bridge::note_on_its_way`): the friend's next send may start.
+    fn send_on_its_way(&self, peer: &str, id: &str) {
+        let mut queues = lock(&self.send_queues);
+        if queues.sealing.get(peer).is_some_and(|s| s == id) {
+            queues.sealing.remove(peer);
+        }
+        let _ = self.start_sends_locked(&mut queues, peer);
+    }
+
+    /// The send `id` to `peer` ended (`alone`: it ran alone): the friend's
+    /// next send may start, and a friend with none left is forgotten.
+    fn send_ended(&self, peer: &str, id: &str, alone: bool) {
+        let mut queues = lock(&self.send_queues);
+        match queues.flying.get_mut(peer) {
+            Some(n) if *n > 1 => *n -= 1,
+            _ => {
+                queues.flying.remove(peer);
+            }
+        }
+        if queues.sealing.get(peer).is_some_and(|s| s == id) {
+            queues.sealing.remove(peer);
+        }
+        if alone {
+            queues.alone_runs.remove(peer);
+        }
+        let _ = self.start_sends_locked(&mut queues, peer);
+        if queues.by_peer.get(peer).is_some_and(VecDeque::is_empty)
+            && !queues.flying.contains_key(peer)
+        {
+            queues.by_peer.remove(peer);
+        }
     }
 
     /// Whether a send would be held back now ([`Outcome::HeldBack`]): Lock
@@ -1602,12 +1722,18 @@ impl Inner {
         }
         let held = std::mem::take(&mut queues.held);
         // Newest first, each before the rest: the oldest ends up first.
+        // All of them are in their queues before any is started, so the
+        // oldest is the first to go.
+        let mut friends: Vec<String> = Vec::new();
         for (id, peer) in held.into_iter().rev() {
-            if self.enqueue_locked(&mut queues, &id, &peer, true).is_err() {
-                queues.held.push((id, peer));
-            } else {
-                send_note(&peer, &format!("{id} goes again"));
+            Self::queue_locked(&mut queues, &id, &peer, true);
+            send_note(&peer, &format!("{id} goes again"));
+            if !friends.contains(&peer) {
+                friends.push(peer);
             }
+        }
+        for peer in friends {
+            let _ = self.start_sends_locked(&mut queues, &peer);
         }
         true
     }
@@ -2539,35 +2665,56 @@ fn delete_row(dir: &std::path::Path, peer: &str, mid: &str) {
     let _ = raven_core::chat_history::ChatHistory::delete_outbound_rows(dir, &HashSet::from([key]));
 }
 
+/// Sends to one friend that may be on their way at once: as many batches
+/// as raven-node carries on one kept Tor link at once (its
+/// `onion/warm.rs` `PIPELINE_DEPTH`).
+pub(crate) const SENDS_ON_THEIR_WAY: usize = 3;
+
 /// The sends waiting for each friend (its key, lowercase), in the order
-/// they were asked for. A friend is here while its worker runs: the one
-/// that takes the last of them away ends that worker.
+/// they were asked for, and those that run.
 #[derive(Debug, Default)]
 pub(crate) struct SendQueues {
     pub(crate) by_peer: HashMap<String, VecDeque<String>>,
     /// Sends held back ([`Outcome::HeldBack`]) until the node runs and the
     /// profile is open again: (id, friend), in the order they were held.
     pub(crate) held: Vec<(String, String)>,
+    /// How many of a friend's sends run now.
+    pub(crate) flying: HashMap<String, usize>,
+    /// A friend's send that was started last and has not sealed its
+    /// message yet (it is not on its way over Tor and has not ended): the
+    /// next one waits for it, so the friend's messages keep their order.
+    pub(crate) sealing: HashMap<String, String>,
+    /// The waiting sends that go alone (a photo's), and the friends whose
+    /// running send goes alone.
+    pub(crate) alone: HashSet<String>,
+    pub(crate) alone_runs: HashSet<String>,
 }
 
-/// One friend's send worker: its sends one at a time, in the order they
-/// were asked for, until none waits.
-fn send_worker(me: std::sync::Weak<Inner>, peer: String) {
-    loop {
-        let Some(inner) = me.upgrade() else {
-            return;
-        };
-        let id = {
-            let mut queues = lock(&inner.send_queues);
-            match queues.by_peer.get_mut(&peer).map(VecDeque::pop_front) {
-                Some(Some(id)) => id,
-                // None waits: the next send to this friend starts a worker.
-                _ => {
-                    queues.by_peer.remove(&peer);
-                    return;
+/// Whether a friend's next waiting send may start beside the `flying` sends
+/// of the friend's that run, each of them on its way over Tor already
+/// ([`Inner::start_sends_locked`]): always when none runs; else up to
+/// [`SENDS_ON_THEIR_WAY`] at once, and never beside a send that goes alone
+/// (`alone`: the waiting one is such a send; `alone_runs`: a running one is).
+fn turn_has_come(flying: usize, alone: bool, alone_runs: bool) -> bool {
+    flying == 0 || (!alone && !alone_runs && flying < SENDS_ON_THEIR_WAY)
+}
+
+/// One send on a thread of its own: the friend's next one is started when
+/// this one says that it is on its way over Tor, or when it ends
+/// ([`Inner::start_sends_locked`]).
+fn send_job(me: std::sync::Weak<Inner>, peer: String, id: String, alone: bool) {
+    let Some(inner) = me.upgrade() else {
+        return;
+    };
+    {
+        let (me, friend, job) = (me.clone(), peer.clone(), id.clone());
+        let _on_its_way = bridge::note_on_its_way(Box::new(move |over_tor| {
+            if over_tor {
+                if let Some(inner) = me.upgrade() {
+                    inner.send_on_its_way(&friend, &job);
                 }
             }
-        };
+        }));
         let run =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.run_send_job(&id)));
         if run.is_err() {
@@ -2582,6 +2729,7 @@ fn send_worker(me: std::sync::Weak<Inner>, peer: String) {
             }
         }
     }
+    inner.send_ended(&peer, &id, alone);
 }
 
 #[cfg(test)]
@@ -2641,6 +2789,56 @@ mod tests {
             pending: None,
             attachment: None,
         }
+    }
+
+    /// A friend's next send starts beside those on their way over Tor, as
+    /// many as raven-node carries on one kept link, and a photo's send
+    /// runs alone: none starts beside it, and it starts beside none.
+    #[test]
+    fn a_friends_next_send_starts_beside_those_on_their_way_but_a_photo_goes_alone() {
+        // None runs: whatever waits goes.
+        assert!(turn_has_come(0, false, false));
+        assert!(turn_has_come(0, true, false));
+        // Texts, up to the link's depth.
+        for flying in 1..SENDS_ON_THEIR_WAY {
+            assert!(turn_has_come(flying, false, false), "{flying} on their way");
+        }
+        assert!(!turn_has_come(SENDS_ON_THEIR_WAY, false, false));
+        assert!(!turn_has_come(SENDS_ON_THEIR_WAY + 1, false, false));
+        // A photo waits until none runs; nothing starts beside a photo.
+        assert!(!turn_has_come(1, true, false));
+        assert!(!turn_has_come(1, false, true));
+        assert!(!turn_has_come(1, true, true));
+    }
+
+    /// The queue's count of the sends before a new one names those on their
+    /// way too, and a send that goes again is first.
+    #[test]
+    fn a_new_send_counts_the_friends_sends_before_it_waiting_or_on_their_way() {
+        let mut queues = SendQueues::default();
+        assert_eq!(
+            Inner::queue_locked(&mut queues, "pending-1", "aa", false),
+            0
+        );
+        assert_eq!(
+            Inner::queue_locked(&mut queues, "pending-2", "aa", false),
+            1
+        );
+        // Two of the friend's sends run; another friend's count nothing.
+        queues.flying.insert("aa".into(), 2);
+        queues.flying.insert("bb".into(), 1);
+        assert_eq!(
+            Inner::queue_locked(&mut queues, "pending-3", "aa", false),
+            4
+        );
+        assert_eq!(
+            Inner::queue_locked(&mut queues, "pending-9", "cc", false),
+            0
+        );
+        // One that goes again is taken before those that wait.
+        assert_eq!(Inner::queue_locked(&mut queues, "pending-0", "aa", true), 0);
+        let order: Vec<&str> = queues.by_peer["aa"].iter().map(String::as_str).collect();
+        assert_eq!(order, ["pending-0", "pending-1", "pending-2", "pending-3"]);
     }
 
     /// E1: a delivered message's Details showed "id=pending-4" and

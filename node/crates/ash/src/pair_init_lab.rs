@@ -283,6 +283,61 @@ fn tell_own_id(mid: &[u8; 16]) {
     }
 }
 
+/// What the app engine asks to be told once, on this thread: this send's
+/// own message is sealed and staged, the friend's send lock is let go, and
+/// the message's dial begins ([`SendLockHold::around`]); `true` when it goes
+/// over Tor. From this word on the engine's next send to the same friend
+/// may be sealed behind it: over Tor raven-node carries both on one kept
+/// link, each answered about one round trip after it was written
+/// (raven-node `onion/warm.rs`, pipelining), where a burst used to cost one
+/// round trip more for every message before it. The next send takes this
+/// message along, before its own, as it takes every earlier message of the
+/// session that has no answer yet (T1 a; this one, still prepared, is handed
+/// to the queue first, and its own handoff then finds it handed over): the
+/// friend answers the copy as the message it holds, and whichever link
+/// reaches the friend, the kept one or a fresh one after it closed, brings
+/// the messages in the order they were written. A send that never dials its
+/// own message (queued for a friend out of reach, refused) never says it:
+/// its end says the same.
+pub(super) type OnItsWayNote = Box<dyn FnOnce(bool)>;
+
+thread_local! {
+    /// Per thread, as a send runs on its caller's thread. No terminal
+    /// command sets one.
+    static ON_ITS_WAY_NOTE: std::cell::RefCell<Option<OnItsWayNote>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Holds this thread's note for one send (the engine,
+/// `engine_bridge::note_on_its_way`): a note the send never called goes with
+/// it.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+pub(super) struct OnItsWayGuard(());
+
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
+impl OnItsWayGuard {
+    pub(super) fn set(note: OnItsWayNote) -> Self {
+        ON_ITS_WAY_NOTE.with(|slot| *slot.borrow_mut() = Some(note));
+        Self(())
+    }
+}
+
+impl Drop for OnItsWayGuard {
+    fn drop(&mut self) {
+        let unused = ON_ITS_WAY_NOTE.with(|slot| slot.borrow_mut().take());
+        drop(unused);
+    }
+}
+
+/// This thread's send let the send lock go for its own message's dial
+/// (`over_tor`: on the onion carrier): tell whoever asked, once.
+fn tell_on_its_way(over_tor: bool) {
+    let note = ON_ITS_WAY_NOTE.with(|slot| slot.borrow_mut().take());
+    if let Some(note) = note {
+        note(over_tor);
+    }
+}
+
 thread_local! {
     /// This thread's send carries an attachment's offer the app engine made
     /// (`engine_bridge::send_offer_to_contact_noting`). Per thread, as a
@@ -3868,7 +3923,12 @@ fn send_indexed_text(
         // keeps it: another send's new message must not be sealed between
         // this loop and this send's own.
         let dialled = if carry_batch.get() {
-            lock.around(run)
+            lock.around(|| {
+                // Sealed, staged and the lock free: the engine's next send
+                // to this friend may be sealed behind this one.
+                tell_on_its_way(carrier == DialCarrier::Onion);
+                run()
+            })
         } else {
             run()
         };
