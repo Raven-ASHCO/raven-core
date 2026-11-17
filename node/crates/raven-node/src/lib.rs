@@ -61,6 +61,14 @@ mod nearby;
 #[cfg(any(unix, windows))]
 mod netwatch;
 mod onion;
+/// Keep watch lab (debug builds with `tor-embedded`): the Tor helper alone
+/// in the calling process, for the iPhone app's tunnel extension to measure
+/// Tor's memory and its life through sleeps before the node moves in there
+/// (`onion/watch_probe.rs`).
+#[cfg(all(feature = "tor-embedded", debug_assertions))]
+pub mod watch_probe {
+    pub use crate::onion::watch_probe::{start, status, stop, CHECK_EVERY_MIN};
+}
 mod outbox;
 mod p2p;
 mod pair_seed;

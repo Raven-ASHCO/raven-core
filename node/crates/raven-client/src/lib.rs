@@ -34,6 +34,7 @@ mod profile;
 mod safety;
 mod settings;
 mod warm;
+mod watch_probe;
 
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(feature = "embedded-node")]
 pub use embedded::NODE_MODE_ENV;
 pub use envelope::code;
-pub use ffi::{raven_call, raven_free};
+pub use ffi::{raven_call, raven_free, raven_watch_probe};
 pub use node::NODE_PROGRAM_ENV;
 
 // An iOS app may start no helper process: its node runs in the app.

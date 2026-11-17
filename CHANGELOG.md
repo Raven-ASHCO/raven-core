@@ -98,6 +98,10 @@ independent review.
   as a file), `raven lab attachments`, `raven lab attachment-ask HANDLE` and
   `raven lab attachment-save HANDLE --out PATH` (it prints the SHA-256 to compare with the
   sender's).
+- Lab builds of the engine with Tor in process have one more C function, `raven_watch_probe`: Tor
+  alone with a throwaway onion service, for the iPhone app's lab tunnel to measure how much memory
+  Tor takes there and whether it lives through an iPhone's sleeps (`docs/IOS.md`, section 8.1). It
+  opens no profile, starts no node and says counts only. Release builds answer that it is not there.
 - Next to the name of the friend who holds a message of yours, or of the group member who passed a
   message on, the engine now says whether that is a friend you verified and have not blocked
   (`via_friend`), so the apps never show anyone else as a friend.

@@ -65,6 +65,11 @@ mod arti;
 #[cfg(debug_assertions)]
 pub(crate) mod loopback;
 
+/// Keep watch lab: the helper alone in the calling process, with no
+/// raven-node around it (the iPhone app's tunnel extension).
+#[cfg(all(feature = "tor-embedded", debug_assertions))]
+pub(crate) mod watch_probe;
+
 /// Tests: loopback streams in memory, for tests on the paused clock.
 #[cfg(test)]
 pub(crate) mod memnet;

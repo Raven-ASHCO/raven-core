@@ -476,6 +476,31 @@ otherwise when it next opens or refreshes, provided a friend holds its mail.
 Between two phones with no always-on friend, a message waits on the sender's
 phone until both apps are open at the same time.
 
+### 8.1 Keep watch (lab): what the VPN slot gives
+
+A fourth way is being measured, not built: a packet tunnel extension that
+carries no traffic and stays in iOS's VPN slot, where a node could keep
+listening while the app is closed. The iPhone app's lab build has that
+tunnel (it reads and writes no packet), and it keeps a diary of what iOS
+lets its process do: how much of the time it runs while the iPhone is
+locked, how much memory it may take, what the battery does.
+
+Before the node moves in, Tor is measured there alone. Debug builds of the
+engine with Tor in process have one more C function for it,
+`raven_watch_probe` (raven-client `src/watch_probe.rs`, raven-node
+`src/onion/watch_probe.rs`). It runs the same in-process Tor helper as the
+app's node (section 6) with one onion service that is a throwaway: its key
+is made in a state folder of its own, nobody is told its address, and the
+function opens no profile, reads no key of Raven and starts no node. By the
+wall clock, which goes on while the iPhone sleeps, it reaches its own
+service as a friend would, and it counts: lives, checks and how many
+reached, how long a check took in running time and on the wall clock,
+descriptor upload rounds. It ends a Tor life that is not ready within three
+minutes of running time, or whose checks missed four times in a row, and
+starts another. Its answer holds numbers and the helper's fixed words,
+never an address. Release builds, and builds without Tor in process, answer
+that it is not there.
+
 ## 9. Building and testing
 
 ```sh

@@ -1,4 +1,5 @@
-//! The C ABI (include/raven_client.h): `raven_call` and `raven_free`.
+//! The C ABI (include/raven_client.h): `raven_call` and `raven_free`, and
+//! for lab builds `raven_watch_probe`.
 //!
 //! - Never returns NULL: a NULL or non-UTF-8 request is answered with a
 //!   `BAD_REQUEST` envelope, a panic with `INTERNAL`.
@@ -54,11 +55,45 @@ pub unsafe extern "C" fn raven_call(request_json: *const c_char) -> *mut c_char 
     out
 }
 
-/// Frees a string returned by [`raven_call`]. NULL is ignored.
+/// Keep watch lab (`watch_probe.rs`): the Tor helper alone in the calling
+/// process, for the iPhone app's tunnel extension. One JSON object in, one
+/// out (the probe's status, or `{"error": ...}`); it touches no profile and
+/// no engine. Builds without it (release builds, builds without Tor in
+/// process) answer `{"error":"not in this build"}`. Never NULL; free the
+/// result with [`raven_free`].
 ///
 /// # Safety
-/// `response` is NULL or a pointer [`raven_call`] returned that was not
-/// freed yet.
+/// `request_json` is NULL or points to a NUL-terminated string that stays
+/// valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn raven_watch_probe(request_json: *const c_char) -> *mut c_char {
+    use crate::watch_probe::{call, failure};
+    let answer = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if request_json.is_null() {
+            return failure("the request is NULL");
+        }
+        // SAFETY: not NULL, and the caller promises a NUL-terminated string
+        // that outlives this call.
+        let raw = unsafe { CStr::from_ptr(request_json) };
+        match raw.to_str() {
+            Ok(text) => call(text),
+            Err(_) => failure("the request is not UTF-8"),
+        }
+    }))
+    .unwrap_or_else(|_| failure("the probe failed"));
+    // JSON has no NUL byte; were there one, the answer is an error still.
+    CString::new(answer)
+        .or_else(|_| CString::new(r#"{"error":"the answer could not be built"}"#))
+        .map(CString::into_raw)
+        .unwrap_or_else(|_| CString::default().into_raw())
+}
+
+/// Frees a string returned by [`raven_call`] or [`raven_watch_probe`].
+/// NULL is ignored.
+///
+/// # Safety
+/// `response` is NULL or a pointer one of them returned that was not freed
+/// yet.
 #[no_mangle]
 pub unsafe extern "C" fn raven_free(response: *mut c_char) {
     if response.is_null() {
@@ -66,7 +101,7 @@ pub unsafe extern "C" fn raven_free(response: *mut c_char) {
     }
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the caller hands back a pointer from CString::into_raw in
-        // raven_call, exactly once.
+        // raven_call or raven_watch_probe, exactly once.
         drop(unsafe { CString::from_raw(response) });
     }));
 }

@@ -20,6 +20,9 @@ void  raven_free(char *response);             /* frees a string returned by rave
 - Requests and responses are NUL-terminated UTF-8. A NULL or non-UTF-8 request is answered with
   `BAD_REQUEST`; a failure inside the engine with `INTERNAL`. Every returned string goes to
   `raven_free` exactly once (never to the app's own allocator).
+- Lab builds have a second function beside it, `raven_watch_probe` (debug builds with Tor in
+  process; `raven_client.h`, and `docs/IOS.md` section 8.1). It is no part of this contract: it
+  touches no engine and no profile, and every other build answers `{"error":"not in this build"}`.
 - One function keeps the boundary small, versioned and identical on every OS. There are no callbacks
   across the boundary: events are pulled with `events.poll` (cheap; the apps poll every 500 ms while a
   window is open and every 5 s in the menu bar or tray), or waited for with `events.wait`, which
