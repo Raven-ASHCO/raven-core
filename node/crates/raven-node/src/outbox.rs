@@ -56,8 +56,10 @@
 //! - **Triggers:** an IPC `OutboxKick` right after a send stages, the backoff
 //!   timer, a listener coming up (service start or a supervised restart), a
 //!   change of this machine's network (`netwatch`; a wake from sleep and a
-//!   moved default route count as one), and an authenticated inbound link
-//!   from that contact (at most once a minute per contact).
+//!   moved default route count as one), an authenticated inbound link
+//!   from that contact (at most once a minute per contact), and a send
+//!   dial whose program hung up and handed nothing over within three
+//!   seconds (it was ended in the middle: `ipc_server::orphan_look`, W5-13).
 //!   **Backoff restarts (G5):** the failure count starts over on an IPC
 //!   `OutboxKick` (a send, `raven outbox retry`/`cancel`, a reset step; not an
 //!   app submit), on a verified ACK from that contact (its other objects and

@@ -165,6 +165,10 @@ Fixes from our own testing after 0.1.0, the engine for the iPhone app, and a Lin
 - After `raven nearby disable`, sending no longer tries Bluetooth. With peer-to-peer off on this
   computer, sending no longer tries an old peer-to-peer address, and the message no longer advises
   turning peer-to-peer on.
+- A message whose sending program was ended in the middle of the send (the terminal app killed, a
+  desktop app quit) no longer waits up to ten minutes. raven-node sees the program go and takes the
+  message over a few seconds later; before, it found it only at its next look at the store, and a
+  message that had already arrived stayed "queued" until then.
 
 ### Finding friends again
 

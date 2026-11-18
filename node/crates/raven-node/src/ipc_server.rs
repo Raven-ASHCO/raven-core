@@ -588,6 +588,9 @@ fn handle_req(req: IpcRequest, data_dir: &Path, forward: &Option<ForwardQueue>) 
                     };
                 }
             };
+            // The program that sent is alive and handed its messages over
+            // itself ([`orphan_look`]).
+            note_send_kick(peer);
             if custody_now {
                 // `raven outbox hand-off`: friends may take what waits
                 // without the 60 s wait (a failed direct try still first).
@@ -1021,6 +1024,90 @@ static SEND_DIAL_LOG: std::sync::OnceLock<PerContactLog> = std::sync::OnceLock::
 /// it hung up first (nobody reads the answer).
 pub(crate) const CLIENT_GONE: &str = "IPC_CLIENT_GONE";
 
+/// How long after a send dial's program hung up raven-node looks at that
+/// contact's messages itself ([`orphan_look`]): a send that is alive has
+/// handed them over well within it.
+const ORPHAN_LOOK_AFTER: Duration = Duration::from_secs(3);
+/// How long a send's `OutboxKick` is remembered for [`orphan_look`].
+const SEND_KICK_KEPT: Duration = Duration::from_secs(60);
+
+/// The `OutboxKick`s of the last [`SEND_KICK_KEPT`]: for which contact
+/// (`None`: for everybody) and when.
+static SEND_KICKS: std::sync::Mutex<Vec<(Option<[u8; 32]>, tokio::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A program asked the outbox to take its messages to `peer` (or to
+/// everybody) now.
+fn note_send_kick(peer: Option<[u8; 32]>) {
+    let now = tokio::time::Instant::now();
+    let mut kicks = SEND_KICKS.lock().unwrap_or_else(|e| e.into_inner());
+    kicks.retain(|(_, at)| now.saturating_duration_since(*at) < SEND_KICK_KEPT);
+    kicks.push((peer, now));
+}
+
+/// Did a program hand its messages to `peer` over since `since`?
+fn kicked_since(peer: &[u8; 32], since: tokio::time::Instant) -> bool {
+    SEND_KICKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(whom, at)| *at >= since && whom.is_none_or(|p| p == *peer))
+}
+
+/// Tests: the contacts [`orphan_look`] found nobody had handed over for.
+#[cfg(test)]
+static ORPHAN_LOOKS: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
+
+/// Tests: how often [`orphan_look`] went on to the outbox for `peer`.
+#[cfg(test)]
+fn orphan_looks(peer: &[u8; 32]) -> usize {
+    ORPHAN_LOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|p| *p == peer)
+        .count()
+}
+
+/// W5-13 (hard tests, 2026-11-15 and 2026-11-18). A send writes its message
+/// to the store, dials through raven-node, and hands the message to the
+/// outbox only at its end, when it could not deliver it itself. A program
+/// that is ended in the middle (the terminal app killed, a desktop app
+/// quit) hands nothing over: raven-node kept running and knew nothing of
+/// the row until its next read of the store, ten minutes apart when nothing
+/// else waits. The message went late, or one that had arrived stayed
+/// "queued" until then.
+///
+/// raven-node does see the program go: its connection closes in the middle
+/// of the send dial `peer`'s message rode (`IPC_CLIENT_GONE`). A send whose
+/// own wait ran out hangs up the same way, but it then queues its message
+/// and kicks the outbox, at once. So [`ORPHAN_LOOK_AFTER`] the hang-up, when
+/// no kick for that contact came, the outbox reads that contact's rows
+/// again: what the dead send wrote goes out from here. The contact's send
+/// lock keeps this from a send that is alive, and a look that finds nothing
+/// costs one read of the store.
+async fn orphan_look(peer: [u8; 32], hung_up: tokio::time::Instant) {
+    tokio::time::sleep(ORPHAN_LOOK_AFTER).await;
+    if kicked_since(&peer, hung_up) {
+        return;
+    }
+    #[cfg(test)]
+    ORPHAN_LOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(peer);
+    if crate::outbox::kick(Some(&peer), false, false) {
+        let log = SEND_DIAL_LOG.get_or_init(PerContactLog::new);
+        let tag = crate::netutil::link_tag(&peer);
+        if log.hit(&tag, std::time::Instant::now()).is_some() {
+            eprintln!(
+                "raven-node send: contact {tag}, the program that sent hung up and handed \
+                 nothing over; the outbox looks at its messages"
+            );
+        }
+    }
+}
+
 /// Serve the send dial `req` with `serve`, then write its line (D1). The
 /// dial ends when `hangup` does: the program that asked for it closed its
 /// connection (T3 a, Tor messaging audit 2026-11: a send gives its Tor
@@ -1046,6 +1133,12 @@ where
             message: "the program that asked for this dial hung up; the dial ended with it".into(),
         },
     };
+    if let (Some(note), IpcResponse::Error { code, .. }) = (&note, &response) {
+        if code == CLIENT_GONE {
+            // Hung up because its wait was over, or because it was ended?
+            tokio::spawn(orphan_look(note.peer, tokio::time::Instant::now()));
+        }
+    }
     if let Some(note) = note {
         let log = SEND_DIAL_LOG.get_or_init(PerContactLog::new);
         let tag = crate::netutil::link_tag(&note.peer);
@@ -4521,5 +4614,112 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the dial to Bob's address ended too");
+    }
+
+    /// W5-13: a program that hangs up in the middle of a send dial and
+    /// hands nothing over was ended: a moment later the outbox looks at
+    /// that contact's messages. One that kicks the outbox itself (its wait
+    /// was over, it queued its message) gets no second look, nor does a
+    /// kick for everybody; a kick for another contact does not count.
+    #[tokio::test(start_paused = true)]
+    async fn a_send_whose_program_vanished_is_looked_after() {
+        // Keys no other test uses: the looks are counted per contact.
+        let (bob, carol) = ([0xB7u8; 32], [0xC7u8; 32]);
+
+        // Ended in the middle: nobody kicks.
+        orphan_look(bob, tokio::time::Instant::now()).await;
+        assert_eq!(
+            orphan_looks(&bob),
+            1,
+            "a look after a program that vanished"
+        );
+
+        // Alive: it kicks for that contact right after it hung up.
+        let look = tokio::spawn(orphan_look(bob, tokio::time::Instant::now()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        note_send_kick(Some(bob));
+        look.await.unwrap();
+        assert_eq!(orphan_looks(&bob), 1, "no look beside a send that is alive");
+
+        // A kick for everybody counts for every contact.
+        let look = tokio::spawn(orphan_look(carol, tokio::time::Instant::now()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        note_send_kick(None);
+        look.await.unwrap();
+        assert_eq!(orphan_looks(&carol), 0);
+
+        // A kick for another contact, or one from before the hang-up, does not.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let look = tokio::spawn(orphan_look(carol, tokio::time::Instant::now()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        note_send_kick(Some(bob));
+        look.await.unwrap();
+        assert_eq!(
+            orphan_looks(&carol),
+            1,
+            "another contact's kick is not this one's"
+        );
+
+        // Kicks are forgotten after a minute.
+        tokio::time::sleep(SEND_KICK_KEPT + Duration::from_secs(1)).await;
+        note_send_kick(Some(carol));
+        let kept = SEND_KICKS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| *p == Some(bob))
+            .count();
+        assert_eq!(kept, 0, "older kicks are dropped");
+    }
+
+    /// W5-13, on a connection: the program asks for a send dial to a
+    /// contact whose address never answers, and is ended. The dial ends
+    /// with it, and three seconds later the look comes; not before.
+    #[tokio::test]
+    async fn a_program_ended_in_a_send_dial_gets_the_look() {
+        use crate::outbox::test_rig::{contacts, lab_backends};
+        if !lab_backends() || !raven_core::internet_direct_live_enabled() {
+            eprintln!("skipped: needs the lab backends and Internet direct");
+            return;
+        }
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let _alice = raven_core::load_or_create_identity(a.path()).unwrap().0;
+        let bob = raven_core::load_or_create_identity(b.path()).unwrap().0;
+        contacts(a.path(), &bob.public_key_bytes(), "", "", true);
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = silent.local_addr().unwrap().to_string();
+        let (mut program, node_end) = tokio::io::duplex(1 << 16);
+        let serving = tokio::spawn(serve_one(
+            node_end,
+            Arc::new(a.path().to_path_buf()),
+            Arc::new(Mutex::new(None)),
+        ));
+        let req = raven_core::encode_request(&IpcRequest::InternetDial {
+            v: IPC_VERSION,
+            internet_dial: at,
+            expected_pub_hex: hex::encode(bob.public_key_bytes()),
+            frames_b64: vec![b64_encode(b"a frame of the send")],
+        })
+        .unwrap();
+        program.write_all(&req).await.unwrap();
+        let _dialled = tokio::time::timeout(Duration::from_secs(10), silent.accept())
+            .await
+            .expect("the dial reached Bob's address")
+            .unwrap();
+        let bob = bob.public_key_bytes();
+        assert_eq!(orphan_looks(&bob), 0);
+        drop(program);
+        tokio::time::timeout(Duration::from_secs(3), serving)
+            .await
+            .expect("the IPC connection ends with the program")
+            .unwrap();
+        tokio::time::sleep(ORPHAN_LOOK_AFTER - Duration::from_millis(1500)).await;
+        assert_eq!(orphan_looks(&bob), 0, "no look before its time");
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(
+            orphan_looks(&bob),
+            1,
+            "the look came after the program vanished"
+        );
     }
 }
