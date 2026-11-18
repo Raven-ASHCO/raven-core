@@ -197,11 +197,15 @@ connection (`direct` to Bob, `reversed` back) and s32e with no session and
 two dead routes ahead of p2p (AppSubmit's probe dials both, then pairs on
 p2p; a build before that probe fails it); and with
 RAVEN_FAULT_NETWATCH=1: s33, the sender's network changing while a message
-waits; s34, a network switch while 5 messages to 2 contacts wait (the old
-network refuses every connection; after the switch all are delivered within
-30 s, exactly once, in order; then a wake from sleep round); and s34c, the
-same switch without the netwatch line, which records how long the backoff
-alone takes. With RAVEN_FAULT_P2P=1 (libp2p, debug lab unlock): s35, a
+waits; s34, a network switch while 5 messages to 2 contacts wait (route
+hints held and Alice's node started again after the warm-ups, so nothing
+reaches the contacts around the old network and each next try gets 15 s or
+more away; the old network refuses every connection; after the switch
+netwatch says it retried the 5 that waited and all are delivered within
+30 s, exactly once, in order; then a wake from sleep round with one more
+message); and s34c, the same switch without the netwatch line, which
+records how long the backoff alone takes. With RAVEN_FAULT_P2P=1 (libp2p,
+debug lab unlock): s35, a
 stranger in the relay's circle who holds Bob's verified card is refused by
 Bob's peer gate before his Raven link runs, its send reads as if Bob were
 offline (no refusal hint), and Alice still reaches Bob exactly once; s36, how each p2p delivery travelled
@@ -355,20 +359,30 @@ the 'something else answered' text; X stops, Bob restarts on that port and
 sends to Alice, and her queued message reaches him exactly once with no
 `ash outbox retry` (what X received is carrier_matrix C39's job). s91b
 (F5): s91 with Carol, linked to Alice at the start like Bob (Alice holds
-both noise pins); after Bob's return Carol links to Alice, and Bob's message
-is delivered within 15 s of her link (Alice logs 'a contact answered on this
-network; retrying 1 others'), each message exactly once. s92
-(F1): Alice's saved route for Bob, with whom she has a session, becomes a
-computer name that resolves nowhere (x-nohost.local on his port); with the
-gate closed for one send it is today's NOT SENT CONTACT_NOT_VERIFIED; open,
-an unverified Bob's message is QUEUED within 6 s saying his computer name
-was not found (held NOT_REACHABLE, never CONTACT_NOT_VERIFIED), a verified
-Bob's too with the same cause, and once `contact set-addr` puts his address
-back both arrive exactly once with no new send. s93b
-(M2): Alice's clock moves 25 h past a pairing while Bob is down; after her
-raven-node restarts (which prunes the expired session) her send is NOT SENT
-saying the secure connection with Bob ended, never 'a first message', and
-nothing is queued. s99 (F10 / M11, clock skew; LabClock on both, Bob's
+both noise pins); once Bob is away Alice's node starts again (a contact it
+met on the LAN in the last 10 minutes is tried again within 15 s whatever
+its backoff, E1, which it remembers only while it runs), so her next try
+for Bob backs off; after Bob's silent return Carol links to Alice, and Bob's
+message is delivered within 15 s of her link while Alice's own next try was
+30 s or more away, each message exactly once (the line 'a contact answered
+on this network; retrying 1 others', at most one in 10 minutes, is recorded
+only). s92
+(F1): Bob, with whom Alice has a session, is away: his node is stopped (it
+would be found at the address its route hints told) and her saved route for
+him becomes a computer name that resolves nowhere (x-nohost.local on his
+port); with the gate closed for one send it is today's NOT SENT
+CONTACT_NOT_VERIFIED; open, an unverified Bob's message is QUEUED within 6 s
+saying his computer name was not found (raven-node keeps trying it, never
+CONTACT_NOT_VERIFIED), a verified Bob's too with the same cause, and once
+Bob is back on his port both arrive exactly once with no new send and no new
+address, at the address his route hints told. s93b
+(M2): the clock moves 25 h past a pairing while Bob is down; after Alice's
+raven-node restarts (which prunes the expired session) her send is kept by
+the long message horizon: QUEUED (HORIZON_PARKED) saying RAVEN first sets up
+a new secure connection and then sends it, never 'a first message' and never
+NOT SENT; once Bob is back on his port it arrives exactly once over a new
+session with no new send, and his reply is delivered. s99 (F10 / M11, clock
+skew; LabClock on both, Bob's
 moved): Bob 4 min ahead delivers both ways; 10 min ahead, Bob holds Alice's
 message once but she refuses his ACK (her send stays 'sent, delivery
 unconfirmed' and names the clocks), her node refuses his message and her
@@ -470,10 +484,11 @@ scenario's own (RAVEN_LAB_LAN_BEACON_BUS=<root>/bus, whose line names
 <root>/net1): every datagram stays on 127.0.0.1 ephemeral ports, never UDP
 7420 or a real interface. A Sniffer registers on such a bus like a node and
 hears every datagram. Scenarios whose contacts must not find each other on
-one LAN run without it (without_beacon): s90 (route hints held), s15, s32b,
-s34 and s34c, s89, s92 and s98 (a path that is tried only when the LAN
-cannot reach the contact, or a network that dies while the contact's node
-runs on), and the p2p, friend relay and custody families (peers on other
+one LAN run without it (without_beacon): s90, s34 and s34c (route hints
+held too), s15, s32b, s89, s92 and s98 (a path that is tried only when the
+LAN cannot reach the contact, a network that dies while the contact's node
+runs on, or a contact who is to be found again only at the address his
+route hints told), and the p2p, friend relay and custody families (peers on other
 networks, recipients that cannot be reached). s04 then must deliver
 after-move-1 before Bob's own message, with no route hint
 (delivered_before_bob_s: Bob waits up to 90 s for it; with nothing waiting
@@ -1895,10 +1910,13 @@ class Node:
         assert m, out
         return m.group(1)
 
-    def add_pinned(self, other: 'Node', tag: str, dial: str | None = None) -> None:
+    def add_pinned(self, other: 'Node', tag: str, dial: str | None = None,
+                   fp: str | None = None) -> None:
+        """`fp`: `other`'s fingerprint, read earlier (s92 pins Bob while
+        his node is stopped, and asks his profile nothing then)."""
         r = self.ash('contact', 'add', '--address', other.address, '--pub-hex', other.pub,
                      '--petname', tag.capitalize(), '--tag', tag,
-                     '--lan-dial', dial or other.dial, '--verify-fp', other.fingerprint())
+                     '--lan-dial', dial or other.dial, '--verify-fp', fp or other.fingerprint())
         assert r.returncode == 0, r.stdout + r.stderr
 
     def add_pinned_internet(self, other: 'Node', tag: str) -> None:
@@ -5213,16 +5231,42 @@ def wait_all(nodes_texts: list, secs: float) -> float | None:
     return None
 
 
+RETRIED_NOW = re.compile(r'retrying (\d+) waiting now, backoff restarted')
+
+
+def netwatch_retried(node: Node, what: str, since: int = 0) -> int | None:
+    """How many waiting objects the node's first netwatch line about `what`
+    ('network changed', 'woke from sleep') after log offset `since` says it
+    retried on a fresh backoff; None without such a line."""
+    for line in node.log_path.read_text(errors='replace')[since:].splitlines():
+        if f'raven-node netwatch: {what}' in line:
+            m = RETRIED_NOW.search(line)
+            return int(m.group(1)) if m else None
+    return None
+
+
 def network_switch(root: Path, netwatch: bool) -> dict:
     """Alice reaches Bob and Carol through proxies (her "network"). The old
     network dies (every connection refused at once) while 3 messages to Bob
     and 2 to Carol wait and back off; then a new network works. With
-    `netwatch` her lab event file says so (a network gone, one new). No LAN
-    beacon under RAVEN_FAULT_BEACON=1 (without_beacon): the lab bus does not
-    die with the proxies."""
+    `netwatch` her lab event file says so (a network gone, one new), and
+    `retried` is how many waiting objects her node says it retried then.
+
+    Nothing may reach around the proxies, and the waits have to grow:
+    - Route hints are held for the three (ENV_NO_HINTS, the debug close; a
+      release build has them on since 2026-10-29). With them Bob's and
+      Carol's hints name their real ports, and every send was delivered
+      there at once while the proxies refused: nothing ever waited.
+    - No LAN beacon under RAVEN_FAULT_BEACON=1 (without_beacon): the lab bus
+      does not die with the proxies.
+    - Alice's raven-node starts again after the warm-ups. A contact it had
+      a LAN link with in the last 10 minutes is tried again within 15 s
+      whatever its backoff (E1, outbox::LAN_SEEN_RETRY, 2026-10-25), and it
+      remembers such links only while it runs. Without the restart no next
+      try gets past 15 s, and a network change has no backoff to restart."""
     net = root / 'a-net.txt'
     net.write_text('up 192.0.2.10/24\n')
-    base = without_beacon(ENV)
+    base = without_beacon(ENV_NO_HINTS)
     env = dict(base, RAVEN_LAB_NETWATCH_EVENTS=str(net))
     a, b, c = Node('a', root, env), Node('b', root, base), Node('c', root, base)
     for n in (a, b, c):
@@ -5233,8 +5277,11 @@ def network_switch(root: Path, netwatch: bool) -> dict:
     a.add(c, 'carol', pc.addr)
     b.add(a, 'alice')
     c.add(a, 'alice')
-    baseline = wait_log(a, 'raven-node netwatch: watching (1 network)', 30)
     warm = [status_word(a.send('bob', 'warmup-b')[1]), status_word(a.send('carol', 'warmup-c')[1])]
+    a.stop()
+    started = log_size(a)
+    a.start(port=int(a.dial.rsplit(':', 1)[1]))
+    baseline = wait_log(a, 'raven-node netwatch: watching (1 network)', 30, started)
     for p in (pb, pc):
         p.mode = 'refuse'
         p.kill_live()
@@ -5262,20 +5309,29 @@ def network_switch(root: Path, netwatch: bool) -> dict:
     return dict(a=a, b=b, net=net, pb=pb, baseline_s=baseline, warm=warm, statuses=statuses,
                 backed_off=backed_off, quiet=quiet,
                 noticed_s=None if noticed is None else round(noticed, 1),
+                retried=netwatch_retried(a, 'network changed', mark) if netwatch else None,
                 all_delivered_s=took, counts=counts, bob_order=order)
 
 
 def s34_network_switch_queued(root: Path) -> dict:
-    """Phase 0b: Alice's network switches while 5 messages to 2 contacts back
-    off; netwatch notices within 10 s and all 5 are delivered within 30 s of
-    the switch, exactly once, Bob's in order. Then a wake from sleep round."""
+    """Phase 0b: Alice's network switches while 5 messages to 2 contacts
+    wait, each queued and backed off to a next try 15 s or more away
+    (network_switch: route hints held, her node started again after the
+    warm-ups). netwatch notices within 10 s and its line says it retried
+    exactly the 5 that waited; all 5 are delivered within 30 s of the
+    switch, exactly once, Bob's in order. Then a wake from sleep round:
+    Bob's side refuses again and one more message to him is queued and
+    retried 3 times; a wake is noticed within 10 s, its line says 1 waiting
+    was retried, and the message is delivered once within 30 s. (Bob
+    answered a minute before, so that message's next try was at most 15 s
+    away anyway, E1: there the proof is the node's count, not the time.)"""
     r = network_switch(root, netwatch=True)
     a, b, net, pb = r.pop('a'), r.pop('b'), r.pop('net'), r.pop('pb')
     pb.mode = 'refuse'
     pb.kill_live()
     rc, out, _ = a.send('bob', 'wake-b-1')
     m = re.search(r'mid=([0-9a-f]{8})', out)
-    wake_backed_off = wait_attempts(a, m.group(1), 4, 120, next_s=15) if m else None
+    wake_backed_off = wait_attempts(a, m.group(1), 3, 120) if m else None
     pb.mode = 'pass'
     mark = log_size(a)
     with open(net, 'a') as f:
@@ -5284,18 +5340,22 @@ def s34_network_switch_queued(root: Path) -> dict:
     woke = wait_log(a, 'raven-node netwatch: woke from sleep', 10, mark)
     got = wait_inbox(b, 'wake-b-1', 30)
     wake_delivered = None if got is None else round(time.time() - t1, 1)
+    wake_retried = netwatch_retried(a, 'woke from sleep', mark)
     log = a.log_path.read_text(errors='replace')
     r.update(
         ok=(r['quiet'] or {}).get('min_next_try_s', 0) >= 15
-        and r['noticed_s'] is not None and r['noticed_s'] <= 10
+        and r['noticed_s'] is not None and r['noticed_s'] <= 10 and r['retried'] == 5
         and r['all_delivered_s'] is not None and r['all_delivered_s'] <= 30
         and all(v == 1 for v in r['counts'].values()) and r['bob_order'] == [1, 2, 3]
         and all(v == 'QUEUED' for v in r['statuses'].values())
-        and woke is not None and wake_delivered is not None and wake_delivered <= 30
+        and status_word(out) == 'QUEUED' and (wake_backed_off or {}).get('attempts', 0) >= 3
+        and woke is not None and wake_retried == 1
+        and wake_delivered is not None and wake_delivered <= 30
         and count(b.inbox(), 'wake-b-1') == 1
         and log.count('raven-node netwatch: network changed') == 1,
         wake_send=(rc, status_word(out)), wake_backed_off=wake_backed_off,
-        woke_s=None if woke is None else round(woke, 1), wake_delivered_s=wake_delivered,
+        woke_s=None if woke is None else round(woke, 1), wake_retried=wake_retried,
+        wake_delivered_s=wake_delivered,
         netwatch=[l for l in log.splitlines() if 'raven-node netwatch:' in l][-4:])
     return r
 
@@ -5304,7 +5364,7 @@ def s34c_switch_without_netwatch(root: Path) -> dict:
     """s34's control: the same switch with no netwatch line; the backoff alone
     delivers (took_s shows what netwatch gains)."""
     r = network_switch(root, netwatch=False)
-    for k in ('a', 'b', 'net', 'pb'):
+    for k in ('a', 'b', 'net', 'pb', 'retried'):
         r.pop(k)
     r['took_s'] = r.pop('all_delivered_s')
     r['ok'] = r['took_s'] is not None and all(v == 1 for v in r['counts'].values())
@@ -7412,13 +7472,22 @@ SIBLING_WOKE = 'raven-node outbox: a contact answered on this network; retrying 
 def s91b_sibling_link_wakes_the_queue(root: Path) -> dict:
     """Cutoff F5 (CP.12; RAVEN_FAULT_OFFLINE=1). s91 with a third node,
     Carol: Alice, Bob and Carol link once at the start, so Alice holds both
-    noise pins. Bob is away about 150 s (longer if Alice's next try is
-    under 30 s off, so her backoff cannot be what delivers) and comes back
+    noise pins. Bob goes away, and Alice's raven-node starts again: a
+    contact it had a LAN link with in the last 10 minutes is tried again
+    within 15 s whatever its backoff (E1, outbox::LAN_SEEN_RETRY,
+    2026-10-25), and it remembers such links only while it runs, so without
+    the restart her next try for Bob is never far enough off for a wake to
+    beat. Her message to Bob is queued and backs off. Bob is away about
+    150 s (longer while Alice's next try is under 45 s off) and comes back
     silent on his address; then Carol links to Alice (she sends): Bob's
-    message is delivered within 15 s of that link (delivered_after_link_s;
-    next_try_before_link is what Alice's backoff alone would have waited)
-    and Alice logs 'a contact answered on this network; retrying 1 others'.
-    Each message exactly once."""
+    message is delivered within 15 s of that link (delivered_after_link_s)
+    while Alice's own next try was still 30 s or more away
+    (next_try_before_link), so her backoff cannot be what delivered it:
+    Carol's link woke it. Each message exactly once. Alice's line 'a
+    contact answered on this network; retrying 1 others' comes at most once
+    in 10 minutes, and a link with Carol soon after the restart (route
+    hints: each tells the other its routes) uses it up while Bob is still
+    away: woke_lines is recorded, not required."""
     a, b = pair(root)
     c = Node('c', root)
     c.init()
@@ -7430,15 +7499,17 @@ def s91b_sibling_link_wakes_the_queue(root: Path) -> dict:
     pinned = b.pub in pins and c.pub in pins
     port = int(b.dial.rsplit(':', 1)[1])
     b.stop()
+    a.stop()
+    a.start(port=int(a.dial.rsplit(':', 1)[1]))
     t_away = time.time()
     rc, out, send_s = a.send('bob', 's91b-m1')
     m = re.search(r'mid=([0-9a-f]{8})', out)
     mid = m.group(1) if m else ''
     time.sleep(max(0.0, 150 - (time.time() - t_away)))
     t_wait = time.time()
-    while mid and time.time() - t_wait < 90:
+    while mid and time.time() - t_wait < 120:
         st = a.ash('outbox', 'status', mid).stdout
-        if (next_try_s(outbox_field(st, 'next try')) or 0) >= 30:
+        if (next_try_s(outbox_field(st, 'next try')) or 0) >= 45:
             break
         time.sleep(0.5)
     away_s = round(time.time() - t_away, 1)
@@ -7459,8 +7530,8 @@ def s91b_sibling_link_wakes_the_queue(root: Path) -> dict:
             's91b-carol-hello': count(a.inbox(), 's91b-carol-hello')}
     return dict(
         ok=warm == [0, 0] and pinned and status_word(out) == 'QUEUED' and m is not None
-        and (next_try_s(next_try) or 0) >= 15 and early == 0 and back[0] == 0
-        and took is not None and took <= 15 and woke == 1
+        and (next_try_s(next_try) or 0) >= 30 and early == 0 and back[0] == 0
+        and took is not None and took <= 15
         and once == {'s91b-m1': 1, 's91b-carol-hello': 1},
         warmups=warm, pinned=pinned, send=(rc, status_word(out), round(send_s, 1)),
         away_s=away_s, next_try_before_link=next_try, delivered_before_link=early,
@@ -7469,26 +7540,51 @@ def s91b_sibling_link_wakes_the_queue(root: Path) -> dict:
         outbox=a.outbox()[-400:])
 
 
+def last_error_code(status: str) -> str | None:
+    """The code of `ash outbox status`'s `last error` row: the row is the
+    code alone, or words with the code after them in brackets (E2 r38:
+    '... isn't receiving right now (it may be locked or closed)
+    (NOT_LISTENING)'). None without the row."""
+    row = outbox_field(status, 'last error')
+    if row is None:
+        return None
+    m = re.search(r'\(([A-Z][A-Z0-9_]+)\)$', row)
+    return m.group(1) if m else row
+
+
 def s92_name_route_while_away(root: Path) -> dict:
     """Cutoff F1 (CP.9; RAVEN_FAULT_OFFLINE=1). Alice and Bob link once (a
-    session), then Alice's saved route for Bob becomes a computer name that
-    resolves nowhere (x-nohost.local on his port): Bob is away. One send with
-    the gate closed (RAVEN_LAB_OFFLINE=0 for that ash only) records today's
-    NOT SENT ... CONTACT_NOT_VERIFIED. Gate open: (a) Bob unverified, the send
-    is QUEUED within 6 s saying his computer name x-nohost.local could not be
-    found, and raven-node holds it as NOT_REACHABLE (never
+    session; Bob's route hints tell Alice his LAN port, hinted_port). Then
+    Bob is away: his raven-node stops, and Alice's saved route for him
+    becomes a computer name that resolves nowhere (x-nohost.local on his
+    port). His node has to be down for that: route hints are on in a
+    release build since 2026-10-29, and while it ran on, every send was
+    delivered at the address they told, whatever the name did. One send
+    with the gate closed (RAVEN_LAB_OFFLINE=0 for that ash only) records
+    today's NOT SENT ... CONTACT_NOT_VERIFIED. Gate open: (a) Bob
+    unverified, the send is QUEUED within 6 s saying his computer name
+    x-nohost.local could not be found, and raven-node keeps trying it with
+    a reachability error (NOT_LISTENING here: the hinted address is this
+    computer, where nothing listens on his port now; never
     CONTACT_NOT_VERIFIED); (b) Bob verified (pinned), QUEUED with the same
-    cause, never 'could not be completed'. Then `contact set-addr` back to
-    his literal address: both messages arrive exactly once with no new send
-    (delivered_after_s); the gate-closed one never does. No LAN beacon under
-    RAVEN_FAULT_BEACON=1 (without_beacon): Bob's node keeps running, and the
-    beacon would find it past the name."""
+    cause, never 'could not be completed'. Then Bob comes back on his port
+    and stays silent, his name still resolving nowhere and Alice's book
+    still naming it: both messages arrive exactly once within 60 s with no
+    new send and no new address typed, at the address his route hints told
+    (delivered_after_return_s); the gate-closed one never does. No LAN
+    beacon under RAVEN_FAULT_BEACON=1 (without_beacon): it would find Bob
+    past the name by itself."""
     a, b = pair(root, env=without_beacon(ENV))
     warm = a.send('bob', 's92-warmup')
     port = int(b.dial.rsplit(':', 1)[1])
     name = f'x-nohost.local:{port}'
     not_found = ("Bob's computer name x-nohost.local could not be found on this network "
                  '(Bob may be away, or on another network)')
+    # While Bob's node still answers: his fingerprint for (b), and what his
+    # route hints told Alice.
+    fp = b.fingerprint()
+    hinted = wait_until(lambda: (learned_entry(a, b) or {}).get('lan_port') == port, 10)
+    b.stop()
     a.set_lan('bob', name)
     gate_open = a.env
     a.env = dict(gate_open, RAVEN_LAB_OFFLINE='0')
@@ -7499,38 +7595,42 @@ def s92_name_route_while_away(root: Path) -> dict:
     mid1, last1 = item_id(a, 's92-m1'), None
     t0 = time.time()
     while mid1 and last1 is None and time.time() - t0 < 30:
-        last1 = outbox_field(a.ash('outbox', 'status', mid1).stdout, 'last error')
+        last1 = last_error_code(a.ash('outbox', 'status', mid1).stdout)
         time.sleep(1)
-    a.add_pinned(b, 'bob', name)
+    a.add_pinned(b, 'bob', name, fp=fp)
     rc2, out2, send2_s = a.send('bob', 's92-m2')
-    a.set_lan('bob', b.dial)
+    b.start(port=port)
     tokens = ('s92-m1', 's92-m2')
     took: dict = {t: None for t in tokens}
-    t_fix = time.time()
-    while time.time() - t_fix < 150 and None in took.values():
+    t_back = time.time()
+    while time.time() - t_back < 60 and None in took.values():
         inbox = b.inbox()
         for t in tokens:
             if took[t] is None and count(inbox, t):
-                took[t] = round(time.time() - t_fix, 1)
+                took[t] = round(time.time() - t_back, 1)
         time.sleep(1)
     time.sleep(2)
     inbox = b.inbox()
     once = {t: count(inbox, t) for t in tokens + ('s92-closed',)}
+    saved = saved_lan_dial(a, b)
     return dict(
-        ok=warm[0] == 0 and status_word(out0) == 'NOT_SENT' and 'CONTACT_NOT_VERIFIED' in out0
+        ok=warm[0] == 0 and hinted is not None
+        and status_word(out0) == 'NOT_SENT' and 'CONTACT_NOT_VERIFIED' in out0
         and f'{name} could not be resolved' in out0
         and status_word(out1) == 'QUEUED' and send1_s <= 6 and not_found in out1
-        and 'CONTACT_NOT_VERIFIED' not in out1 and last1 == 'NOT_REACHABLE'
+        and 'CONTACT_NOT_VERIFIED' not in out1
+        and last1 in ('NOT_REACHABLE', 'NOT_LISTENING')
         and status_word(out2) == 'QUEUED' and not_found in out2
         and 'could not be completed' not in out2
-        and all(v is not None for v in took.values())
+        and all(v is not None for v in took.values()) and saved == name
         and once == {'s92-m1': 1, 's92-m2': 1, 's92-closed': 0},
-        warmup=(warm[0], status_word(warm[1])),
+        warmup=(warm[0], status_word(warm[1])), hinted_port=hinted is not None,
         gate_closed=(rc0, status_word(out0), round(send0_s, 1)), gate_closed_text=out0[-500:],
         unverified=(rc1, status_word(out1), round(send1_s, 1)), unverified_text=out1[-500:],
         unverified_last_error=last1,
         verified=(rc2, status_word(out2), round(send2_s, 1)), verified_text=out2[-500:],
-        delivered_after_s=took, exactly_once=once, outbox=a.outbox()[-400:])
+        delivered_after_return_s=took, exactly_once=once,
+        saved_route_is_the_name=saved == name, outbox=a.outbox()[-400:])
 
 
 def s93_first_message_unreachable(root: Path) -> dict:
@@ -7571,39 +7671,82 @@ def s93_first_message_unreachable(root: Path) -> dict:
 
 
 def s93b_session_ended_says_meet_first(root: Path) -> dict:
-    """Cutoff M2 (RAVEN_FAULT_OFFLINE=1; LabClock, so both profiles run with
-    the lab unlock). Alice and Bob pair (a message delivered), Bob goes
-    down, and Alice's clock moves 25 h ahead: their session (a day from its
-    PairInit) has ended. Her raven-node restarts, which prunes the expired
-    session; her next send is NOT SENT and says the secure connection with
-    Bob ended (never 'a first message needs'), and nothing waits in her
-    outbox or is marked queued. One wake from sleep per jump."""
-    clock = LabClock(root / 'alice.clock')
+    """Cutoff M2 (RAVEN_FAULT_OFFLINE=1; one LabClock for both profiles, so
+    both run with the lab unlock). Alice and Bob pair (a message delivered),
+    Bob goes down, and the clock moves 25 h ahead: their session (a day from
+    its PairInit) has ended. Alice's raven-node restarts, which prunes the
+    expired session. Her next send is kept by the long message horizon
+    (release behaviour since 2026-10-29; before it this send was NOT SENT):
+    QUEUED with HORIZON_PARKED, saying that RAVEN first sets up a new secure
+    connection when both are on the same network and then sends it (never
+    'a first message needs', never NOT SENT), with a deadline on this
+    computer's clock 7 days after it was written; her outbox lists it as
+    waiting and her history says queued. Then Bob comes back on his port
+    and stays silent: with no new send and no `raven outbox retry`, Alice's
+    raven-node sets up a new session, seals the message again once
+    (`resealed=1`) and delivers it exactly once within 90 s
+    (arrived_after_return_s); her history says delivered, nothing is left
+    waiting, and Bob's reply over the new session is delivered once. One
+    wake from sleep per jump. s94 keeps the horizon-held half (NOT SENT)."""
+    clock = LabClock(root / 'lab.clock')
     a = Node('a', root, env=clock.env(ENV))
-    b = Node('b', root, env=dict(ENV, RAVEN_LAB_TEST_A='1'))
+    b = Node('b', root, env=clock.env(ENV))
     a.init(); b.init()
     a.start(); b.start()
     a.add_pinned(b, 'bob')
     b.add_pinned(a, 'alice')
     warm = a.send('bob', 's93b-warmup')
+    a_port, b_port = (int(n.dial.rsplit(':', 1)[1]) for n in (a, b))
     b.stop()
     since = log_size(a)
-    clock.advance(25 * 3600 * 1000)
+    clock.advance(25 * HOUR_MS)
     woke = wait_log(a, LabClock.WOKE, 15, since)
     a.stop()
-    a.start()
-    rc, out, send_s = a.send('bob', 's93b-m1')
+    a.start(port=a_port)
+    pruned = wait_for(lambda: session_heads(a) == 0, 30)
+    text = 's93b-m1'
+    t_send = int(time.time() * 1000)
+    rc, out, send_s = a.send('bob', text)
     outbox = a.outbox()
+    deadlines = waiting_deadlines(a)
+    # 7 days after it was written, on the clock it was written by (25 h ahead).
+    ahead = clock.offset_ms + 7 * DAY_MS
+    in_window = len(deadlines) == 1 and all(
+        t_send + ahead - 5_000 <= d <= int(time.time() * 1000) + ahead
+        for d in deadlines.values())
+    parked_history = out_states(a, [text])
+    b.start(port=b_port)
+    t_back = time.time()
+    arrived = wait_until(lambda: count(b.inbox(), text) > 0, 90)
+    arrived_s = None if arrived is None else round(time.time() - t_back, 1)
+    time.sleep(5)  # a second copy would be in by now
+    once = count(b.inbox(), text)
+    delivered = wait_until(lambda: all_states(a, [text], 'delivered'), 30, 1)
+    steps = horizon_steps(a)
+    left = waiting_deadlines(a)
+    reply = b.send('alice', 's93b-reply')
+    reply_once = count(a.inbox(), 's93b-reply')
+    wakes = a.log_path.read_text(errors='replace').count(LabClock.WOKE)
     return dict(
-        ok=warm[0] == 0 and status_word(warm[1]) == 'DELIVERED' and rc != 0
-        and status_word(out) == 'NOT_SENT'
-        and "RAVEN's secure connection with Bob ended" in out
-        and 'Send it when you meet.' in out
-        and 'a first message needs' not in out and only_local_zone(out)
-        and 'queued' not in outbox and 's93b-m1' not in outbox and woke is not None,
-        warmup=(warm[0], status_word(warm[1])), woke_s=woke,
+        ok=warm[0] == 0 and status_word(warm[1]) == 'DELIVERED' and woke is not None
+        and wakes == 1 and pruned is not None
+        and rc != 0 and status_word(out) == 'QUEUED' and 'HORIZON_PARKED' in out
+        and 'RAVEN first sets up a new secure connection, then sends it' in out
+        and 'NOT SENT' not in out and 'a first message needs' not in out
+        and bool(LOCAL_DEADLINE.search(out)) and only_local_zone(out)
+        and in_window and 'waiting' in outbox and text in outbox
+        and parked_history == {text: ['queued']}
+        and arrived is not None and once == 1 and delivered is not None
+        and sum(s[1] for s in steps) == 1 and not left and session_heads(a) == 1
+        and reply[0] == 0 and status_word(reply[1]) == 'DELIVERED' and reply_once == 1,
+        warmup=(warm[0], status_word(warm[1])), woke_s=woke, wakes=wakes, pruned_s=pruned,
         send=(rc, status_word(out), round(send_s, 1)), send_text=out[-700:],
-        outbox=outbox[-300:])
+        outbox=outbox[-300:], deadlines=deadlines, deadline_in_window=in_window,
+        parked_history=parked_history, arrived_after_return_s=arrived_s, exactly_once=once,
+        delivered_s=took(delivered), history=out_states(a, [text]), horizon_steps=steps,
+        still_waiting=len(left), sessions=(session_heads(a), session_heads(b)),
+        reply=(reply[0], status_word(reply[1])), reply_once=reply_once,
+        outbox_end=a.outbox()[-300:])
 
 
 # The clock sentences of cutoff pack CP.7 (ash ext.rs, cli.rs).
