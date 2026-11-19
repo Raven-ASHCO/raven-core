@@ -1381,7 +1381,27 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
 
         let _ = inner.last_uploaded.insert(now);
 
-        for period_ctx in inner.time_periods.iter_mut() {
+        // Raven (RAVEN_DELTA.md): the round uploads to every time period that
+        // needs the descriptor. Upstream ended it at the first one that needs
+        // nothing, and the time periods after it waited.
+        let dirty = inner
+            .time_periods
+            .iter()
+            .map(|ctx| {
+                ctx.hs_dirs
+                    .iter()
+                    .filter(|(_, status)| *status == DescriptorStatus::Dirty)
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        let wanted = crate::raven_delta::periods_to_upload(&dirty);
+
+        for (place, period_ctx) in inner.time_periods.iter_mut().enumerate() {
+            if !wanted.contains(&place) {
+                trace!("the descriptor is clean for all HSDirs of this time period. Nothing to do");
+                continue;
+            }
+
             let upload_task_complete_tx = self.upload_task_complete_tx.clone();
 
             // Figure out which HsDirs we need to upload the descriptor to (some of them might already
@@ -1397,11 +1417,6 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
                     }
                 })
                 .collect::<Vec<_>>();
-
-            if hs_dirs.is_empty() {
-                trace!("the descriptor is clean for all HSDirs. Nothing to do");
-                return Ok(());
-            }
 
             let time_period = period_ctx.params.time_period();
             // This scope exists because rng is not Send, so it needs to fall out of scope before we

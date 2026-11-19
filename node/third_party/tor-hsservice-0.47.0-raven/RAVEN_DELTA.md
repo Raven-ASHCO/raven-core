@@ -32,6 +32,8 @@ revision at the HsDirs and new circuits for the helper.
 |---|---|
 | `src/raven_delta.rs` | new: `push_unless_waiting`, which adds a timer only when none like it waits |
 | `src/publish/reactor.rs` | `handle_upload_results` adds a reupload timer only when the time period has none; the one that waits, the earlier, stays. Otherwise it logs `descriptor reupload already scheduled` (debug) |
+| `src/raven_delta.rs` | new: `periods_to_upload`, the time periods an upload round uploads to: every one that needs the descriptor |
+| `src/publish/reactor.rs` | `upload_all` goes on past a time period whose HsDirs all have the descriptor; upstream ended the round there |
 | `src/lib.rs` | `pub mod raven_delta` |
 | `Cargo.toml` | description notes the patch |
 
@@ -41,10 +43,31 @@ than upstream's 120 minutes. A later timer in its place could be put off again
 and again by uploads to single HsDirs, and an HsDir drops a descriptor it has
 held for its lifetime.
 
+### Every time period that needs the descriptor gets it
+
+Upstream's upload round (`Reactor::upload_all`) walks the time periods, the
+current one first, and returns at the first whose HsDirs all have the
+descriptor. A time period after it that needs the descriptor then waits until
+the current one needs an upload as well. Upstream's many timers hid that: one
+of the current time period's fired every few minutes. With one timer per time
+period it shows: when the second time period's timer fires while the current
+one is clean, nothing is uploaded and the second waits for the current one's
+timer, up to two hours more. Its HsDirs would then hold a descriptor for up to
+four hours, longer than its lifetime of three (`IPT_PUBLISH_CERTAIN`), so they
+drop it. The second time period is where a client on the other side of the
+daily change (12:00 UTC) looks, so for a part of an hour around that change
+such a friend could not find this device.
+
+The round now uploads to every time period that needs the descriptor
+(`raven_delta::periods_to_upload`); one that needs nothing is passed over.
+
 The crate's own tests need crates that Raven does not vendor. The patch is
 tested from `raven-node` (feature `tor`):
 `the_hsservice_patch_keeps_one_reupload_timer_per_time_period` plays two days
-of one time period with upstream's rule and with this one.
+of one time period with upstream's rule and with this one, and
+`the_hsservice_patch_uploads_to_every_time_period_that_needs_it` plays two
+days of two time periods with upstream's round and with this one.
 
 Drop this fork once a crates.io release that keeps one reupload timer per time
-period is in `Cargo.lock`.
+period, and whose upload round passes over a clean time period, is in
+`Cargo.lock`.

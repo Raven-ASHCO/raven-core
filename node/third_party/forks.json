@@ -123,16 +123,16 @@
         "version": "0.47.0",
         "crate_sha256": "55809560d9295dcc2ee77002c5a4275d1f5f5a54203de7cd6acb52215f5344bd"
       },
-      "why": "one descriptor reupload timer per time period: upstream adds one on every upload result and each fires an upload of its own, so an onion service that stays up uploads its descriptor more and more often (RAVEN_DELTA.md)",
+      "why": "one descriptor reupload timer per time period: upstream adds one on every upload result and each fires an upload of its own, so an onion service that stays up uploads its descriptor more and more often; and an upload round uploads to every time period that needs the descriptor: upstream ends it at the first that needs nothing, and the time period a client across the daily change looks in then waits past its descriptor's lifetime (RAVEN_DELTA.md)",
       "delta": {
         "modified": {
           "Cargo.toml": "7a83c8cb19d1d0d7d3b9297fecf8a2de3d69810c394ed466dcf3b8e0cc7d9229",
           "src/lib.rs": "7fa48e11f69c13549f485a1a1a563e60c10ee32ba521e750c6799cb7a227e447",
-          "src/publish/reactor.rs": "fccdf711e3428acbde1b7e653a34380719645ad9fbbcb5f00d8a58f07686e893"
+          "src/publish/reactor.rs": "52225a53b104ad3c26d19bccf9728a531e92dc1222a0119386fd2de19cd7771d"
         },
         "added": {
-          "RAVEN_DELTA.md": "adb109cfb94c0ad22b0c5028ef0beea14a3d3dfa1f48f6f6f6d611d7742fba68",
-          "src/raven_delta.rs": "93310464d150246da772f0052c9ae2eeef700d1f03de8152b8c719b58bb35664"
+          "RAVEN_DELTA.md": "fc1b93c5dd66dadb8982c27479926006e79d981baf6a126e9829bddfd3dd774f",
+          "src/raven_delta.rs": "19ed12ecbe8dcf64742526de9d32107af9a4dde2d978c96993f2de9f35fc3b1f"
         },
         "removed": [
           "Cargo.lock"

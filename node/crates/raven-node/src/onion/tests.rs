@@ -1731,6 +1731,93 @@ fn the_hsservice_patch_keeps_one_reupload_timer_per_time_period() {
     assert!(longest <= 120, "an HsDir waited {longest} minutes");
 }
 
+/// The second change of the vendored `tor-hsservice` patch (RAVEN_DELTA.md):
+/// an upload round uploads to every time period that needs the descriptor.
+///
+/// Two time periods, the current one first, each with its one reupload timer
+/// (the first change), played minute by minute for two days. A timer that
+/// fires marks its time period dirty and asks for a round. Upstream's round
+/// ended at the first time period that needs nothing, so when the second
+/// one's timer fired while the current one was clean, nothing went out and
+/// the second waited for the current one's timer: its HsDirs then held a
+/// descriptor for longer than its lifetime of three hours and dropped it.
+#[cfg(feature = "tor")]
+#[test]
+fn the_hsservice_patch_uploads_to_every_time_period_that_needs_it() {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    /// Upstream's round: it stops at the first time period that needs nothing.
+    fn upstream(dirty: &[usize]) -> Vec<usize> {
+        (0..dirty.len())
+            .take_while(|place| dirty[*place] > 0)
+            .collect()
+    }
+
+    /// The longest time, in minutes, the HsDirs of each of the two time
+    /// periods went without a new descriptor.
+    fn two_days(round: fn(&[usize]) -> Vec<usize>) -> [u64; 2] {
+        const HSDIRS: usize = 8;
+        let mut timers: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut dirty = [HSDIRS, HSDIRS];
+        let (mut uploaded_at, mut longest) = ([0_u64; 2], [0_u64; 2]);
+        let mut asked = true;
+        for now in 0..=48 * 60_u64 {
+            while timers.peek().is_some_and(|timer| timer.0 .0 <= now) {
+                let Reverse((_, place)) = timers.pop().expect("peeked");
+                dirty[place] = HSDIRS;
+                asked = true;
+            }
+            if !asked {
+                continue;
+            }
+            asked = false;
+            for place in round(&dirty) {
+                dirty[place] = 0;
+                longest[place] = longest[place].max(now - uploaded_at[place]);
+                uploaded_at[place] = now;
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let timer = Reverse((now + 60 + (seed >> 33) % 61, place));
+                tor_hsservice::raven_delta::push_unless_waiting(&mut timers, timer, |a, b| {
+                    a.0 .1 == b.0 .1
+                });
+            }
+        }
+        // A time period still waiting at the end has waited since its last upload.
+        for place in 0..2 {
+            if dirty[place] > 0 {
+                longest[place] = longest[place].max(48 * 60 - uploaded_at[place]);
+            }
+        }
+        longest
+    }
+
+    // The rule itself: every time period that needs the descriptor, wherever it stands.
+    use tor_hsservice::raven_delta::periods_to_upload;
+    assert_eq!(periods_to_upload(&[0, 8]), [1]);
+    assert_eq!(periods_to_upload(&[8, 0, 3]), [0, 2]);
+    assert_eq!(periods_to_upload(&[0, 0]), Vec::<usize>::new());
+    assert_eq!(upstream(&[0, 8]), Vec::<usize>::new());
+
+    let [current, second] = two_days(upstream);
+    assert!(
+        current <= 120,
+        "upstream, the current time period: {current} minutes"
+    );
+    assert!(
+        second > 180,
+        "upstream: the second time period's HsDirs outlive the descriptor ({second} minutes)"
+    );
+    let [current, second] = two_days(periods_to_upload);
+    assert!(
+        current <= 120 && second <= 120,
+        "an HsDir waited {current} or {second} minutes"
+    );
+}
+
 /// Tor is on in release builds (since 2026-10): raven-node's Status carries
 /// its line, and so its start percentage, without a lab switch (the apps'
 /// progress bar reads it from the engine's `network.status`).

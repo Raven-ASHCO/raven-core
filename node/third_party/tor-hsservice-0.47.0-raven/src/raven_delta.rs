@@ -1,5 +1,6 @@
-//! Raven's change to this crate (RAVEN_DELTA.md): the descriptor publisher
-//! keeps one reupload timer per time period.
+//! Raven's changes to this crate (RAVEN_DELTA.md): the descriptor publisher
+//! keeps one reupload timer per time period, and an upload round uploads to
+//! every time period that needs the descriptor.
 //!
 //! Upstream adds a timer on every upload result
 //! (`Reactor::handle_upload_results`) and takes one away only when it fires.
@@ -32,4 +33,28 @@ pub fn push_unless_waiting<T: Ord>(
     }
     waiting.push(timer);
     true
+}
+
+/// The time periods an upload round uploads to: every one with an HsDir that
+/// needs the descriptor.
+///
+/// `dirty` is, for each time period in the publisher's order (the current one
+/// first), how many of its HsDirs need the descriptor. Returns the places of
+/// the time periods to upload to.
+///
+/// Upstream ends the round at the first time period that needs nothing
+/// (`Reactor::upload_all` returns there), so a later time period waits until
+/// the first one needs an upload as well. Upstream's many timers hid that:
+/// one of the first time period's fired every few minutes. With one timer per
+/// time period the wait is up to two hours more, and the HsDirs of the second
+/// time period would hold a descriptor for up to four hours: longer than its
+/// lifetime of three, so they drop it. The second time period is the one that
+/// a client on the other side of the daily change looks in.
+pub fn periods_to_upload(dirty: &[usize]) -> Vec<usize> {
+    dirty
+        .iter()
+        .enumerate()
+        .filter(|(_, needing)| **needing > 0)
+        .map(|(place, _)| place)
+        .collect()
 }
