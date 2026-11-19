@@ -156,8 +156,16 @@ const CONFUSABLES: &[(char, char)] = &[
     ('\u{03BD}', 'v'),
 ];
 
+/// A name as it is compared with other names. The joiner and the non-joiner
+/// may stand in a name (the Persian half-space, a joined emoji), and where
+/// they change nothing on screen two names that differ only by one look the
+/// same: they are left out here, so such a pair is the same name.
 fn name_key(name: &str) -> String {
-    raven_core::sanitize::sanitize_terminal_line(name.trim()).to_lowercase()
+    raven_core::sanitize::sanitize_terminal_line(name.trim())
+        .chars()
+        .filter(|c| !matches!(c, '\u{200C}' | '\u{200D}'))
+        .collect::<String>()
+        .to_lowercase()
 }
 
 fn fold_confusables(name: &str) -> String {
@@ -807,6 +815,29 @@ mod tests {
         );
         // The same friend may keep their own name.
         assert!(check_name(&list, "Desk", &list[1].pub_hex).is_ok());
+    }
+
+    /// A joiner or a non-joiner that a name may now keep changes nothing on
+    /// screen after a letter that never joins: such a name looks exactly
+    /// like the one without it, and is that name here.
+    #[test]
+    fn names_that_differ_only_by_a_joiner_clash() {
+        // A Persian name; its first letter never joins the next one.
+        let list = vec![view("\u{0631}\u{0636}\u{0627}", 3, true)];
+        let new_key = hex::encode(Identity::from_seed(&[9; 32]).public_key_bytes());
+        for hidden in ['\u{200C}', '\u{200D}'] {
+            let twin: String = ['\u{0631}', hidden, '\u{0636}', '\u{0627}']
+                .iter()
+                .collect();
+            assert_eq!(
+                check_name(&list, &twin, &new_key).unwrap_err().code,
+                code::NAME_CLASH
+            );
+        }
+        // Another name is still another name.
+        assert!(check_name(&list, "\u{0631}\u{0636}\u{0648}\u{06CC}", &new_key).is_ok());
+        // And the friend keeps their own, with or without it.
+        assert!(check_name(&list, "\u{0631}\u{200C}\u{0636}\u{0627}", &list[0].pub_hex).is_ok());
     }
 
     #[test]
