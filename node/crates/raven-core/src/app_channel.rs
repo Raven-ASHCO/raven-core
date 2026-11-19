@@ -1409,12 +1409,13 @@ mod tests {
             assert!(store::get(d, &offer.handle).unwrap().is_none());
         }
         let _gate = AttGate::set(true);
-        // Live, from someone not verified: the stored form, and no row.
+        // Live, from someone not verified: offers are taken from verified
+        // friends only, so it stays as it came, as a build without
+        // attachments keeps it (no stored form whose preview and caption a
+        // reader would open), and has no row.
         write("in", &stranger, 2);
         let row = row_of(&stranger, "in");
-        assert_eq!(row.body, offer.stored().encode());
-        assert_eq!(row.preview, "Photo");
-        assert!(!row.body.contains(&key) && !row.body.contains(&root));
+        assert_eq!(row.body, photo);
         assert!(!row.is_hidden());
         assert!(store::get(d, &offer.handle).unwrap().is_none());
 
@@ -1433,11 +1434,14 @@ mod tests {
         let row = row_of(&friend, "in");
         assert_eq!(row.body, offer.stored().encode());
         assert_eq!(row.preview, "Photo");
+        assert!(!row.body.contains(&key) && !row.body.contains(&root));
         let kept = store::get(d, &offer.handle).unwrap().unwrap();
         assert_eq!(
             (kept.state, kept.peer_key()),
             (State::Incoming, Some(friend))
         );
+        // The offer of the one who is not verified is not taken up.
+        assert_eq!(row_of(&stranger, "in").body, photo);
         assert_eq!(
             crate::attachment::flow::adopt_kept_offers(d, 21).unwrap(),
             0

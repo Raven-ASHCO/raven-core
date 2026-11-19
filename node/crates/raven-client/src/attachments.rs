@@ -1695,6 +1695,21 @@ mod tests {
         profile_with(friend, true)
     }
 
+    /// One more verified friend in the profile `dir`, whose Raven takes
+    /// photos.
+    fn befriend(dir: &Path, friend: &[u8; 32], name: &str) {
+        let path = dir.join("contacts.json");
+        let mut rows: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        rows.as_array_mut().unwrap().push(json!({
+            "petname": name,
+            "pub_hex": hex::encode(friend),
+            "address": "",
+            "pinned": true,
+        }));
+        std::fs::write(&path, rows.to_string()).unwrap();
+        peers::note(dir, friend, true, 1).unwrap();
+    }
+
     /// A photo of mine for `friend`, sealed in `dir` (the gate is open):
     /// its handle, its offer and its own bytes.
     fn photo(
@@ -2482,6 +2497,8 @@ mod tests {
         // same way, the same offer).
         let other = profile(&FRIEND);
         let o = other.path();
+        // Both are verified friends: an offer is taken from nobody else.
+        befriend(o, &OTHER, "Lily");
         let (_, offer, _) = photo(o, &OTHER, 50_000, "");
         history_row(o, "out", &FRIEND, 5, "delivered", &offer);
         history_row(o, "in", &OTHER, 6, "received", &offer);

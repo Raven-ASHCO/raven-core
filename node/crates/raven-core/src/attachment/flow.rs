@@ -371,16 +371,23 @@ pub fn history_body(
         if !attachment_gate::attachments_live() {
             return Ok(None);
         }
-        if is_friend(data_dir, peer) {
-            let kept = keep_offer(data_dir, peer, message_id, &offer, text, now_ms)
-                .map_err(|e| e.to_string())?;
-            // No room for its row now: the offer stays as it came (as a
-            // build without attachments keeps it), key and all, so that it
-            // is not lost: it is taken up when there is room again. The
-            // stored form holds no key, and could never be fetched.
-            if kept == Kept::NoRoom {
-                return Ok(None);
-            }
+        // Offers are taken from verified friends only (design 8.3). Anyone
+        // else's stays as it came, as a build without attachments keeps
+        // it: readers say only that a photo was sent, and no preview,
+        // caption or size of theirs is opened or handed to an app. It is
+        // taken up at the node's first start after they are verified
+        // ([`adopt_kept_offers`]).
+        if !is_friend(data_dir, peer) {
+            return Ok(None);
+        }
+        let kept = keep_offer(data_dir, peer, message_id, &offer, text, now_ms)
+            .map_err(|e| e.to_string())?;
+        // No room for its row now: the offer stays as it came (as a
+        // build without attachments keeps it), key and all, so that it
+        // is not lost: it is taken up when there is room again. The
+        // stored form holds no key, and could never be fetched.
+        if kept == Kept::NoRoom {
+            return Ok(None);
         }
     }
     let stored = offer.stored();
@@ -389,10 +396,12 @@ pub fn history_body(
 }
 
 /// Attachments went live in this profile after a build that only kept
-/// offers (phase 1a): every friend's offer the history kept as it came
-/// takes its stored form now, and a verified friend's gets its row, so its
-/// chunks can come. The rows rewritten. Nothing happens while the gate is
-/// shut, and nothing is written when no row holds an offer.
+/// offers (phase 1a), or a contact whose offer was kept as it came has been
+/// verified since: every verified friend's offer the history kept as it came
+/// takes its stored form and gets its row, so its chunks can come. An offer
+/// of anyone else stays as it came ([`history_body`]). The rows rewritten.
+/// Nothing happens while the gate is shut, and nothing is written when no
+/// row holds a verified friend's offer.
 pub fn adopt_kept_offers(data_dir: &Path, now_ms: u64) -> Result<usize, String> {
     if !attachment_gate::attachments_live() {
         return Ok(0);
@@ -406,13 +415,14 @@ pub fn adopt_kept_offers(data_dir: &Path, now_ms: u64) -> Result<usize, String> 
         let mut mid = [0u8; 16];
         hex::decode_to_slice(&entry.peer_pub_hex, &mut peer).ok()?;
         hex::decode_to_slice(&entry.message_id_hex, &mut mid).ok()?;
-        if is_friend(data_dir, &peer) {
-            // A row that cannot be written now, or has no room, leaves the
-            // offer as it is: the next start tries again.
-            let kept = keep_offer(data_dir, &peer, &mid, &offer, &entry.body, now_ms).ok()?;
-            if kept == Kept::NoRoom {
-                return None;
-            }
+        if !is_friend(data_dir, &peer) {
+            return None;
+        }
+        // A row that cannot be written now, or has no room, leaves the
+        // offer as it is: the next start tries again.
+        let kept = keep_offer(data_dir, &peer, &mid, &offer, &entry.body, now_ms).ok()?;
+        if kept == Kept::NoRoom {
+            return None;
         }
         let stored = offer.stored();
         Some((stored.encode(), stored.list_words().unwrap_or_default()))
