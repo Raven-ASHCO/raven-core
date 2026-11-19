@@ -340,11 +340,24 @@ mod tests {
         assert!(staged.exists() && orphan.exists());
         // Old ones go.
         let old = SystemTime::now() - Duration::from_millis(UNSENT_GRACE_MS + 60_000);
-        let touch = |path: &Path| {
-            std::fs::File::open(path)
-                .and_then(|f| f.set_modified(old))
-                .unwrap();
+        let touch_at = |path: &Path, at: SystemTime| {
+            #[cfg(not(windows))]
+            let file = std::fs::File::open(path);
+            // Windows sets a time only through a handle that may write the
+            // attributes, and opens a folder only with backup semantics.
+            #[cfg(windows)]
+            let file = {
+                use std::os::windows::fs::OpenOptionsExt;
+                const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+                const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+                std::fs::OpenOptions::new()
+                    .access_mode(FILE_WRITE_ATTRIBUTES)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(path)
+            };
+            file.and_then(|f| f.set_modified(at)).unwrap();
         };
+        let touch = |path: &Path| touch_at(path, old);
         touch(&staged);
         touch(&orphan);
         let swept = sweep(d, now).unwrap();
@@ -353,14 +366,10 @@ mod tests {
         // A staged file goes sooner than the rest: it is not sealed.
         let staged = store::stage(d, "photo.jpg").unwrap();
         let recent = SystemTime::now() - Duration::from_millis(STAGED_GRACE_MS - 60_000);
-        std::fs::File::open(&staged)
-            .and_then(|f| f.set_modified(recent))
-            .unwrap();
+        touch_at(&staged, recent);
         assert_eq!(sweep(d, now).unwrap().staged, 0);
         let left = SystemTime::now() - Duration::from_millis(STAGED_GRACE_MS + 60_000);
-        std::fs::File::open(&staged)
-            .and_then(|f| f.set_modified(left))
-            .unwrap();
+        touch_at(&staged, left);
         assert_eq!(sweep(d, now).unwrap().staged, 1);
         // And all of them go when an app starts to stage anew.
         let (one, two) = (
