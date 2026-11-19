@@ -1558,9 +1558,39 @@ fn replace_file(temporary: &Path, destination: &Path) -> Result<(), ChatHistoryE
     std::fs::rename(temporary, destination).map_err(|error| ChatHistoryError::Io(error.to_string()))
 }
 
+/// How long one history save keeps trying on Windows while another program
+/// holds the history file open.
+///
+/// `MoveFileExW` cannot replace a file that somebody else has open at that
+/// instant: a second `raven` reading the history, a virus scanner or the
+/// search indexer looking at the file that was just written. The holder lets
+/// go within milliseconds, so a refused save (the message was not sent and not
+/// queued) is the wrong answer to it; the save waits and tries again.
+#[cfg(windows)]
+const WINDOWS_REPLACE_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
 #[cfg(windows)]
 fn replace_file(temporary: &Path, destination: &Path) -> Result<(), ChatHistoryError> {
+    replace_file_within(temporary, destination, WINDOWS_REPLACE_BUDGET)
+}
+
+/// Replaces `destination` with `temporary` in one step, trying again for up
+/// to `budget` while Windows answers that the file is in use (a sharing
+/// violation, a lock violation, or access denied, which is what a replace
+/// over an open file gets). Any other error, and the last one when the budget
+/// is spent, comes back with the Windows error code in its text. The
+/// temporary file is left to the caller in every failure.
+#[cfg(windows)]
+fn replace_file_within(
+    temporary: &Path,
+    destination: &Path,
+    budget: std::time::Duration,
+) -> Result<(), ChatHistoryError> {
     use std::os::windows::ffi::OsStrExt;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
@@ -1568,19 +1598,40 @@ fn replace_file(temporary: &Path, destination: &Path) -> Result<(), ChatHistoryE
     from.push(0);
     let mut to: Vec<u16> = destination.as_os_str().encode_wide().collect();
     to.push(0);
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(ChatHistoryError::Io(
-            "atomic history replacement failed".into(),
-        ));
+
+    let started = Instant::now();
+    let mut pause = Duration::from_millis(1);
+    let mut tries: u32 = 0;
+    loop {
+        tries += 1;
+        let ok = unsafe {
+            MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        // Read at once: any other call may overwrite the thread's last error.
+        let code = unsafe { GetLastError() };
+        let in_use = matches!(
+            code,
+            ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION
+        );
+        let waited = started.elapsed();
+        if !in_use || waited >= budget {
+            return Err(ChatHistoryError::Io(format!(
+                "atomic history replacement failed (Windows error {code}, {tries} tries in {} ms)",
+                waited.as_millis()
+            )));
+        }
+        std::thread::sleep(pause.min(budget - waited));
+        // Short pauses: what frees the file is the holder closing it, and that
+        // takes milliseconds; many tries find the gap, long sleeps miss it.
+        pause = (pause * 2).min(Duration::from_millis(10));
     }
-    Ok(())
 }
 
 #[cfg(any(test, unix, windows))]
@@ -5568,5 +5619,178 @@ mod tests {
             "sent rows never"
         );
         assert!(!history.note_inbound_copy(&peer, &"33".repeat(16), None));
+    }
+
+    /// Another program that has the history file open (here with no sharing at
+    /// all, the hardest kind) must not make a save fail: the save waits until
+    /// the file is let go and then replaces it.
+    #[cfg(windows)]
+    #[test]
+    fn windows_save_waits_while_another_handle_holds_the_history_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("chat_history.bin");
+        std::fs::write(&destination, b"old").unwrap();
+
+        let holder = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&destination)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(holder);
+        });
+
+        let started = Instant::now();
+        atomic_write_private(&destination, b"new").unwrap();
+        let waited = started.elapsed();
+        release.join().unwrap();
+
+        assert!(
+            waited >= Duration::from_millis(250),
+            "the save came back after {waited:?}: it did not wait for the holder"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".chat_history.tmp.")
+        }));
+    }
+
+    /// A plain reader (the way this crate itself opens the file to read it)
+    /// must not make a save fail either.
+    #[cfg(windows)]
+    #[test]
+    fn windows_save_goes_through_while_a_reader_has_the_history_file_open() {
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("chat_history.bin");
+        std::fs::write(&destination, b"old").unwrap();
+
+        let reader = File::open(&destination).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(reader);
+        });
+
+        atomic_write_private(&destination, b"new").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+    }
+
+    /// When the file is never let go the save gives up after its budget, says
+    /// which Windows error it met, and leaves the old history as it was.
+    #[cfg(windows)]
+    #[test]
+    fn windows_replace_names_the_os_error_when_the_file_stays_held() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("chat_history.bin");
+        let temporary = dir.path().join(".chat_history.tmp.test");
+        std::fs::write(&destination, b"old").unwrap();
+        std::fs::write(&temporary, b"new").unwrap();
+
+        let holder = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&destination)
+            .unwrap();
+
+        let started = Instant::now();
+        let error = replace_file_within(&temporary, &destination, Duration::from_millis(120))
+            .unwrap_err()
+            .to_string();
+        let waited = started.elapsed();
+        assert!(
+            error.contains("(Windows error 32,") || error.contains("(Windows error 5,"),
+            "{error}"
+        );
+        assert!(!error.contains(", 1 tries"), "{error}");
+        assert!(waited >= Duration::from_millis(120), "{waited:?}");
+        assert!(waited < Duration::from_millis(1_500), "{waited:?}");
+
+        drop(holder);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"new");
+    }
+
+    /// An error that does not mean "in use" is not waited for.
+    #[cfg(windows)]
+    #[test]
+    fn windows_replace_does_not_wait_for_a_missing_temporary_file() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("chat_history.bin");
+        std::fs::write(&destination, b"old").unwrap();
+
+        let started = Instant::now();
+        let error = replace_file_within(
+            &dir.path().join(".chat_history.tmp.missing"),
+            &destination,
+            Duration::from_millis(2_000),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("(Windows error 2, 1 tries"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+    }
+
+    /// The case of the finding: other programs keep opening the history file
+    /// to read it (as a second `raven send` and the node do) while saves go
+    /// on. Every save goes through.
+    #[cfg(windows)]
+    #[test]
+    fn windows_saves_go_through_while_readers_keep_opening_the_history_file() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("chat_history.bin");
+        std::fs::write(&destination, vec![0u8; 64 * 1024]).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                let path = destination.clone();
+                std::thread::spawn(move || {
+                    let mut reads = 0u32;
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Ok(mut file) = File::open(&path) {
+                            let mut bytes = Vec::new();
+                            if file.read_to_end(&mut bytes).is_ok() {
+                                reads += 1;
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    reads
+                })
+            })
+            .collect();
+
+        for round in 0..200u32 {
+            let contents = vec![(round % 251) as u8; 64 * 1024];
+            atomic_write_private(&destination, &contents)
+                .unwrap_or_else(|error| panic!("save {round} failed: {error}"));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let reads: u32 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+        assert!(reads > 0, "the readers never read the file");
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            vec![(199 % 251) as u8; 64 * 1024]
+        );
     }
 }
