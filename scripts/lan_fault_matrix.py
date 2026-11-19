@@ -347,11 +347,13 @@ s90-s99 (s90p, s91b, s93b, s96w), added by the pack's steps. A scenario that nee
 days to pass moves one profile's wall clock with LabClock (CP.3: a file of
 its own, and the lab unlock on that profile's ash and raven-node; each jump
 ahead reads as one wake from sleep). s91 and s95 run without the switch
-(release behaviour, in the default list). s91 (F5, today's wait): Bob is
+(release behaviour, in the default list). s91 (F5's lone contact): Bob is
 away 150 s and comes back silent on the same address (a phone back on a
-laptop's hotspot): it records Alice's `next try` text before his return and
-the delivery time, which comes at that next try (the study's 170 s is
-recorded, not required: the backoff step then is 80-240 s). s90p (M0, noise
+laptop's hotspot): Alice's node met him on the LAN in the last 10 minutes,
+so it tries him again within 15 s whatever the backoff (E1; the backoff
+alone steps 80-240 s by then): her `next try` is never more than 15 s off
+while he is away, she has made 8 attempts or more by his return, and the
+message arrives within 20 s of it, exactly once. s90p (M0, noise
 pins):
 Alice and Bob link once, then Bob goes down and X, another raven-node
 profile, starts on his old port: Alice's send ends within 2 s, queued with
@@ -534,10 +536,12 @@ a new port, with nothing to send, sends no join round (owner decision
 OD-C7), Alice's message to him waits, her beacon cannot find him, and her
 nearby search row says no answer from Bob and to check that both laptops
 show the same time. Since P3.C5, s91 under RAVEN_FAULT_BEACON=1 also
-records the beacon's part (Bob answered Alice's query; within_15_s): the
-delivery still comes at Alice's next try, since a query names Bob only
-when her outbox wants him and Bob, with nothing waiting, sends no join
-round (OD-C7's stated cost), so the bound stays her next try. With
+records the beacon's part (whether Bob answered a query of Alice's;
+within_15_s): the delivery still comes at Alice's next try, since a query
+names Bob only when her outbox wants him and Bob, with nothing waiting,
+sends no join round (OD-C7's stated cost). Since E1 that try is at most
+15 s off and mostly carries no query (her queries naming him thin out
+while unanswered), so his answer is recorded, not expected. With
 RAVEN_FAULT_CUSTODY=1 as well, the beacon versions of the custody walks
 (route hints off, the beacon carries every find): s96
 (custodian_walks): Bob back first, then Carol on a new port; her join
@@ -7411,27 +7415,37 @@ def s90_stale_address_inbound_learns(root: Path) -> dict:
 
 
 def s91_access_point_waits(root: Path) -> dict:
-    """Cutoff F5 (CP.12; release behaviour, no switch: today's wait). Bob
+    """Cutoff F5's lone contact (CP.12; release behaviour, no switch). Bob
     is away 150 s and comes back on the same address, silent, like a phone
     that left a laptop's hotspot and rejoined it: the host's own addresses
-    never changed, so only Alice's backoff retries. Records Alice's `next
-    try` text just before his return (next_try_before_return) and how long
-    delivery took after it (delivered_after_s), exactly once. Delivery
-    comes at that next try (bound: it plus 10 s). The study's bound of 170 s
-    is recorded (within_170_s), not required: after 150 s away the backoff
-    step is 80-240 s, so about one run in eight waits longer. F5 cannot
-    shorten this while Bob is Alice's only contact (s91b needs another
-    contact's link); that case needs the Phase 3 beacon (P3.C5).
+    never changed, so nothing tells Alice and only her own retries find
+    him. Her node had a LAN link with him in the last 10 minutes, so it
+    tries him again within 15 s whatever his message's backoff (E1,
+    outbox::LAN_SEEN_RETRY, 2026-10-25; the backoff alone steps 80-240 s
+    after 150 s away). Read every 2 s while he is away, her `next try` is
+    never more than 15 s off (longest_next_try_s; next_try_reads: how
+    many readings gave a time, of how many), and by his return she has
+    made 8 attempts or more (attempts_before_return; the backoff alone
+    makes 6 at most in 150 s). The message arrives within 20 s of his
+    return (delivered_after_s: her next try, and the delivery itself),
+    exactly once. Her `next try` text just before his return is recorded
+    (next_try_before_return). A lone contact away for more than those 10
+    minutes still waits for Alice's backoff: F5 needs another contact's
+    link (s91b, where Alice's node starts again and so remembers no
+    link), and the beacon does not shorten the wait (below).
 
     With RAVEN_FAULT_BEACON=1 (P3.C5; both on the scenario's lab bus) it
     records the beacon's part too: Alice's beacon counts just before his
-    return and both nodes' after the delivery (Bob answered Alice's
-    query: answers_sent_10m), and whether the delivery came within 15 s
-    of his return (within_15_s). The bound stays Alice's next try: a
-    query names Bob only when one of Alice's sources wants him (her
-    outbox, in an attempt), and Bob, with nothing waiting, sends no join
-    round when he comes back (owner decision OD-C7), so the beacon finds
-    him at her next attempt, not before."""
+    return and both nodes' after the delivery, and whether the delivery
+    came within 15 s of his return (within_15_s). The beacon does not
+    shorten the wait: a query names Bob only when one of Alice's sources
+    wants him (her outbox, in an attempt), and Bob, with nothing waiting,
+    sends no join round when he comes back (owner decision OD-C7). Since
+    E1 her tries come 15 s apart while her queries naming him thin out
+    (15 s apart at first, the gap doubling while unanswered), so the try
+    that finds him, at his saved address, mostly carries no query:
+    whether he answered one (bob_answered: answers_sent_10m) is recorded,
+    not expected."""
     a, b = pair(root)
     warm = a.send('bob', 's91-warmup')
     port = int(b.dial.rsplit(':', 1)[1])
@@ -7439,17 +7453,22 @@ def s91_access_point_waits(root: Path) -> dict:
     t_away = time.time()
     rc, out, send_s = a.send('bob', 's91-m1')
     m = re.search(r'mid=([0-9a-f]{8})', out)
-    time.sleep(max(0.0, 150 - (time.time() - t_away)))
-    st = a.ash('outbox', 'status', m.group(1)).stdout if m else ''
+    mid = m.group(1) if m else ''
+    waits = []
+    while mid and time.time() - t_away < 150:
+        waits.append(next_try_s(outbox_field(a.ash('outbox', 'status', mid).stdout, 'next try')))
+        time.sleep(2)
+    st = a.ash('outbox', 'status', mid).stdout if mid else ''
     next_try = outbox_field(st, 'next try')
     attempts = int(outbox_field(st, 'attempts') or 0)
     away_s = round(time.time() - t_away, 1)
+    read = [w for w in waits + [next_try_s(next_try)] if w is not None]
+    longest = max(read, default=None)
     a_before = beacon_counts(a) if BEACON else {}
     b.start(port=port)
     took = wait_inbox(b, 's91-m1', 255)
     time.sleep(2)
     once = count(b.inbox(), 's91-m1')
-    bound = None if next_try_s(next_try) is None else next_try_s(next_try) + 10
     beacon = {}
     if BEACON:
         a_after, b_after = beacon_counts(a), beacon_counts(b)
@@ -7458,11 +7477,12 @@ def s91_access_point_waits(root: Path) -> dict:
                       within_15_s=took is not None and took <= 15)
     return dict(
         ok=warm[0] == 0 and status_word(out) == 'QUEUED' and m is not None
-        and bound is not None and took is not None and took <= bound and once == 1,
+        and next_try_s(next_try) is not None and longest is not None and longest <= 15
+        and attempts >= 8 and took is not None and took <= 20 and once == 1,
         send=(rc, status_word(out), round(send_s, 1)), away_s=away_s,
-        next_try_before_return=next_try, attempts_before_return=attempts,
-        delivered_after_s=None if took is None else round(took, 1),
-        within_170_s=took is not None and took <= 170, exactly_once=once,
+        next_try_before_return=next_try, longest_next_try_s=longest,
+        next_try_reads=(len(read), len(waits) + 1), attempts_before_return=attempts,
+        delivered_after_s=None if took is None else round(took, 1), exactly_once=once,
         outbox=a.outbox()[-400:], **({'beacon': beacon} if BEACON else {}))
 
 
