@@ -479,20 +479,23 @@ impl World {
     /// [`Self::fetch`] with the wall clock at `wall` (ms).
     fn fetch_at(&self, n: usize, shared: &Mutex<Shared>, at: Instant, wall: u64) -> bool {
         let dir = self.dir(n);
-        let mut dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+        let dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
             self.net
                 .dial(dir, route, expected, frames)
                 .map(|replies| (replies, Some(DeliveryPath::Direct)))
         };
         let mut home_changed = |_: usize| {};
         let mut io = PassIo {
-            dial: &mut dial,
+            dial: &dial,
             want: &|_| {},
             finds: &|_| Vec::new(),
             find_failed: &|_, _| {},
             home_changed: &mut home_changed,
             lan: true,
             kick: &|_| {},
+            // One turn at a time, on this thread: the net answers for the
+            // other nodes here, under the gates this thread set.
+            at_once: 1,
         };
         fetch_pass_with(shared, dir, &self.ids[n], at, wall, &mut io)
     }
@@ -514,20 +517,23 @@ impl World {
         want: &dyn Fn(&[u8; 32]),
     ) -> ForwardPass {
         let dir = self.dir(n);
-        let mut dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+        let dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
             self.net
                 .dial(dir, route, expected, frames)
                 .map(|replies| (replies, Some(DeliveryPath::Direct)))
         };
         let mut home_changed = |_: usize| {};
         let mut io = PassIo {
-            dial: &mut dial,
+            dial: &dial,
             want,
             finds: &|_| Vec::new(),
             find_failed: &|_, _| {},
             home_changed: &mut home_changed,
             lan,
             kick: &|_| {},
+            // One turn at a time, on this thread: the net answers for the
+            // other nodes here, under the gates this thread set.
+            at_once: 1,
         };
         forward_pass_with(shared, dir, at, wall, &mut io)
     }
