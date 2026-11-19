@@ -93,10 +93,26 @@ const PER_DIAL_DEADLINE: Duration = Duration::from_secs(45);
 /// while dropped ones drain or contacts list custodians of their own. The
 /// rest follow as turns end.
 const ASKED_AT_ONCE: usize = 4;
-/// While mail friends are being asked, the pass looks this often whether
-/// another one came due: the fetcher's own shortest wait
-/// ([`Shared::next_wait`]).
+/// While mail friends are being asked, the pass sleeps until the next one's
+/// time, a turn's end or a wake ([`Shared::ring`]), never shorter than this
+/// (the fetcher's own shortest wait, [`Shared::next_wait`]) ...
 const LOOK_AGAIN: Duration = Duration::from_millis(200);
+/// ... and never longer than this: a custodian made due some other way is
+/// asked within it.
+const LOOK_AT_LEAST: Duration = Duration::from_secs(5);
+/// A custodian whose turn in a fetch pass dialled it is asked again in the
+/// same pass when it is due again, but no sooner than this after that turn
+/// ended (a tenth of the fetch interval, at most this: [`PassTimes`]). The
+/// kicks of a node's start (its listeners, Tor, Tor's relays: seconds apart)
+/// ask a friend that answered a moment ago once more, not once for each, and
+/// a custodian whose next time is already past when its turn ends (one that
+/// is away, after a dial of 75 s) is not dialled back to back.
+const AGAIN_AFTER: Duration = Duration::from_secs(5);
+/// A fetch pass gives a custodian that has had its turn in it another one
+/// only while the pass is younger than this; the pass ends when its turns
+/// do, and the next one reads the mail friends, the home custodians and the
+/// forward rows again. A custodian's first turn in a pass has no such bound.
+const NEW_TURNS_FOR: Duration = ONION_DIAL_DEADLINE;
 /// A custody dial over Tor has Tor's waits (design 2026-10-tor-fallback
 /// §3.5): the onion dial's own deadline, and a little more.
 const ONION_DIAL_DEADLINE: Duration =
@@ -132,6 +148,60 @@ const HOME_REFRESH: Duration = Duration::from_secs(60);
 /// The longest wait before an idle poll of a custodian that could not be
 /// reached at all ([`unreachable_wait`]).
 const UNREACHABLE_IDLE_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// The times a fetch pass keeps ([`fetch_pass_with`]).
+#[derive(Clone, Copy, Debug)]
+struct PassTimes {
+    /// The fetch interval (a lab interval, `RAVEN_LAB_CUSTODY_FETCH_MS`,
+    /// scales every wait).
+    base: Duration,
+    /// The rest between two turns of a custodian in a pass: a tenth of the
+    /// fetch interval, at most [`AGAIN_AFTER`].
+    again_after: Duration,
+    /// [`NEW_TURNS_FOR`].
+    new_turns_for: Duration,
+}
+
+impl PassTimes {
+    fn now() -> Self {
+        #[cfg(test)]
+        if let Some(times) = PASS_TIMES_FOR_TESTS.with(std::cell::Cell::get) {
+            return times;
+        }
+        Self::for_base(lab_fetch_interval().unwrap_or(BASE_INTERVAL))
+    }
+
+    fn for_base(base: Duration) -> Self {
+        Self {
+            base,
+            again_after: (base / 10).min(AGAIN_AFTER),
+            new_turns_for: NEW_TURNS_FOR,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The [`PassTimes`] of this test thread's passes (a test of a second
+    /// turn in a pass need not wait minutes for it).
+    static PASS_TIMES_FOR_TESTS: std::cell::Cell<Option<PassTimes>> =
+        const { std::cell::Cell::new(None) };
+    /// The not-reached lines this test thread's passes printed.
+    static NOT_REACHED_FOR_TESTS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Called on a turn's thread once it knows where its custodian can be
+    /// dialled, before it takes the work ([`ask`]); a test sets it through
+    /// a [`TurnGate`].
+    static ROUTES_FOUND_FOR_TESTS: std::cell::RefCell<Option<RoutesFound>> =
+        const { std::cell::RefCell::new(None) };
+    /// The looks of this test thread's passes that ask several custodians
+    /// at the same time ([`Pass::ask_at_once`]).
+    static LOOKS_FOR_TESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`ROUTES_FOUND_FOR_TESTS`]: called with the custodian.
+#[cfg(test)]
+type RoutesFound = Arc<dyn Fn(&[u8; 32]) + Send + Sync>;
 
 /// The wait after a fetch round that reached the custodian on no route,
 /// the `failures`-th such round in a row (0 first): with something owed
@@ -301,6 +371,9 @@ struct Shared {
     linked: HashMap<[u8; 32], Instant>,
     /// Per custodian: when a fetch last dialled it over Tor.
     onion_fetch_at: HashMap<[u8; 32], Instant>,
+    /// While a fetch pass asks several custodians at the same time: where
+    /// it hears that one may have come due ([`Self::ring`]).
+    bell: Option<std::sync::mpsc::Sender<Note>>,
 }
 
 fn shared() -> &'static Mutex<Shared> {
@@ -360,6 +433,16 @@ impl Shared {
             *again = true;
         }
         self.forward_everything(now);
+        self.ring();
+    }
+
+    /// A custodian may have come due: a fetch pass that is asking several
+    /// at the same time looks now ([`Pass::ask_at_once`]), not at its next
+    /// look.
+    fn ring(&self) {
+        if let Some(bell) = &self.bell {
+            let _ = bell.send(Note::Due);
+        }
     }
 
     /// [`retry`]: [`Self::kick`], and a misbehaving custodian's park lifted
@@ -491,6 +574,7 @@ impl Shared {
             if why == Wake::Met {
                 *empty = 0;
             }
+            self.ring();
             return true;
         }
         if let Some(again) = self.in_pass.get_mut(peer) {
@@ -597,7 +681,8 @@ impl Shared {
         self.all_due(now);
     }
 
-    /// [`note_deposit`]: `custodian` due by `due` at the latest.
+    /// [`note_deposit`]: `custodian` due by `due` at the latest (a base
+    /// interval on, beyond a pass's longest sleep: nothing to ring).
     fn note_deposit(&mut self, custodian: &[u8; 32], due: Instant) {
         let entry = self
             .states
@@ -1313,6 +1398,17 @@ struct PassIo<'a> {
     /// ([`ASKED_AT_ONCE`]). 1: one after the other, each on the pass's own
     /// thread.
     at_once: usize,
+    /// What is left of a bounded mail check's budget ([`pass_budget_left`];
+    /// `None`: no check runs). Once it is spent no turn starts: its dials
+    /// could not go out.
+    budget: &'a dyn Fn() -> Option<Duration>,
+}
+
+impl PassIo<'_> {
+    /// A bounded mail check's time is up: no new turn.
+    fn budget_spent(&self) -> bool {
+        (self.budget)().is_some_and(|left| left.is_zero())
+    }
 }
 
 /// One fetch pass over every due custodian (blocking pool), then (custody
@@ -1338,6 +1434,7 @@ fn fetch_pass(data_dir: &Path, identity: &Identity, handle: &tokio::runtime::Han
             crate::outbox::kick(Some(peer), false, false);
         },
         at_once: ASKED_AT_ONCE,
+        budget: &pass_budget_left,
     };
     let inbox_changed = fetch_pass_with(
         shared(),
@@ -1394,20 +1491,27 @@ fn fetch_pass(data_dir: &Path, identity: &Identity, handle: &tokio::runtime::Han
 ///   own is out. The stores see one fetch at a time, as before, page by
 ///   page. Only where a custodian can be dialled is looked up outside it
 ///   (a read: a saved name may take 5 s to resolve).
-/// - **One that comes due meanwhile is asked meanwhile.** While turns are
-///   out the pass looks every [`LOOK_AGAIN`] whether another custodian came
-///   due (a link from it, a kick, its own time) and starts its turn at
-///   once, so it does not wait for the pass to end behind a dial to a
-///   friend that is away. A custodian has one turn in a pass.
+/// - **One that comes due meanwhile is asked meanwhile,** whether it has
+///   had its turn in this pass or not: a wake (a link from it, new routes,
+///   a kick, Tor coming up: [`Shared::ring`]) or its own next time starts
+///   its turn at once, so it does not wait for the pass to end behind a
+///   dial to a friend that is away. A custodian has one turn out at a
+///   time; another one in the same pass comes no sooner than
+///   [`AGAIN_AFTER`] after one that dialled it, and only while the pass is
+///   younger than [`NEW_TURNS_FOR`]. Mail a turn takes in may bring a
+///   session, and with it tags the turns already asked did not ask for:
+///   a custodian whose turn missed them is asked again ([`Pass::retag`]).
 /// - **At most `io.at_once` turns at the same time** ([`ASKED_AT_ONCE`]):
 ///   the rest follow as turns end, friends that answered their last round
-///   first ([`in_asking_order`]). With one custodian in all, or one at a
-///   time, each turn runs on the pass's own thread, one after the other.
+///   first ([`in_asking_order`]), each worked out when its place frees.
+///   With one custodian in all, or one at a time, each turn runs on the
+///   pass's own thread, one after the other, once.
 /// - **Nothing else changes:** who is asked, what each one is asked and
 ///   told, the dials' deadlines, each custodian's schedule, parks and
 ///   failures. In a bounded mail check every dial has what is left of the
 ///   check's budget ([`pass_budget_left`]), and the turns share it by
-///   running at the same time.
+///   running at the same time; once it is spent no turn starts, and a turn
+///   none of whose dials the budget let out was no round there.
 fn fetch_pass_with(
     shared: &Mutex<Shared>,
     data_dir: &Path,
@@ -1458,13 +1562,16 @@ fn fetch_pass_with(
     // let go before it is taken again.
     let cache = std::mem::take(&mut lock_of(shared).tags);
     let reg_cache = std::mem::take(&mut lock_of(shared).register_tags);
+    let times = PassTimes::now();
     let mut pass = Pass {
         shared,
         asking: &asking,
         handoff,
         register_due,
         custody_live: CustodyGates::current().live,
-        base: lab_fetch_interval().unwrap_or(BASE_INTERVAL),
+        base: times.base,
+        again_after: times.again_after,
+        new_turns_for: times.new_turns_for,
         offers,
         cache,
         reg_cache,
@@ -1473,6 +1580,9 @@ fn fetch_pass_with(
     if io.at_once <= 1 || targets.len() <= 1 {
         // One after the other, each worked out when its turn comes.
         for (custodian, peers) in &targets {
+            if io.budget_spent() {
+                break;
+            }
             if let Some(turn) = pass.plan(io, custodian, peers, (now, wall), true) {
                 let asked = ask(turn, &asking);
                 pass.settle(io, asked);
@@ -1503,11 +1613,14 @@ struct Asking<'a> {
 /// (taking a page in, the stores, the letters), while their dials overlap.
 /// A turn holds this from the moment it knows where its custodian can be
 /// dialled to its end, and lets go only while a dial of its own is out
-/// ([`AtWork::away`]); the pass's
-/// thread holds it while it works a turn out ([`Pass::plan`]) and while
-/// it notes a turn's end ([`Pass::settle`]). Nothing else is ever waited
-/// for while holding it, and no lock a turn holds is held across its dial,
-/// so the turns cannot hold each other up for longer than a page takes.
+/// ([`AtWork::away`]); the pass's thread holds it while it works a turn
+/// out ([`Pass::plan`]), while it notes a turn's end ([`Pass::settle`])
+/// and while it looks for tags a turn missed ([`Pass::retag`]). No dial
+/// and no other turn is waited for while holding it (only what this
+/// device's own work takes: the schedule's, the letters' and the beacon's
+/// locks, the stores' file locks, which the app or the CLI may hold a
+/// moment), and no lock a turn holds is held across its dial, so the turns
+/// cannot hold each other up for longer than a page takes.
 struct AtWork<'a> {
     lock: &'a Mutex<()>,
     held: Option<std::sync::MutexGuard<'a, ()>>,
@@ -1581,6 +1694,11 @@ struct Asked {
     tried: Option<OutboxCarrier>,
     /// Whether this fetch dialled the custodian over Tor.
     over_tor: bool,
+    /// Dials that went out (answered or not).
+    dialled: usize,
+    /// A dial the mail check's budget did not let out
+    /// ([`MAIL_CHECK_BUDGET`]): none of those went anywhere.
+    cut: bool,
 }
 
 /// One custodian's turn ([`Turn`]): where it can be dialled now, the fetch
@@ -1607,6 +1725,10 @@ fn ask(mut turn: Turn, asking: &Asking<'_>) -> Asked {
     }
     // Phase 5: over a nearby pipe too (last), under the custody gates.
     routes.extend(crate::nearby::custodian_route(&custodian));
+    #[cfg(test)]
+    if let Some(found) = ROUTES_FOUND_FOR_TESTS.with(|f| f.borrow().clone()) {
+        found(&custodian);
+    }
     let mut work = AtWork::begin(asking.work);
     let mut report = None;
     let mut letters = None;
@@ -1614,17 +1736,25 @@ fn ask(mut turn: Turn, asking: &Asking<'_>) -> Asked {
     let carrier = std::cell::Cell::new(None::<OutboxCarrier>);
     let tried = std::cell::Cell::new(None::<OutboxCarrier>);
     let over_tor = std::cell::Cell::new(false);
+    let (dialled, cut) = (std::cell::Cell::new(0usize), std::cell::Cell::new(false));
     let expected = hex::encode(custodian);
     let mut first = 0;
     let finds = &turn.finds;
     let mut dial = |frames: &[Vec<u8>]| {
         dial_in_turn(&routes, &mut first, |(planned, route)| {
+            // The dial is out: the other turns go on meanwhile.
+            let got = work.away(|| (asking.dial)(route, &expected, frames));
+            if matches!(&got, Err(e) if e == MAIL_CHECK_BUDGET) {
+                // The check's time was up before it went out: nothing was
+                // dialled, and nothing is learned about the route.
+                cut.set(true);
+                return got;
+            }
+            dialled.set(dialled.get() + 1);
             if route.carrier == OutboxCarrier::Onion {
                 over_tor.set(true);
             }
             tried.set(Some(route.carrier));
-            // The dial is out: the other turns go on meanwhile.
-            let got = work.away(|| (asking.dial)(route, &expected, frames));
             // A find that does not lead to the custodian is one no
             // longer (§7, review A-5).
             if let Err(e) = &got {
@@ -1732,6 +1862,8 @@ fn ask(mut turn: Turn, asking: &Asking<'_>) -> Asked {
         carrier,
         tried,
         over_tor,
+        dialled: dialled.get(),
+        cut: cut.get(),
     }
 }
 
@@ -1746,9 +1878,23 @@ struct FromPassThread {
 }
 
 /// A gate an in-process test set for its own thread only, as the call that
-/// sets it again on a turn's thread ([`FromPassThread`]).
+/// sets it again on a turn's thread ([`FromPassThread`]). Only what a test
+/// pushes onto [`TURN_GATES`] reaches a turn's thread: the custody tests'
+/// `Gates` push the custody gates, the hints, the carrier gates and the lab
+/// letter switch. A test whose pass runs turns on their own threads
+/// (`at_once` above 1, more than one custodian) and that sets any other
+/// override of its thread (the handoff gate, base ops only, a policy, a
+/// session lifetime...) pushes it there too, or its turns run without it;
+/// the tests that set those run their passes one turn at a time, on their
+/// own thread (`at_once: 1`).
 #[cfg(test)]
 type TurnGate = Arc<dyn Fn() + Send + Sync>;
+
+/// Tests: no bounded mail check runs ([`PassIo::budget`]).
+#[cfg(test)]
+fn no_budget() -> Option<Duration> {
+    None
+}
 
 #[cfg(test)]
 thread_local! {
@@ -1781,7 +1927,16 @@ impl FromPassThread {
 
 /// What a turn's thread sends when it ends: what the turn brought, or the
 /// panic that ended it.
-type TurnEnd = std::thread::Result<Asked>;
+type TurnEnd = std::thread::Result<Box<Asked>>;
+
+/// What a fetch pass that asks several custodians at the same time hears
+/// ([`Pass::ask_at_once`]).
+enum Note {
+    /// The turn of the pass's custodian with this number ended.
+    Ended(usize, TurnEnd),
+    /// A custodian may have come due ([`Shared::ring`]).
+    Due,
+}
 
 /// Where a turn that was to start runs ([`on_its_own_thread`]).
 enum Started {
@@ -1791,36 +1946,48 @@ enum Started {
     Here(Box<Turn>),
 }
 
-/// Start `turn` on a thread of its own in `scope`; it sends its end
-/// through `ended`, whatever that end is.
+/// Start `turn` (of the pass's custodian number `n`) on a thread of its own
+/// in `scope`; once that thread runs, it sends its end through `ended`,
+/// whatever that end is: everything it does, entering the pass's runtime
+/// included, is inside the catch.
 fn on_its_own_thread<'scope>(
     scope: &'scope std::thread::Scope<'scope, '_>,
-    turn: Turn,
+    (n, turn): (usize, Turn),
     asking: &'scope Asking<'scope>,
     from: &'scope FromPassThread,
-    ended: &std::sync::mpsc::Sender<TurnEnd>,
+    ended: &std::sync::mpsc::Sender<Note>,
 ) -> Started {
-    #[cfg(test)]
-    if NO_TURN_THREADS.with(std::cell::Cell::get) {
-        return Started::Here(Box::new(turn));
-    }
     // The turn waits where both sides can reach it: a thread that could not
     // be started never ran, and the turn is still there for the caller.
     let slot = Arc::new(Mutex::new(Some(turn)));
     let theirs = Arc::clone(&slot);
     let ended = ended.clone();
-    let thread = std::thread::Builder::new()
-        .name("raven-mail-friend".into())
-        .spawn_scoped(scope, move || {
+    let body = move || {
+        let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _here = from.enter();
             let turn = theirs.lock().unwrap_or_else(|e| e.into_inner()).take();
-            let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ask(turn.expect("a turn's thread has its turn"), asking)
-            }));
-            let _ = ended.send(end);
-        });
+            Box::new(ask(turn.expect("a turn's thread has its turn"), asking))
+        }));
+        let _ = ended.send(Note::Ended(n, end));
+    };
+    #[cfg(test)]
+    let thread = if NO_TURN_THREADS.with(std::cell::Cell::get) {
+        // As when the system has no thread to give: the body never runs.
+        drop(body);
+        Err(std::io::Error::other("no thread (test)"))
+    } else {
+        std::thread::Builder::new()
+            .name("raven-mail-friend".into())
+            .spawn_scoped(scope, body)
+            .map(drop)
+    };
+    #[cfg(not(test))]
+    let thread = std::thread::Builder::new()
+        .name("raven-mail-friend".into())
+        .spawn_scoped(scope, body)
+        .map(drop);
     match thread {
-        Ok(_) => Started::OnItsThread,
+        Ok(()) => Started::OnItsThread,
         Err(_) => {
             let turn = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
             Started::Here(Box::new(
@@ -1830,14 +1997,88 @@ fn on_its_own_thread<'scope>(
     }
 }
 
-/// The turns a pass's first look found due, in the order they start in:
-/// the custodians that answered their last round before those that were
-/// not reached in theirs (`failures`), each group as it was (by key). It
-/// matters only with more of them than are asked at the same time
-/// ([`ASKED_AT_ONCE`]): a friend that is away is away for a while, and the
-/// others should not wait for a free place behind it in every pass.
-fn in_asking_order(turns: &mut [Turn], failures: &HashMap<[u8; 32], u32>) {
-    turns.sort_by_key(|turn| failures.get(&turn.custodian).is_some_and(|n| *n > 0));
+/// The custodians of a pass in the order their turns start in: those that
+/// answered their last round before those that were not reached in theirs
+/// (`failures`), each group as it was (by key). It matters only with more
+/// of them due than are asked at the same time ([`ASKED_AT_ONCE`]): a friend
+/// that is away is away for a while, and the others should not wait for a
+/// free place behind it in every pass.
+fn in_asking_order(keepers: &mut [Keeper], failures: &HashMap<[u8; 32], u32>) {
+    keepers.sort_by_key(|k| failures.get(&k.custodian).is_some_and(|n| *n > 0));
+}
+
+/// One custodian of a pass that asks several at the same time
+/// ([`Pass::ask_at_once`]), and its turns in it so far.
+struct Keeper {
+    custodian: [u8; 32],
+    /// The contacts whose mail it may hold (`fetch_targets`).
+    peers: Vec<[u8; 32]>,
+    /// Looked at in this pass: only its first look may take it before its
+    /// time, for a new tag to register (rg3).
+    looked: bool,
+    /// Its turns in this pass.
+    turns: u32,
+    /// A turn of its is out.
+    out: bool,
+    /// Its next turn in this pass starts no sooner (the pass's clock):
+    /// [`AGAIN_AFTER`] after a turn of its that dialled it ended.
+    rest_until: Option<Instant>,
+    /// The peers its last turn asked for, and the tags it asked with.
+    live_peers: Vec<[u8; 32]>,
+    asked_for: HashSet<[u8; 16]>,
+    /// While its turn is out, another turn's mail brought tags this one
+    /// did not ask for: it is due again when it ends ([`Pass::retag`]).
+    retag: bool,
+}
+
+impl Keeper {
+    fn new((custodian, peers): ([u8; 32], Vec<[u8; 32]>)) -> Self {
+        Self {
+            custodian,
+            peers,
+            looked: false,
+            turns: 0,
+            out: false,
+            rest_until: None,
+            live_peers: Vec::new(),
+            asked_for: HashSet::new(),
+            retag: false,
+        }
+    }
+
+    /// Its `turn` starts.
+    fn starts(&mut self, turn: &Turn) {
+        self.turns += 1;
+        self.live_peers.clone_from(&turn.live_peers);
+        self.asked_for = turn.tags.keys().copied().collect();
+        self.retag = false;
+    }
+}
+
+/// While a pass asks several custodians at the same time, the schedule
+/// rings it ([`Shared::ring`]); the bell comes down when the pass ends,
+/// however it ends.
+struct Bell<'a>(&'a Mutex<Shared>);
+
+impl<'a> Bell<'a> {
+    fn hang(shared: &'a Mutex<Shared>, bell: &std::sync::mpsc::Sender<Note>) -> Self {
+        lock_of(shared).bell = Some(bell.clone());
+        Self(shared)
+    }
+}
+
+impl Drop for Bell<'_> {
+    fn drop(&mut self) {
+        lock_of(self.0).bell = None;
+    }
+}
+
+/// What a turn's end left for the pass ([`Pass::settle`]).
+struct Settled {
+    /// The peers whose mail it took in.
+    touched: Vec<[u8; 32]>,
+    /// A dial of it went out.
+    dialled: bool,
 }
 
 /// One fetch pass's own things: what a custodian's turn is worked out from
@@ -1853,6 +2094,10 @@ struct Pass<'a> {
     custody_live: bool,
     /// The fetch interval (a lab interval scales every wait).
     base: Duration,
+    /// The rest between two turns of a custodian in this pass, and how long
+    /// it gives those that had their turn another one ([`PassTimes`]).
+    again_after: Duration,
+    new_turns_for: Duration,
     /// The custody offers custodians announced (RRH1 §12), read once.
     offers: HashMap<[u8; 32], raven_core::learned_routes::LearnedCustody>,
     cache: TagCache,
@@ -1981,14 +2226,18 @@ impl Pass<'_> {
         })
     }
 
-    /// The turns of a pass with several custodians, at the same time: every
-    /// one that is due at the pass's time, and every one that comes due
-    /// while turns are still out (looked for every [`LOOK_AGAIN`], at the
-    /// pass's time plus what has gone by), each on a thread of its own, at
-    /// most `io.at_once` at once. Each turn's end is noted as it comes
-    /// ([`Self::settle`]); the pass is over when no turn is out and nothing
-    /// more is due. A turn that panicked ends the pass as it would have
-    /// before, once the other turns have ended.
+    /// The turns of a pass with several custodians, at the same time, each
+    /// on a thread of its own, at most `io.at_once` at once: every one that
+    /// is due at the pass's time, and while turns are still out every one
+    /// that comes due (at the pass's time plus what has gone by), again
+    /// too, as [`fetch_pass_with`] says. A turn is worked out when its place
+    /// frees ([`Self::plan`]), and its end is noted as it comes
+    /// ([`Self::noted`]). The pass sleeps until a turn ends, the schedule
+    /// rings ([`Shared::ring`]) or the next custodian's time comes
+    /// ([`Self::next_look`]); it is over when no turn is out. A turn that
+    /// panicked ends the pass as a panic in a pass always did: no turn
+    /// starts after it, and it is resumed once the turns that are out have
+    /// ended and been noted.
     fn ask_at_once(
         &mut self,
         io: &PassIo<'_>,
@@ -1998,69 +2247,173 @@ impl Pass<'_> {
         let asking = self.asking;
         let from = FromPassThread::here();
         let began = std::time::Instant::now();
-        // The custodians that had no turn in this pass yet.
-        let mut left = targets;
-        let mut waiting = std::collections::VecDeque::new();
+        let pass_time = || {
+            let gone = began.elapsed();
+            let gone_ms = u64::try_from(gone.as_millis()).unwrap_or(u64::MAX);
+            (now + gone, wall.saturating_add(gone_ms))
+        };
+        let mut keepers: Vec<Keeper> = targets.into_iter().map(Keeper::new).collect();
+        in_asking_order(&mut keepers, &lock_of(self.shared).failures);
+        let (bell, notes) = std::sync::mpsc::channel::<Note>();
+        let rung = Bell::hang(self.shared, &bell);
         let mut out = 0usize;
         let mut died = None;
-        let (ended, ends) = std::sync::mpsc::channel::<TurnEnd>();
         std::thread::scope(|scope| {
-            let mut first = true;
+            // The first look is at the pass's time, as every custodian's
+            // time was in a pass that asked them one after the other.
+            let mut at = (now, wall);
             loop {
-                let at = if first {
-                    (now, wall)
-                } else {
-                    let gone = began.elapsed();
-                    let gone_ms = u64::try_from(gone.as_millis()).unwrap_or(u64::MAX);
-                    (now + gone, wall.saturating_add(gone_ms))
-                };
-                let mut due = Vec::new();
-                left.retain(|(custodian, peers)| {
-                    match self.plan(io, custodian, peers, at, first) {
-                        Some(turn) => {
-                            due.push(turn);
-                            false
-                        }
-                        None => true,
-                    }
-                });
-                if first {
-                    in_asking_order(&mut due, &lock_of(self.shared).failures);
-                }
-                first = false;
-                waiting.extend(due);
-                while out < io.at_once {
-                    let Some(turn) = waiting.pop_front() else {
+                #[cfg(test)]
+                LOOKS_FOR_TESTS.with(|looks| looks.set(looks.get() + 1));
+                let again = began.elapsed() < self.new_turns_for;
+                let may_start = died.is_none() && !io.budget_spent();
+                for n in 0..keepers.len() {
+                    if !may_start || out >= io.at_once {
                         break;
+                    }
+                    let k = &mut keepers[n];
+                    let resting = k.rest_until.is_some_and(|until| until > at.0);
+                    if k.out || resting || (k.turns > 0 && !again) {
+                        continue;
+                    }
+                    let first = !std::mem::replace(&mut k.looked, true);
+                    let custodian = k.custodian;
+                    let Some(turn) = self.plan(io, &custodian, &keepers[n].peers, at, first) else {
+                        continue;
                     };
-                    match on_its_own_thread(scope, turn, asking, &from, &ended) {
-                        Started::OnItsThread => out += 1,
+                    keepers[n].starts(&turn);
+                    match on_its_own_thread(scope, (n, turn), asking, &from, &bell) {
+                        Started::OnItsThread => {
+                            keepers[n].out = true;
+                            out += 1;
+                        }
                         Started::Here(turn) => {
                             let asked = ask(*turn, asking);
-                            self.settle(io, asked);
+                            self.noted(io, &mut keepers, n, asked, pass_time());
                         }
                     }
                 }
                 if out == 0 {
                     break;
                 }
-                match ends.recv_timeout(LOOK_AGAIN) {
-                    Ok(Ok(asked)) => {
+                let wait = if may_start && out < io.at_once {
+                    self.next_look(&keepers, pass_time().0, again)
+                } else {
+                    LOOK_AT_LEAST
+                };
+                // Everything heard by now, then the next look.
+                let mut heard = notes.recv_timeout(wait).ok();
+                while let Some(note) = heard {
+                    if let Note::Ended(n, end) = note {
                         out -= 1;
-                        self.settle(io, asked);
+                        keepers[n].out = false;
+                        match end {
+                            Ok(asked) => self.noted(io, &mut keepers, n, *asked, pass_time()),
+                            Err(panic) => {
+                                died.get_or_insert(panic);
+                            }
+                        }
                     }
-                    Ok(Err(panic)) => {
-                        out -= 1;
-                        died.get_or_insert(panic);
-                    }
-                    // Nothing ended yet: look whether another one is due.
-                    Err(_) => {}
+                    heard = notes.try_recv().ok();
                 }
+                at = pass_time();
             }
         });
+        drop(rung);
         if let Some(panic) = died {
             std::panic::resume_unwind(panic);
         }
+    }
+
+    /// Keeper number `n`'s turn has ended with `asked`, at the pass's time
+    /// `at`: it is noted ([`Self::settle`]), the keeper rests before another
+    /// turn ([`AGAIN_AFTER`]; a turn that dialled nothing, [`LOOK_AGAIN`]),
+    /// and the mail it took in may make a custodian of the pass due again
+    /// ([`Self::retag`]).
+    fn noted(
+        &mut self,
+        io: &PassIo<'_>,
+        keepers: &mut [Keeper],
+        n: usize,
+        asked: Asked,
+        at: (Instant, u64),
+    ) {
+        let settled = self.settle(io, asked);
+        let k = &mut keepers[n];
+        let rest = if settled.dialled {
+            self.again_after
+        } else {
+            LOOK_AGAIN
+        };
+        k.rest_until = Some(at.0 + rest);
+        if std::mem::take(&mut k.retag) {
+            if let Some((_, due, _)) = lock_of(self.shared).states.get_mut(&k.custodian) {
+                *due = (*due).min(at.0);
+            }
+        }
+        self.retag(keepers, &settled.touched, at);
+    }
+
+    /// A turn took in mail of `touched` at `at`, and that may have brought a
+    /// session, whose tags no turn asked for before. In a pass that asked
+    /// one custodian after the other, the next one was asked with them;
+    /// here the turns started together. So each custodian of the pass whose
+    /// last turn asked for one of those peers' mail without one of their
+    /// tags now (the one that took the mail in too) is due again: at once,
+    /// or as its turn that is out ends. Worked out with the work held
+    /// ([`AtWork`]): it reads the session store.
+    fn retag(&mut self, keepers: &mut [Keeper], touched: &[[u8; 32]], (now, wall): (Instant, u64)) {
+        if touched.is_empty() {
+            return;
+        }
+        let _work = AtWork::begin(self.asking.work);
+        let (data_dir, identity) = (self.asking.data_dir, self.asking.identity);
+        for k in keepers.iter_mut().filter(|k| k.turns > 0) {
+            let peers: Vec<[u8; 32]> = k
+                .live_peers
+                .iter()
+                .copied()
+                .filter(|p| touched.contains(p))
+                .collect();
+            if peers.is_empty() {
+                continue;
+            }
+            let tags = inbound_tags_cached(data_dir, identity, &peers, wall, &mut self.cache)
+                .unwrap_or_default();
+            if tags.keys().all(|tag| k.asked_for.contains(tag)) {
+                continue;
+            }
+            if k.out {
+                k.retag = true;
+            } else if let Some((_, due, _)) = lock_of(self.shared).states.get_mut(&k.custodian) {
+                *due = (*due).min(now);
+            }
+        }
+    }
+
+    /// How long a pass with turns out sleeps at `now` (its clock) when no
+    /// turn ends and the schedule does not ring: until the first of its
+    /// custodians that may start a turn is due (parks and rests included;
+    /// `again`: those that had their turn may have another), between
+    /// [`LOOK_AGAIN`] and [`LOOK_AT_LEAST`].
+    fn next_look(&self, keepers: &[Keeper], now: Instant, again: bool) -> Duration {
+        let s = lock_of(self.shared);
+        keepers
+            .iter()
+            .filter(|k| !k.out && (k.turns == 0 || again))
+            .map(|k| {
+                let mut due = s.states.get(&k.custodian).map_or(now, |(_, due, _)| *due);
+                if let Some((until, _)) = s.parked.get(&k.custodian) {
+                    due = due.max(*until);
+                }
+                if let Some(until) = k.rest_until {
+                    due = due.max(until);
+                }
+                due.saturating_duration_since(now)
+            })
+            .min()
+            .unwrap_or(LOOK_AT_LEAST)
+            .clamp(LOOK_AGAIN, LOOK_AT_LEAST)
     }
 
     /// A custodian's turn has ended: what it brought is noted (its next
@@ -2068,7 +2421,7 @@ impl Pass<'_> {
     /// kick, the log's lines) and its entry is back in `states`
     /// ([`Shared::end_fetch`]). On the pass's thread, as each turn ends,
     /// with the turns' work held ([`AtWork`]).
-    fn settle(&mut self, io: &PassIo<'_>, asked: Asked) {
+    fn settle(&mut self, io: &PassIo<'_>, asked: Asked) -> Settled {
         let _work = AtWork::begin(self.asking.work);
         let (shared, base) = (self.shared, self.base);
         let Asked {
@@ -2081,6 +2434,8 @@ impl Pass<'_> {
             carrier,
             tried,
             over_tor,
+            dialled,
+            cut,
         } = asked;
         let Turn {
             custodian,
@@ -2093,14 +2448,22 @@ impl Pass<'_> {
         } = turn;
         let letter_dials = letters.as_ref().map_or(0, |r| r.dials);
         let mut empty = empty;
-        let all_failed =
-            (report.as_ref().is_some_and(|r| r.dials > 0) || letter_dials > 0) && answered == 0;
+        // A bounded mail check whose time was up before any dial of this
+        // turn went out: nothing was asked there, as with no route, and it
+        // is due as it was (review mail-friends-3: it was counted and
+        // logged as not reached).
+        let unasked = dialled == 0 && cut;
+        let all_failed = (report.as_ref().is_some_and(|r| r.dials > 0) || letter_dials > 0)
+            && answered == 0
+            && dialled > 0;
         let next = {
             let mut s = lock_of(shared);
             if let Some(p) = path {
                 s.last_path.insert(custodian, p);
             }
-            if no_route {
+            if unasked {
+                Duration::ZERO
+            } else if no_route {
                 // No route at all (no address known, Tor not usable yet, or
                 // the idle-Tor rule took its route): nothing was asked
                 // there, so this was no round. Its failures and empty
@@ -2204,17 +2567,27 @@ impl Pass<'_> {
         if over_tor {
             lock_of(shared).onion_fetch_at.insert(custodian, now);
         }
-        let missed = no_route || all_failed;
+        let missed = no_route || unasked || all_failed;
         let ended = Instant::now();
         let due = lock_of(shared).end_fetch(custodian, state, (now + next, empty), missed, ended);
         if all_failed {
             // The node's log was silent about a mail friend it waited for
             // and did not reach (W11-F2): the keeper's short tag, the
             // carrier tried last and the wait from now, nothing else.
-            eprintln!(
-                "raven-node custody: {}",
-                not_reached_line(&custodian, tried, due.saturating_duration_since(ended))
-            );
+            let line = not_reached_line(&custodian, tried, due.saturating_duration_since(ended));
+            #[cfg(test)]
+            NOT_REACHED_FOR_TESTS.with(|lines| lines.borrow_mut().push(line.clone()));
+            eprintln!("raven-node custody: {line}");
+        }
+        let mut touched: Vec<[u8; 32]> = report.iter().flat_map(|r| r.touched.clone()).collect();
+        for peer in letters.iter().flat_map(|r| r.touched.iter()) {
+            if !touched.contains(peer) {
+                touched.push(*peer);
+            }
+        }
+        Settled {
+            touched,
+            dialled: dialled > 0,
         }
     }
 }
@@ -3795,6 +4168,7 @@ mod tests {
             lan,
             kick: &|_| {},
             at_once: 1,
+            budget: &no_budget,
         };
         fetch_pass_with(shared, fix.dir(), &fix.alice, now, wall, &mut io);
     }
@@ -3852,6 +4226,7 @@ mod tests {
                 lan: true,
                 kick: &|_| {},
                 at_once: 1,
+                budget: &no_budget,
             };
             fetch_pass_with(
                 &shared,
@@ -3933,17 +4308,44 @@ mod tests {
 
     fn forget_nothing(_: &[u8; 32], _: &str) {}
 
+    /// The LAN beacon of a test's pass: its finds and its forgetting.
+    type Beacon<'a> = (
+        &'a dyn Fn(&[u8; 32]) -> Vec<String>,
+        &'a (dyn Fn(&[u8; 32], &str) + Sync),
+    );
+
     /// One pass over Alice's mail friends as the node makes it, at most
     /// `at_once` asked at the same time: every dial goes through `dial`,
     /// on the thread of that custodian's turn.
     fn pass_at_once(
         fix: &Fix,
         shared: &Mutex<Shared>,
-        (now, wall): (Instant, u64),
+        at: (Instant, u64),
         at_once: usize,
         finds: &dyn Fn(&[u8; 32]) -> Vec<String>,
         find_failed: &(dyn Fn(&[u8; 32], &str) + Sync),
         dial: &DialTo<'_>,
+    ) {
+        pass_at_once_in(
+            fix,
+            shared,
+            at,
+            at_once,
+            (finds, find_failed),
+            dial,
+            &no_budget,
+        );
+    }
+
+    /// [`pass_at_once`] within a mail check's `budget`.
+    fn pass_at_once_in(
+        fix: &Fix,
+        shared: &Mutex<Shared>,
+        (now, wall): (Instant, u64),
+        at_once: usize,
+        (finds, find_failed): Beacon<'_>,
+        dial: &DialTo<'_>,
+        budget: &dyn Fn() -> Option<Duration>,
     ) {
         let to = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
             let who = [(fix.carol, "carol"), (fix.dave, "dave"), (fix.bob, "bob")]
@@ -3962,6 +4364,7 @@ mod tests {
             lan: true,
             kick: &|_| {},
             at_once,
+            budget,
         };
         fetch_pass_with(shared, fix.dir(), &fix.alice, now, wall, &mut io);
     }
@@ -4183,9 +4586,9 @@ mod tests {
     /// Working a custodian's turn out (its tags, the beacon's finds) is
     /// this device's work too: it waits while another turn is at its own.
     /// Dave's find is stale and his turn tells the beacon to forget it,
-    /// which takes a while here; Carol comes due meanwhile, and her turn is
-    /// worked out once Dave's has let go of the work, never while it holds
-    /// it.
+    /// which takes a while here; Carol comes due right then (new routes:
+    /// the schedule rings the pass at once), and her turn is worked out
+    /// once Dave's has let go of the work, never while it holds it.
     #[test]
     fn f18_a_turn_is_worked_out_while_no_other_turn_is_at_work() {
         if !rig::lab_backends() {
@@ -4195,10 +4598,10 @@ mod tests {
         let (fix, wall) = two_friends(true);
         let shared: Mutex<Shared> = Mutex::default();
         let now = Instant::now();
-        let soon = now + Duration::from_millis(50);
+        let later = now + Duration::from_secs(600);
         lock_of(&shared)
             .states
-            .insert(fix.carol, (FetchState::default(), soon, 0));
+            .insert(fix.carol, (FetchState::default(), later, 0));
         let answers = Carol::default();
         let forgetting = Mutex::new(false);
         // Whose turn was worked out, and whether Dave's was at work then.
@@ -4216,11 +4619,21 @@ mod tests {
                 Vec::new()
             }
         };
+        let woke_at = Mutex::new(None);
         let find_failed = |_: &[u8; 32], _: &str| {
             *forgetting.lock().unwrap() = true;
+            *woke_at.lock().unwrap() = Some(std::time::Instant::now());
+            let woke = lock_of(&shared).wake(&fix.carol, Wake::Moved, Instant::now());
+            assert!(woke, "Carol is due now");
             std::thread::sleep(Duration::from_millis(800));
             *forgetting.lock().unwrap() = false;
         };
+        // Dave's saved address answers once Carol has been asked and her
+        // turn has ended (her entry is in the schedule from the start).
+        let (carol_dials, carol_done) = (
+            Told::<usize>::default(),
+            Told::<Option<Duration>>::default(),
+        );
         pass_at_once(
             &fix,
             &shared,
@@ -4228,9 +4641,18 @@ mod tests {
             ASKED_AT_ONCE,
             &finds,
             &find_failed,
-            &|_, route, frames| {
+            &|who, route, frames| {
                 if route.dial.ends_with(":47532") {
                     return Err("lan connect: cannot connect (Connection refused)".to_string());
+                }
+                if who == "carol" {
+                    carol_dials.set(carol_dials.get() + 1);
+                }
+                if who == "dave" {
+                    let done =
+                        wait_until(|| carol_dials.get() >= 1 && turn_ended(&shared, &fix.carol));
+                    let woke = woke_at.lock().unwrap().expect("the wake came");
+                    carol_done.set(done.then(|| woke.elapsed()));
                 }
                 answers.dial(frames)
             },
@@ -4239,6 +4661,13 @@ mod tests {
             *worked_out.lock().unwrap(),
             [("dave", false), ("carol", false)],
             "Carol's turn was worked out while Dave's was not at work"
+        );
+        let after = carol_done
+            .get()
+            .expect("Carol's turn ended while Dave's was out");
+        assert!(
+            after < Duration::from_secs(3),
+            "the wake rang the pass (it sleeps 5 s otherwise): {after:?}"
         );
         assert!(turn_ended(&shared, &fix.carol) && turn_ended(&shared, &fix.dave));
     }
@@ -4294,16 +4723,18 @@ mod tests {
                 }
                 *dave_dials.lock().unwrap() += 1;
                 assert_eq!(carol.count(), 0, "Carol was not due when the pass began");
+                let kicked = std::time::Instant::now();
                 lock_of(&shared).kick(now);
                 let done = wait_until(|| carol.count() >= 1 && turn_ended(&shared, &fix.carol));
-                carol_done.set(Some(done));
+                carol_done.set(Some(done && kicked.elapsed() < Duration::from_secs(3)));
                 Err("custody dial deadline".to_string())
             },
         );
         assert_eq!(
             carol_done.get(),
             Some(true),
-            "Carol was asked while Dave's dial was out"
+            "Carol was asked while Dave's dial was out, the kick ringing the pass \
+             (it sleeps 5 s otherwise)"
         );
         assert_eq!(*dave_dials.lock().unwrap(), 1, "one turn in a pass");
         let s = lock_of(&shared);
@@ -4348,7 +4779,9 @@ mod tests {
     /// its blocking pool), as the pass's own thread is: what a turn calls
     /// finds the runtime where it found it before, and a real dial from it
     /// blocks on that runtime, its timers and sockets driven (here a LAN
-    /// dial to a closed port on this machine's loopback, refused at once).
+    /// dial to a closed port on this machine's loopback, refused at once:
+    /// one the system just gave out and took back, not a fixed one that
+    /// something may listen on).
     #[test]
     fn f18_a_turns_thread_is_in_the_runtime_of_the_pass() {
         if !rig::lab_backends() {
@@ -4364,9 +4797,13 @@ mod tests {
             .build()
             .unwrap();
         let in_runtime = Mutex::new(Vec::new());
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .unwrap()
+            .port();
         let closed = OutboxRoute {
             carrier: OutboxCarrier::Lan,
-            dial: "127.0.0.1:9".to_string(),
+            dial: format!("127.0.0.1:{port}"),
         };
         let dial = |who: &'static str, _: &OutboxRoute, frames: &[Vec<u8>]| {
             let turn = std::thread::current().name() == Some("raven-mail-friend");
@@ -4638,6 +5075,1004 @@ mod tests {
         assert_eq!(
             line,
             format!("contact {tag} not reached for mail (unknown); asked again in 0 s")
+        );
+    }
+
+    /// A pass's times ([`PassTimes`]): a custodian rests 5 s between two
+    /// turns in a pass ([`AGAIN_AFTER`]), a tenth of the fetch interval
+    /// when a lab interval is shorter (the fault matrix's 2 s: 200 ms); new
+    /// turns for [`NEW_TURNS_FOR`], an onion dial's deadline, either way.
+    #[test]
+    fn f18_a_pass_rests_a_tenth_of_its_interval_at_most_5_s() {
+        let times = PassTimes::for_base(BASE_INTERVAL);
+        assert_eq!(times.again_after, Duration::from_secs(5));
+        assert_eq!(times.new_turns_for, ONION_DIAL_DEADLINE);
+        let lab = PassTimes::for_base(Duration::from_secs(2));
+        assert_eq!(
+            (lab.base, lab.again_after, lab.new_turns_for),
+            (
+                Duration::from_secs(2),
+                Duration::from_millis(200),
+                ONION_DIAL_DEADLINE
+            )
+        );
+    }
+
+    /// The times of this thread's passes ([`PassTimes`]), in ms, until
+    /// dropped.
+    struct Times;
+
+    impl Times {
+        fn set(base: u64, again_after: u64, new_turns_for: u64) -> Self {
+            let ms = Duration::from_millis;
+            PASS_TIMES_FOR_TESTS.with(|t| {
+                t.set(Some(PassTimes {
+                    base: ms(base),
+                    again_after: ms(again_after),
+                    new_turns_for: ms(new_turns_for),
+                }));
+            });
+            Self
+        }
+    }
+
+    impl Drop for Times {
+        fn drop(&mut self) {
+            PASS_TIMES_FOR_TESTS.with(|t| t.set(None));
+        }
+    }
+
+    /// The not-reached lines this thread's passes printed since the last
+    /// call.
+    fn not_reached_lines() -> Vec<String> {
+        NOT_REACHED_FOR_TESTS.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+    }
+
+    /// Review mail-friends-1: a mail friend that already had its turn in a
+    /// pass and comes due again is asked again in it, not after the pass
+    /// behind the friend that is away. Both are due; Carol answers at once,
+    /// Dave is away. While his dial is out a kick comes (the listeners, Tor,
+    /// a link): Carol is asked again, no sooner than her rest after her
+    /// first turn (here 1.5 s, well above what a turn takes in a debug
+    /// build), and done while his dial is still out. Dave, whose turn ends
+    /// last, is not asked again in the pass.
+    #[test]
+    fn f18_one_that_had_its_turn_is_asked_again_when_it_comes_due_again() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let _t = Times::set(60_000, 1500, 80_000);
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let carol = Carol::default();
+        let carol_at = Mutex::new(Vec::new());
+        let dave_dials = Mutex::new(0usize);
+        let twice = Told::<Option<bool>>::default();
+        pass_at_once(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            ASKED_AT_ONCE,
+            &no_finds,
+            &forget_nothing,
+            &|who, _, frames| {
+                if who == "carol" {
+                    carol_at.lock().unwrap().push(std::time::Instant::now());
+                    return carol.dial(frames);
+                }
+                *dave_dials.lock().unwrap() += 1;
+                let first = wait_until(|| turn_ended(&shared, &fix.carol));
+                lock_of(&shared).kick(Instant::now());
+                let again = wait_until(|| {
+                    carol_at.lock().unwrap().len() >= 2 && turn_ended(&shared, &fix.carol)
+                });
+                twice.set(Some(first && again));
+                Err("custody dial deadline".to_string())
+            },
+        );
+        assert_eq!(
+            twice.get(),
+            Some(true),
+            "asked again while Dave's dial was out"
+        );
+        let at = carol_at.into_inner().unwrap();
+        assert_eq!(at.len(), 2, "once, and once after the kick: {at:?}");
+        assert!(
+            at[1] - at[0] >= Duration::from_millis(1500),
+            "not before her rest: {:?}",
+            at[1] - at[0]
+        );
+        assert_eq!(*dave_dials.lock().unwrap(), 1, "Dave once");
+        let s = lock_of(&shared);
+        assert_eq!(s.failures.get(&fix.dave), Some(&1));
+        assert!(!s.failures.contains_key(&fix.carol) && s.in_pass.is_empty());
+    }
+
+    /// Review mail-friends-5: while a dial is out the pass sleeps until a
+    /// turn ends, the schedule rings, or one of its custodians may start a
+    /// turn; it does not look every 200 ms. Carol answers and rests 2 s
+    /// (new routes make her due meanwhile: a wake, which leaves parks as
+    /// they are), Bob is parked for an hour, Dave's dial is out until Carol
+    /// has been asked again: six looks or so in all, where looking every
+    /// 200 ms through her rest made ten more.
+    #[test]
+    fn f18_the_pass_sleeps_while_no_turn_can_start() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let _t = Times::set(60_000, 2000, 80_000);
+        let (fix, wall) = two_friends(true);
+        fix.book_with(&[], &[fix.bob]);
+        let shared: Mutex<Shared> = Mutex::default();
+        lock_of(&shared)
+            .parked
+            .insert(fix.bob, (Instant::now() + LATER, "TEST_PARK"));
+        let carol = Carol::default();
+        let (again, bob_dials) = (Told::<Option<bool>>::default(), Told::<usize>::default());
+        LOOKS_FOR_TESTS.with(|looks| looks.set(0));
+        pass_at_once(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            ASKED_AT_ONCE,
+            &no_finds,
+            &forget_nothing,
+            &|who, _, frames| match who {
+                "carol" => carol.dial(frames),
+                "dave" => {
+                    let ended = wait_until(|| turn_ended(&shared, &fix.carol));
+                    let woke = lock_of(&shared).wake(&fix.carol, Wake::Moved, Instant::now());
+                    let asked =
+                        wait_until(|| carol.count() >= 2 && turn_ended(&shared, &fix.carol));
+                    again.set(Some(ended && woke && asked));
+                    Err("custody dial deadline".to_string())
+                }
+                _ => {
+                    bob_dials.set(bob_dials.get() + 1);
+                    Err("custody dial deadline".to_string())
+                }
+            },
+        );
+        let looks = LOOKS_FOR_TESTS.with(std::cell::Cell::get);
+        assert_eq!(
+            again.get(),
+            Some(true),
+            "Carol was asked again after her rest"
+        );
+        assert_eq!((carol.count(), bob_dials.get()), (2, 0), "Bob stays parked");
+        assert!(looks <= 9, "looks: {looks}");
+    }
+
+    /// ... and one whose own next time comes while a dial is out is asked
+    /// again then, by the pass's own clock, with nothing ringing: Carol's
+    /// fetch interval is 400 ms here, and the pass looks at least every
+    /// 5 s otherwise.
+    #[test]
+    fn f18_one_that_had_its_turn_is_asked_again_at_its_own_time() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let _t = Times::set(400, 50, 80_000);
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let carol = Carol::default();
+        let carol_at = Mutex::new(Vec::new());
+        pass_at_once(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            ASKED_AT_ONCE,
+            &no_finds,
+            &forget_nothing,
+            &|who, _, frames| {
+                if who == "carol" {
+                    carol_at.lock().unwrap().push(std::time::Instant::now());
+                    return carol.dial(frames);
+                }
+                wait_until(|| carol_at.lock().unwrap().len() >= 2);
+                Err("custody dial deadline".to_string())
+            },
+        );
+        let at = carol_at.into_inner().unwrap();
+        assert!(at.len() >= 2, "{at:?}");
+        let gap = at[1] - at[0];
+        assert!(
+            gap >= Duration::from_millis(300) && gap < Duration::from_secs(2),
+            "at her time, not at a later look: {gap:?}"
+        );
+    }
+
+    /// Turns again in a pass start only while it is young (here 600 ms;
+    /// Carol's fetch interval 100 ms, at most 1 s after empty rounds): then
+    /// the pass ends with the turns that are out (Dave's, 2.5 s), and the
+    /// next one reads the mail friends again.
+    #[test]
+    fn f18_no_turn_again_once_the_pass_is_old() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let _t = Times::set(100, 10, 600);
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let carol = Carol::default();
+        let began = std::time::Instant::now();
+        let carol_at = Mutex::new(Vec::new());
+        pass_at_once(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            ASKED_AT_ONCE,
+            &no_finds,
+            &forget_nothing,
+            &|who, _, frames| {
+                if who == "carol" {
+                    carol_at.lock().unwrap().push(began.elapsed());
+                    return carol.dial(frames);
+                }
+                std::thread::sleep(Duration::from_millis(2500));
+                Err("custody dial deadline".to_string())
+            },
+        );
+        let at = carol_at.into_inner().unwrap();
+        assert!(at.len() >= 2, "asked again while young: {at:?}");
+        assert!(
+            at.iter().all(|t| *t < Duration::from_secs(1)),
+            "none once the pass was old: {at:?}"
+        );
+    }
+
+    /// Review mail-friends-3: in a mail check whose time is up, a turn none
+    /// of whose dials went out was no round. Dave counts no failure, has no
+    /// not-reached line and is due as he was; Carol, whose dial went out,
+    /// answered. A dial that did go out and failed is a failure, with its
+    /// line: the keeper's tag, the carrier and the wait from now.
+    #[test]
+    fn f18_a_turn_the_check_never_let_out_is_no_round() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let refused = "lan connect: cannot connect (Connection refused)";
+        for (dave_says, kick, waits) in [
+            (MAIL_CHECK_BUDGET, false, &[][..]),
+            // The idle wait from now.
+            (refused, false, &[" 59 s", " 60 s"][..]),
+            // A kick came during his turn, which reached nothing: he is due
+            // again at once, and the line says so.
+            (refused, true, &[" 0 s"][..]),
+        ] {
+            let (fix, wall) = two_friends(true);
+            let shared: Mutex<Shared> = Mutex::default();
+            let carol = Carol::default();
+            not_reached_lines();
+            pass_at_once(
+                &fix,
+                &shared,
+                (Instant::now(), wall),
+                ASKED_AT_ONCE,
+                &no_finds,
+                &forget_nothing,
+                &|who, _, frames| {
+                    if who == "carol" {
+                        return carol.dial(frames);
+                    }
+                    if kick {
+                        lock_of(&shared).kick(Instant::now());
+                    }
+                    Err(dave_says.to_string())
+                },
+            );
+            let lines = not_reached_lines();
+            let s = lock_of(&shared);
+            assert!(!s.failures.contains_key(&fix.carol) && carol.count() == 1);
+            assert!(
+                kick || s.states[&fix.carol].1 > Instant::now(),
+                "Carol answered"
+            );
+            if waits.is_empty() {
+                assert_eq!(s.failures.get(&fix.dave), None, "no failure");
+                assert!(lines.is_empty(), "no line: {lines:?}");
+                assert!(s.states[&fix.dave].1 <= Instant::now(), "due as he was");
+                continue;
+            }
+            assert_eq!(s.failures.get(&fix.dave), Some(&1));
+            let tag = crate::netutil::link_tag(&fix.dave);
+            let lan = OutboxCarrier::Lan.label();
+            let line = format!("contact {tag} not reached for mail ({lan}); asked again in");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].starts_with(&line), "{lines:?}");
+            assert!(waits.iter().any(|w| lines[0].ends_with(w)), "{lines:?}");
+            assert_eq!(s.states[&fix.dave].1 <= Instant::now(), kick, "due at once");
+        }
+    }
+
+    /// ... and once the check's time is up no turn starts at all: nothing
+    /// is dialled and no schedule changes, whether the pass asks its mail
+    /// friends at the same time or one after the other. A budget spent
+    /// while a dial is out lets no turn start after it: the kick that comes
+    /// then asks nobody.
+    #[test]
+    fn f18_no_turn_starts_once_the_checks_time_is_up() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let _t = Times::set(60_000, 50, 80_000);
+        for at_once in [ASKED_AT_ONCE, 1] {
+            let (fix, wall) = two_friends(true);
+            let shared: Mutex<Shared> = Mutex::default();
+            let dials = Mutex::new(0usize);
+            let spent = || Some(Duration::ZERO);
+            pass_at_once_in(
+                &fix,
+                &shared,
+                (Instant::now(), wall),
+                at_once,
+                (&no_finds, &forget_nothing),
+                &|_, _, _| {
+                    *dials.lock().unwrap() += 1;
+                    Err(MAIL_CHECK_BUDGET.to_string())
+                },
+                &spent,
+            );
+            assert_eq!(*dials.lock().unwrap(), 0, "at_once {at_once}");
+            let s = lock_of(&shared);
+            assert!(
+                s.states.is_empty() && s.in_pass.is_empty(),
+                "at_once {at_once}"
+            );
+        }
+        // Spent while Dave's dial is out.
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let carol = Carol::default();
+        let up = Told::<bool>::default();
+        let budget = || Some(if up.get() { Duration::ZERO } else { LATER });
+        pass_at_once_in(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            ASKED_AT_ONCE,
+            (&no_finds, &forget_nothing),
+            &|who, _, frames| {
+                if who == "carol" {
+                    return carol.dial(frames);
+                }
+                wait_until(|| turn_ended(&shared, &fix.carol));
+                up.set(true);
+                lock_of(&shared).kick(Instant::now());
+                std::thread::sleep(Duration::from_millis(400));
+                Err("custody dial deadline".to_string())
+            },
+            &budget,
+        );
+        assert_eq!(carol.count(), 1, "not asked again once the time was up");
+    }
+
+    /// Review mail-friends-8: no turn starts after one panicked. Bob (Dave
+    /// lists him), Carol and Dave are due; Carol answers; Dave's turn
+    /// panics while Bob's dial is out, and a kick makes Carol due again
+    /// (after her rest): she is not asked again, and the panic ends the
+    /// pass once Bob's turn has ended and been noted.
+    #[test]
+    fn f18_no_turn_starts_after_one_panicked() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _g = Gates::on(true, true);
+            let _t = Times::set(60_000, 400, 80_000);
+            let (fix, wall) = two_friends(true);
+            fix.book_with(&[], &[fix.bob]);
+            let shared = Mutex::default();
+            let (carol, bob) = (Carol::default(), Carol::default());
+            let pass = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pass_at_once(
+                    &fix,
+                    &shared,
+                    (Instant::now(), wall),
+                    ASKED_AT_ONCE,
+                    &no_finds,
+                    &forget_nothing,
+                    &|who, _, frames| match who {
+                        "carol" => carol.dial(frames),
+                        "bob" => {
+                            wait_until(|| turn_ended(&shared, &fix.carol));
+                            lock_of(&shared).kick(Instant::now());
+                            std::thread::sleep(Duration::from_millis(1200));
+                            bob.dial(frames)
+                        }
+                        _ => {
+                            wait_until(|| turn_ended(&shared, &fix.carol));
+                            panic!("a fault in Dave's turn");
+                        }
+                    },
+                );
+            }));
+            let bob_noted = turn_ended(&shared, &fix.bob);
+            let _ = ended.send((pass.is_err(), carol.count(), bob_noted));
+        });
+        let (panicked, carol_dials, bob_noted) = end
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the pass ended");
+        assert!(panicked, "the panic ends the pass");
+        assert_eq!(carol_dials, 1, "nobody asked after the panic");
+        assert!(bob_noted, "Bob's turn was noted first");
+    }
+
+    /// Where a custodian can be dialled is looked up before its turn takes
+    /// the work: a lookup that takes a while (a saved name that does not
+    /// resolve: up to 5 s) holds no other turn up. Dave's lookup waits here
+    /// until Carol's whole turn has ended.
+    #[test]
+    fn f18_a_turns_route_lookup_holds_no_other_turn_up() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let (fix, wall) = two_friends(true);
+        let shared: Arc<Mutex<Shared>> = Arc::default();
+        let carol_done = Arc::new(Told::<Option<bool>>::default());
+        let found: RoutesFound = {
+            let (shared, carol_done, carol, dave) = (
+                Arc::clone(&shared),
+                Arc::clone(&carol_done),
+                fix.carol,
+                fix.dave,
+            );
+            Arc::new(move |c: &[u8; 32]| {
+                if *c == dave {
+                    carol_done.set(Some(wait_until(|| turn_ended(&shared, &carol))));
+                }
+            })
+        };
+        TURN_GATES.with(|gates| {
+            gates.borrow_mut().push(Arc::new(move || {
+                ROUTES_FOUND_FOR_TESTS.with(|f| *f.borrow_mut() = Some(Arc::clone(&found)));
+            }));
+        });
+        let answers = Carol::default();
+        pass_at_once(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            ASKED_AT_ONCE,
+            &no_finds,
+            &forget_nothing,
+            &|_, _, frames| answers.dial(frames),
+        );
+        assert_eq!(carol_done.get(), Some(true), "Carol's turn ended meanwhile");
+        assert!(turn_ended(&shared, &fix.dave));
+    }
+
+    /// Review mail-friends-4: a turn is worked out when its place frees,
+    /// not when it is found due, so what the schedule says then is what
+    /// counts. Bob (Dave lists him), Carol and Dave are due, two asked at
+    /// the same time; while the first two dials are out the third one is
+    /// parked (as the deposits' strikes park a custodian): it is not asked
+    /// in this pass.
+    #[test]
+    fn f18_a_turn_is_worked_out_when_its_place_frees() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let (fix, wall) = two_friends(true);
+        fix.book_with(&[], &[fix.bob]);
+        let shared: Mutex<Shared> = Mutex::default();
+        let answers = Carol::default();
+        let out = DialsOut::default();
+        let dialled = Mutex::new(Vec::new());
+        let together = Told::<bool>::default();
+        let keys = [("bob", fix.bob), ("carol", fix.carol), ("dave", fix.dave)];
+        pass_at_once(
+            &fix,
+            &shared,
+            (Instant::now(), wall),
+            2,
+            &no_finds,
+            &forget_nothing,
+            &|who, _, frames| {
+                dialled.lock().unwrap().push(who);
+                if out.begin(2, Duration::from_secs(5)) {
+                    together.set(true);
+                }
+                {
+                    let seen = dialled.lock().unwrap();
+                    let mut s = lock_of(&shared);
+                    for (name, key) in keys {
+                        if !seen.contains(&name) {
+                            s.parked.insert(key, (Instant::now() + LATER, "TEST_PARK"));
+                        }
+                    }
+                }
+                let got = answers.dial(frames);
+                out.end();
+                got
+            },
+        );
+        assert!(together.get(), "the first two were asked at the same time");
+        let dialled = dialled.into_inner().unwrap();
+        assert_eq!(
+            dialled.len(),
+            2,
+            "the third was parked when its place freed: {dialled:?}"
+        );
+        let s = lock_of(&shared);
+        assert!(s.in_pass.is_empty() && s.failures.is_empty());
+    }
+
+    /// Review mail-friends-7: whatever a turn's thread runs into, its end
+    /// reaches the pass: entering the pass's runtime (and in tests the
+    /// gates) is inside the catch too. Every turn's thread panics there (a
+    /// gate of this test): the pass ends with that panic, instead of
+    /// waiting for ends that never come.
+    #[test]
+    fn f18_a_turns_thread_that_fails_before_its_turn_still_ends_the_pass() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _g = Gates::on(true, true);
+            TURN_GATES.with(|gates| {
+                gates
+                    .borrow_mut()
+                    .push(Arc::new(|| panic!("a fault entering a turn's thread")));
+            });
+            let (fix, wall) = two_friends(true);
+            let shared = Mutex::default();
+            let answers = Carol::default();
+            let pass = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pass_at_once(
+                    &fix,
+                    &shared,
+                    (Instant::now(), wall),
+                    ASKED_AT_ONCE,
+                    &no_finds,
+                    &forget_nothing,
+                    &|_, _, frames| answers.dial(frames),
+                );
+            }));
+            let _ = ended.send((pass.is_err(), answers.count()));
+        });
+        let (panicked, dials) = end
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the pass ended");
+        assert!(panicked, "with the panic");
+        assert_eq!(dials, 0, "no turn ran");
+    }
+
+    /// The tags a turn missed are looked at with the work held
+    /// ([`Pass::retag`]): they come from the session store, which a turn's
+    /// page writes. A turn holds the work here for 400 ms.
+    #[test]
+    fn f18_tags_are_looked_at_with_the_work_held() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let now = Instant::now();
+        let mut keepers = vec![Keeper::new((fix.carol, vec![fix.bob]))];
+        keepers[0].turns = 1;
+        keepers[0].live_peers = vec![fix.bob];
+        with_pass(&fix, &shared, |pass, _| {
+            let work = pass.asking.work;
+            let held = std::sync::Barrier::new(2);
+            let waited = std::thread::scope(|s| {
+                s.spawn(|| {
+                    let _turn = AtWork::begin(work);
+                    held.wait();
+                    std::thread::sleep(Duration::from_millis(400));
+                });
+                held.wait();
+                let began = std::time::Instant::now();
+                pass.retag(&mut keepers, &[fix.bob], (now, wall));
+                began.elapsed()
+            });
+            assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        });
+    }
+
+    /// A [`Pass`] over Alice's folder in `fix` on `shared`, with no network,
+    /// handed to `f` with its `PassIo`.
+    fn with_pass<T>(
+        fix: &Fix,
+        shared: &Mutex<Shared>,
+        f: impl FnOnce(&mut Pass<'_>, &PassIo<'_>) -> T,
+    ) -> T {
+        let work = Mutex::new(());
+        let dial = |_: &OutboxRoute, _: &str, _: &[Vec<u8>]| Err("no dial here".to_string());
+        let asking = Asking {
+            data_dir: fix.dir(),
+            identity: &fix.alice,
+            dial: &dial,
+            find_failed: &forget_nothing,
+            work: &work,
+        };
+        let mut pass = Pass {
+            shared,
+            asking: &asking,
+            handoff: false,
+            register_due: false,
+            custody_live: true,
+            base: BASE_INTERVAL,
+            again_after: Duration::from_millis(700),
+            new_turns_for: NEW_TURNS_FOR,
+            offers: HashMap::new(),
+            cache: TagCache::default(),
+            reg_cache: TagCache::default(),
+            inbox_changed: false,
+        };
+        let mut home_changed = |_: usize| {};
+        let io = PassIo {
+            dial: &dial,
+            want: &|_| {},
+            finds: &no_finds,
+            find_failed: &forget_nothing,
+            home_changed: &mut home_changed,
+            lan: true,
+            kick: &|_| {},
+            at_once: ASKED_AT_ONCE,
+            budget: &no_budget,
+        };
+        f(&mut pass, &io)
+    }
+
+    /// A turn of `custodian` at `now` that asks for the mail of
+    /// `live_peers` with `tags`.
+    fn turn_of(
+        custodian: [u8; 32],
+        (now, wall): (Instant, u64),
+        live_peers: Vec<[u8; 32]>,
+        tags: BTreeMap<[u8; 16], raven_core::relayed_ingest::RelayHint>,
+    ) -> Turn {
+        Turn {
+            custodian,
+            now,
+            wall,
+            state: FetchState::default(),
+            empty: 0,
+            live_peers,
+            last_path: None,
+            registering: false,
+            offer: None,
+            finds: Vec::new(),
+            onion: false,
+            tags,
+            register: BTreeMap::new(),
+            wants_tags: false,
+        }
+    }
+
+    /// The tags of Alice's live session with Bob, as a turn asks with them.
+    fn bob_tags(fix: &Fix, wall: u64) -> BTreeMap<[u8; 16], raven_core::relayed_ingest::RelayHint> {
+        let tags =
+            raven_core::custody_client::inbound_tags(fix.dir(), &fix.alice, &[fix.bob], wall)
+                .unwrap();
+        assert!(!tags.is_empty(), "Alice's session with Bob");
+        tags
+    }
+
+    /// What a turn of `custodian` at `now` brought that asked nothing
+    /// there (`dialled` dials went out, each answered).
+    fn asked_nothing(custodian: [u8; 32], at: (Instant, u64), dialled: usize) -> Asked {
+        Asked {
+            turn: turn_of(custodian, at, Vec::new(), BTreeMap::new()),
+            no_route: false,
+            report: None,
+            letters: None,
+            answered: dialled,
+            path: None,
+            carrier: None,
+            tried: None,
+            over_tor: false,
+            dialled,
+            cut: false,
+        }
+    }
+
+    /// A turn's end as the pass notes it ([`Pass::noted`]): the custodian
+    /// rests [`AGAIN_AFTER`] (here 700 ms) after a turn that dialled it,
+    /// [`LOOK_AGAIN`] after one that dialled nothing; one whose turn missed
+    /// tags another turn's mail brought while it was out is due at once as
+    /// it ends; and the mail a turn took in makes due again each custodian
+    /// whose last turn asked for that peer's mail without one of its tags
+    /// now, the one that took it in too ([`Pass::retag`]).
+    #[test]
+    fn f18_a_turns_end_sets_its_rest_and_missed_tags_make_it_due() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let now = Instant::now();
+        let mut keepers = vec![
+            Keeper::new((fix.carol, vec![fix.bob])),
+            Keeper::new((fix.dave, vec![fix.bob])),
+        ];
+        with_pass(&fix, &shared, |pass, io| {
+            lock_of(&shared).begin_fetch(&fix.carol);
+            pass.noted(
+                io,
+                &mut keepers,
+                0,
+                asked_nothing(fix.carol, (now, wall), 1),
+                (now, wall),
+            );
+            assert_eq!(
+                keepers[0].rest_until,
+                Some(now + Duration::from_millis(700))
+            );
+            assert!(
+                lock_of(&shared).states[&fix.carol].1 > now,
+                "its own next time"
+            );
+            keepers[1].retag = true;
+            lock_of(&shared).begin_fetch(&fix.dave);
+            pass.noted(
+                io,
+                &mut keepers,
+                1,
+                asked_nothing(fix.dave, (now, wall), 0),
+                (now, wall),
+            );
+            assert_eq!(
+                keepers[1].rest_until,
+                Some(now + LOOK_AGAIN),
+                "it dialled nothing"
+            );
+            assert!(lock_of(&shared).states[&fix.dave].1 <= now, "due at once");
+            assert!(!keepers[1].retag);
+            // Carol's turn took in Bob's mail, which may have brought a
+            // session: her turn asked without its tags, Dave's with them.
+            let later = now + BASE_INTERVAL;
+            lock_of(&shared).states.get_mut(&fix.dave).unwrap().1 = later;
+            let bob_tags = bob_tags(&fix, wall);
+            keepers[0].starts(&turn_of(
+                fix.carol,
+                (now, wall),
+                vec![fix.bob],
+                BTreeMap::new(),
+            ));
+            keepers[1].starts(&turn_of(fix.dave, (now, wall), vec![fix.bob], bob_tags));
+            lock_of(&shared).begin_fetch(&fix.carol);
+            let mut asked = asked_nothing(fix.carol, (now, wall), 1);
+            asked.report = Some(raven_core::custody_client::FetchReport {
+                touched: vec![fix.bob],
+                ..Default::default()
+            });
+            pass.noted(io, &mut keepers, 0, asked, (now, wall));
+            let s = lock_of(&shared);
+            assert!(
+                s.states[&fix.carol].1 <= now,
+                "due again for the tags she missed"
+            );
+            assert_eq!(s.states[&fix.dave].1, later, "Dave asked with them");
+        });
+    }
+
+    /// Mail a turn took in for a peer may bring a session whose tags the
+    /// turns asked at the same time did not ask for (in a pass that asked
+    /// one after the other, the next one was asked with them): a custodian
+    /// whose last turn asked for that peer's mail without one of its tags
+    /// now is due again (at once; flagged while its turn is out), one whose
+    /// turn asked with all of them is not, nor one that asks for other
+    /// peers' mail.
+    #[test]
+    fn f18_tags_a_turn_did_not_ask_with_make_its_custodian_due_again() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, true);
+        let (fix, wall) = two_friends(true);
+        let shared: Mutex<Shared> = Mutex::default();
+        let now = Instant::now();
+        let later = now + BASE_INTERVAL;
+        let schedule = |c: [u8; 32]| {
+            lock_of(&shared)
+                .states
+                .insert(c, (FetchState::default(), later, 0));
+        };
+        let due_at = |c: &[u8; 32]| lock_of(&shared).states[c].1;
+        let mut keepers = vec![
+            Keeper::new((fix.carol, vec![fix.bob])),
+            Keeper::new((fix.dave, vec![fix.bob])),
+        ];
+        // The turns they had: Carol's asked for Bob's mail with none of
+        // his tags, Dave's with all of them.
+        let bob_tags = bob_tags(&fix, wall);
+        keepers[0].starts(&turn_of(
+            fix.carol,
+            (now, wall),
+            vec![fix.bob],
+            BTreeMap::new(),
+        ));
+        keepers[1].starts(&turn_of(fix.dave, (now, wall), vec![fix.bob], bob_tags));
+        schedule(fix.carol);
+        schedule(fix.dave);
+        with_pass(&fix, &shared, |pass, _| {
+            pass.retag(&mut keepers, &[fix.bob], (now, wall));
+            assert!(due_at(&fix.carol) <= now, "Carol's turn missed Bob's tags");
+            assert_eq!(due_at(&fix.dave), later, "Dave's asked with them");
+            // Out: due again when it ends.
+            schedule(fix.carol);
+            keepers[0].out = true;
+            pass.retag(&mut keepers, &[fix.bob], (now, wall));
+            assert!(keepers[0].retag);
+            assert_eq!(due_at(&fix.carol), later);
+            // Mail of another peer: nothing.
+            keepers[0].out = false;
+            keepers[0].retag = false;
+            pass.retag(&mut keepers, &[fix.dave], (now, wall));
+            assert!(!keepers[0].retag);
+            assert_eq!(due_at(&fix.carol), later);
+        });
+    }
+
+    /// Bob's fetch pass in the letters world `w` on `shared`, his mail
+    /// friends Carol and Dave asked at the same time: every dial through
+    /// `dial`, the beacon's finds and forgetting, every outbox kick
+    /// through `kick`.
+    fn bob_pass(
+        w: &crate::letters::tests::World,
+        shared: &Mutex<Shared>,
+        dial: &PassDial<'_>,
+        (finds, find_failed): Beacon<'_>,
+        kick: &dyn Fn(&[u8; 32]),
+    ) {
+        let mut home_changed = |_: usize| {};
+        let mut io = PassIo {
+            dial,
+            want: &|_| {},
+            finds,
+            find_failed,
+            home_changed: &mut home_changed,
+            lan: true,
+            kick,
+            at_once: ASKED_AT_ONCE,
+            budget: &no_budget,
+        };
+        let (now, wall) = (Instant::now(), raven_core::clock::now_ms());
+        fetch_pass_with(shared, w.b.path(), &w.bob, now, wall, &mut io);
+    }
+
+    /// Alice's messages `texts`, left by her worker with both of Bob's mail
+    /// friends, in a letters world of seed `seed`.
+    fn left_with_both(seed: u8, texts: &[&str]) -> crate::letters::tests::World {
+        let w = crate::letters::tests::World::new(seed, true, true);
+        for text in texts {
+            w.stage(text);
+        }
+        let report = w.attempt();
+        assert_eq!(report.outcomes.len(), texts.len(), "{report:?}");
+        let both = crate::outbox::Outcome::Deposited { held: 2 };
+        assert!(report.outcomes.values().all(|o| *o == both), "{report:?}");
+        let n = i64::try_from(texts.len()).unwrap();
+        assert_eq!(
+            (w.objects_at(w.carol_pub), w.objects_at(w.dave_pub)),
+            (n, n)
+        );
+        w
+    }
+
+    /// Review mail-friends-2: real mail on the turns' threads. Alice's two
+    /// messages wait at both of Bob's mail friends (sealed objects, as her
+    /// worker leaves them with Carol and Dave), and Bob's pass asks the two
+    /// at the same time: each message reaches his inbox exactly once, both
+    /// keepers let go of what they held (RELEASE), the two dials were out
+    /// together, and the outbox kicked is Alice's. Then with a third one:
+    /// noting a turn's end is this device's work too. Carol's mail kicks
+    /// Alice's outbox while her end is noted; Dave's dial to a stale find
+    /// fails right then, and his turn tells the beacon to forget the find
+    /// only once Carol's end has been noted.
+    #[test]
+    fn f18_mail_both_friends_hold_comes_once_when_both_are_asked_at_once() {
+        if !rig::lab_backends() {
+            return;
+        }
+        let _g = Gates::on(true, false);
+        let _lan = crate::lan_direct::lan_switch_untouched();
+        let w = left_with_both(0x1b, &["first", "second"]);
+        let (carol, dave) = (w.carol_pub, w.dave_pub);
+        let shared = Mutex::default();
+        let out = DialsOut::default();
+        let net = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+            crate::outbox::Dialer::dial(&*w.net, w.b.path(), route, expected, frames)
+                .map(|replies| (replies, Some(DeliveryPath::Direct)))
+        };
+        let dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+            out.begin(2, Duration::from_secs(5));
+            let got = net(route, expected, frames);
+            out.end();
+            got
+        };
+        let kicked = Mutex::new(Vec::new());
+        let kick = |peer: &[u8; 32]| kicked.lock().unwrap().push(*peer);
+        bob_pass(&w, &shared, &dial, (&no_finds, &forget_nothing), &kick);
+        let mut inbox = w.bob_inbox();
+        inbox.sort();
+        assert_eq!(inbox, ["first", "second"], "each message once");
+        assert_eq!(out.most(), 2, "the two were asked at the same time");
+        assert_eq!(
+            (w.objects_at(carol), w.objects_at(dave)),
+            (0, 0),
+            "both let go"
+        );
+        let kicked = kicked.into_inner().unwrap();
+        assert!(!kicked.is_empty() && kicked.iter().all(|p| *p == w.alice_pub));
+        {
+            let s = lock_of(&shared);
+            assert!(s.failures.is_empty() && s.in_pass.is_empty());
+            assert!(s.states.contains_key(&carol) && s.states.contains_key(&dave));
+        }
+        drop(w);
+        // Noting an end holds the work.
+        let w = left_with_both(0x1b, &["third"]);
+        let stale = "192.168.1.99:47532";
+        let finds = |c: &[u8; 32]| {
+            if *c == w.dave_pub {
+                vec![stale.to_string()]
+            } else {
+                Vec::new()
+            }
+        };
+        let kicking = std::sync::atomic::AtomicBool::new(false);
+        let (forgot, overlap) = (
+            Mutex::new(0usize),
+            std::sync::atomic::AtomicBool::new(false),
+        );
+        let find_failed = |_: &[u8; 32], _: &str| {
+            *forgot.lock().unwrap() += 1;
+            if kicking.load(std::sync::atomic::Ordering::SeqCst) {
+                overlap.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        let kicks = Mutex::new(0usize);
+        let kick = |_: &[u8; 32]| {
+            *kicks.lock().unwrap() += 1;
+            kicking.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(300));
+            kicking.store(false, std::sync::atomic::Ordering::SeqCst);
+        };
+        let waited = Told::<Option<bool>>::default();
+        let net = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+            crate::outbox::Dialer::dial(&*w.net, w.b.path(), route, expected, frames)
+                .map(|replies| (replies, Some(DeliveryPath::Direct)))
+        };
+        let dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+            if route.dial == stale {
+                waited.set(Some(wait_until(|| {
+                    kicking.load(std::sync::atomic::Ordering::SeqCst)
+                })));
+                return Err("lan connect: cannot connect (Connection refused)".to_string());
+            }
+            net(route, expected, frames)
+        };
+        let shared = Mutex::default();
+        bob_pass(&w, &shared, &dial, (&finds, &find_failed), &kick);
+        assert_eq!(
+            waited.get(),
+            Some(true),
+            "Dave's stale dial failed while Carol's end was noted"
+        );
+        assert!(*kicks.lock().unwrap() >= 1 && *forgot.lock().unwrap() == 1);
+        assert!(
+            !overlap.load(std::sync::atomic::Ordering::SeqCst),
+            "Dave's turn worked while Carol's end was being noted"
+        );
+        assert_eq!(w.bob_inbox(), ["third"]);
+        assert_eq!(
+            (w.objects_at(w.carol_pub), w.objects_at(w.dave_pub)),
+            (0, 0)
         );
     }
 
@@ -5199,6 +6634,7 @@ mod tests {
             lan: true,
             kick: &kick,
             at_once: 1,
+            budget: &no_budget,
         };
         fetch_pass_with(
             shared,
@@ -5300,6 +6736,7 @@ mod tests {
             lan: true,
             kick: &kick,
             at_once: 1,
+            budget: &no_budget,
         };
         fetch_pass_with(
             &Mutex::default(),

@@ -496,6 +496,7 @@ impl World {
             // One turn at a time, on this thread: the net answers for the
             // other nodes here, under the gates this thread set.
             at_once: 1,
+            budget: &no_budget,
         };
         fetch_pass_with(shared, dir, &self.ids[n], at, wall, &mut io)
     }
@@ -534,6 +535,7 @@ impl World {
             // One turn at a time, on this thread: the net answers for the
             // other nodes here, under the gates this thread set.
             at_once: 1,
+            budget: &no_budget,
         };
         forward_pass_with(shared, dir, at, wall, &mut io)
     }
