@@ -267,19 +267,29 @@ pub fn start(config: &NodeConfig) -> Result<(), String> {
     start_locked(config, Kind::Full)
 }
 
+/// The refusal while a node for another profile than `dir`'s runs in this
+/// process (`None`: none does).
+fn another_profile_runs(c: &mut Controller, dir: &Path) -> Option<String> {
+    reap(c);
+    c.running
+        .as_ref()
+        .filter(|r| !same_profile(&r.data_dir, dir))
+        .map(|r| {
+            format!(
+                "an embedded raven-node already runs for another profile ({}) in this process",
+                r.data_dir.display()
+            )
+        })
+}
+
 fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
     let dir = config.data_dir().to_path_buf();
     {
         let mut c = controller();
-        reap(&mut c);
+        if let Some(refused) = another_profile_runs(&mut c, &dir) {
+            return Err(refused);
+        }
         if let Some(r) = &c.running {
-            if !same_profile(&r.data_dir, &dir) {
-                return Err(format!(
-                    "an embedded raven-node already runs for another profile ({}) in this \
-                     process",
-                    r.data_dir.display()
-                ));
-            }
             // The full node does all a small one does; a small node gives
             // way to any other kind.
             if r.kind == kind || r.kind == Kind::Full {
@@ -290,8 +300,10 @@ fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
     // A small node gives way to the one asked for.
     stop_locked(STOP_WAIT);
     gives_way(kind);
-    forget_last_life();
     open_profile(&dir)?;
+    // Only for a node that starts: one whose profile does not open leaves
+    // the last life to the next start.
+    forget_last_life();
     open_log(&dir);
     // From here the node writes to sockets whose other end may be closed:
     // an error, never the app's end (raven_core::sigpipe).
@@ -596,8 +608,15 @@ pub fn end_pause() {
 ///   the check returned, as any fetch does, instead of being cut, counted
 ///   as a friend not reached and tried again a minute later.
 /// - **A small node** (iOS background refresh: the background node, or one
-///   the check started) has every custody dial cut at the budget; one the
+///   the check started) has its custody dials cut at the budget: each one
+///   that starts once the check has begun, in the pass it waits for and in
+///   a pass that was at work then (which starts none once the budget is
+///   spent, even after the check returned). A dial that was already out
+///   keeps its own deadline; the wait still ends with the budget. One the
 ///   check started leaves [`MAIL_CHECK_STOP_RESERVE`] of it for its stop.
+/// - **A node for another profile** is not the check's: nothing of that
+///   node is bounded or kicked, and the check is refused
+///   ([`check_mail_if_running`]: `None`, nothing done).
 ///
 /// Mail taken in within the budget is in the profile when the check returns
 /// (`messages` counts it). While a running node's pass is waited for,
@@ -656,6 +675,16 @@ fn check(
     let already = kind.is_some();
     if !already && !may_start {
         return Ok(None);
+    }
+    // A node for another profile is not this check's to bound: refused
+    // before the deadline and the kick, which are the whole process's
+    // (review mail-friends-5, nit C: a pass of that node at work kept the
+    // deadline to its end, and the kick cleared its friends' parks), as the
+    // start below would refuse it.
+    if !already {
+        if let Some(refused) = another_profile_runs(&mut controller(), &dir) {
+            return Err(refused);
+        }
     }
     // A running full node's dials keep their own deadlines; the wait for
     // its pass still ends with the budget.
@@ -759,18 +788,106 @@ mod tests {
 
     /// Review mail-friends-4, finding 4: a full node that starts does not
     /// keep the deadline a mail check set for the small node it replaces;
-    /// a small node that starts keeps it. (An hour on: no custody dial of
-    /// another test in this process is cut by it meanwhile.)
+    /// a small node that starts keeps it. A pass of the node it replaces
+    /// that was at work when the check set it still keeps it (review
+    /// mail-friends-5, finding A): the full node's passes begin after. The
+    /// pass counted here before the deadline is set stands for one at work:
+    /// the check counts the passes begun by then, that one and no later one
+    /// (review mail-friends-6, finding 1: one more, and the next pass would
+    /// keep the spent deadline and ask nobody). (An hour on: no custody
+    /// dial of another test in this process is cut by it meanwhile.)
     #[test]
     fn a_full_node_starts_with_no_mail_check_deadline() {
+        let _passes = crate::custody::passes_for_tests();
+        let at_work = crate::custody::pass_begun_for_tests();
         let later = Some(Instant::now() + Duration::from_secs(3_600));
         crate::custody::set_pass_deadline(later);
+        let by_then = crate::custody::pass_counts().0;
+        let last = crate::custody::pass_deadline_last();
+        let (until, begun) = last.expect("the last deadline set");
+        assert_eq!(Some(until), later);
+        assert!(
+            at_work <= begun && begun <= by_then,
+            "the passes begun by then: {begun}, not in {at_work}..={by_then}"
+        );
         gives_way(Kind::Background);
         assert_eq!(crate::custody::pass_deadline_set(), later);
         gives_way(Kind::MailCheck);
         assert_eq!(crate::custody::pass_deadline_set(), later);
         gives_way(Kind::Full);
         assert_eq!(crate::custody::pass_deadline_set(), None);
+        assert_eq!(crate::custody::pass_deadline_last(), last);
+    }
+
+    /// Review mail-friends-6, finding 1: a full node that starts lets go of
+    /// a mail check's deadline before anything of it runs ([`gives_way`]),
+    /// even one whose profile then does not open. The start here is for a
+    /// profile no path resolves to: it ends there, and nothing of a node
+    /// starts.
+    #[test]
+    fn a_full_node_that_starts_lets_go_of_a_checks_deadline() {
+        let _passes = crate::custody::passes_for_tests();
+        let later = Some(Instant::now() + Duration::from_secs(3_600));
+        crate::custody::set_pass_deadline(later);
+        let last = crate::custody::pass_deadline_last();
+        let nowhere = Path::new("/nonexistent")
+            .join(raven_core::paths::UNRESOLVED_DATA_DIR_NAME)
+            .join("profile");
+        let refused = start(&NodeConfig::new(nowhere, "127.0.0.1:0")).unwrap_err();
+        assert!(
+            refused.contains("cannot determine the Raven data directory"),
+            "{refused}"
+        );
+        assert_eq!(crate::custody::pass_deadline_set(), None);
+        assert_eq!(crate::custody::pass_deadline_last(), last);
+        assert!(controller().running.is_none());
+    }
+
+    /// Review mail-friends-5, nit C: a mail check for a profile while a
+    /// node for another one runs in this process is refused before it sets
+    /// a deadline or kicks the fetcher: that node's passes are not the
+    /// check's to bound. Before, a pass of it at work kept the check's
+    /// deadline to its end. A start for this profile is refused as before.
+    /// The other profile's node here is a stand-in that runs nothing.
+    #[test]
+    fn a_mail_check_for_another_profile_bounds_no_pass() {
+        struct Undo;
+        impl Drop for Undo {
+            fn drop(&mut self) {
+                controller().running = None;
+                raven_core::custody_gate::set_custody_gates_for_this_thread(None);
+            }
+        }
+        let _passes = crate::custody::passes_for_tests();
+        let _undo = Undo;
+        raven_core::custody_gate::set_custody_gates_for_this_thread(Some(
+            raven_core::custody_gate::CustodyGates {
+                live: true,
+                wan: false,
+            },
+        ));
+        let (_runs, done) = mpsc::channel::<String>();
+        controller().running = Some(Running {
+            data_dir: PathBuf::from("/nonexistent/profile-a"),
+            kind: Kind::Full,
+            stop: tokio::sync::watch::channel(false).0,
+            done,
+            thread: None,
+        });
+        let deadline = || {
+            (
+                crate::custody::pass_deadline_set(),
+                crate::custody::pass_deadline_last(),
+            )
+        };
+        let before = deadline();
+        let other = NodeConfig::new("/nonexistent/profile-b", "127.0.0.1:0");
+        let refused = check_mail(&other, Duration::from_secs(5)).unwrap_err();
+        assert!(refused.contains("another profile"), "{refused}");
+        assert_eq!(deadline(), before, "no deadline set");
+        assert!(running_kind(Path::new("/nonexistent/profile-a")).is_some());
+        let refused = start(&other).unwrap_err();
+        assert!(refused.contains("another profile"), "{refused}");
     }
 
     /// The node inside an app binds no port Raven reserves (7420-7427): its

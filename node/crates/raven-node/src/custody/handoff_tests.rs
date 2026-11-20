@@ -39,7 +39,15 @@ use raven_core::owed_acks::OwedAcks;
 use raven_core::paths::PRIMARY_DEVICE_ID;
 use raven_core::route_hints::{custodian_tag, CUSTODIAN_FLAG_HANDOFF_INBOX};
 use raven_core::LanBundle;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// The LAN beacon of a test's forward pass: its finds, its forgetting and
+/// its wants.
+type Looks<'a> = (
+    &'a dyn Fn(&[u8; 32]) -> Vec<String>,
+    &'a (dyn Fn(&[u8; 32], &str) + Sync),
+    &'a dyn Fn(&[u8; 32]),
+);
 
 const DAY: u64 = 24 * 60 * 60 * 1000;
 const A: usize = 0;
@@ -536,6 +544,44 @@ impl World {
             // other nodes here, under the gates this thread set.
             at_once: 1,
             budget: &no_budget,
+        };
+        forward_pass_with(shared, dir, at, wall, &mut io)
+    }
+
+    /// [`Self::forward`] within a mail check's `budget`, with the LAN
+    /// beacon `looks`: `out` is called as each dial goes out, and one with
+    /// none of the budget left then is refused at once
+    /// ([`MAIL_CHECK_BUDGET`]), as the node's is ([`dial_route_path`]).
+    fn forward_within(
+        &self,
+        n: usize,
+        shared: &Mutex<Shared>,
+        (at, wall): (Instant, u64),
+        budget: &(dyn Fn() -> Option<Duration> + Sync),
+        (finds, find_failed, want): Looks<'_>,
+        out: &(dyn Fn() + Sync),
+    ) -> ForwardPass {
+        let dir = self.dir(n);
+        let dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+            out();
+            if budget().is_some_and(|left| left.is_zero()) {
+                return Err(MAIL_CHECK_BUDGET.to_string());
+            }
+            self.net
+                .dial(dir, route, expected, frames)
+                .map(|replies| (replies, Some(DeliveryPath::Direct)))
+        };
+        let mut home_changed = |_: usize| {};
+        let mut io = PassIo {
+            dial: &dial,
+            want,
+            finds,
+            find_failed,
+            home_changed: &mut home_changed,
+            lan: true,
+            kick: &|_| {},
+            at_once: 1,
+            budget,
         };
         forward_pass_with(shared, dir, at, wall, &mut io)
     }
@@ -1055,6 +1101,73 @@ fn fw9_the_forwarder_asks_the_lan_beacon_for_the_next_hop() {
     let pass = w.forward_io(F1, &s1, t2, wall + 2_000, true, &want);
     assert_eq!(pass.dials, 0);
     assert_eq!(*wanted.lock().unwrap(), [f2], "no second want");
+}
+
+/// Review mail-friends-6, nit 7: a forward pass whose mail check's time is
+/// up dials no next hop and learns nothing. With the budget spent as the
+/// pass begins, F2 is not even wanted from the LAN beacon; with it spent
+/// while the dial to F2's beacon find is out, that find is not forgotten,
+/// its saved route is not dialled and no retry wait starts for it. Either
+/// way what the network change made due stays due. Before, the find was
+/// forgotten and the retry wait grew, though nothing had gone out.
+#[test]
+fn fw10_a_forward_pass_the_checks_time_is_up_for_learns_nothing() {
+    if !lab_backends() {
+        return;
+    }
+    let _g = Gates::on(true);
+    let (w, s1) = forwarded(0x9A);
+    let f2 = w.keys[F2];
+    let find = "192.168.1.97:47533";
+    let finds = |hop: &[u8; 32]| {
+        if *hop == f2 {
+            vec![find.to_string()]
+        } else {
+            Vec::new()
+        }
+    };
+    let forgot: Mutex<Vec<String>> = Mutex::default();
+    let find_failed = |_: &[u8; 32], dial: &str| forgot.lock().unwrap().push(dial.to_string());
+    let wanted = AtomicUsize::new(0);
+    let want = |_: &[u8; 32]| {
+        wanted.fetch_add(1, Ordering::SeqCst);
+    };
+    let looks: Looks<'_> = (&finds, &find_failed, &want);
+    let out = AtomicUsize::new(0);
+    let still_due = |s1: &Mutex<Shared>| {
+        let s = lock_of(s1);
+        s.forward_all && !s.forward_wait.contains_key(&f2)
+    };
+    let (t0, wall) = (Instant::now(), now());
+    lock_of(&s1).network_changed(t0);
+    let spent = || Some(Duration::ZERO);
+    let pass = w.forward_within(F1, &s1, (t0, wall), &spent, looks, &|| {
+        out.fetch_add(1, Ordering::SeqCst);
+    });
+    assert_eq!((pass.dials, out.load(Ordering::SeqCst)), (0, 0));
+    assert_eq!(wanted.load(Ordering::SeqCst), 0, "not wanted");
+    assert!(still_due(&s1), "still due, no retry wait");
+    // Spent while the dial to its find is out.
+    let t1 = t0 + LATER;
+    lock_of(&s1).network_changed(t1);
+    let up = AtomicBool::new(false);
+    let budget = || {
+        Some(if up.load(Ordering::SeqCst) {
+            Duration::ZERO
+        } else {
+            LATER
+        })
+    };
+    let pass = w.forward_within(F1, &s1, (t1, wall + 1_000), &budget, looks, &|| {
+        out.fetch_add(1, Ordering::SeqCst);
+        up.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(pass.dials, 0, "cut: no dial counted");
+    assert_eq!(out.load(Ordering::SeqCst), 1, "its saved route not dialled");
+    assert_eq!(wanted.load(Ordering::SeqCst), 1);
+    assert!(forgot.lock().unwrap().is_empty(), "the find stays");
+    assert!(still_due(&s1), "still due, no retry wait");
+    assert_eq!(w.forward_rows(F1, wall).len(), 1, "the row waits");
 }
 
 /// fw3: three links F2 closed park handoff at F2 for an hour; plain
