@@ -289,6 +289,7 @@ fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
     }
     // A small node gives way to the one asked for.
     stop_locked(STOP_WAIT);
+    gives_way(kind);
     forget_last_life();
     open_profile(&dir)?;
     open_log(&dir);
@@ -316,6 +317,18 @@ fn start_locked(config: &NodeConfig, kind: Kind) -> Result<(), String> {
         thread: Some(thread),
     });
     wait_ready(&dir)
+}
+
+/// A node of `kind` is about to start in place of whatever ran. A full
+/// node's custody dials keep their own deadlines: a mail check that bounds
+/// the small node it replaces (the app opened during the background node's
+/// check) does not bound its passes (review mail-friends-4, finding 4: its
+/// first pass kept that deadline to its end). The check's wait stays
+/// bounded. A small node keeps the deadline.
+fn gives_way(kind: Kind) {
+    if kind == Kind::Full {
+        crate::custody::set_pass_deadline(None);
+    }
 }
 
 /// A node starts in this process, maybe not the first: what an earlier one
@@ -742,6 +755,22 @@ mod tests {
             pass_deadline_for(None, began, Duration::from_secs(1)),
             Some(began)
         );
+    }
+
+    /// Review mail-friends-4, finding 4: a full node that starts does not
+    /// keep the deadline a mail check set for the small node it replaces;
+    /// a small node that starts keeps it. (An hour on: no custody dial of
+    /// another test in this process is cut by it meanwhile.)
+    #[test]
+    fn a_full_node_starts_with_no_mail_check_deadline() {
+        let later = Some(Instant::now() + Duration::from_secs(3_600));
+        crate::custody::set_pass_deadline(later);
+        gives_way(Kind::Background);
+        assert_eq!(crate::custody::pass_deadline_set(), later);
+        gives_way(Kind::MailCheck);
+        assert_eq!(crate::custody::pass_deadline_set(), later);
+        gives_way(Kind::Full);
+        assert_eq!(crate::custody::pass_deadline_set(), None);
     }
 
     /// The node inside an app binds no port Raven reserves (7420-7427): its
