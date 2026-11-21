@@ -6156,32 +6156,36 @@ mod tests {
     /// 1 s after his first, starts while the pass is young and is out until
     /// 9.8 s: it holds the pass, though it is not his first (first turns
     /// hold it too: review mail-friends-4, finding 3). Dave's dial fails at
-    /// 5.4 s, and two kicks during it (at 4.3 s and 4.8 s) made him due at
-    /// once. After Dave's turn Carol is asked at her times, Dave is not
-    /// asked again, and the pass ends with Bob's turn (the next one reads
-    /// the mail friends again). Meanwhile it sleeps until Carol is due: Dave
-    /// is due, but may not start a turn, and looking every 200 ms for him
-    /// fails the bound on its looks. Before, nothing was asked once the
-    /// pass was old. A kick makes Carol due at once too, her empty rounds
-    /// forgotten, if her turn is not out then. Her answers are empty, so
-    /// from her fourth turn her interval doubles: with them kept, she is
-    /// asked once after Dave's turn, not three times. Her turns are about
-    /// 0.7 s apart or more, so two kicks 0.5 s apart do not both come on one
-    /// of hers (with one kick, at 4.8 s, about when her fifth turn was due,
-    /// two stress runs asked her once after Dave's turn in 14 of 28 runs, at
-    /// a load average of 4 to 9).
+    /// 5.4 s, and a kick during it made him due at once. After Dave's turn
+    /// Carol is asked at her times, Dave is not asked again, and the pass
+    /// ends with Bob's turn (the next one reads the mail friends again).
+    /// Meanwhile it sleeps until Carol is due: Dave is due, but may not
+    /// start a turn, and looking every 200 ms for him fails the bound on
+    /// its looks. Before, nothing was asked once the pass was old. A kick
+    /// makes Carol due at once too, her empty rounds forgotten, but only if
+    /// her turn is not out then. Her answers are empty, so from her fourth
+    /// turn her interval doubles: with them kept, she is asked once after
+    /// Dave's turn, not three times. So the kick waits, from 4.3 s to 5.2 s,
+    /// until her turn is not out, looked at under the pass's lock (review
+    /// mail-friends-9, N2: a kick at a set time can come while her turn is
+    /// out; with one at 4.8 s, two stress runs asked her once after Dave's
+    /// turn in 14 of 28 runs, at a load average of 4 to 9, and a turn held
+    /// up long enough takes in two kicks 0.5 s apart).
     /// The times of Dave's and Bob's dials run from the pass's first dial,
     /// and the pass is young for five of Bob's intervals: its age runs from
     /// the call, his turns from its first look, which a loaded machine made
     /// up to 0.6 s later (review mail-friends-5, nit F), and a loaded
     /// machine can hold a pass's setup up by seconds (review mail-friends-8,
     /// 8.1: with three intervals, a setup held up by 2 s would start his
-    /// second turn once the pass was old). Bob's turn is out long enough
-    /// for Carol to be asked twice after Dave's although a loaded machine
-    /// held her turn up to 1.8 s past her time (with Bob out 2.4 s past
-    /// Dave's turn, a stress run at a load average of about 285, read live,
-    /// asked her once); the pass may end up to 2 s after his turn, for the
-    /// same reason.
+    /// second turn once the pass was old). A run proves nothing if Bob's
+    /// second turn started once the pass was old (a setup held up by more
+    /// than about 3.8 s does that: review mail-friends-9, on 8.1) or if
+    /// Carol's turn was out from 4.3 s to 5.2 s: it runs again, three times
+    /// at most. Bob's turn is out long enough for Carol to be asked twice
+    /// after Dave's although a loaded machine held her turn up to 1.8 s past
+    /// her time (with Bob out 2.4 s past Dave's turn, a stress run at a load
+    /// average of about 285, read live, asked her once); the pass may end
+    /// up to 2 s after his turn, for the same reason.
     #[test]
     fn f18_an_old_pass_still_asks_a_friend_that_is_there() {
         if !rig::lab_backends() {
@@ -6189,6 +6193,66 @@ mod tests {
         }
         let _g = Gates::on(true, true);
         let _t = Times::set(1000, 10, 5000);
+        let mut proved_nothing = Vec::new();
+        let (run, again) = loop {
+            let run = old_pass_run();
+            assert_eq!(
+                run.dials,
+                (1, 2),
+                "Dave is not asked again once the pass is old"
+            );
+            let again = run.again.expect("Bob's second turn");
+            if again < Duration::from_millis(5000) && run.kicked {
+                break (run, again);
+            }
+            proved_nothing.push((run.setup, again, run.kicked));
+            assert!(
+                proved_nothing.len() < 3,
+                "no run proved anything (setup, Bob's second turn, kicked): {proved_nothing:?}"
+            );
+        };
+        if !proved_nothing.is_empty() {
+            eprintln!(
+                "runs that proved nothing (setup, Bob's second turn, kicked): {proved_nothing:?}"
+            );
+        }
+        let OldPassRun {
+            carol_at: at,
+            ended,
+            took,
+            looks,
+            ..
+        } = run;
+        assert!(
+            at.iter().filter(|t| **t > ended).count() >= 2,
+            "Carol was asked at her times, Bob's second turn out (from {again:?}): {at:?}"
+        );
+        assert!(
+            took < Duration::from_millis(11_800),
+            "the pass ended with Bob's turn: {took:?}"
+        );
+        assert!(looks <= 28, "looks: {looks}");
+    }
+
+    /// What one run of [`f18_an_old_pass_still_asks_a_friend_that_is_there`]
+    /// measured: the dials to Dave and to Bob; when Bob's second turn began,
+    /// when the pass's first dial came, when Carol was asked and when
+    /// Dave's dial ended, from before the call; whether Carol was kicked
+    /// while her turn was not out; how long the pass took from its first
+    /// dial; and its looks.
+    struct OldPassRun {
+        dials: (usize, usize),
+        again: Option<Duration>,
+        setup: Duration,
+        kicked: bool,
+        carol_at: Vec<Duration>,
+        ended: Duration,
+        took: Duration,
+        looks: usize,
+    }
+
+    /// One run of [`f18_an_old_pass_still_asks_a_friend_that_is_there`].
+    fn old_pass_run() -> OldPassRun {
         let (fix, wall) = two_friends(true);
         fix.book_with(&[], &[fix.bob]);
         let shared: Mutex<Shared> = Mutex::default();
@@ -6203,6 +6267,7 @@ mod tests {
         let (dave_dials, bob_dials) = (Told::<usize>::default(), Told::<usize>::default());
         let dave_ended = Told::<Option<Duration>>::default();
         let bob_again = Told::<Option<Duration>>::default();
+        let kicked = Told::<bool>::default();
         LOOKS_FOR_TESTS.with(|looks| looks.set(0));
         pass_at_once(
             &fix,
@@ -6220,9 +6285,16 @@ mod tests {
                     }
                     "dave" => {
                         dave_dials.set(dave_dials.get() + 1);
-                        for kick in [4300, 4800] {
-                            std::thread::sleep(until(kick));
-                            lock_of(&shared).kick(Instant::now());
+                        std::thread::sleep(until(4300));
+                        while !until(5200).is_zero() {
+                            let mut s = lock_of(&shared);
+                            if !s.in_pass.contains_key(&fix.carol) {
+                                s.kick(Instant::now());
+                                kicked.set(true);
+                                break;
+                            }
+                            drop(s);
+                            std::thread::sleep(Duration::from_millis(10));
                         }
                         std::thread::sleep(until(5400));
                         dave_ended.set(Some(began.elapsed()));
@@ -6240,29 +6312,17 @@ mod tests {
                 }
             },
         );
-        let took = first.get().expect("a dial").elapsed();
-        let looks = LOOKS_FOR_TESTS.with(std::cell::Cell::get);
-        let at = carol_at.into_inner().unwrap();
-        let ended = dave_ended.get().expect("Dave's dial ended");
-        assert_eq!(
-            (dave_dials.get(), bob_dials.get()),
-            (1, 2),
-            "Dave is not asked again once the pass is old"
-        );
-        let again = bob_again.get().expect("Bob's second turn");
-        assert!(
-            again < Duration::from_millis(5000),
-            "Bob's second turn started while the pass was young: {again:?}"
-        );
-        assert!(
-            at.iter().filter(|t| **t > ended).count() >= 2,
-            "Carol was asked at her times, Bob's second turn out: {at:?}"
-        );
-        assert!(
-            took < Duration::from_millis(11_800),
-            "the pass ended with Bob's turn: {took:?}"
-        );
-        assert!(looks <= 28, "looks: {looks}");
+        let first = *first.get().expect("a dial");
+        OldPassRun {
+            took: first.elapsed(),
+            looks: LOOKS_FOR_TESTS.with(std::cell::Cell::get),
+            dials: (dave_dials.get(), bob_dials.get()),
+            again: bob_again.get(),
+            setup: first.saturating_duration_since(began),
+            kicked: kicked.get(),
+            carol_at: carol_at.into_inner().unwrap(),
+            ended: dave_ended.get().expect("Dave's dial ended"),
+        }
     }
 
     /// ... and an old pass ends once its young turns have: friends that are
@@ -6594,7 +6654,10 @@ mod tests {
     /// the test's start, as a loaded machine can hold a pass's setup up by
     /// seconds (review mail-friends-8, 8.1). Before, her three turns with
     /// no route filled her window, and she was dialled only once the first
-    /// of them was an interval old (here 6 s). The bound leaves room for a
+    /// of them was an interval old (here 10 s: that wait runs from when her
+    /// first turn was planned, the bound from inside it, so with 6 s a
+    /// first turn held up by 2 s would let a pass that wrongly waits for it
+    /// through: review mail-friends-9, N3). The bound leaves room for a
     /// loaded machine: with an interval of 3 s and a bound of 2.5 s from
     /// the test's start, she was once dialled 2.62 s on (a stress run, at a
     /// load average of 220 to 350, read live).
@@ -6604,7 +6667,7 @@ mod tests {
             return;
         }
         let _g = Gates::on(true, true);
-        let _t = Times::set(6000, 10, 80_000);
+        let _t = Times::set(10_000, 10, 80_000);
         let (fix, wall) = two_friends(true);
         fix.carol_has_no_address();
         let shared: Mutex<Shared> = Mutex::default();
