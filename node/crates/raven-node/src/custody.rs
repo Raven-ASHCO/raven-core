@@ -6197,24 +6197,28 @@ mod tests {
     /// the pass is old: review mail-friends-9, on 8.1; the pass held up by
     /// about 4 s from just before it falls due gives him none: review
     /// mail-friends-10, 10.3), if Carol's entry was out of the schedule from
-    /// 4.3 s to 5.2 s, if Bob's second dial did not see the pass note Dave's
-    /// end (review mail-friends-11, 11.3), or if fewer than two of her asks
-    /// came once it had noted it and one or more came between his dial's end
-    /// and that (the run then shows nothing of what holds the pass once his
-    /// turn has ended). If Dave's end reaches the pass late, her asks at her
-    /// times leave two after the noting while it comes up to about 1.95 s
-    /// after his dial's end (0.94 s if her last ask, 0.43 s before Bob's
-    /// turn ends, is held up past that), and a later noting runs again. If
-    /// the pass itself is held up from his dial's end, two come after it
-    /// while that lasts under about 3.4 s and one (a failure) while it lasts
-    /// up to about 4.4 s; past that Bob's dial sees no noting, and the run
-    /// runs again (review mail-friends-11, 11.4). Dave's and Bob's dials are
-    /// checked on every run (Bob's twice at most). Bob's turn is out long
-    /// enough for Carol to be asked twice after Dave's although a loaded
-    /// machine held her turn up to 1.8 s past her time (with Bob out 2.4 s
-    /// past Dave's turn, a stress run at a load average of about 285, read
-    /// live, asked her once); the pass may end up to 2 s after his turn, for
-    /// the same reason.
+    /// 4.3 s to 5.2 s, if Bob's second dial, which looks every 10 ms while
+    /// it is out, did not see the pass note Dave's end (review
+    /// mail-friends-11, 11.3) or saw it 3 s or more after his dial ended
+    /// (review mail-friends-12, N2), or if fewer than two of her asks came
+    /// once it had noted it and one or more came between his dial's end and
+    /// that (the run then shows nothing of what holds the pass once his turn
+    /// has ended). If Dave's end reaches the pass late, her asks at her
+    /// times leave two after the noting while it comes up to about 1.9 to
+    /// 2.2 s after his dial's end (0.9 to 1.3 s if her last ask, 0.2 to
+    /// 0.5 s before Bob's turn ends, is held up past that), and a later
+    /// noting runs again. If the pass itself is held up from his dial's end,
+    /// two come after it while that lasts under about 3.4 s and one from
+    /// then to about 4.4 s, a failure of correct code that the 3 s rule runs
+    /// again; past that Bob's dial sees no noting (review mail-friends-11,
+    /// 11.4; held up once by 2.5, 3.2, 3.7 and 4.7 s in a probe, the pass
+    /// let two, two, one and none come, and Bob's dial saw no noting in the
+    /// last). Dave's and Bob's dials are checked on every run (Bob's twice
+    /// at most). Bob's turn is out long enough for Carol to be asked twice
+    /// after Dave's although a loaded machine held her turn up to 1.8 s past
+    /// her time (with Bob out 2.4 s past Dave's turn, a stress run at a load
+    /// average of about 285, read live, asked her once); the pass may end up
+    /// to 2 s after his turn, for the same reason.
     #[test]
     fn f18_an_old_pass_still_asks_a_friend_that_is_there() {
         if !rig::lab_backends() {
@@ -6237,26 +6241,32 @@ mod tests {
             let young = run
                 .again
                 .is_some_and(|again| again < Duration::from_millis(5000));
+            let noted_soon = run
+                .noted
+                .is_some_and(|noted| noted.saturating_sub(run.ended) < Duration::from_secs(3));
             let (in_lag, after) = run.asked_around_daves_end();
-            if young && run.kicked && run.noted.is_some() && (after >= 2 || in_lag == 0) {
+            if young && run.kicked && noted_soon && (after >= 2 || in_lag == 0) {
                 break (run, after);
             }
-            proved_nothing.push((run.setup, run.again, run.kicked, run.noted, in_lag, after));
+            proved_nothing.push((
+                run.setup, run.again, run.kicked, run.ended, run.noted, in_lag, after,
+            ));
             assert!(
                 proved_nothing.len() < 3,
-                "no run proved anything (setup, Bob's second dial, kicked, Dave noted, Carol's \
-                 asks in the lag and after): {proved_nothing:?}"
+                "no run proved anything (setup, Bob's second dial, kicked, Dave's dial ended, \
+                 its noting seen, Carol's asks in the lag and after): {proved_nothing:?}"
             );
         };
         if !proved_nothing.is_empty() {
             eprintln!(
-                "runs that proved nothing (setup, Bob's second dial, kicked, Dave noted, \
-                 Carol's asks in the lag and after): {proved_nothing:?}"
+                "runs that proved nothing (setup, Bob's second dial, kicked, Dave's dial ended, \
+                 its noting seen, Carol's asks in the lag and after): {proved_nothing:?}"
             );
         }
         let OldPassRun {
             carol_at: at,
             again,
+            setup,
             ended,
             noted,
             took,
@@ -6266,7 +6276,8 @@ mod tests {
         assert!(
             after >= 2,
             "Carol was asked at her times once Dave's end was noted ({noted:?}; his dial \
-             ended {ended:?}), Bob's second turn out (from {again:?}): {at:?}"
+             ended {ended:?}), Bob's second turn out (from {again:?}; the first dial \
+             {setup:?}): {at:?}"
         );
         assert!(
             took < Duration::from_millis(11_800),
