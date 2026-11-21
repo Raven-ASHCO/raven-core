@@ -291,7 +291,10 @@ requester's own fetch first.
 - For every custodian C it fetches from for contact P (the custodians it lists for P,
   and with learned custody its home custodians and those P announced that offer
   custody to it), the recipient REGISTERs the inbound store tags of each live session
-  with P for the days [today - 1, today + 1] within the session's days.
+  with P for the days [today - 1, today + 1] within the session's days. The session's
+  days begin where its fetch days do (RFC1 §3): at the day of its start less the 5 min
+  skew, so a session begun in a UTC day's first five minutes registers the day before
+  too.
 - Expiry = the end of that day + the custody validity bound, clamped to now + 72 h by
   the recipient too.
 - Registration rides the fetch dial (at most 2 TAGS frames, before RELEASE/FETCH). A

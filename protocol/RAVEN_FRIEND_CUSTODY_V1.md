@@ -69,10 +69,16 @@ store_tag[d]   = SHA-256("raven/relay-tag/v1" || mailbox_tag[d])[:16]
   was sealed under, and `day(envelope.created_at)` (deterministic per object).
 - **Fetch tags:** the recipient's inbound direction, for every day in
   `[day(now − MAX_CUSTODY_VALIDITY_MS), day(now + 5 min)]` within the session's
-  own days (at most 3). Toward a home custodian (§2 (a)): the inbound
-  direction of every live session with a pinned contact, since any of them may
-  have left mail there. Toward a static custodian (§2 (b)): the sessions of the
-  contacts that listed it, unchanged.
+  own days (at most 3). The session's days begin at the day of the earliest
+  `created_at` it accepts: its start (the signed PairInit `created_at_ms`)
+  less `MAX_PEER_CLOCK_SKEW_MS` (5 min, the start-bound skew tolerance of
+  [`RAVEN_PAIR_INIT_V1.md`](RAVEN_PAIR_INIT_V1.md) §1). A sender files each
+  object under the day of its `created_at`, which its own clock stamps, so a
+  session begun in a UTC day's first five minutes has the day before too.
+  Toward a home custodian (§2 (a)): the inbound direction of every live
+  session with a pinned contact, since any of them may have left mail there.
+  Toward a static custodian (§2 (b)): the sessions of the contacts that
+  listed it, unchanged.
 - Every DEPOSIT also names the `recipient` key. Only that recipient,
   authenticated on the link, can fetch or release the object.
 

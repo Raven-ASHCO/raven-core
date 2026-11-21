@@ -145,6 +145,25 @@ Platform vector consumers outside this workflow: see [`../shared-vectors/README.
 
 ---
 
+## Freeze record changes (2026-11-21, friend custody: a session's first day)
+
+A rule of the recipient, not of the wire format: no frame layout, code, op, reply, caps bit,
+card field or vector changed, and senders and custodians are unchanged. A session takes an
+envelope dated up to `MAX_PEER_CLOCK_SKEW_MS` (5 min) before its start, and a sender files each
+object under the day of its `created_at`. So in a session begun in a UTC day's first five
+minutes, a sender whose clock is a little behind filed its first objects and ACKs under the day
+before, which the recipient neither fetched nor registered at a handoff custodian (review 9 of
+the mail friends work, N1). Such a session now asks each custodian for one more tag, the day
+before's, for about a day, as an older session does; the owner accepted that on 2026-11-21. The
+code change (`indexed_session_store::custody::fetch_days` and `register_days`) had an
+independent review; this text did not.
+
+- **Friend Custody V1 (draft).** [`RAVEN_FRIEND_CUSTODY_V1.md`](RAVEN_FRIEND_CUSTODY_V1.md) §3,
+  fetch tags: the session's days begin at the day of its start less `MAX_PEER_CLOCK_SKEW_MS`.
+  Before, at the day of its start.
+- **Custody Handoff V1 (draft).** [`RAVEN_CUSTODY_HANDOFF_V1.md`](RAVEN_CUSTODY_HANDOFF_V1.md)
+  §3.6: the registered days begin at that same day. Before, at the day of its start.
+
 ## Freeze record changes (2026-11-14, release posture: kept Tor links and hedges are on)
 
 A release posture change of the onion dialer, not of the wire format: no
