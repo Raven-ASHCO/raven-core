@@ -6168,18 +6168,23 @@ mod tests {
     /// mail-friends-10, 10.1: where only first turns held it, round 8's
     /// run, at a load average of about 340, asked her about 0.95 s after
     /// his dial ended, and one more such ask would have let that cut
-    /// through). After it, at most one ask that the pass planned before can
-    /// come, so two are wanted. A kick makes Carol due at once too, her
-    /// empty rounds forgotten, but only while her entry is in the schedule
-    /// (not out for a turn, nor taken out for one being planned: review
-    /// mail-friends-10, 10.2). Her answers are empty, so from her fourth
-    /// turn her interval doubles: with them kept, she is asked once after
-    /// Dave's turn, not three times. So the kick waits, from 4.3 s to 5.2 s,
-    /// until her entry is in the schedule, looked at under the pass's lock
-    /// (review mail-friends-9, N2: a kick at a set time can come while her
-    /// turn is out; with one at 4.8 s, two stress runs asked her once after
-    /// Dave's turn in 14 of 28 runs, at a load average of 4 to 9, and a
-    /// turn held up long enough takes in two kicks 0.5 s apart).
+    /// through). Her dial looks at his entry, under the pass's lock, as she
+    /// is asked: a watch on another thread sees the noting late, and an ask
+    /// planned after it could count before it (review mail-friends-11,
+    /// 11.1). Once it is noted, at most one ask that the pass planned before
+    /// can come, so two are wanted: one turn of hers is out at a time, and
+    /// each dials once here (one page, no letters: review mail-friends-11,
+    /// 11.5). A kick makes Carol due at once too, her empty rounds
+    /// forgotten, but only while her entry is in the schedule (not out for a
+    /// turn, nor taken out for one being planned: review mail-friends-10,
+    /// 10.2). Her answers are empty, so from her fourth turn her interval
+    /// doubles: with them kept, she is asked once after Dave's turn, not
+    /// three times. So the kick waits, from 4.3 s to 5.2 s, until her entry
+    /// is in the schedule, looked at under the pass's lock (review
+    /// mail-friends-9, N2: a kick at a set time can come while her turn is
+    /// out; with one at 4.8 s, two stress runs asked her once after Dave's
+    /// turn in 14 of 28 runs, at a load average of 4 to 9, and a turn held
+    /// up long enough takes in two kicks 0.5 s apart).
     /// The times of Dave's and Bob's dials run from the pass's first dial,
     /// and the pass is young for five of Bob's intervals: its age runs from
     /// the call, his turns from its first look, which a loaded machine made
@@ -6191,16 +6196,25 @@ mod tests {
     /// young (a setup held up by more than about 3.8 s makes it come once
     /// the pass is old: review mail-friends-9, on 8.1; the pass held up by
     /// about 4 s from just before it falls due gives him none: review
-    /// mail-friends-10, 10.3), if Carol's entry was out of the schedule
-    /// from 4.3 s to 5.2 s, or if fewer than two of her asks came after the
-    /// pass noted Dave's end and one came between his dial's end and that
-    /// (the run then shows nothing of what holds the pass once his turn has
-    /// ended). Dave's and Bob's dials are checked on every run (Bob's
-    /// twice at most). Bob's turn is out long enough for Carol to be asked
-    /// twice after Dave's although a loaded machine held her turn up to
-    /// 1.8 s past her time (with Bob out 2.4 s past Dave's turn, a stress
-    /// run at a load average of about 285, read live, asked her once); the
-    /// pass may end up to 2 s after his turn, for the same reason.
+    /// mail-friends-10, 10.3), if Carol's entry was out of the schedule from
+    /// 4.3 s to 5.2 s, if Bob's second dial did not see the pass note Dave's
+    /// end (review mail-friends-11, 11.3), or if fewer than two of her asks
+    /// came once it had noted it and one or more came between his dial's end
+    /// and that (the run then shows nothing of what holds the pass once his
+    /// turn has ended). If Dave's end reaches the pass late, her asks at her
+    /// times leave two after the noting while it comes up to about 1.95 s
+    /// after his dial's end (0.94 s if her last ask, 0.43 s before Bob's
+    /// turn ends, is held up past that), and a later noting runs again. If
+    /// the pass itself is held up from his dial's end, two come after it
+    /// while that lasts under about 3.4 s and one (a failure) while it lasts
+    /// up to about 4.4 s; past that Bob's dial sees no noting, and the run
+    /// runs again (review mail-friends-11, 11.4). Dave's and Bob's dials are
+    /// checked on every run (Bob's twice at most). Bob's turn is out long
+    /// enough for Carol to be asked twice after Dave's although a loaded
+    /// machine held her turn up to 1.8 s past her time (with Bob out 2.4 s
+    /// past Dave's turn, a stress run at a load average of about 285, read
+    /// live, asked her once); the pass may end up to 2 s after his turn, for
+    /// the same reason.
     #[test]
     fn f18_an_old_pass_still_asks_a_friend_that_is_there() {
         if !rig::lab_backends() {
@@ -6224,7 +6238,7 @@ mod tests {
                 .again
                 .is_some_and(|again| again < Duration::from_millis(5000));
             let (in_lag, after) = run.asked_around_daves_end();
-            if young && run.kicked && (after >= 2 || in_lag == 0) {
+            if young && run.kicked && run.noted.is_some() && (after >= 2 || in_lag == 0) {
                 break (run, after);
             }
             proved_nothing.push((run.setup, run.again, run.kicked, run.noted, in_lag, after));
@@ -6263,17 +6277,18 @@ mod tests {
 
     /// What one run of [`f18_an_old_pass_still_asks_a_friend_that_is_there`]
     /// measured: the dials to Dave and to Bob; when Bob's second dial came,
-    /// when the pass's first dial came, when Carol was asked, when Dave's
-    /// dial ended and when the pass noted his end (if it did while Bob's
-    /// second turn was out), from before the call; whether Carol was kicked
-    /// while her entry was in the schedule; how long the pass took from its
-    /// first dial; and its looks.
+    /// when the pass's first dial came, when Carol was asked (and where
+    /// Dave's turn then was), when Dave's dial ended and when Bob's second
+    /// dial saw that the pass had noted his end (if it did while that turn
+    /// was out), from before the call; whether Carol was kicked while her
+    /// entry was in the schedule; how long the pass took from its first
+    /// dial; and its looks.
     struct OldPassRun {
         dials: (usize, usize),
         again: Option<Duration>,
         setup: Duration,
         kicked: bool,
-        carol_at: Vec<Duration>,
+        carol_at: Vec<(Duration, Option<bool>)>,
         ended: Duration,
         noted: Option<Duration>,
         took: Duration,
@@ -6281,18 +6296,17 @@ mod tests {
     }
 
     impl OldPassRun {
-        /// Carol's asks after Dave's dial ended up to when the pass noted
-        /// his end (the lag), and after that; if it never did, all of them
-        /// after his dial's end are in the lag.
+        /// Carol's asks once Dave's dial had ended: those while the pass
+        /// had not noted his end yet (the lag), and those once it had, each
+        /// as her dial found his entry.
         fn asked_around_daves_end(&self) -> (usize, usize) {
-            let noted = self.noted.unwrap_or(Duration::MAX);
-            let asked = |from: Duration, to: Duration| {
+            let asked = |noted: bool| {
                 self.carol_at
                     .iter()
-                    .filter(|t| **t > from && **t <= to)
+                    .filter(|(_, dave)| *dave == Some(noted))
                     .count()
             };
-            (asked(self.ended, noted), asked(noted, Duration::MAX))
+            (asked(false), asked(true))
         }
     }
 
@@ -6328,7 +6342,16 @@ mod tests {
                 first.get_or_init(std::time::Instant::now);
                 match who {
                     "carol" => {
-                        carol_at.lock().unwrap().push(began.elapsed());
+                        // Where Dave's turn was as she is asked: his dial
+                        // not ended (None), ended but his entry still in
+                        // `in_pass` (Some(false): the pass had not noted
+                        // his end), or ended and his entry out of it
+                        // (Some(true): it had, `Shared::end_fetch`).
+                        let at = began.elapsed();
+                        let dave = dave_ended
+                            .get()
+                            .map(|_| !lock_of(&shared).in_pass.contains_key(&fix.dave));
+                        carol_at.lock().unwrap().push((at, dave));
                         carol.dial(frames)
                     }
                     "dave" => {
@@ -6356,8 +6379,9 @@ mod tests {
                             return bob.dial(frames);
                         }
                         bob_again.set(Some(began.elapsed()));
-                        // When the pass noted Dave's end: his entry leaves
-                        // `in_pass` as it does (`Shared::end_fetch`).
+                        // Whether, and when, this dial sees that the pass
+                        // has noted Dave's end: his entry leaves `in_pass`
+                        // as it does (`Shared::end_fetch`).
                         while !until(9800).is_zero() {
                             if dave_ended.get().is_some()
                                 && !lock_of(&shared).in_pass.contains_key(&fix.dave)
