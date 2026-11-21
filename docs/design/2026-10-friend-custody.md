@@ -194,9 +194,10 @@ The same rule applies to ACKs deposited by their sender.
 **Fetch tags (per custodian C).** Built as follows:
 - For every pinned, unblocked contact P whose `custodians` list contains C, and every live session head with P:
   - take the **inbound** direction;
-  - take every day in `[day(now − MAX_CUSTODY_VALIDITY_MS), day(now + MAX_ENDPOINT_FUTURE_SKEW_MS)] ∩ [day(head.created_at_ms), day(head.expires_at_ms)]`.
+  - take every day in `[day(now − MAX_CUSTODY_VALIDITY_MS), day(now + MAX_ENDPOINT_FUTURE_SKEW_MS)] ∩ [day(head.created_at_ms − MAX_PREKEY_FUTURE_SKEW_MS), day(head.expires_at_ms)]`.
 - That gives at most 3 days, usually 2: the profile §6 "current and previous day within the skew window".
 - Coverage argument: Alice's validity is at most 24 h (`core/outbox.rs:36-52`) and skew is at most 5 min. So `day(created) ∈ [day(now−24 h), day(now+5 min)]` for any object Bob can still accept.
+- The session's first day is that of the earliest `created_at` its store accepts: an object dated up to `MAX_PREKEY_FUTURE_SKEW_MS` (5 min) before the session began (a peer clock a little behind; `before_session_start`). So a session begun in a UTC day's first 5 minutes also fetches the day before. The handoff registration days (`register_days`) begin at the same day.
 
 **Recipient binding.** DEPOSIT also carries `recipient[32]`, the recipient's contact key (the device Ed25519, as everywhere in the contact book).
 - Carol returns an object only to a link-authenticated fetcher equal to `recipient` that also presents its tag.

@@ -1373,7 +1373,12 @@ impl Net {
 
     /// Alice seals `text` for Bob.
     fn seal(&self, text: &str) -> Vec<u8> {
-        let (a, alice) = (self.dir(A), &self.ids[A]);
+        self.seal_by(A, text)
+    }
+
+    /// Node `n` (Alice or Bob) seals `text` for the other.
+    fn seal_by(&self, n: usize, text: &str) -> Vec<u8> {
+        let (a, alice) = (self.dir(n), &self.ids[n]);
         let mut store = IndexedSessionStore::open(a).unwrap();
         let (cert, reg) = crate::device_cert::ensure_local_device_certificate(
             a,
@@ -1681,6 +1686,82 @@ fn register_tags_cover_yesterday_to_tomorrow_with_their_expiry() {
     assert!(inbound_register_tags(b, &w.ids[B], &[w.key_of(F1)], now())
         .unwrap()
         .is_empty());
+}
+
+/// The offset from the system clock that puts this thread's clock at `at_ms`
+/// now (it then moves on with the system clock).
+fn offset_to(at_ms: u64) -> i64 {
+    let system = crate::clock::system_now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    at_ms as i64 - system
+}
+
+/// The session began a minute after a UTC midnight and Bob's clock is three
+/// minutes behind Alice's, so his message is dated the day before (the store
+/// takes up to five minutes before the session's start) and F2 hands it on
+/// under that day's tag. Alice registers that tag at F1 too: otherwise F1
+/// answers TAG_UNKNOWN for good and the message stays at F2 (review 9 of the
+/// mail friends work, N1).
+#[test]
+fn a_message_dated_before_a_session_begun_after_midnight_is_handed_on() {
+    let _gates = Gates::on();
+    let midnight = (now() / DAY + 1) * DAY;
+    let alice = offset_to(midnight + MIN);
+    let bob = alice - 3 * MIN as i64;
+    crate::clock::set_for_this_thread(Some(alice));
+    // A seed of its own: the friends' rate windows (process wide, by key)
+    // start on this clock, a day ahead at most.
+    let w = two_friends(0x2c);
+    let (f1, f2) = (w.key_of(F1), w.key_of(F2));
+    let mut store = IndexedSessionStore::open(w.dir(A)).unwrap();
+    let sid = store.session_id_for_record_key(&w.key).unwrap();
+    let start = store.session_created_at_ms(&sid).unwrap().unwrap();
+    drop(store);
+    assert!(
+        start >= midnight && start < midnight + 2 * MIN,
+        "a minute past"
+    );
+    crate::clock::set_for_this_thread(Some(bob));
+    let packed = w.seal_by(B, "dated by a clock behind");
+    let created = crate::envelope::Envelope::unpack(&packed)
+        .unwrap()
+        .created_at;
+    assert!(created < midnight, "dated the day before");
+    assert_eq!(
+        w.plan(B),
+        [PlanStep::Forward {
+            via: f2,
+            next_hop: f1
+        }]
+    );
+    assert_eq!(
+        w.forward(B, F2, f1, &w.rso1(B, &packed)),
+        ItemAnswer::Code(CustodyCode::Ok)
+    );
+    crate::clock::set_for_this_thread(Some(alice));
+    let digest = custody_digest(&packed);
+    assert_eq!(
+        w.hand_on(F2, F1),
+        [(digest, Some(ItemAnswer::Code(CustodyCode::TagUnknown)))]
+    );
+    // Alice's fetch at F1 registers the day before her session's first.
+    let tags = Cell::new(0);
+    let mut state = FetchState::default();
+    assert!(w.fetch(A, F1, &mut state, &tags).tags_ok);
+    assert_eq!(
+        w.hand_on(F2, F1),
+        [(digest, Some(ItemAnswer::Code(CustodyCode::Ok)))]
+    );
+    let got = w.fetch(A, F1, &mut state, &tags);
+    assert_eq!(got.accepted_messages, 1, "{got:?}");
+    let inbox = IndexedSessionStore::open(w.dir(A))
+        .unwrap()
+        .list_endpoint_inbox()
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    crate::clock::set_for_this_thread(None);
 }
 
 /// The files of custodian `n`'s two stores (and their journals).

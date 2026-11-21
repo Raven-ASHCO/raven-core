@@ -13,7 +13,7 @@
 //! - the whole chain: a message and its ACK through two friends.
 
 use super::*;
-use crate::outbox::test_rig::{lab_backends, lan, pair, test_ctx};
+use crate::outbox::test_rig::{lab_backends, lan, pair_started, test_ctx, PAIRED_AGO_MS};
 use crate::outbox::{
     attempt_peer, scan_store, AttemptCtx, Dialer, Entry, Outcome, PeerReport, UnsentAck,
 };
@@ -253,13 +253,11 @@ impl World {
             .collect();
         cache_peer_bundle(dirs[A].path(), &bundles[B]).unwrap();
         cache_peer_bundle(dirs[B].path(), &bundles[A]).unwrap();
-        let key = pair(
-            dirs[A].path(),
-            &ids[A],
-            dirs[B].path(),
-            &ids[B],
-            &bundles[A],
-            &bundles[B],
+        // Begun a little before the mail `stage` dates two minutes back.
+        let key = pair_started(
+            (dirs[A].path(), &ids[A], &bundles[A]),
+            (dirs[B].path(), &ids[B], &bundles[B]),
+            now() - PAIRED_AGO_MS,
         );
         let net = Arc::new(Net {
             nodes: (0..4)
@@ -1189,7 +1187,8 @@ fn rg1_tags_are_registered_once_and_again_when_due() {
     w.fetch(B, &sb, t0);
     assert_eq!(w.ops(B, F2).len(), 1);
     assert_eq!(w.ops(B, F2)[0][0], TAGS);
-    // Yesterday (when the session is that old), today and tomorrow.
+    // Yesterday (when the session is that old, or began in a day's first
+    // five minutes), today and tomorrow.
     assert!((2..=3).contains(&w.handoff_usage(F2).tags));
     w.fetch(B, &sb, t0 + LATER);
     assert!(!w.ops(B, F2)[1].contains(&TAGS));
@@ -1508,4 +1507,31 @@ fn next_wait_counts_the_forwarder() {
     assert_eq!(s.next_wait(t0, BASE_INTERVAL), Duration::from_secs(5));
     s.forward_everything(t0);
     assert_eq!(s.next_wait(t0, BASE_INTERVAL), Duration::from_millis(200));
+}
+
+/// The world's mail is dated inside its session, at any hour: the session
+/// began [`PAIRED_AGO_MS`] before [`World::new`] paired it and
+/// [`World::stage`] dates mail two minutes before the call.
+#[test]
+fn the_world_dates_its_mail_inside_its_session() {
+    if !lab_backends() {
+        return;
+    }
+    let w = World::new(0xb1);
+    let mut store = IndexedSessionStore::open(w.dir(A)).unwrap();
+    let sid = store.session_id_for_record_key(&w.key).unwrap();
+    let start = store.session_created_at_ms(&sid).unwrap().unwrap();
+    drop(store);
+    let mid = w.stage("inside", DAY);
+    let rows = scan_store(w.dir(A)).unwrap();
+    let created = rows
+        .iter()
+        .find(|r| r.message_id == mid)
+        .unwrap()
+        .created_at_ms;
+    assert!(
+        start < created && created - start <= PAIRED_AGO_MS,
+        "began {} ms before the mail",
+        created as i64 - start as i64
+    );
 }

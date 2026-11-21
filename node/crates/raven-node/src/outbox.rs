@@ -7492,6 +7492,38 @@ pub(crate) mod test_rig {
         key
     }
 
+    /// How long before now the custody test worlds' sessions begin
+    /// ([`pair_started`]). Their mail is dated two minutes back (past the
+    /// 60 s custody wait), so it is inside its session at any hour, also just
+    /// after a UTC midnight, when it is filed under the day before. Mail dated
+    /// before its session's start (which the store takes within the peer
+    /// clock skew) has its own tests:
+    /// `custody::tests::mail_dated_before_a_session_begun_after_midnight_comes`
+    /// and raven-core's.
+    pub(crate) const PAIRED_AGO_MS: u64 = 3 * 60_000;
+
+    /// [`pair`] with the session begun at `started_ms` on Raven's clock: the
+    /// PairInit, its response and the confirmation run on this thread's clock
+    /// put back to then ([`raven_core::clock::set_for_this_thread`], a test
+    /// hook), and the clock is given back after. A PairInit may be dated at
+    /// most the prekey clock skew (5 min) before the bundles' prekeys: the
+    /// worlds make them just before they pair, a few minutes after
+    /// `started_ms` at most.
+    pub(crate) fn pair_started(
+        (a, alice, a_bundle): (&Path, &Identity, &LanBundle),
+        (b, bob, b_bundle): (&Path, &Identity, &LanBundle),
+        started_ms: u64,
+    ) -> IndexedSessionRecordKey {
+        let system = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let before = raven_core::clock::set_for_this_thread(Some(started_ms as i64 - system));
+        let key = pair(a, alice, b, bob, a_bundle, b_bundle);
+        raven_core::clock::set_for_this_thread(before);
+        key
+    }
+
     pub(crate) fn on() -> bool {
         true
     }

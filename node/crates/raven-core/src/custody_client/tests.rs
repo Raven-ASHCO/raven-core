@@ -128,14 +128,19 @@ impl World {
     }
 
     fn seal(&self, text: &str) -> Vec<u8> {
-        let mut store = IndexedSessionStore::open(self.a.path()).unwrap();
+        self.seal_by(self.a.path(), &self.alice, text)
+    }
+
+    /// `text` sealed in the session by the side at `dir` (Alice or Bob).
+    fn seal_by(&self, dir: &Path, who: &Identity, text: &str) -> Vec<u8> {
+        let mut store = IndexedSessionStore::open(dir).unwrap();
         let (cert, reg) = crate::device_cert::ensure_local_device_certificate(
-            self.a.path(),
-            &self.alice,
+            dir,
+            who,
             crate::paths::PRIMARY_DEVICE_ID,
         )
         .unwrap();
-        let device = AuthorizedEndpointDevice::authorize(&cert, &self.alice, &reg, now()).unwrap();
+        let device = AuthorizedEndpointDevice::authorize(&cert, who, &reg, now()).unwrap();
         let t = now();
         let end = store.session_expires_at(&self.key).unwrap();
         let expires = crate::outbox::envelope_expires_at(t, end).unwrap();
@@ -272,6 +277,124 @@ fn a_message_and_its_ack_travel_via_a_friend() {
             Some(EndpointDeliveryState::Delivered)
         );
     }
+    set_custody_gates_for_this_thread(None);
+}
+
+/// The offset from the system clock that puts this thread's clock at `at_ms`
+/// now ([`crate::clock::set_for_this_thread`]; it then moves on with the
+/// system clock).
+fn offset_to(at_ms: i64) -> i64 {
+    let system = crate::clock::system_now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    at_ms - system
+}
+
+/// A session begun a minute after a UTC midnight, and a responder whose clock
+/// is three minutes behind the initiator's. The store takes objects dated up
+/// to five minutes before the session's start, so Bob's ACK of Alice's
+/// message and his own message are dated the day before and left with Carol
+/// under that day's tag. Alice's fetch must ask for that day: otherwise both
+/// stay with Carol (Bob's node counted them held), Alice never sees his
+/// message and hers is never delivered (review 9 of the mail friends work,
+/// N1).
+#[test]
+fn objects_dated_before_a_session_begun_after_midnight_come_via_a_friend() {
+    const DAY: i64 = 86_400_000;
+    set_custody_gates_for_this_thread(Some(CustodyGates {
+        live: true,
+        wan: false,
+    }));
+    let midnight = (now() as i64 / DAY + 1) * DAY;
+    // Both clocks run on from here: Alice's a minute past midnight, Bob's
+    // three minutes behind hers.
+    let alice = offset_to(midnight + 60_000);
+    let bob = alice - 180_000;
+    let alice_clock = || crate::clock::set_for_this_thread(Some(alice));
+    let bob_clock = || crate::clock::set_for_this_thread(Some(bob));
+    alice_clock();
+    // A seed of its own: Carol's rate windows (process wide, by key) start
+    // on these clocks, a day ahead at most.
+    let w = world(0x28);
+    let mut store = IndexedSessionStore::open(w.a.path()).unwrap();
+    let sid = store.session_id_for_record_key(&w.key).unwrap();
+    let start = store.session_created_at_ms(&sid).unwrap().unwrap();
+    drop(store);
+    let midnight = midnight as u64;
+    assert!(
+        start >= midnight && start < midnight + 120_000,
+        "a minute past"
+    );
+    let deposit = |dir: &Path, from: &Identity, to: &Identity, packed: &[u8]| {
+        let tag = IndexedSessionStore::open(dir)
+            .unwrap()
+            .outbound_store_tag_for_object(&w.key, packed, now())
+            .unwrap();
+        let item = DepositItem {
+            recipient: to.public_key_bytes(),
+            rso1: rfc1_rso1(tag, packed).unwrap(),
+        };
+        deposit_batch(&[item], &mut w.carol_dial(from)).unwrap()
+    };
+    let fetch = |dir: &Path, who: &Identity, peer: &Identity| {
+        let tags = inbound_tags(dir, who, &[peer.public_key_bytes()], now()).unwrap();
+        fetch_round(
+            dir,
+            who,
+            &tags,
+            &mut FetchState::default(),
+            now(),
+            MAX_PAGES_PER_TRIGGER,
+            &mut w.carol_dial(who),
+        )
+    };
+    let day_before = |packed: &[u8]| Envelope::unpack(packed).unwrap().created_at < midnight;
+
+    // Alice writes after midnight; Bob takes it from Carol.
+    let to_bob = w.seal("to bob");
+    assert!(!day_before(&to_bob));
+    assert_eq!(
+        deposit(w.a.path(), &w.alice, &w.bob, &to_bob),
+        vec![Some(CustodyCode::Ok)]
+    );
+    bob_clock();
+    let got = fetch(w.b.path(), &w.bob, &w.alice);
+    assert_eq!(got.accepted_messages, 1, "{got:?}");
+    // Bob's ACK and his answer are dated by his clock, before midnight.
+    let (mut owed, _) = OwedAcks::open(w.b.path()).unwrap();
+    let acks = owed.list(now()).unwrap();
+    assert_eq!(acks.len(), 1);
+    let to_alice = w.seal_by(w.b.path(), &w.bob, "to alice");
+    for packed in [&acks[0].bytes, &to_alice] {
+        assert!(day_before(packed), "dated by Bob's clock");
+        let stored = deposit(w.b.path(), &w.bob, &w.alice, packed);
+        assert!(stored.iter().all(|c| c.is_some_and(CustodyCode::held)));
+    }
+
+    // Alice's fetch asks for the day before her session's first: both come.
+    alice_clock();
+    let back = fetch(w.a.path(), &w.alice, &w.bob);
+    assert_eq!(
+        (back.accepted_messages, back.accepted_acks),
+        (1, 1),
+        "{back:?}"
+    );
+    let inbox = IndexedSessionStore::open(w.a.path())
+        .unwrap()
+        .list_endpoint_inbox()
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].plaintext, b"to alice");
+    let mid = Envelope::unpack(&to_bob).unwrap().message_id;
+    assert_eq!(
+        IndexedSessionStore::open(w.a.path())
+            .unwrap()
+            .outstanding_delivery_state(&sid, &mid, &w.bob.public_key_bytes())
+            .unwrap(),
+        Some(EndpointDeliveryState::Delivered)
+    );
+    crate::clock::set_for_this_thread(None);
     set_custody_gates_for_this_thread(None);
 }
 

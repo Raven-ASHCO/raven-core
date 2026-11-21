@@ -76,7 +76,7 @@ fn shift(t: SystemTime, offset_ms: i64) -> SystemTime {
 
 /// The lab offset in force now ([`lab_offset`] over this build and process).
 fn lab_offset_ms() -> i64 {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     if let Some(offset) = THIS_THREAD.with(std::cell::Cell::get) {
         return offset;
     }
@@ -162,16 +162,18 @@ fn parse_offset(text: &str) -> Option<i64> {
         .filter(|ms| ms.unsigned_abs() <= LAB_CLOCK_MAX_OFFSET_MS.unsigned_abs())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 thread_local! {
     static THIS_THREAD: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
-/// Tests only: `Some(offset)` puts this thread's clock `offset` ms off the
-/// system clock (no lab unlock or file needed); `None` gives it back.
-#[cfg(test)]
-pub fn set_for_this_thread(offset: Option<i64>) {
-    THIS_THREAD.with(|c| c.set(offset));
+/// Tests only (this crate's, and with `test-helpers` other crates' tests):
+/// `Some(offset)` puts this thread's clock `offset` ms off the system clock
+/// (no lab unlock or file needed); `None` gives it back. Returns the offset
+/// it replaces.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn set_for_this_thread(offset: Option<i64>) -> Option<i64> {
+    THIS_THREAD.with(|c| c.replace(offset))
 }
 
 #[cfg(test)]

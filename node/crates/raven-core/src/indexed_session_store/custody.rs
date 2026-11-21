@@ -221,29 +221,43 @@ impl IndexedSessionStore {
     }
 }
 
+/// The first UTC day an object of a session begun at `created_at_ms` can be
+/// filed under: the day of the earliest `created_at` the session accepts
+/// ([`super::session_window_start`]: its start, which the initiator's clock
+/// stamped, less `MAX_PREKEY_FUTURE_SKEW_MS`). A session begun in a UTC day's
+/// first minutes so has the day before too: a peer whose clock is a little
+/// behind dates its first objects, and its ACKs, there.
+fn first_day(created_at_ms: u64) -> u64 {
+    super::session_window_start(created_at_ms) / DAY_MS
+}
+
 /// Every day a still-acceptable object of a session can be filed under:
 /// `[day(now - MAX_CUSTODY_VALIDITY_MS), day(now + skew)]` within the session's
-/// own days (at most 3, usually 2).
+/// own days, [`first_day`] to the day it expires (at most 3, usually 2).
 pub fn fetch_days(created_at_ms: u64, expires_at_ms: u64, now_ms: u64) -> Vec<u64> {
     let lo = now_ms.saturating_sub(crate::carrier_admission::MAX_CUSTODY_VALIDITY_MS) / DAY_MS;
     let hi = now_ms.saturating_add(MAX_ENDPOINT_FUTURE_SKEW_MS) / DAY_MS;
-    let (s_lo, s_hi) = (created_at_ms / DAY_MS, expires_at_ms / DAY_MS);
+    let (s_lo, s_hi) = (first_day(created_at_ms), expires_at_ms / DAY_MS);
     (lo.max(s_lo)..=hi.min(s_hi)).collect()
 }
 
 /// Days whose inbound tags a recipient registers at a handoff custodian
 /// (`RAVEN_CUSTODY_HANDOFF_V1.md` §3.6): yesterday..tomorrow within the
-/// session's own days (at most 3). Tomorrow is in, so a tag is registered
-/// before any object filed under it exists.
+/// session's own days, [`first_day`] to the day it expires (at most 3).
+/// Tomorrow is in, so a tag is registered before any object filed under it
+/// exists.
 pub fn register_days(created_at_ms: u64, expires_at_ms: u64, now_ms: u64) -> Vec<u64> {
     let today = now_ms / DAY_MS;
     let (lo, hi) = (today.saturating_sub(1), today.saturating_add(1));
-    (lo.max(created_at_ms / DAY_MS)..=hi.min(expires_at_ms / DAY_MS)).collect()
+    (lo.max(first_day(created_at_ms))..=hi.min(expires_at_ms / DAY_MS)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MIN: u64 = 60_000;
+    const HOUR: u64 = 60 * MIN;
 
     #[test]
     fn fetch_days_are_bounded_by_validity_skew_and_session() {
@@ -258,8 +272,73 @@ mod tests {
         // Near midnight the skew pulls in tomorrow.
         let late = 101 * day - 60_000;
         assert!(fetch_days(90 * day, 110 * day, late).contains(&101));
-        // Clipped to the session's own days.
-        assert_eq!(fetch_days(100 * day + 1, 100 * day + 2, now), vec![100]);
+        // Clipped to the session's own days: begun half an hour after
+        // midnight, it has no yesterday.
+        let ends = 100 * day + 2 * HOUR;
+        assert_eq!(fetch_days(100 * day + 30 * MIN, ends, now), vec![100]);
+        // Begun in the day's first five minutes, it has: the store takes an
+        // object dated up to five minutes before the session's start (a
+        // peer's clock a little behind), filed under the day of its date.
+        assert_eq!(fetch_days(100 * day + MIN, ends, now), vec![99, 100]);
+        assert_eq!(fetch_days(100 * day + 1, ends, now), vec![99, 100]);
+        assert_eq!(fetch_days(100 * day + 6 * MIN, ends, now), vec![100]);
+        // The edge is the store's: begun exactly the skew after midnight,
+        // its earliest object is dated at midnight.
+        let skew = crate::prekey_lifecycle::MAX_PREKEY_FUTURE_SKEW_MS;
+        assert_eq!(fetch_days(100 * day + skew, ends, now), vec![100]);
+        assert_eq!(fetch_days(100 * day + skew - 1, ends, now), vec![99, 100]);
+        // Only while that day is within the validity window: a day later it
+        // is gone, as it is for every session; three days at most.
+        assert_eq!(
+            fetch_days(100 * day + MIN, 102 * day, 101 * day + HOUR),
+            vec![100, 101]
+        );
+        assert_eq!(
+            fetch_days(100 * day + MIN, 102 * day, 101 * day + 2 * MIN),
+            vec![99, 100, 101]
+        );
+    }
+
+    /// The day lists against the store's own window: every `created_at` a
+    /// session accepts (`before_session_start`: from the peer clock skew
+    /// before its start, `ATSAM_ENDPOINT_TRANSACTION_V1.md` §1 step 4) is
+    /// filed under a day `fetch_days` holds for as long as such an object
+    /// can still be fetched, and `register_days` holds when the object is
+    /// made and an hour later (a registration then lasts to the end of its
+    /// day and the validity bound beyond: `register_expiry`); neither holds
+    /// a day before the earliest one's. Sessions begun around a UTC
+    /// midnight, every 15 s.
+    #[test]
+    fn the_day_lists_hold_every_day_the_session_window_accepts() {
+        let day = DAY_MS;
+        let validity = crate::carrier_admission::MAX_CUSTODY_VALIDITY_MS;
+        let skew = crate::prekey_lifecycle::MAX_PREKEY_FUTURE_SKEW_MS;
+        for start in (101 * day - 10 * MIN..=101 * day + 10 * MIN).step_by(15_000) {
+            let ends = start + day;
+            let earliest = start - skew;
+            assert!(!super::super::before_session_start(earliest, start));
+            assert!(super::super::before_session_start(earliest - 1, start));
+            for created in [earliest, earliest + 1, start - 1, start, start + MIN] {
+                let at_once = created.max(earliest);
+                let last = (created + validity - 1).min(ends - 1);
+                for now in [at_once, created + HOUR, last] {
+                    let days = fetch_days(start, ends, now);
+                    assert!(
+                        days.contains(&(created / day)) && days.len() <= 3,
+                        "start {start}, created {created}, now {now}: {days:?}"
+                    );
+                    assert!(days[0] >= earliest / day, "start {start}: {days:?}");
+                }
+                for now in [at_once, created + HOUR] {
+                    let days = register_days(start, ends, now);
+                    assert!(
+                        days.contains(&(created / day)) && days.len() <= 3,
+                        "start {start}, created {created}, now {now}: {days:?}"
+                    );
+                    assert!(days[0] >= earliest / day, "start {start}: {days:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -280,22 +359,58 @@ mod tests {
             register_days(long.0, long.1, 101 * day + five_min),
             vec![100, 101, 102]
         );
-        // Bounded by the session: one that started today and ends
+        // Bounded by the session: one that started this morning and ends
         // tomorrow has no yesterday; one that ends today has no tomorrow.
         let now = 100 * day + 3_600_000;
         assert_eq!(
-            register_days(100 * day + 1, 101 * day + 5, now),
+            register_days(100 * day + 30 * MIN, 101 * day + 5, now),
             vec![100, 101]
         );
         assert_eq!(
             register_days(90 * day, 100 * day + 7_200_000, now),
             vec![99, 100]
         );
-        assert_eq!(register_days(100 * day + 1, 100 * day + 2, now), vec![100]);
+        assert_eq!(
+            register_days(100 * day + 30 * MIN, 100 * day + 40 * MIN, now),
+            vec![100]
+        );
+        // One begun in the day's first five minutes has yesterday (an object
+        // dated up to five minutes before its start is filed there); one
+        // begun six minutes after midnight has not.
+        assert_eq!(
+            register_days(100 * day + MIN, 101 * day + 5, now),
+            vec![99, 100, 101]
+        );
+        assert_eq!(
+            register_days(100 * day + 1, 100 * day + 2, now),
+            vec![99, 100]
+        );
+        assert_eq!(
+            register_days(100 * day + 6 * MIN, 101 * day + 5, now),
+            vec![100, 101]
+        );
+        // The edge is the store's, as for `fetch_days`.
+        let skew = crate::prekey_lifecycle::MAX_PREKEY_FUTURE_SKEW_MS;
+        assert_eq!(
+            register_days(100 * day + skew, 101 * day + 5, now),
+            vec![100, 101]
+        );
+        assert_eq!(
+            register_days(100 * day + skew - 1, 101 * day + 5, now),
+            vec![99, 100, 101]
+        );
+        // A day later that day is the day before yesterday: out, as for
+        // every session.
+        assert_eq!(
+            register_days(100 * day + MIN, 102 * day, 101 * day + HOUR),
+            vec![100, 101, 102]
+        );
         // A session entirely in the past or the future gives none.
         assert!(register_days(90 * day, 95 * day, now).is_empty());
         assert!(register_days(105 * day, 110 * day, now).is_empty());
-        // Day 0 does not wrap.
+        // Day 0 does not wrap, even begun in its first minutes.
         assert_eq!(register_days(0, 10 * day, 3_600_000), vec![0, 1]);
+        assert_eq!(register_days(MIN, 10 * day, 3_600_000), vec![0, 1]);
+        assert_eq!(fetch_days(MIN, 10 * day, 3_600_000), vec![0]);
     }
 }

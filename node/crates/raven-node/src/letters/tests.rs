@@ -6,7 +6,7 @@
 //! release builds ignore: these tests return early there.
 
 use super::*;
-use crate::outbox::test_rig::{lab_backends, lan, pair, test_ctx};
+use crate::outbox::test_rig::{lab_backends, lan, pair_started, test_ctx, PAIRED_AGO_MS};
 use crate::outbox::{attempt_peer, scan_store, Dialer};
 use raven_core::async_letter::{seal, Ral1Kind, SealInput};
 use raven_core::custody_gate::{
@@ -213,9 +213,16 @@ fn write_contacts(dir: &Path, rows: &[serde_json::Value]) {
 
 impl World {
     /// The world; both Carol and Dave are custodians when `dave`, Carol
-    /// alone otherwise; Alice and Bob share a direct session when
-    /// `paired`.
+    /// alone otherwise; Alice and Bob share a direct session, begun
+    /// [`PAIRED_AGO_MS`] before they pair, when `paired`.
     pub(crate) fn new(seed: u8, dave: bool, paired: bool) -> Self {
+        Self::started(seed, dave, paired.then_some(|| now() - PAIRED_AGO_MS))
+    }
+
+    /// [`Self::new`] with Alice and Bob's session begun at the time
+    /// `started` gives (on Raven's clock), asked once the world is set up,
+    /// just before they pair; no session without it.
+    pub(crate) fn started(seed: u8, dave: bool, started: Option<impl FnOnce() -> u64>) -> Self {
         let id = |n: u8| Identity::from_seed(&[seed.wrapping_add(n); 32]);
         let (alice, bob, carol, dave_id) = (id(0), id(1), id(2), id(3));
         let dirs: Vec<tempfile::TempDir> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
@@ -265,7 +272,13 @@ impl World {
         let b_bundle = local_bundle(b.path(), &bob).unwrap();
         cache_peer_bundle(a.path(), &b_bundle).unwrap();
         cache_peer_bundle(b.path(), &a_bundle).unwrap();
-        let key = paired.then(|| pair(a.path(), &alice, b.path(), &bob, &a_bundle, &b_bundle));
+        let key = started.map(|at| {
+            pair_started(
+                (a.path(), &alice, &a_bundle),
+                (b.path(), &bob, &b_bundle),
+                at(),
+            )
+        });
         let net = Arc::new(LetterNet {
             nodes: vec![
                 Node {
@@ -647,6 +660,32 @@ fn seal_to(from: &Identity, to: &LanBundle, inner: &[u8], created: u64, expires:
 fn only(report: &PeerReport) -> Outcome {
     assert_eq!(report.outcomes.len(), 1, "{:?}", report.outcomes);
     report.outcomes.values().next().unwrap().clone()
+}
+
+/// The world's mail is dated inside its session, at any hour: the session
+/// began [`PAIRED_AGO_MS`] before [`World::new`] paired it and [`World::stage`]
+/// dates mail two minutes before the call.
+#[test]
+fn the_world_dates_its_mail_inside_its_session() {
+    if !lab_backends() {
+        return;
+    }
+    let w = World::new(0x7d, false, true);
+    let mut store = IndexedSessionStore::open(w.a.path()).unwrap();
+    let sid = store
+        .session_id_for_record_key(w.key.as_ref().unwrap())
+        .unwrap();
+    let start = store.session_created_at_ms(&sid).unwrap().unwrap();
+    drop(store);
+    w.stage("inside");
+    let rows = scan_store(w.a.path()).unwrap();
+    assert_eq!(rows.len(), 1);
+    let created = rows[0].created_at_ms;
+    assert!(
+        start < created && created - start <= PAIRED_AGO_MS,
+        "began {} ms before the mail",
+        created as i64 - start as i64
+    );
 }
 
 /// A message the direct path could not carry moves into a letter session

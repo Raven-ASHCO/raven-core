@@ -4025,4 +4025,89 @@ mod tests {
         lock_of(&shared).kick(Instant::now());
         assert!(letter_pass(&w, &shared).is_empty());
     }
+
+    /// Bob's fetch pass in a letters world, as [`letter_pass`] runs Alice's:
+    /// every dial to the friends' real handlers, on this thread (where the
+    /// thread's clock and gates hold).
+    fn bob_fetch_pass(w: &crate::letters::tests::World, shared: &Mutex<Shared>) {
+        use crate::outbox::Dialer;
+        let mut dial = |route: &OutboxRoute, expected: &str, frames: &[Vec<u8>]| {
+            w.net
+                .dial(w.b.path(), route, expected, frames)
+                .map(|replies| (replies, Some(DeliveryPath::Direct)))
+        };
+        let mut home_changed = |_: usize| {};
+        let mut io = PassIo {
+            dial: &mut dial,
+            want: &|_| {},
+            finds: &|_| Vec::new(),
+            find_failed: &|_, _| {},
+            home_changed: &mut home_changed,
+            lan: true,
+            kick: &|_| {},
+        };
+        let wall = raven_core::clock::now_ms();
+        fetch_pass_with(shared, w.b.path(), &w.bob, Instant::now(), wall, &mut io);
+    }
+
+    /// Review 9 of the mail friends work, N1: the session began a minute
+    /// after a UTC midnight and Alice's mail is dated two minutes before
+    /// that (as a clock a little behind, or stepped back after the pairing,
+    /// would date it), which the store takes within the peer clock skew. Her
+    /// worker leaves it with Carol under the day before; Bob's pass asks for
+    /// that day too, and the message comes. (The letters world's own mail is
+    /// dated inside its session: `World::new`.)
+    #[test]
+    fn mail_dated_before_a_session_begun_after_midnight_comes() {
+        if !rig::lab_backends() {
+            return;
+        }
+        const DAY: u64 = 86_400_000;
+        let _g = Gates::on(true, false);
+        let _lan = crate::lan_direct::lan_switch_untouched();
+        let midnight = (raven_core::clock::now_ms() / DAY + 1) * DAY;
+        let begun = midnight + 60_000;
+        // This thread's clock put at `at`, however long the work before took.
+        let clock_at = |at: u64| {
+            let system = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            raven_core::clock::set_for_this_thread(Some(at as i64 - system))
+        };
+        clock_at(begun);
+        // Identities of its own (0x79 to 0x7c): Carol's rate windows
+        // (process wide, by key) start on this clock, a day ahead at most.
+        let w = crate::letters::tests::World::started(0x79, false, Some(|| begun));
+        // `stage` dates the mail two minutes before now.
+        clock_at(begun);
+        w.stage("dated the day before");
+        let mut store =
+            raven_core::indexed_session_store::IndexedSessionStore::open(w.a.path()).unwrap();
+        let sid = store
+            .session_id_for_record_key(w.key.as_ref().unwrap())
+            .unwrap();
+        let start = store.session_created_at_ms(&sid).unwrap().unwrap();
+        drop(store);
+        let rows = crate::outbox::scan_store(w.a.path()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let created = rows[0].created_at_ms;
+        let skew = raven_core::prekey_lifecycle::MAX_PREKEY_FUTURE_SKEW_MS;
+        assert!(
+            created < midnight && midnight <= start && start - created < skew,
+            "mail {created}, midnight {midnight}, session {start}"
+        );
+        let report = w.attempt();
+        let held = crate::outbox::Outcome::Deposited { held: 1 };
+        assert!(
+            report.outcomes.len() == 1 && report.outcomes.values().all(|o| *o == held),
+            "{report:?}"
+        );
+        assert_eq!(w.objects_at(w.carol_pub), 1);
+        let shared = Mutex::default();
+        bob_fetch_pass(&w, &shared);
+        assert_eq!(w.bob_inbox(), ["dated the day before"]);
+        assert_eq!(w.objects_at(w.carol_pub), 0, "released");
+        raven_core::clock::set_for_this_thread(None);
+    }
 }

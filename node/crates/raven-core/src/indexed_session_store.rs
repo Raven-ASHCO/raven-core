@@ -7847,7 +7847,15 @@ impl<'a> BinaryReader<'a> {
 /// and then be unable to send, receive or acknowledge in it until its clock
 /// caught up. Expiry bounds stay exact.
 fn before_session_start(t_ms: u64, session_created_at_ms: u64) -> bool {
-    t_ms.saturating_add(crate::prekey_lifecycle::MAX_PREKEY_FUTURE_SKEW_MS) < session_created_at_ms
+    t_ms < session_window_start(session_created_at_ms)
+}
+
+/// The earliest instant a session's windows accept ([`before_session_start`]):
+/// its start less `MAX_PREKEY_FUTURE_SKEW_MS`. Friend custody's day lists
+/// begin at its UTC day ([`fetch_days`], [`register_days`]), since a sender
+/// files each object under the day of its `created_at`.
+fn session_window_start(session_created_at_ms: u64) -> u64 {
+    session_created_at_ms.saturating_sub(crate::prekey_lifecycle::MAX_PREKEY_FUTURE_SKEW_MS)
 }
 
 #[cfg(test)]
